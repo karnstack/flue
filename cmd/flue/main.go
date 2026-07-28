@@ -170,13 +170,23 @@ func cmdServe(args []string) error {
 		<-held
 	}()
 
-	fmt.Printf("daemon running on 127.0.0.1:%d\n", *port)
-	fmt.Printf("  http://127.0.0.1:%d/?t=%s\n", *port, token)
+	fmt.Print(serveBanner(*port))
 
 	// ListenAndServe reports a ctx-caused shutdown as nil, not as
 	// http.ErrServerClosed, so there is nothing to filter out here: whatever
 	// it returns is the exit status of the daemon.
 	return <-serveErr
+}
+
+// serveBanner is what flue serve prints once it is listening.
+//
+// It carries no credential. The URL it prints will 401 on its own, and that is
+// deliberate: the session token must never be written into terminal scrollback,
+// and a handoff token minted here would be spent or expired long before anyone
+// read the line. The way in is flue open, which mints one and launches the
+// browser in the same breath.
+func serveBanner(port int) string {
+	return fmt.Sprintf("daemon running on 127.0.0.1:%d\n  run \"flue open\" to get a browser tab\n", port)
 }
 
 // reassertInterval is how often a serving daemon checks that the runtime
@@ -305,40 +315,122 @@ func cmdOpen(args []string) error {
 		return fmt.Errorf("load auth token: %w", err)
 	}
 
-	// Catch a token the running daemon will not accept before handing the
-	// user a URL that silently 401s in the browser. This happens for real:
-	// config discards and regenerates a token file whose mode has been
-	// loosened, so a backup or sync tool touching the file leaves an
-	// already-running daemon holding a token nobody on disk has any more.
+	// Ask the daemon for a one-time token to put in the URL. The session
+	// token itself never goes into a URL: a URL is argv the moment it reaches
+	// open(1) or xdg-open(1), and argv is readable by any local user at
+	// Linux's default hidepid=0 and by ps(1) on macOS — so the permanent
+	// credential would be exposed for the life of the launch.
 	//
-	// Only an outright rejection is fatal. A timeout or a transport error
-	// says nothing about the token, and must not stop flue open from doing
-	// its job.
-	if _, err := fetchSessions(port, token); errors.Is(err, errTokenRejected) {
+	// This is also where a token the running daemon will not accept is
+	// caught, which happens for real: config discards and regenerates a token
+	// file whose mode has been loosened, so a backup or sync tool touching the
+	// file leaves an already-running daemon holding a token nobody on disk has
+	// any more. Every failure here is fatal, unlike the old advisory
+	// pre-flight: without a handoff token there is no URL to open, and there
+	// is deliberately no fallback that would put the session token back into
+	// argv.
+	handoff, err := mintHandoff(port, token)
+	if err != nil {
 		return err
 	}
 
-	target := openURL(port, token, cwd)
-	fmt.Println(target)
-	return openBrowser(target)
+	target := openURL(port, handoff, cwd)
+
+	// Print the origin rather than the target. The target carries a live
+	// credential, and printing it would write a secret into terminal
+	// scrollback for no benefit: by the time anyone read the line the browser
+	// would already have spent it.
+	fmt.Printf("http://127.0.0.1:%d/\n", port)
+
+	if err := openBrowser(target); err != nil {
+		// Nothing else can get the user in from here, so the fallback is worth
+		// its cost: a token that dies in HandoffTTL, in this user's own
+		// terminal, only when the launch has already failed.
+		return fmt.Errorf("%w\nopen this within %s to get in:\n%s", err, local.HandoffTTL, target)
+	}
+	return nil
 }
 
-// openURL builds the URL flue open hands to the browser.
+// maxMintBytes bounds the mint response this CLI will parse. The daemon has
+// been identified by ourDaemon, so this is a backstop against a wedged daemon,
+// not against a hostile one.
+const maxMintBytes = 64 << 10
+
+// mintHandoff asks the running daemon for a one-time handoff token.
+//
+// The session token travels in a request header, not in the URL and not in a
+// cookie. Not the URL because that is the exposure this whole mechanism
+// removes; not a cookie because a browser attaches cookies by itself and
+// SameSite is blind to the port, so a co-resident untrusted origin on another
+// loopback port can cause the victim's browser to send one — a credential the
+// browser volunteers must never be enough to mint a fresh one. A custom header
+// is the carrier no browser can be induced to send cross-origin, because the
+// CORS preflight it would need is answered 405.
+func mintHandoff(port int, token string) (string, error) {
+	u := &url.URL{
+		Scheme: "http",
+		Host:   fmt.Sprintf("127.0.0.1:%d", port),
+		Path:   daemon.MintPath,
+	}
+	req, err := http.NewRequest(http.MethodPost, u.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set(local.HeaderName, token)
+
+	resp, err := probeClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ask the daemon on 127.0.0.1:%d for a handoff token: %w", port, err)
+	}
+	defer resp.Body.Close()
+
+	// The daemon answers a failed check with a plain-text body, so status has
+	// to be checked before decoding.
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized:
+		return "", errTokenRejected
+	default:
+		return "", fmt.Errorf("daemon on 127.0.0.1:%d answered %s when asked for a handoff token", port, resp.Status)
+	}
+
+	var body struct {
+		Handoff string `json:"handoff"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMintBytes)).Decode(&body); err != nil {
+		return "", fmt.Errorf("decode handoff token: %w", err)
+	}
+	if body.Handoff == "" {
+		return "", fmt.Errorf("daemon on 127.0.0.1:%d returned an empty handoff token", port)
+	}
+	// Last line of defence, and cheap. Everything in this file is arranged so
+	// the session token never reaches a command line; if the peer ever answers
+	// with the token it was given — a daemon bug, or an impostor that got past
+	// ourDaemon — refusing here is what stops the CLI from carrying it the rest
+	// of the way itself.
+	if body.Handoff == token {
+		return "", fmt.Errorf("daemon on 127.0.0.1:%d returned the session token as a handoff token; refusing to put it in a URL", port)
+	}
+	return body.Handoff, nil
+}
+
+// openURL builds the URL flue open hands to the browser. It carries a one-time
+// handoff token, never the session token.
 //
 // cwd is an arbitrary filesystem path, not a token drawn from a known-safe
 // alphabet, so it goes through url.Values rather than fmt.Sprintf: a path
 // containing "&", "#", "%", or "+" formatted straight into a query string
 // would either break the URL outright or let a directory name inject
-// additional query parameters (a "t=" among them) that were never meant to
+// additional query parameters (an "h=" among them) that were never meant to
 // be there.
-func openURL(port int, token, cwd string) string {
+func openURL(port int, handoff, cwd string) string {
 	u := &url.URL{
 		Scheme: "http",
 		Host:   fmt.Sprintf("127.0.0.1:%d", port),
 		Path:   "/",
 	}
 	q := u.Query()
-	q.Set("t", token)
+	q.Set(local.HandoffParam, handoff)
 	q.Set("cwd", cwd)
 	u.RawQuery = q.Encode()
 	return u.String()
@@ -485,17 +577,21 @@ func daemonAt(port int) bool {
 }
 
 // fetchSessions asks the daemon for its session listing.
+//
+// The token goes in a header. The daemon no longer accepts it from a URL at
+// all — see local.Auth.validToken — and this is also the carrier that keeps it
+// out of anything that records URLs.
 func fetchSessions(port int, token string) ([]session.Info, error) {
 	u := &url.URL{
-		Scheme:   "http",
-		Host:     fmt.Sprintf("127.0.0.1:%d", port),
-		Path:     "/api/sessions",
-		RawQuery: url.Values{"t": {token}}.Encode(),
+		Scheme: "http",
+		Host:   fmt.Sprintf("127.0.0.1:%d", port),
+		Path:   "/api/sessions",
 	}
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set(local.HeaderName, token)
 	resp, err := probeClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -709,7 +805,13 @@ func portOpen(port int) bool {
 	return true
 }
 
-func openBrowser(url string) error {
+// openBrowser is a package variable so a test can observe the exact string
+// flue open hands to the browser — which is the only place the "no session
+// token in argv" requirement can actually be checked end to end. Same seam
+// pattern as spawnDaemon and loadToken, for the same reason.
+var openBrowser = launchBrowser
+
+func launchBrowser(url string) error {
 	switch runtime.GOOS {
 	case "darwin":
 		return exec.Command("open", url).Start()

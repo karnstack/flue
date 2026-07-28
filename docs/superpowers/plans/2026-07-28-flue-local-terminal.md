@@ -4068,11 +4068,11 @@ import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import '@/styles.css'
 import { createFlueRouter } from '@/router'
-import { stripToken } from '@/lib/url'
+import { stripHandoff } from '@/lib/url'
 
 // The daemon has already moved the token into an HttpOnly cookie, so drop
 // it from the URL before it reaches history or a referrer header.
-const cleaned = stripToken(location.href)
+const cleaned = stripHandoff(location.href)
 if (cleaned !== location.href) history.replaceState(null, '', cleaned)
 
 const router = createFlueRouter()
@@ -4088,16 +4088,24 @@ createRoot(document.getElementById('root')!).render(
 
 `web/src/lib/url.ts`:
 
+> **Amended by task 7b.** The URL never carries the session token any more. It
+> carries a one-time handoff token in `h`, which the daemon exchanges for the
+> `flue_token` cookie on first load and immediately invalidates. So the helper
+> strips `h`, not `t` — and the daemon no longer accepts `t` at all, so a helper
+> that stripped `t` would leave the spent `h` in the URL and every reload would
+> 401.
+
 ```ts
 /**
- * Remove the token from a URL. The daemon moves it into an HttpOnly cookie
- * on first load; the app then calls this and replaceState so the secret
- * stops appearing in history and referrers.
+ * Remove the one-time handoff token from a URL. The daemon redeems it on
+ * first load, sets an HttpOnly cookie, and invalidates the token; the app
+ * then calls this and replaceState so a spent secret stops appearing in
+ * history and referrers.
  */
-export function stripToken(url: string): string {
+export function stripHandoff(url: string): string {
   const u = new URL(url)
-  if (!u.searchParams.has('t')) return url
-  u.searchParams.delete('t')
+  if (!u.searchParams.has('h')) return url
+  u.searchParams.delete('h')
   const query = u.searchParams.toString()
   return `${u.origin}${u.pathname}${query ? `?${query}` : ''}`
 }
@@ -4109,21 +4117,21 @@ export function stripToken(url: string): string {
 
 ```ts
 import { describe, expect, it } from 'vitest'
-import { stripToken } from './url'
+import { stripHandoff } from './url'
 
-describe('stripToken', () => {
-  it('removes the token', () => {
-    expect(stripToken('http://127.0.0.1:7717/?t=secret')).toBe('http://127.0.0.1:7717/')
+describe('stripHandoff', () => {
+  it('removes the handoff token', () => {
+    expect(stripHandoff('http://127.0.0.1:7717/?h=secret')).toBe('http://127.0.0.1:7717/')
   })
 
   it('preserves other parameters', () => {
-    expect(stripToken('http://127.0.0.1:7717/?t=secret&cwd=%2Ftmp')).toBe(
+    expect(stripHandoff('http://127.0.0.1:7717/?h=secret&cwd=%2Ftmp')).toBe(
       'http://127.0.0.1:7717/?cwd=%2Ftmp',
     )
   })
 
-  it('leaves a URL without a token untouched', () => {
-    expect(stripToken('http://127.0.0.1:7717/d/local/s/abc')).toBe(
+  it('leaves a URL without a handoff token untouched', () => {
+    expect(stripHandoff('http://127.0.0.1:7717/d/local/s/abc')).toBe(
       'http://127.0.0.1:7717/d/local/s/abc',
     )
   })
@@ -5077,11 +5085,11 @@ import { RouterProvider } from '@tanstack/react-router'
 import '@/styles.css'
 import { createFlueRouter } from '@/router'
 import { FlueClientProvider } from '@/client/provider'
-import { stripToken } from '@/lib/url'
+import { stripHandoff } from '@/lib/url'
 
 // The daemon has already moved the token into an HttpOnly cookie, so drop
 // it from the URL before it reaches history or a referrer header.
-const cleaned = stripToken(location.href)
+const cleaned = stripHandoff(location.href)
 if (cleaned !== location.href) history.replaceState(null, '', cleaned)
 
 const router = createFlueRouter()
@@ -5912,7 +5920,7 @@ Verify each of these:
 
 1. A browser tab opens with a working shell in `~/code`.
 2. `ls` and `vim` render correctly; colours and cursor movement work.
-3. The URL is `/d/local/s/<id>` and contains no `t=` parameter.
+3. The URL is `/d/local/s/<id>` and contains neither a `t=` nor an `h=` parameter.
 4. Resizing the window reflows the terminal.
 5. Run `sleep 300`, close the tab, reopen the same URL — the session reattaches with its scrollback, and `sleep` is still running.
 6. Open the same URL in a second tab, type in one, and confirm it mirrors into the other.

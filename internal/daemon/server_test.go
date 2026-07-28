@@ -9,7 +9,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,9 +58,18 @@ func dial(t *testing.T, ts *httptest.Server) *websocket.Conn {
 	return dialWith(t, ts, nil)
 }
 
+// dialWith opens a WebSocket authenticated the way a non-browser client now
+// has to: the session token in a request header. The query string is no longer
+// a credential carrier anywhere on this daemon.
 func dialWith(t *testing.T, ts *httptest.Server, header http.Header) *websocket.Conn {
 	t.Helper()
-	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?t=" + tok
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	if header == nil {
+		header = http.Header{}
+	} else {
+		header = header.Clone()
+	}
+	header.Set(local.HeaderName, tok)
 	c, _, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{HTTPHeader: header})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -366,11 +379,7 @@ func TestHTTPSessionsEndpointWithAuth(t *testing.T) {
 	}
 	defer s.Close()
 
-	resp, err := http.Get(ts.URL + "/api/sessions?t=" + tok)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
+	resp := get(t, ts, "/api/sessions", "same-origin")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -472,27 +481,34 @@ func TestNoStateChangeIsReachableByGET(t *testing.T) {
 
 // TestCookieExchangeNeverStoresAClientSuppliedToken covers the one piece of
 // state a GET on this daemon really can change: the browser's stored
-// credential. A request authenticated by a valid cookie may still carry a
-// "t" query parameter, and echoing that parameter back into the cookie hands
-// its value to whoever wrote the URL. A redirect-laundered navigation to
-// /?t=garbage would then overwrite a working token with garbage and lock the
-// user out of their own terminal — a mutating GET wearing a login flow's
-// clothes. The cookie must only ever be set to the daemon's own token.
+// credential. The exchange must only ever write the daemon's own session token
+// into the cookie. If it echoed anything from the request instead, a
+// redirect-laundered navigation could overwrite a working credential with
+// garbage and lock the user out of their own terminal — or, far worse, fix the
+// victim's browser onto a value the attacker chose. The value is a constant
+// picked by the daemon, which is what makes session fixation structurally
+// impossible here.
 func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
-	ts, _ := newTestServer(t)
+	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
 
-	resp := get(t, ts, "/?t=not-the-token", "none")
-	for _, c := range resp.Cookies() {
-		if c.Name == local.CookieName && c.Value != tok {
-			t.Fatalf("%s cookie was set to the client-supplied %q, want the daemon's own token",
-				local.CookieName, c.Value)
+	for _, path := range []string{"/?h=not-a-handoff", "/?t=" + tok, "/?h=" + tok} {
+		resp := get(t, ts, path, "none")
+		for _, c := range resp.Cookies() {
+			if c.Name == local.CookieName && c.Value != tok {
+				t.Fatalf("GET %s set %s to the client-supplied %q, want the daemon's own token",
+					path, local.CookieName, c.Value)
+			}
 		}
 	}
 
 	// The negative above is satisfied by setting no cookie at all, so pin the
 	// positive too: the first-load flow must still hand the token to the
 	// browser, or the app works once and never again.
-	resp = get(t, ts, "/?t="+tok, "none")
+	h, err := srv.currentAuth().Mint()
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	resp := get(t, ts, "/?"+local.HandoffParam+"="+h, "none")
 	var found *http.Cookie
 	for _, c := range resp.Cookies() {
 		if c.Name == local.CookieName {
@@ -500,7 +516,7 @@ func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
 		}
 	}
 	if found == nil {
-		t.Fatalf("first load with ?t= set no %s cookie", local.CookieName)
+		t.Fatalf("first load with a handoff token set no %s cookie", local.CookieName)
 	}
 	if found.Value != tok {
 		t.Fatalf("%s cookie = %q, want the daemon's token", local.CookieName, found.Value)
@@ -511,13 +527,22 @@ func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
 }
 
 // TestOnlySafeMethodsAreRouted pins the invariant the test above depends on:
-// flue's HTTP surface is read-only, so a mutation cannot be bolted onto it by
-// a later task without this failing first.
+// flue's HTTP surface is read-only apart from one explicitly allowlisted mint
+// path, so a mutation cannot be bolted onto it by a later task without this
+// failing first.
+//
+// OPTIONS is in the list for every path including the mint path, and that is
+// load-bearing rather than tidy: a CORS preflight that never succeeds is what
+// stops a browser from ever sending a cross-origin request carrying the
+// X-Flue-Token header that authenticates a mint.
 func TestOnlySafeMethodsAreRouted(t *testing.T) {
 	ts, _ := newTestServer(t)
-	for _, path := range []string{"/", "/api/sessions", "/ws"} {
+	for _, path := range []string{"/", "/api/sessions", "/ws", MintPath} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
-			req, err := http.NewRequest(method, ts.URL+path+"?t="+tok, nil)
+			if path == MintPath && method == http.MethodPost {
+				continue // the one allowlisted exception; see TestPOSTIsRoutedOnlyToTheMintPath
+			}
+			req, err := http.NewRequest(method, ts.URL+path, nil)
 			if err != nil {
 				t.Fatalf("NewRequest: %v", err)
 			}
@@ -534,6 +559,403 @@ func TestOnlySafeMethodsAreRouted(t *testing.T) {
 	}
 }
 
+// TestPOSTIsRoutedOnlyToTheMintPath pins the width of the exception. A POST to
+// any other path — including one that only differs by path normalisation, which
+// http.ServeMux would clean before matching — must be refused before it reaches
+// a handler.
+func TestPOSTIsRoutedOnlyToTheMintPath(t *testing.T) {
+	ts, _ := newTestServer(t)
+	for _, path := range []string{
+		"/",
+		"/api/sessions",
+		"/ws",
+		"/api/handoff/",
+		"/api/handoff/x",
+		"/api/./handoff",
+		"//api/handoff",
+		"/api/spawn",
+	} {
+		req, err := http.NewRequest(http.MethodPost, ts.URL+path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set(local.HeaderName, tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Errorf("POST %s = 200; only %s may answer a POST", path, MintPath)
+		}
+	}
+}
+
+// --- the one-time handoff token ---
+
+// mintReq builds the request flue open makes: POST, no Origin, no
+// Sec-Fetch-Site, session token in a header.
+func mintReq(t *testing.T, ts *httptest.Server, token string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, ts.URL+MintPath, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if token != "" {
+		req.Header.Set(local.HeaderName, token)
+	}
+	return req
+}
+
+// mint runs the real mint round trip and returns the handoff token.
+func mint(t *testing.T, ts *httptest.Server) string {
+	t.Helper()
+	resp, err := http.DefaultClient.Do(mintReq(t, ts, tok))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("mint status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("mint Cache-Control = %q, want no-store — a handoff token must not be cached", got)
+	}
+	var body struct {
+		Handoff string `json:"handoff"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode mint response: %v", err)
+	}
+	if body.Handoff == "" {
+		t.Fatal("mint returned an empty handoff token")
+	}
+	if body.Handoff == tok {
+		t.Fatal("mint returned the session token as a handoff token")
+	}
+	return body.Handoff
+}
+
+// firstLoad is the request a browser launched by flue open makes: no cookie
+// yet, no Origin, Sec-Fetch-Site: none, and a handoff token in the URL.
+func firstLoad(t *testing.T, ts *httptest.Server, handoff string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/?"+local.HandoffParam+"="+handoff, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Sec-Fetch-Site", "none")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestMintRequiresAuthentication is the requirement stated end to end over
+// HTTP: anyone who cannot read $XDG_CONFIG_HOME/flue/token cannot mint a
+// handoff token, and therefore cannot get a session cookie out of this daemon.
+func TestMintRequiresAuthentication(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	for name, req := range map[string]*http.Request{
+		"no credential":    mintReq(t, ts, ""),
+		"wrong token":      mintReq(t, ts, "not-the-token"),
+		"empty token":      mintReq(t, ts, ""),
+		"token in query":   mintReqQuery(t, ts, "?t="+tok),
+		"token in cookie":  mintReqCookie(t, ts, tok),
+		"handoff in query": mintReqQuery(t, ts, "?"+local.HandoffParam+"="+tok),
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("do: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				t.Fatalf("mint with %s = 200, want a rejection", name)
+			}
+		})
+	}
+}
+
+func mintReqQuery(t *testing.T, ts *httptest.Server, query string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, ts.URL+MintPath+query, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	return req
+}
+
+func mintReqCookie(t *testing.T, ts *httptest.Server, token string) *http.Request {
+	t.Helper()
+	req := mintReq(t, ts, "")
+	req.AddCookie(&http.Cookie{Name: local.CookieName, Value: token})
+	return req
+}
+
+// TestMintRejectsEveryBrowserShapedRequest. The cookie is the credential a
+// browser volunteers, and SameSite is port-blind, so a page on another loopback
+// port can cause the victim's browser to send it. Minting on the strength of a
+// volunteered credential would hand that page a fresh one. Every modern browser
+// also sends Sec-Fetch-Site on every request, so its presence — at any value,
+// including the "none" a redirect can launder — is enough to refuse.
+func TestMintRejectsEveryBrowserShapedRequest(t *testing.T) {
+	ts, _ := newTestServer(t)
+	for _, sfs := range []string{"none", "same-origin", "same-site", "cross-site"} {
+		req := mintReq(t, ts, tok)
+		req.Header.Set("Sec-Fetch-Site", sfs)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("mint with Sec-Fetch-Site: %s = %d, want 403", sfs, resp.StatusCode)
+		}
+	}
+}
+
+// TestMintIsNotReachableByGET closes the obvious way back into the laundering
+// surface: a GET can be produced by a redirected navigation, a POST cannot.
+func TestMintIsNotReachableByGET(t *testing.T) {
+	ts, _ := newTestServer(t)
+	req, err := http.NewRequest(http.MethodGet, ts.URL+MintPath, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set(local.HeaderName, tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET %s = %d, want 405", MintPath, resp.StatusCode)
+	}
+}
+
+// TestHandoffIsRedeemableExactlyOnceOverHTTP is the whole mechanism end to
+// end: mint, first load succeeds and yields the session cookie, second
+// presentation of the same token fails. Whoever read the URL out of the browser
+// opener's argv arrives second.
+func TestHandoffIsRedeemableExactlyOnceOverHTTP(t *testing.T) {
+	ui := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("app shell"))
+	})
+	ts, _, _ := newTestServerUI(t, ui)
+
+	h := mint(t, ts)
+
+	first := firstLoad(t, ts, h)
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first load = %d, want 200", first.StatusCode)
+	}
+	var cookie *http.Cookie
+	for _, c := range first.Cookies() {
+		if c.Name == local.CookieName {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("first load set no session cookie")
+	}
+	if cookie.Value != tok {
+		t.Fatalf("session cookie = %q, want the daemon's token", cookie.Value)
+	}
+	if !cookie.HttpOnly {
+		t.Error("session cookie HttpOnly = false, want true")
+	}
+	if cookie.SameSite != http.SameSiteStrictMode {
+		t.Errorf("session cookie SameSite = %v, want Strict", cookie.SameSite)
+	}
+
+	second := firstLoad(t, ts, h)
+	if second.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("second presentation = %d, want 401", second.StatusCode)
+	}
+	for _, c := range second.Cookies() {
+		if c.Name == local.CookieName {
+			t.Fatal("a spent handoff token still yielded a session cookie")
+		}
+	}
+}
+
+// TestConcurrentHandoffExchangesYieldExactlyOneSuccess. Two browsers — or the
+// real browser and whoever raced it — presenting the same token at the same
+// instant must not both be admitted. Run under -race.
+func TestConcurrentHandoffExchangesYieldExactlyOneSuccess(t *testing.T) {
+	ts, _, _ := newTestServerUI(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	for round := 0; round < 10; round++ {
+		h := mint(t, ts)
+
+		const racers = 8
+		var start sync.WaitGroup
+		var done sync.WaitGroup
+		var ok, cookies atomic.Int64
+		start.Add(1)
+		done.Add(racers)
+		for i := 0; i < racers; i++ {
+			go func() {
+				defer done.Done()
+				req, err := http.NewRequest(http.MethodGet, ts.URL+"/?"+local.HandoffParam+"="+h, nil)
+				if err != nil {
+					t.Errorf("NewRequest: %v", err)
+					return
+				}
+				req.Header.Set("Sec-Fetch-Site", "none")
+				start.Wait()
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Errorf("do: %v", err)
+					return
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					ok.Add(1)
+				}
+				for _, c := range resp.Cookies() {
+					if c.Name == local.CookieName {
+						cookies.Add(1)
+					}
+				}
+			}()
+		}
+		start.Done()
+		done.Wait()
+
+		if got := ok.Load(); got != 1 {
+			t.Fatalf("round %d: %d concurrent exchanges succeeded, want exactly 1", round, got)
+		}
+		if got := cookies.Load(); got != 1 {
+			t.Fatalf("round %d: %d session cookies handed out, want exactly 1", round, got)
+		}
+	}
+}
+
+// TestExpiredHandoffIsRefusedOverHTTP. flue open launches the browser
+// immediately, so a token that turns up later has no business working.
+func TestExpiredHandoffIsRefusedOverHTTP(t *testing.T) {
+	reg := session.NewRegistry(time.Now)
+	srv := New(reg, nil, http.NotFoundHandler(), "test")
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	t.Cleanup(srv.Shutdown)
+
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("parse %q: %v", ts.URL, err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("parse port from %q: %v", ts.URL, err)
+	}
+
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	srv.SetAuth(local.NewAuthWithClock(tok, port, clock))
+
+	h := mint(t, ts)
+
+	mu.Lock()
+	now = now.Add(local.HandoffTTL + time.Second)
+	mu.Unlock()
+
+	resp := firstLoad(t, ts, h)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expired handoff = %d, want 401", resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == local.CookieName {
+			t.Fatal("an expired handoff token still yielded a session cookie")
+		}
+	}
+}
+
+// TestHandoffTokenCannotAuthenticateAWebSocketUpgrade. The upgrade is the one
+// GET that leads to every state change flue has — spawn, signal, close — and it
+// is reached through Auth.Check, which does not redeem. A handoff token buys the
+// session cookie on a read-only route and nothing else; if it could open a
+// socket, a token read out of a URL would be a shell rather than a page load.
+func TestHandoffTokenCannotAuthenticateAWebSocketUpgrade(t *testing.T) {
+	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
+	h := mint(t, ts)
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?" + local.HandoffParam + "=" + h
+	c, resp, err := websocket.Dial(context.Background(), wsURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Sec-Fetch-Site": []string{"same-origin"}},
+	})
+	if err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("upgrade authenticated by a handoff token succeeded, want rejection")
+	}
+	if resp != nil && resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+
+	// And the rejected upgrade must not have spent it either.
+	if !srv.currentAuth().Redeem(h) {
+		t.Fatal("the rejected upgrade spent the handoff token")
+	}
+}
+
+// TestSessionTokenIsNeverAcceptedFromAURL is the no-fallback requirement. If a
+// failed handoff exchange — or anything else — fell back to accepting the
+// session token from the query string, the exposure this task removes would be
+// straight back, and every other control here would be theatre.
+func TestSessionTokenIsNeverAcceptedFromAURL(t *testing.T) {
+	ui := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("app shell"))
+	})
+	ts, _, _ := newTestServerUI(t, ui)
+
+	// A live handoff token, so the "spent handoff plus session token" case is
+	// exercised against a store that is not simply empty.
+	live := mint(t, ts)
+	spent := mint(t, ts)
+	firstLoad(t, ts, spent)
+
+	for _, path := range []string{
+		"/?t=" + tok,
+		"/api/sessions?t=" + tok,
+		"/?" + local.HandoffParam + "=" + tok,
+		"/?" + local.HandoffParam + "=" + spent + "&t=" + tok,
+		"/?" + local.HandoffParam + "=unknown&t=" + tok,
+	} {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Sec-Fetch-Site", "none")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("do %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Errorf("GET %s = 200; the session token must never authenticate from a URL", path)
+		}
+		for _, c := range resp.Cookies() {
+			if c.Name == local.CookieName {
+				t.Errorf("GET %s handed out a session cookie", path)
+			}
+		}
+	}
+
+	// None of the above may have burned the live token either.
+	if resp := firstLoad(t, ts, live); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the live handoff token stopped working after the rejected requests: %d", resp.StatusCode)
+	}
+}
+
 // TestWebSocketUpgradeRejectsFetchSiteNone is the endpoint-policy half of the
 // same defence. The upgrade is the one GET that leads to state changes —
 // spawn, signal and close all ride an established socket — so it must not
@@ -544,9 +966,12 @@ func TestOnlySafeMethodsAreRouted(t *testing.T) {
 // "none" here costs a real client nothing.
 func TestWebSocketUpgradeRejectsFetchSiteNone(t *testing.T) {
 	ts, _ := newTestServer(t)
-	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?t=" + tok
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 	c, resp, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Sec-Fetch-Site": []string{"none"}},
+		HTTPHeader: http.Header{
+			"Sec-Fetch-Site": []string{"none"},
+			local.HeaderName: []string{tok},
+		},
 	})
 	if err == nil {
 		c.Close(websocket.StatusNormalClosure, "")
@@ -565,7 +990,7 @@ func TestWebSocketUpgradeRejectsFetchSiteNone(t *testing.T) {
 // matters — it is same-site with this daemon, so the cookie rides along.
 func TestWebSocketRejectsForeignOrigin(t *testing.T) {
 	ts, _ := newTestServer(t)
-	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?t=" + tok
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 
 	for _, origin := range []string{
 		"http://127.0.0.1:3000", // an unrelated dev server on this machine
@@ -573,7 +998,10 @@ func TestWebSocketRejectsForeignOrigin(t *testing.T) {
 		"null", // an opaque origin: a sandboxed iframe, a data: URL
 	} {
 		c, resp, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{
-			HTTPHeader: http.Header{"Origin": []string{origin}},
+			HTTPHeader: http.Header{
+				"Origin":         []string{origin},
+				local.HeaderName: []string{tok},
+			},
 		})
 		if err == nil {
 			c.Close(websocket.StatusNormalClosure, "")
@@ -595,17 +1023,17 @@ func TestWebSocketUpgradeAcceptsSameOrigin(t *testing.T) {
 	readUntil(t, c, func(msg any, _ []byte) bool { _, ok := msg.(wire.Welcome); return ok })
 }
 
-// TestAppShellAllowsFetchSiteNone is the other positive control: a typed URL
-// or a bookmark is exactly the "none" case, and it is what the first-load
-// token-in-URL flow depends on. Only safe, side-effect-free reads may accept
-// it.
+// TestAppShellAllowsFetchSiteNone is the other positive control: a typed URL,
+// a bookmark, and the browser flue open launches are all exactly the "none"
+// case, and the handoff exchange depends on it. Only safe, side-effect-free
+// reads may accept it.
 func TestAppShellAllowsFetchSiteNone(t *testing.T) {
 	ui := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("app shell"))
 	})
 	ts, _, _ := newTestServerUI(t, ui)
 
-	resp := get(t, ts, "/?t="+tok, "none")
+	resp := get(t, ts, "/", "none")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET / with Sec-Fetch-Site: none = %d, want 200", resp.StatusCode)
 	}
@@ -730,7 +1158,12 @@ func TestServerWithoutAuthFailsClosed(t *testing.T) {
 	defer ts.Close()
 
 	for _, path := range []string{"/", "/api/sessions", "/ws"} {
-		resp, err := http.Get(ts.URL + path + "?t=" + tok)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set(local.HeaderName, tok)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("get %s: %v", path, err)
 		}
@@ -738,6 +1171,24 @@ func TestServerWithoutAuthFailsClosed(t *testing.T) {
 		if resp.StatusCode == http.StatusOK {
 			t.Errorf("GET %s = 200 with no authenticator configured, want a rejection", path)
 		}
+	}
+
+	// The mint endpoint carries its own authentication rather than sitting
+	// behind withAuth, so its fail-closed behaviour has to be pinned
+	// separately: a daemon with no authenticator must not hand out handoff
+	// tokens either.
+	req, err := http.NewRequest(http.MethodPost, ts.URL+MintPath, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set(local.HeaderName, tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post %s: %v", MintPath, err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("POST %s = 200 with no authenticator configured, want a rejection", MintPath)
 	}
 
 	if err := srv.ListenAndServe(context.Background(), 0); err == nil {
@@ -818,7 +1269,7 @@ func TestEndToEndOverRealListener(t *testing.T) {
 	go func() { _ = srv.ListenAndServe(ctx, port) }()
 
 	origin := fmt.Sprintf("http://127.0.0.1:%d", port)
-	url := fmt.Sprintf("ws://127.0.0.1:%d/ws?t=%s", port, tok)
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", port)
 
 	var c *websocket.Conn
 	deadline := time.Now().Add(5 * time.Second)
@@ -827,6 +1278,7 @@ func TestEndToEndOverRealListener(t *testing.T) {
 		conn, _, err := websocket.Dial(dctx, url, &websocket.DialOptions{HTTPHeader: http.Header{
 			"Origin":         []string{origin},
 			"Sec-Fetch-Site": []string{"same-origin"},
+			local.HeaderName: []string{tok},
 		}})
 		dcancel()
 		if err == nil {
@@ -887,12 +1339,14 @@ func TestShutdownClosesEstablishedWebSockets(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- srv.ListenAndServe(ctx, port) }()
 
-	url := fmt.Sprintf("ws://127.0.0.1:%d/ws?t=%s", port, tok)
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", port)
 	var c *websocket.Conn
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		dctx, dcancel := context.WithTimeout(context.Background(), time.Second)
-		conn, _, err := websocket.Dial(dctx, url, nil)
+		conn, _, err := websocket.Dial(dctx, url, &websocket.DialOptions{
+			HTTPHeader: http.Header{local.HeaderName: []string{tok}},
+		})
 		dcancel()
 		if err == nil {
 			c = conn

@@ -530,6 +530,13 @@ func swapSpawn(t *testing.T, fn func() error) (restore func()) {
 	return func() { spawnDaemon = orig }
 }
 
+func swapBrowser(t *testing.T, fn func(string) error) (restore func()) {
+	t.Helper()
+	orig := openBrowser
+	openBrowser = fn
+	return func() { openBrowser = orig }
+}
+
 // --- cmdServe port validation ---
 
 func TestCmdServeRejectsAnUnusablePort(t *testing.T) {
@@ -577,10 +584,10 @@ func TestCmdServeRefusesEmptyToken(t *testing.T) {
 
 func TestOpenURLEscapesSpecialCharacters(t *testing.T) {
 	// A directory name containing URL metacharacters must not break the URL
-	// or let its bytes smuggle in extra query parameters (a "t=" among
+	// or let its bytes smuggle in extra query parameters (an "h=" among
 	// them) that were never meant to be there.
 	cwd := "/Users/karn/some project & stuff #2/100%done"
-	got := openURL(7717, "tok123", cwd)
+	got := openURL(7717, "handoff123", cwd)
 
 	u, err := url.Parse(got)
 	if err != nil {
@@ -589,34 +596,272 @@ func TestOpenURLEscapesSpecialCharacters(t *testing.T) {
 	if u.Query().Get("cwd") != cwd {
 		t.Fatalf("cwd round-trip = %q, want %q (raw URL: %s)", u.Query().Get("cwd"), cwd, got)
 	}
-	if u.Query().Get("t") != "tok123" {
-		t.Fatalf("t = %q, want %q — a badly escaped cwd must not smuggle an extra t param (raw URL: %s)", u.Query().Get("t"), "tok123", got)
+	if u.Query().Get(local.HandoffParam) != "handoff123" {
+		t.Fatalf("%s = %q, want %q — a badly escaped cwd must not smuggle an extra handoff param (raw URL: %s)",
+			local.HandoffParam, u.Query().Get(local.HandoffParam), "handoff123", got)
 	}
-	if len(u.Query()["t"]) != 1 {
-		t.Fatalf("t appeared %d times, want exactly 1 (raw URL: %s)", len(u.Query()["t"]), got)
+	if n := len(u.Query()[local.HandoffParam]); n != 1 {
+		t.Fatalf("%s appeared %d times, want exactly 1 (raw URL: %s)", local.HandoffParam, n, got)
 	}
 }
 
-func TestOpenURLInjectionAttemptCannotOverrideToken(t *testing.T) {
-	// A cwd deliberately crafted to look like "&t=evil" must not be able to
+func TestOpenURLInjectionAttemptCannotOverrideHandoff(t *testing.T) {
+	// A cwd deliberately crafted to look like "&h=evil" must not be able to
 	// inject a second top-level query parameter at all. Checking only
-	// Get("t") == "real-token" would not catch a regression here — since
-	// openURL always places "t" before "cwd", an unescaped injection would
-	// produce a *second*, trailing "t" value, and Get returns the first one
-	// regardless, masking the bug. The real invariant is that "t" appears
+	// Get("h") == "real-handoff" would not catch a regression here — since
+	// openURL always places the handoff before "cwd", an unescaped injection
+	// would produce a *second*, trailing value, and Get returns the first one
+	// regardless, masking the bug. The real invariant is that it appears
 	// exactly once.
-	cwd := "/tmp/x&t=evil-token"
-	got := openURL(7717, "real-token", cwd)
+	cwd := "/tmp/x&" + local.HandoffParam + "=evil-handoff"
+	got := openURL(7717, "real-handoff", cwd)
 
 	u, err := url.Parse(got)
 	if err != nil {
 		t.Fatalf("openURL produced an unparseable URL %q: %v", got, err)
 	}
-	if tVals := u.Query()["t"]; len(tVals) != 1 || tVals[0] != "real-token" {
-		t.Fatalf("t values = %v, want exactly [\"real-token\"] (raw URL: %s)", tVals, got)
+	if vals := u.Query()[local.HandoffParam]; len(vals) != 1 || vals[0] != "real-handoff" {
+		t.Fatalf("%s values = %v, want exactly [\"real-handoff\"] (raw URL: %s)", local.HandoffParam, vals, got)
 	}
 	if u.Query().Get("cwd") != cwd {
 		t.Fatalf("cwd round-trip = %q, want %q (raw URL: %s)", u.Query().Get("cwd"), cwd, got)
+	}
+}
+
+// --- the handoff token ---
+
+// TestOpenURLNeverCarriesTheSessionToken is the requirement of task 7b at the
+// place it is easiest to regress. A URL is argv the moment it reaches open(1)
+// or xdg-open(1), and argv is readable by any local user at Linux's default
+// hidepid=0 and by ps(1) on macOS.
+func TestOpenURLNeverCarriesTheSessionToken(t *testing.T) {
+	const sessionToken = "0123456789abcdef-the-session-token"
+	got := openURL(7717, "a-fresh-handoff", "/tmp/work")
+	if strings.Contains(got, sessionToken) {
+		t.Fatalf("openURL leaked the session token: %s", got)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("unparseable URL %q: %v", got, err)
+	}
+	for name, vals := range u.Query() {
+		if name == "cwd" {
+			continue
+		}
+		for _, v := range vals {
+			if v == sessionToken {
+				t.Fatalf("query parameter %q carries the session token", name)
+			}
+		}
+	}
+	if u.Query().Has("t") {
+		t.Fatalf("openURL still emits a \"t\" parameter: %s", got)
+	}
+}
+
+// TestMintHandoffReturnsASingleUseToken drives the real round trip against a
+// real daemon: the token the CLI gets back must authenticate one first load and
+// then be worthless.
+func TestMintHandoffReturnsASingleUseToken(t *testing.T) {
+	port := newTestDaemon(t, "tok")
+
+	h, err := mintHandoff(port, "tok")
+	if err != nil {
+		t.Fatalf("mintHandoff: %v", err)
+	}
+	if h == "" {
+		t.Fatal("mintHandoff returned an empty token")
+	}
+	if h == "tok" {
+		t.Fatal("mintHandoff returned the session token")
+	}
+
+	load := func() int {
+		req, err := http.NewRequest(http.MethodGet, openURL(port, h, "/tmp"), nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Sec-Fetch-Site", "none")
+		resp, err := probeClient.Do(req)
+		if err != nil {
+			t.Fatalf("first load: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if got := load(); got != http.StatusOK {
+		t.Fatalf("first load = %d, want 200", got)
+	}
+	if got := load(); got != http.StatusUnauthorized {
+		t.Fatalf("second load = %d, want 401 — the handoff token must be single-use", got)
+	}
+}
+
+// TestMintHandoffReportsARejectedToken: the daemon answering 401 means the
+// token on disk is not the one the running daemon loaded, which is a real
+// state (config regenerates a token file whose mode has been loosened). It has
+// to be recognised rather than reported as a decode failure.
+func TestMintHandoffReportsARejectedToken(t *testing.T) {
+	port := newTestDaemon(t, "the-daemons-token")
+
+	if _, err := mintHandoff(port, "a-different-token"); !errors.Is(err, errTokenRejected) {
+		t.Fatalf("mintHandoff error = %v, want errTokenRejected", err)
+	}
+}
+
+// TestMintHandoffRefusesADaemonThatEchoesTheSessionToken is the CLI's own last
+// line of defence. Everything else in this change is about keeping the session
+// token out of argv; if a future daemon bug — or an impostor on the port that
+// somehow passed the identity checks — answered the mint with the token it was
+// given, the CLI would put it straight into a browser command line. Refuse
+// rather than trust the peer.
+func TestMintHandoffRefusesADaemonThatEchoesTheSessionToken(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"handoff":%q}`, r.Header.Get(local.HeaderName))
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	port, _ := strconv.Atoi(u.Port())
+
+	if got, err := mintHandoff(port, "the-session-token"); err == nil {
+		t.Fatalf("mintHandoff = %q, nil for a daemon that echoed the session token; want a refusal", got)
+	}
+}
+
+// TestCmdOpenPutsNoSessionTokenInTheBrowserCommandLine is the end-to-end
+// statement of the requirement: whatever flue open hands the browser, the
+// contents of $XDG_CONFIG_HOME/flue/token must not be in it.
+func TestCmdOpenPutsNoSessionTokenInTheBrowserCommandLine(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	token, err := config.LoadOrCreateToken()
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	port := newTestDaemon(t, token)
+	if err := daemon.WriteRuntime(port); err != nil {
+		t.Fatalf("WriteRuntime: %v", err)
+	}
+
+	var launched []string
+	restore := swapBrowser(t, func(url string) error {
+		launched = append(launched, url)
+		return nil
+	})
+	defer restore()
+
+	dir := t.TempDir()
+	if err := cmdOpen([]string{dir}); err != nil {
+		t.Fatalf("cmdOpen: %v", err)
+	}
+	if len(launched) != 1 {
+		t.Fatalf("browser launched %d times, want 1", len(launched))
+	}
+
+	got := launched[0]
+	if strings.Contains(got, token) {
+		t.Fatalf("flue open handed the browser the session token: %s", got)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("unparseable URL %q: %v", got, err)
+	}
+	if u.Query().Has("t") {
+		t.Fatalf("flue open still emits a \"t\" parameter: %s", got)
+	}
+	h := u.Query().Get(local.HandoffParam)
+	if h == "" {
+		t.Fatalf("flue open handed the browser no handoff token: %s", got)
+	}
+	if h == token {
+		t.Fatal("the handoff token in the URL is the session token")
+	}
+	if u.Query().Get("cwd") != dir {
+		t.Fatalf("cwd = %q, want %q", u.Query().Get("cwd"), dir)
+	}
+
+	// And the token it did hand over is good for exactly one load.
+	load := func() int {
+		req, err := http.NewRequest(http.MethodGet, got, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Sec-Fetch-Site", "none")
+		resp, err := probeClient.Do(req)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := load(); code != http.StatusOK {
+		t.Fatalf("the URL flue open produced answered %d, want 200", code)
+	}
+	if code := load(); code != http.StatusUnauthorized {
+		t.Fatalf("the URL flue open produced still worked on a second load (%d), want 401", code)
+	}
+}
+
+// TestCmdOpenFailsRatherThanFallBackWhenTheTokenIsStale: a daemon holding a
+// different token cannot mint, and flue open must say so rather than fall back
+// to putting the stored token in the URL.
+func TestCmdOpenFailsRatherThanFallBackWhenTheTokenIsStale(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	token, err := config.LoadOrCreateToken()
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	port := newTestDaemon(t, "a-token-the-daemon-loaded-earlier")
+	if err := daemon.WriteRuntime(port); err != nil {
+		t.Fatalf("WriteRuntime: %v", err)
+	}
+
+	var launched []string
+	restore := swapBrowser(t, func(url string) error {
+		launched = append(launched, url)
+		return nil
+	})
+	defer restore()
+
+	err = cmdOpen([]string{t.TempDir()})
+	if err == nil {
+		t.Fatal("cmdOpen = nil against a daemon that rejects the stored token, want an error")
+	}
+	if !errors.Is(err, errTokenRejected) {
+		t.Fatalf("cmdOpen error = %v, want errTokenRejected", err)
+	}
+	if len(launched) != 0 {
+		t.Fatalf("cmdOpen launched a browser anyway with %q", launched)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("cmdOpen's error message leaks the session token: %v", err)
+	}
+}
+
+// TestCmdServeBannerCarriesNoCredential. The old banner printed the session
+// token into terminal scrollback. A handoff token would be no better here and
+// would also be dead within seconds, so the banner points at flue open instead.
+func TestCmdServeBannerCarriesNoCredential(t *testing.T) {
+	const token = "0123456789abcdef-the-session-token"
+	out := serveBanner(7717)
+
+	if strings.Contains(out, token) {
+		t.Errorf("flue serve banner contains the session token: %s", out)
+	}
+	for _, bad := range []string{"?t=", "?" + local.HandoffParam + "=", "t=", "="} {
+		if strings.Contains(out, bad) {
+			t.Errorf("flue serve banner contains a query parameter (%q), so it is carrying a credential: %s", bad, out)
+		}
+	}
+	if !strings.Contains(out, "127.0.0.1:7717") {
+		t.Errorf("flue serve banner does not say where the daemon is: %s", out)
+	}
+	if !strings.Contains(out, "flue open") {
+		t.Errorf("flue serve banner does not tell the user how to get a browser tab: %s", out)
 	}
 }
 

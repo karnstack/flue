@@ -4,14 +4,14 @@
 //
 // # Endpoint policy
 //
-// The HTTP surface is read-only. There are exactly three routes — the app
-// shell, a JSON session listing, and the WebSocket upgrade — and none of them
-// changes any state. Spawning, signalling, resizing and closing a session are
-// reachable only over an established WebSocket.
+// The GET surface is read-only. There are four routes — the app shell, a JSON
+// session listing, the WebSocket upgrade, and the handoff mint — and no GET
+// among them changes any state. Spawning, signalling, resizing and closing a
+// session are reachable only over an established WebSocket.
 //
 // That is a security constraint rather than a stylistic one. Task 5's
 // authenticator accepts Sec-Fetch-Site: none, because that is what a typed URL
-// or a bookmark sends and the first-load token-in-URL flow depends on it. But
+// or a bookmark sends and the handoff exchange on first load depends on it. But
 // per the Fetch Metadata spec the redirect-downgrade loop is skipped when the
 // value is already "none", so a user-initiated navigation to a co-resident
 // untrusted origin — an unrelated dev server on another loopback port — that
@@ -22,14 +22,30 @@
 // response, and the same trick through window.open or an iframe is
 // page-initiated, arrives as "same-site", and is already rejected.
 //
-// So the defence is structural, in three parts:
+// So the defence is structural, in four parts:
 //
-//   - Only GET and HEAD are routed at all. Anything else is 405 before it
-//     reaches a handler.
-//   - No GET changes state, so a laundered navigation has nothing to reach.
+//   - Only GET and HEAD are routed, with exactly one allowlisted exception:
+//     POST to MintPath. Anything else is 405 before it reaches a handler, which
+//     also means no CORS preflight ever succeeds, since OPTIONS is refused
+//     everywhere.
+//   - The privileged operation — minting a handoff token, which converts "I can
+//     read the token file" into "here is a fresh credential" — is that POST, and
+//     it authenticates on a request header rather than the cookie. Neither a
+//     laundered navigation (which is a GET) nor any browser (which cannot set a
+//     custom header cross-origin without a preflight that always 405s) can
+//     reach it.
 //   - The upgrade — the one GET that leads to state changes — refuses
 //     Sec-Fetch-Site: none outright. See handleWS for why that costs a real
 //     client nothing.
+//   - The one remaining GET that does change state is the handoff exchange in
+//     local.Auth.Middleware, which must admit "none" to work at all. It is
+//     deliberate and bounded: a laundered request carrying an unknown token
+//     changes nothing, and one carrying a token the attacker already knows makes
+//     the victim's browser receive a cookie it is already entitled to — strictly
+//     worse for the attacker than spending the same token themselves, which
+//     would hand them the Set-Cookie header directly. The cookie's value is a
+//     constant chosen by the daemon and never anything from the request, so
+//     session fixation is structurally impossible.
 package daemon
 
 import (
@@ -141,29 +157,53 @@ func (s *Server) checkAuth(r *http.Request) error {
 	return a.Check(r)
 }
 
-// Handler returns the full HTTP handler: UI, JSON API, and WebSocket.
+// MintPath is the one route that may be reached by a method other than GET or
+// HEAD. It hands the flue CLI a one-time handoff token so that the session
+// token never has to appear in a URL — and therefore never in the browser
+// opener's argv, which any local user can read.
+const MintPath = "/api/handoff"
+
+// Handler returns the full HTTP handler: UI, JSON API, WebSocket, and mint.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	// Not behind withAuth. That middleware accepts the flue_token cookie, which
+	// a browser attaches by itself; minting must be reachable only by a local
+	// process that can read the token file. handleMint runs local.Auth.CheckMint
+	// instead, which accepts the token from a request header and nothing else.
+	mux.HandleFunc(MintPath, s.handleMint)
 	mux.Handle("/api/sessions", s.withAuth(http.HandlerFunc(s.handleSessions)))
 	mux.Handle("/", s.withAuth(s.ui))
 
-	return securityHeaders(safeMethodsOnly(mux))
+	return securityHeaders(methodPolicy(mux))
 }
 
-// safeMethodsOnly rejects everything but GET and HEAD.
+// methodPolicy rejects everything but GET and HEAD, plus POST to MintPath.
 //
-// This is what makes "no mutating endpoint" an invariant of the surface
-// rather than a property of today's handlers: a later task cannot add a POST
-// route, or accept a method-overriding parameter, without this failing first.
-// It also means no CORS preflight ever succeeds, since OPTIONS is refused
-// along with the rest.
-func safeMethodsOnly(next http.Handler) http.Handler {
+// This is what makes "no mutating endpoint reachable by GET" an invariant of
+// the surface rather than a property of today's handlers: a later task cannot
+// add a mutating route, or accept a method-overriding parameter, without
+// editing this allowlist first. It also means no CORS preflight ever succeeds,
+// since OPTIONS is refused on every path including MintPath — which is what
+// stops a browser from ever issuing a cross-origin request carrying the
+// X-Flue-Token header a mint requires.
+//
+// The path comparison is against the raw r.URL.Path, before http.ServeMux sees
+// it. ServeMux matches on the cleaned path and answers 301 when cleaning
+// changes anything, so "POST /api/./handoff" is refused here rather than
+// dispatched: there is no normalisation gap where a POST reaches a handler this
+// check believed it was not reaching. Denial is the failure direction.
+func methodPolicy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead:
-		default:
-			w.Header().Set("Allow", "GET, HEAD")
+		isMint := r.URL.Path == MintPath
+		allowed := r.Method == http.MethodGet || r.Method == http.MethodHead ||
+			(isMint && r.Method == http.MethodPost)
+		if !allowed {
+			allow := "GET, HEAD"
+			if isMint {
+				allow = "POST"
+			}
+			w.Header().Set("Allow", allow)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -242,6 +282,57 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": infos})
+}
+
+// handleMint issues a one-time handoff token to a local process that has
+// proved it can read the session token file.
+//
+// It authenticates itself rather than sitting behind withAuth, and the
+// difference is the whole point: withAuth accepts the flue_token cookie, and
+// the cookie is attached automatically by the browser. SameSite is blind to the
+// port, so a co-resident untrusted origin on another loopback port can cause
+// the victim's browser to send it. A credential the browser volunteers must
+// never be enough to mint a fresh one. CheckMint requires the session token in
+// the X-Flue-Token header — which no browser can send cross-origin, because the
+// preflight it would need is answered 405 — and refuses any request carrying a
+// Sec-Fetch-Site header at all, which every browser sends and the flue CLI
+// never does.
+//
+// The response is the one place a handoff token is written out. It is never
+// logged and never persisted.
+func (s *Server) handleMint(w http.ResponseWriter, r *http.Request) {
+	// methodPolicy already refuses everything but GET, HEAD and POST here, and
+	// a GET must not mint: it is the one method a redirect can launder.
+	// Repeating the check locally means the rule survives a handler being
+	// mounted somewhere the middleware does not wrap.
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	a := s.currentAuth()
+	if a == nil {
+		http.Error(w, ErrNoAuth.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if err := a.CheckMint(r); err != nil {
+		writeAuthError(w, err)
+		return
+	}
+
+	handoff, err := a.Mint()
+	if err != nil {
+		http.Error(w, "could not mint a handoff token", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"handoff":       handoff,
+		"expires_in_ms": local.HandoffTTL.Milliseconds(),
+	})
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
