@@ -6,7 +6,7 @@
 
 **Architecture:** The daemon holds each PTY plus a bounded scrollback ring keyed by a monotonic byte offset (`seq`). Browsers connect over WebSocket, `attach` with their `lastSeq`, and receive either a byte-exact delta or a full ring snapshot. Closing a tab detaches without killing the process. Multiple clients on one session mirror each other; exactly one is `primary` and owns the PTY dimensions. Rendering sits behind a narrow `Emulator` interface so xterm.js can later be swapped for `libghostty-vt`.
 
-**Tech Stack:** Go 1.26 (`github.com/creack/pty`, `github.com/coder/websocket`), TypeScript with Vite + Vitest, `@xterm/xterm` with the WebGL and fit addons, pnpm, mise.
+**Tech Stack:** Go 1.26 (`github.com/creack/pty`, `github.com/coder/websocket`); React 19 SPA with TanStack Router, Vite, Tailwind v4, shadcn/ui, Heroicons; `@xterm/xterm` with the WebGL and fit addons; Vitest with Testing Library; pnpm and mise.
 
 ## Global Constraints
 
@@ -20,8 +20,26 @@
 - Loopback auth requires all three: valid token, Origin equal to the daemon's own origin, and `Host` header of `127.0.0.1:PORT` or `localhost:PORT`. No wildcard CORS under any condition.
 - The token is exchanged for an `HttpOnly; SameSite=Strict` cookie on first load, stripped from the URL, and every response sets `Referrer-Policy: no-referrer`.
 - Config lives under `$XDG_CONFIG_HOME/flue` (falling back to `~/.config/flue`), files mode `0600`.
-- Use `pnpm`, never `npm` or `npx`.
+- Use `pnpm`, never `npm` or `npx`. One-off tools run through `pnpm dlx`.
 - Spec: `docs/superpowers/specs/2026-07-28-flue-design.md`.
+
+**Design constraints** (from the `design` skill's guidelines; every UI task inherits these):
+
+- Neutral is **zinc**. Never `gray-*` or `slate-*`.
+- Accent is **amber**, used only for active nav state, focus rings, and the single primary button per screen. Never for body text — amber on dark fails contrast at body sizes.
+- Both themes ship, driven by `prefers-color-scheme`. No manual toggle.
+- `antialiased` on the root element; `isolate` on the app container.
+- Body text is `text-base` on mobile, `sm:text-sm` and above. Never `text-xs` for body copy.
+- Headings use `font-semibold` or `font-medium`, never `font-bold`, with `tracking-tight` above `text-xl` and no `leading-*` modifier.
+- Nav states differ by color and background only — never by `font-weight`, and never a high-contrast fill for the active item.
+- Icons are Heroicons Micro (16px, `size-4`) only, each with `shrink-0` inside a flex container.
+- `min-w-0` on flex children that must shrink; `shrink-0` on those that must not.
+- Dividers use opacity-based colors (`border-zinc-950/10 dark:border-white/10`), never solid neutrals.
+- Reach for the lightest surface treatment that works: whitespace, then dividers, then cards. Tables sit on the page background with horizontal rules only.
+- One primary button per screen. Application-UI buttons are `text-sm` with compact padding.
+- `tabular-nums` on any value that changes over time.
+- `role="list"` on every `<ul>` without a list-style class.
+- No emojis in any UI copy.
 
 ---
 
@@ -3309,26 +3327,27 @@ git commit -m "feat(cli): add serve, open, and status commands"
 
 ---
 
-### Task 8: Web scaffolding, Emulator seam, and the VT conformance corpus
+### Task 8: React scaffolding, design tokens, and shadcn
 
 **Files:**
 - Create: `web/package.json`
 - Create: `web/tsconfig.json`
 - Create: `web/vite.config.ts`
+- Create: `web/components.json`
 - Create: `web/index.html`
-- Create: `web/src/emulator/types.ts`
-- Create: `web/src/emulator/xterm.ts`
-- Create: `testdata/vt/basic.json`
-- Test: `web/src/emulator/emulator.test.ts`
+- Create: `web/src/styles.css`
+- Create: `web/src/lib/utils.ts`
+- Test: `web/src/lib/utils.test.ts`
 
 **Interfaces:**
 - Consumes: nothing from Go.
-- Produces:
-  - `Emulator` interface: `write(bytes: Uint8Array): void`, `resize(cols, rows): void`, `snapshot(): Grid`, `onData(cb: (bytes: Uint8Array) => void): void`, `attachTo(el: HTMLElement): void`, `dispose(): void`
-  - `Grid = { cols: number; rows: number; lines: string[] }` — `lines` is `rows` entries with trailing whitespace trimmed
-  - `createXtermEmulator(opts?: { cols?: number; rows?: number }): Emulator`
+- Produces: `cn(...inputs: ClassValue[]): string` from `@/lib/utils`; the `@/*` path alias resolving to `web/src/*`; design tokens declared in `@theme`.
 
-The corpus is the whole reason this task exists. It runs against xterm.js today and `libghostty-vt` later, which is what turns that swap into a substitution rather than a rewrite.
+**Design decisions, fixed here and applied everywhere below:**
+- Neutral is **zinc**. Never `gray-*` or `slate-*`.
+- Accent is **amber**. Used for active nav indicators, focus rings, and the single primary button per screen. Never for body text — amber on dark fails contrast at body sizes.
+- Both themes ship, driven by `prefers-color-scheme` via Tailwind's built-in `dark:` behaviour. No manual toggle.
+- Terminal colors are a separate concern from chrome colors and are themed inside the emulator.
 
 - [ ] **Step 1: Create the package manifest**
 
@@ -3343,16 +3362,32 @@ The corpus is the whole reason this task exists. It runs against xterm.js today 
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@heroicons/react": "^2.2.0",
+    "@radix-ui/react-slot": "^1.2.0",
+    "@tanstack/react-router": "^1.140.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
-    "@xterm/xterm": "^5.6.0"
+    "@xterm/xterm": "^5.6.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
-    "@vitest/browser": "^4.0.0",
+    "@tailwindcss/vite": "^4.2.0",
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
     "jsdom": "^27.0.0",
+    "tailwindcss": "^4.2.0",
     "typescript": "^5.9.0",
     "vite": "^7.0.0",
     "vitest": "^4.0.0"
@@ -3360,7 +3395,7 @@ The corpus is the whole reason this task exists. It runs against xterm.js today 
 }
 ```
 
-- [ ] **Step 2: Create TypeScript and Vite config**
+- [ ] **Step 2: Create TypeScript and Vite configuration**
 
 `web/tsconfig.json`:
 
@@ -3371,11 +3406,14 @@ The corpus is the whole reason this task exists. It runs against xterm.js today 
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["vitest/globals"]
+    "types": ["vitest/globals"],
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] }
   },
   "include": ["src"]
 }
@@ -3385,12 +3423,20 @@ The corpus is the whole reason this task exists. It runs against xterm.js today 
 
 ```ts
 import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+import { fileURLToPath, URL } from 'node:url'
 
 export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+  },
   build: { outDir: 'dist', emptyOutDir: true },
   test: {
     environment: 'jsdom',
     globals: true,
+    setupFiles: ['./src/test-setup.ts'],
   },
 })
 ```
@@ -3399,18 +3445,20 @@ export default defineConfig({
 
 ```html
 <!doctype html>
-<html lang="en">
+<html lang="en" class="h-full antialiased">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>flue</title>
   </head>
-  <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+  <body class="h-full">
+    <div id="root" class="isolate h-full"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
 ```
+
+`antialiased` sits on the root element and `isolate` on the app container, both per the general guidelines — `isolate` prevents z-index conflicts once dialogs and popovers portal in.
 
 - [ ] **Step 3: Install dependencies**
 
@@ -3418,7 +3466,629 @@ export default defineConfig({
 cd web && pnpm install
 ```
 
-- [ ] **Step 4: Write the VT conformance corpus**
+- [ ] **Step 4: Write the design tokens**
+
+`web/src/styles.css`:
+
+```css
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+
+/*
+ * flue design tokens.
+ *
+ * Neutral is zinc, never gray or slate. Accent is amber — it carries active
+ * nav state, focus rings, and the one primary button per screen, and is
+ * never used for body text, where amber on dark would fail contrast.
+ *
+ * Both themes ship and follow prefers-color-scheme. There is no toggle.
+ */
+@theme {
+  --font-sans:
+    'InterVariable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono:
+    ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, monospace;
+
+  --color-accent-fg: var(--color-amber-600);
+  --color-accent-bg: var(--color-amber-500);
+}
+
+@layer base {
+  :root {
+    /* Surfaces, so a light theme stays a token change rather than a sweep. */
+    --flue-canvas: var(--color-white);
+    --flue-panel: var(--color-white);
+    --flue-line: --alpha(var(--color-zinc-950) / 10%);
+    --flue-muted: var(--color-zinc-500);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --flue-canvas: var(--color-zinc-950);
+      /* Cards sit slightly lighter than the canvas, never darker. */
+      --flue-panel: var(--color-zinc-900);
+      --flue-line: --alpha(var(--color-white) / 10%);
+      --flue-muted: var(--color-zinc-400);
+      --color-accent-fg: var(--color-amber-400);
+    }
+  }
+
+  body {
+    background-color: var(--flue-canvas);
+  }
+}
+
+/* The terminal fills its pane; xterm manages its own internal scrolling. */
+@utility flue-term-surface {
+  block-size: 100%;
+  inline-size: 100%;
+}
+```
+
+Note `--alpha(...)` rather than `calc()` on a spacing variable, and theme variable references rather than raw hex — both required by the Tailwind authoring rules.
+
+- [ ] **Step 5: Initialise shadcn and add the components used below**
+
+```bash
+cd web && pnpm dlx shadcn@latest init --base-color zinc --yes
+pnpm dlx shadcn@latest add button sheet --yes
+```
+
+Only these two. `sheet` provides the mobile navigation panel, which every app needs below `lg:` regardless of the desktop layout. Add further shadcn components when a task actually needs one — pre-installing a component library's worth of unused files makes the tree harder to reason about for no gain.
+
+Verify `web/components.json` records the alias and base colour:
+
+```json
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "new-york",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/styles.css",
+    "baseColor": "zinc",
+    "cssVariables": true
+  },
+  "aliases": { "components": "@/components", "utils": "@/lib/utils" }
+}
+```
+
+- [ ] **Step 6: Write the failing test**
+
+`web/src/lib/utils.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { cn } from './utils'
+
+describe('cn', () => {
+  it('joins class names', () => {
+    expect(cn('a', 'b')).toBe('a b')
+  })
+
+  it('drops falsy values', () => {
+    expect(cn('a', false && 'b', undefined, 'c')).toBe('a c')
+  })
+
+  it('lets a later Tailwind class win over an earlier conflicting one', () => {
+    expect(cn('p-2', 'p-4')).toBe('p-4')
+  })
+})
+```
+
+- [ ] **Step 7: Add the test setup file**
+
+`web/src/test-setup.ts`:
+
+```ts
+import '@testing-library/dom'
+
+// jsdom implements neither of these, and both are exercised by the
+// terminal view's resize handling and focus mode.
+if (!globalThis.ResizeObserver) {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
+}
+
+if (!globalThis.matchMedia) {
+  globalThis.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof matchMedia
+}
+```
+
+- [ ] **Step 8: Run the test to verify it fails**
+
+Run: `cd web && pnpm test`
+Expected: FAIL — cannot resolve `./utils` if `shadcn init` did not create it.
+
+- [ ] **Step 9: Ensure the utils module exists**
+
+`web/src/lib/utils.ts` (created by `shadcn init`; write it if absent):
+
+```ts
+import { clsx, type ClassValue } from 'clsx'
+import { twMerge } from 'tailwind-merge'
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+```
+
+- [ ] **Step 10: Run the test to verify it passes**
+
+Run: `cd web && pnpm test`
+Expected: PASS, three tests.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add web/package.json web/pnpm-lock.yaml web/tsconfig.json web/vite.config.ts web/index.html web/components.json web/src/styles.css web/src/lib web/src/test-setup.ts
+git commit -m "feat(web): scaffold React, Tailwind v4, and shadcn with flue design tokens"
+```
+
+---
+
+### Task 9: App shell and router
+
+**Files:**
+- Create: `web/src/components/app-shell.tsx`
+- Create: `web/src/components/nav.tsx`
+- Create: `web/src/router.tsx`
+- Create: `web/src/routes/sessions.tsx` (placeholder, filled in Task 13)
+- Create: `web/src/routes/terminal.tsx` (placeholder, filled in Task 12)
+- Create: `web/src/main.tsx`
+- Test: `web/src/components/nav.test.tsx`
+- Test: `web/src/router.test.tsx`
+
+**Interfaces:**
+- Consumes: `cn` from Task 8.
+- Produces:
+  - `NAV_ITEMS: ReadonlyArray<{ to: string; label: string; icon: ComponentType<{ className?: string }> }>`
+  - `<Nav currentPath={string} onNavigate?={() => void} />`
+  - `<AppShell currentPath={string}>{children}</AppShell>`
+  - `createFlueRouter(): Router` with routes `/`, `/sessions`, `/settings`, and `/d/$deviceId/s/$sessionId`
+
+**Layout rationale.** Management routes render inside `AppShell`, which is a sidebar on `lg:` and up and a `Sheet` below it. The terminal route renders bare and full-bleed: a terminal session *is* the tab, so wrapping it in app chrome would contradict the premise of the project.
+
+- [ ] **Step 1: Write the failing nav test**
+
+`web/src/components/nav.test.tsx`:
+
+```tsx
+import { describe, expect, it, vi } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { Nav, NAV_ITEMS } from './nav'
+
+describe('Nav', () => {
+  it('renders every nav item', () => {
+    render(<Nav currentPath="/sessions" />)
+    for (const item of NAV_ITEMS) {
+      expect(screen.getByRole('link', { name: item.label })).toBeTruthy()
+    }
+  })
+
+  it('marks the current route with aria-current', () => {
+    render(<Nav currentPath="/sessions" />)
+    const current = screen.getByRole('link', { name: 'Sessions' })
+    expect(current.getAttribute('aria-current')).toBe('page')
+    expect(screen.getByRole('link', { name: 'Settings' }).getAttribute('aria-current')).toBeNull()
+  })
+
+  it('never changes font weight between states', () => {
+    // Guideline: nav states differ by color and background only. A weight
+    // change causes a layout shift and reads as a different element.
+    render(<Nav currentPath="/sessions" />)
+    const active = screen.getByRole('link', { name: 'Sessions' })
+    const inactive = screen.getByRole('link', { name: 'Settings' })
+    const weightClass = /font-(thin|light|normal|medium|semibold|bold|extrabold|black)/
+    const activeWeight = active.className.match(weightClass)?.[0]
+    const inactiveWeight = inactive.className.match(weightClass)?.[0]
+    expect(activeWeight).toBe(inactiveWeight)
+  })
+
+  it('calls onNavigate when a link is activated, so the mobile sheet can close', async () => {
+    const onNavigate = vi.fn()
+    render(<Nav currentPath="/sessions" onNavigate={onNavigate} />)
+    await userEvent.click(screen.getByRole('link', { name: 'Settings' }))
+    expect(onNavigate).toHaveBeenCalled()
+  })
+})
+```
+
+- [ ] **Step 2: Write the failing router test**
+
+`web/src/router.test.tsx`:
+
+```tsx
+import { describe, expect, it } from 'vitest'
+import { createFlueRouter } from './router'
+
+describe('createFlueRouter', () => {
+  it('matches the sessions route', () => {
+    const router = createFlueRouter()
+    const match = router.matchRoutes('/sessions', {})
+    expect(match.some((m) => m.routeId.includes('sessions'))).toBe(true)
+  })
+
+  it('matches a session terminal route and extracts its params', () => {
+    const router = createFlueRouter()
+    const match = router.matchRoutes('/d/local/s/abc123', {})
+    const terminal = match.find((m) => m.routeId.includes('terminal'))
+    expect(terminal).toBeDefined()
+    expect(terminal!.params).toMatchObject({ deviceId: 'local', sessionId: 'abc123' })
+  })
+
+  it('matches the index route', () => {
+    const router = createFlueRouter()
+    const match = router.matchRoutes('/', {})
+    expect(match.length).toBeGreaterThan(0)
+  })
+})
+```
+
+- [ ] **Step 3: Run both tests to verify they fail**
+
+Run: `cd web && pnpm test`
+Expected: FAIL — cannot resolve `./nav` or `./router`.
+
+- [ ] **Step 4: Implement the nav**
+
+`web/src/components/nav.tsx`:
+
+```tsx
+import type { ComponentType } from 'react'
+import { CommandLineIcon, DevicePhoneMobileIcon, Cog6ToothIcon } from '@heroicons/react/16/solid'
+import { cn } from '@/lib/utils'
+
+export const NAV_ITEMS = [
+  { to: '/sessions', label: 'Sessions', icon: CommandLineIcon },
+  { to: '/devices', label: 'Devices', icon: DevicePhoneMobileIcon },
+  { to: '/settings', label: 'Settings', icon: Cog6ToothIcon },
+] as const satisfies ReadonlyArray<{
+  to: string
+  label: string
+  icon: ComponentType<{ className?: string }>
+}>
+
+export interface NavProps {
+  currentPath: string
+  /** Called after a link is activated, so the mobile sheet can close itself. */
+  onNavigate?: () => void
+}
+
+export function Nav({ currentPath, onNavigate }: NavProps) {
+  return (
+    <nav className="flex flex-col gap-y-1">
+      <ul role="list" className="flex flex-col gap-y-1">
+        {NAV_ITEMS.map((item) => {
+          const active = currentPath.startsWith(item.to)
+          const Icon = item.icon
+          return (
+            <li key={item.to}>
+              <a
+                href={item.to}
+                aria-current={active ? 'page' : undefined}
+                onClick={onNavigate}
+                className={cn(
+                  // Font weight is identical in every state. Only color and
+                  // background change, per the navigation guidelines.
+                  'flex items-center gap-x-2.5 rounded-md px-2.5 py-2 text-base/6 font-medium sm:py-1.5 sm:text-sm/6',
+                  'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500',
+                  active
+                    ? // Muted background plus accent text, never a
+                      // high-contrast fill.
+                      'bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                    : 'text-zinc-600 hover:bg-zinc-950/5 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-white/5 dark:hover:text-white',
+                )}
+              >
+                <Icon className="size-4 shrink-0" aria-hidden="true" />
+                {item.label}
+              </a>
+            </li>
+          )
+        })}
+      </ul>
+    </nav>
+  )
+}
+```
+
+- [ ] **Step 5: Implement the app shell**
+
+`web/src/components/app-shell.tsx`:
+
+```tsx
+import { useState, type ReactNode } from 'react'
+import { Bars3Icon } from '@heroicons/react/16/solid'
+import { Button } from '@/components/ui/button'
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
+import { Nav } from './nav'
+
+export interface AppShellProps {
+  currentPath: string
+  children: ReactNode
+}
+
+function Wordmark() {
+  return (
+    <div className="px-2.5 text-sm/6 font-medium tracking-tight text-zinc-950 dark:text-white">
+      flue
+    </div>
+  )
+}
+
+/**
+ * Sidebar on lg: and up, a Sheet below it. Every app needs a mobile
+ * navigation affordance regardless of the desktop layout, and a
+ * multi-column layout must collapse rather than shrink.
+ */
+export function AppShell({ currentPath, children }: AppShellProps) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className="flex h-full flex-col lg:flex-row">
+      <header className="flex items-center gap-x-3 border-b border-zinc-950/10 p-3 lg:hidden dark:border-white/10">
+        <Sheet open={open} onOpenChange={setOpen}>
+          <SheetTrigger asChild>
+            <Button variant="ghost" size="sm" aria-label="Open navigation">
+              <Bars3Icon className="size-4 shrink-0" aria-hidden="true" />
+            </Button>
+          </SheetTrigger>
+          <SheetContent side="left" className="w-64 p-3">
+            <SheetTitle className="px-2.5 text-sm/6 font-medium tracking-tight">flue</SheetTitle>
+            <div className="mt-4">
+              <Nav currentPath={currentPath} onNavigate={() => setOpen(false)} />
+            </div>
+          </SheetContent>
+        </Sheet>
+        <Wordmark />
+      </header>
+
+      <aside className="hidden w-56 shrink-0 flex-col gap-y-4 border-r border-zinc-950/10 p-3 lg:flex dark:border-white/10">
+        <Wordmark />
+        <Nav currentPath={currentPath} />
+      </aside>
+
+      <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
+    </div>
+  )
+}
+```
+
+`min-w-0` on the main region is required: it is a `flex-1` child beside a fixed-width sidebar and would otherwise refuse to shrink below its content.
+
+- [ ] **Step 6: Implement the router**
+
+`web/src/router.tsx`:
+
+```tsx
+import {
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  useRouterState,
+} from '@tanstack/react-router'
+import { AppShell } from '@/components/app-shell'
+import { SessionsRoute } from '@/routes/sessions'
+import { TerminalRoute } from '@/routes/terminal'
+
+const rootRoute = createRootRoute({ component: () => <Outlet /> })
+
+/**
+ * Pathless layout for management screens. The terminal deliberately sits
+ * outside it: a session is the tab, so app chrome around it would defeat
+ * the premise.
+ */
+const shellRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  id: 'shell',
+  component: function ShellLayout() {
+    const pathname = useRouterState({ select: (s) => s.location.pathname })
+    return (
+      <AppShell currentPath={pathname}>
+        <Outlet />
+      </AppShell>
+    )
+  },
+})
+
+const indexRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/',
+  component: SessionsRoute,
+})
+
+const sessionsRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/sessions',
+  component: SessionsRoute,
+})
+
+const settingsRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/settings',
+  component: function Settings() {
+    return (
+      <div className="p-4 sm:p-6 lg:p-8">
+        <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
+          Settings
+        </h1>
+        <p className="mt-2 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+          Scrollback size, keyboard bindings, and themes arrive with the next build step.
+        </p>
+      </div>
+    )
+  },
+})
+
+const terminalRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/d/$deviceId/s/$sessionId',
+  id: 'terminal',
+  component: TerminalRoute,
+})
+
+const routeTree = rootRoute.addChildren([
+  shellRoute.addChildren([indexRoute, sessionsRoute, settingsRoute]),
+  terminalRoute,
+])
+
+export function createFlueRouter() {
+  return createRouter({ routeTree, defaultPreload: false })
+}
+
+declare module '@tanstack/react-router' {
+  interface Register {
+    router: ReturnType<typeof createFlueRouter>
+  }
+}
+```
+
+- [ ] **Step 7: Add route placeholders**
+
+`web/src/routes/sessions.tsx`:
+
+```tsx
+export function SessionsRoute() {
+  return (
+    <div className="p-4 sm:p-6 lg:p-8">
+      <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
+        Sessions
+      </h1>
+    </div>
+  )
+}
+```
+
+`web/src/routes/terminal.tsx`:
+
+```tsx
+export function TerminalRoute() {
+  return <div className="h-full" />
+}
+```
+
+- [ ] **Step 8: Implement the entry point**
+
+`web/src/main.tsx`:
+
+```tsx
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { RouterProvider } from '@tanstack/react-router'
+import '@/styles.css'
+import { createFlueRouter } from '@/router'
+import { stripToken } from '@/lib/url'
+
+// The daemon has already moved the token into an HttpOnly cookie, so drop
+// it from the URL before it reaches history or a referrer header.
+const cleaned = stripToken(location.href)
+if (cleaned !== location.href) history.replaceState(null, '', cleaned)
+
+const router = createFlueRouter()
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <RouterProvider router={router} />
+  </StrictMode>,
+)
+```
+
+- [ ] **Step 9: Implement the URL helper**
+
+`web/src/lib/url.ts`:
+
+```ts
+/**
+ * Remove the token from a URL. The daemon moves it into an HttpOnly cookie
+ * on first load; the app then calls this and replaceState so the secret
+ * stops appearing in history and referrers.
+ */
+export function stripToken(url: string): string {
+  const u = new URL(url)
+  if (!u.searchParams.has('t')) return url
+  u.searchParams.delete('t')
+  const query = u.searchParams.toString()
+  return `${u.origin}${u.pathname}${query ? `?${query}` : ''}`
+}
+```
+
+- [ ] **Step 10: Write the URL helper test**
+
+`web/src/lib/url.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { stripToken } from './url'
+
+describe('stripToken', () => {
+  it('removes the token', () => {
+    expect(stripToken('http://127.0.0.1:7717/?t=secret')).toBe('http://127.0.0.1:7717/')
+  })
+
+  it('preserves other parameters', () => {
+    expect(stripToken('http://127.0.0.1:7717/?t=secret&cwd=%2Ftmp')).toBe(
+      'http://127.0.0.1:7717/?cwd=%2Ftmp',
+    )
+  })
+
+  it('leaves a URL without a token untouched', () => {
+    expect(stripToken('http://127.0.0.1:7717/d/local/s/abc')).toBe(
+      'http://127.0.0.1:7717/d/local/s/abc',
+    )
+  })
+})
+```
+
+- [ ] **Step 11: Run the tests to verify they pass**
+
+Run: `cd web && pnpm test`
+Expected: PASS — nav, router, url, and utils suites.
+
+- [ ] **Step 12: Type-check**
+
+Run: `cd web && pnpm lint`
+Expected: no TypeScript errors.
+
+- [ ] **Step 13: Commit**
+
+```bash
+git add web/src/components web/src/router.tsx web/src/routes web/src/main.tsx web/src/lib
+git commit -m "feat(web): add app shell, navigation, and TanStack Router routes"
+```
+
+---
+
+### Task 10: Emulator seam, xterm.js, and the VT conformance corpus
+
+**Files:**
+- Create: `web/src/emulator/types.ts`
+- Create: `web/src/emulator/xterm.ts`
+- Create: `testdata/vt/basic.json`
+- Test: `web/src/emulator/emulator.test.ts`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces:
+  - `Grid = { cols: number; rows: number; lines: string[] }` — `lines` has `rows` entries, trailing whitespace trimmed
+  - `Emulator` with `write(bytes: Uint8Array)`, `resize(cols, rows)`, `snapshot(): Grid`, `onData(cb: (bytes: Uint8Array) => void)`, `attachTo(el: HTMLElement)`, `dispose()`, `injectForTest(data: string)`
+  - `createXtermEmulator(opts?: { cols?: number; rows?: number }): Emulator`
+
+The corpus is the point of this task. It runs against xterm.js today and `libghostty-vt` later, which is what turns that swap into a substitution rather than a rewrite.
+
+- [ ] **Step 1: Write the VT conformance corpus**
 
 `testdata/vt/basic.json`:
 
@@ -3511,7 +4181,7 @@ cd web && pnpm install
 ]
 ```
 
-- [ ] **Step 5: Write the failing test**
+- [ ] **Step 2: Write the failing test**
 
 `web/src/emulator/emulator.test.ts`:
 
@@ -3533,13 +4203,11 @@ const corpus: Case[] = JSON.parse(
   readFileSync(resolve(__dirname, '../../../testdata/vt/basic.json'), 'utf8'),
 )
 
-function encode(s: string): Uint8Array {
-  return new TextEncoder().encode(s)
-}
+const encode = (s: string) => new TextEncoder().encode(s)
 
 describe('VT conformance corpus', () => {
-  // This suite is emulator-agnostic on purpose: it runs against xterm.js
-  // today and against libghostty-vt later, which is what makes that swap a
+  // Deliberately emulator-agnostic: this suite runs against xterm.js today
+  // and against libghostty-vt later, which is what makes that swap a
   // substitution rather than a rewrite.
   for (const c of corpus) {
     it(c.name, async () => {
@@ -3572,7 +4240,6 @@ describe('Emulator interface', () => {
     const seen: Uint8Array[] = []
     em.onData((b) => seen.push(b))
 
-    // xterm's public input path; the emulator must convert to bytes.
     em.injectForTest('x')
 
     expect(seen.length).toBe(1)
@@ -3582,12 +4249,12 @@ describe('Emulator interface', () => {
 })
 ```
 
-- [ ] **Step 6: Run the test to verify it fails**
+- [ ] **Step 3: Run the test to verify it fails**
 
 Run: `cd web && pnpm test`
 Expected: FAIL — cannot resolve `./xterm`.
 
-- [ ] **Step 7: Define the Emulator interface**
+- [ ] **Step 4: Define the Emulator interface**
 
 `web/src/emulator/types.ts`:
 
@@ -3626,7 +4293,7 @@ export interface Emulator {
 }
 ```
 
-- [ ] **Step 8: Implement the xterm.js emulator**
+- [ ] **Step 5: Implement the xterm.js emulator**
 
 `web/src/emulator/xterm.ts`:
 
@@ -3640,8 +4307,8 @@ export interface XtermOptions {
 }
 
 /**
- * xterm.js behind the Emulator seam. The WebGL addon is loaded lazily in
- * attachTo, because it needs a real canvas and would fail under jsdom.
+ * xterm.js behind the Emulator seam. The WebGL addon loads lazily inside
+ * attachTo because it needs a real canvas and would fail under jsdom.
  */
 export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
   const term = new Terminal({
@@ -3654,7 +4321,7 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
     fontSize: 13,
   })
 
-  const decoder = new TextEncoder()
+  const encoder = new TextEncoder()
   let disposed = false
 
   return {
@@ -3677,7 +4344,7 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
     },
 
     onData(cb: (bytes: Uint8Array) => void) {
-      term.onData((data) => cb(decoder.encode(data)))
+      term.onData((data) => cb(encoder.encode(data)))
     },
 
     attachTo(el: HTMLElement) {
@@ -3702,25 +4369,26 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
 }
 ```
 
-- [ ] **Step 9: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd web && pnpm test`
-Expected: PASS — twelve corpus cases plus two interface tests. If a corpus expectation disagrees with xterm's real behaviour, fix the **corpus**, not the emulator: the corpus is a description of correct VT behaviour, and a genuine xterm bug should be recorded as a skipped case with a comment rather than papered over.
+Expected: PASS — twelve corpus cases plus two interface tests. If a corpus expectation disagrees with xterm's real behaviour, fix the **corpus**, not the emulator: the corpus describes correct VT behaviour, and a genuine xterm bug belongs in the file as a skipped case with a comment rather than being papered over.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add web/package.json web/pnpm-lock.yaml web/tsconfig.json web/vite.config.ts web/index.html web/src/emulator testdata/vt/basic.json
+git add web/src/emulator testdata/vt/basic.json
 git commit -m "feat(web): add Emulator seam, xterm.js implementation, and VT corpus"
 ```
 
 ---
 
-### Task 9: Protocol client with reconnect and delta handling
+### Task 11: Protocol client and React hook
 
 **Files:**
 - Create: `web/src/client/protocol.ts`
 - Create: `web/src/client/client.ts`
+- Create: `web/src/client/use-flue-client.ts`
 - Test: `web/src/client/client.test.ts`
 
 **Interfaces:**
@@ -3729,11 +4397,11 @@ git commit -m "feat(web): add Emulator seam, xterm.js implementation, and VT cor
   - `encodeBinary(type: number, ref: number, payload: Uint8Array): ArrayBuffer`
   - `decodeBinary(buf: ArrayBuffer): { type: number; ref: number; payload: Uint8Array }`
   - `FRAME_OUTPUT = 0x00`, `FRAME_INPUT = 0x01`
-  - Type definitions for every control message in `spec/protocol.md`
-  - `class FlueClient` with `connect()`, `close()`, `list()`, `spawn(opts)`, `attach(id, lastSeq)`, `sendInput(ref, bytes)`, `resize(ref, cols, rows, primary)`, and the events `onOutput`, `onAttached`, `onExit`, `onSizeChanged`, `onSessions`, `onError`, `onStatus`
-  - `FlueClient` accepts an injected socket factory so tests need no real server
+  - TypeScript types for every control message in `spec/protocol.md`
+  - `class FlueClient` with `connect()`, `close()`, `list()`, `spawn(opts)`, `attach(id, lastSeq)`, `detach(ref)`, `sendInput(ref, bytes)`, `resize(ref, cols, rows, primary)`, `lastSeqFor(ref)`, and the callbacks `onOutput`, `onAttached`, `onExit`, `onSizeChanged`, `onSessions`, `onError`, `onStatus`
+  - `useFlueClient(): FlueClient` — one client per browser tab, created once and closed on unmount
 
-The client must track `lastSeq` per attachment and reattach with it, and must surface `truncated` so the view resets its emulator before writing.
+`FlueClient` takes an injected socket factory so tests need no real server.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3752,13 +4420,11 @@ class FakeSocket implements SocketLike {
   onopen: (() => void) | null = null
   onclose: (() => void) | null = null
   onmessage: ((data: string | ArrayBuffer) => void) | null = null
-  closed = false
 
   send(data: string | ArrayBuffer) {
     this.sent.push(data)
   }
   close() {
-    this.closed = true
     this.onclose?.()
   }
 
@@ -3772,9 +4438,7 @@ class FakeSocket implements SocketLike {
     this.onmessage?.(encodeBinary(type, ref, new TextEncoder().encode(text)))
   }
   sentControl(): any[] {
-    return this.sent
-      .filter((s): s is string => typeof s === 'string')
-      .map((s) => JSON.parse(s))
+    return this.sent.filter((s): s is string => typeof s === 'string').map((s) => JSON.parse(s))
   }
 }
 
@@ -3835,7 +4499,7 @@ describe('FlueClient', () => {
   it('emits output and tracks lastSeq', () => {
     const { c, sock } = connected()
     const chunks: string[] = []
-    c.onOutput((ref, bytes) => chunks.push(new TextDecoder().decode(bytes)))
+    c.onOutput((_ref, bytes) => chunks.push(new TextDecoder().decode(bytes)))
 
     sock.emitControl({ type: 'attached', ref: 1, id: 's1', cols: 80, rows: 24, title: '', seq: 100, truncated: false, primary: true })
     sock.emitBinary(FRAME_OUTPUT, 1, 'abc')
@@ -3930,6 +4594,19 @@ describe('FlueClient', () => {
     sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' })
     expect(errs).toEqual(['not_found'])
   })
+
+  it('exposes the session list', () => {
+    const { c, sock } = connected()
+    const seen: string[][] = []
+    c.onSessions((list) => seen.push(list.map((s) => s.id)))
+    sock.emitControl({
+      type: 'sessions',
+      sessions: [
+        { id: 's1', title: 'zsh', cwd: '/tmp', cmd: ['zsh'], state: 'running', exitCode: 0, cols: 80, rows: 24, lastActive: '2026-07-28T00:00:00Z' },
+      ],
+    })
+    expect(seen).toEqual([['s1']])
+  })
 })
 ```
 
@@ -3975,8 +4652,8 @@ export function decodeBinary(buf: ArrayBuffer): {
   }
 }
 
-// Control messages. These mirror spec/protocol.md exactly; the shared
-// golden fixture in testdata/wire/control.json keeps them honest.
+// Control messages, mirroring spec/protocol.md exactly. The shared golden
+// fixture in testdata/wire/control.json keeps them honest against Go.
 
 export interface SessionInfo {
   id: string
@@ -4054,14 +4731,14 @@ const BACKOFF_MAX_MS = 10_000
 
 /**
  * FlueClient owns the socket, the reconnect loop, and per-attachment seq
- * tracking. It knows nothing about the DOM.
+ * tracking. It knows nothing about React or the DOM.
  */
 export class FlueClient {
   private sock: SocketLike | null = null
   private attempt = 0
   private stopped = false
   private attachments = new Map<number, Attachment>()
-  /** Sessions to reattach after a reconnect, by session ID. */
+  /** Sessions to reattach after a reconnect, keyed by session ID. */
   private wanted = new Map<string, number>()
 
   private outputCb: (ref: number, bytes: Uint8Array) => void = () => {}
@@ -4187,7 +4864,7 @@ export class FlueClient {
     switch (msg.type) {
       case 'attached': {
         // seq is the offset of the first byte we are about to receive, so
-        // it is the correct starting point whether this is a delta or a
+        // it is the right starting point whether this is a delta or a
         // post-eviction snapshot.
         this.attachments.set(msg.ref, { id: msg.id, lastSeq: msg.seq })
         this.wanted.set(msg.id, msg.seq)
@@ -4213,93 +4890,68 @@ export class FlueClient {
 }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 5: Implement the React hook**
+
+`web/src/client/use-flue-client.ts`:
+
+```ts
+import { useEffect, useRef } from 'react'
+import { FlueClient } from './client'
+
+/**
+ * One client per browser tab. Created on first render and closed on
+ * unmount, so a tab close detaches cleanly and the daemon keeps the PTY
+ * running.
+ */
+export function useFlueClient(): FlueClient {
+  const ref = useRef<FlueClient | null>(null)
+
+  if (ref.current === null) {
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
+    ref.current = new FlueClient(`${scheme}://${location.host}/ws`)
+  }
+
+  useEffect(() => {
+    const client = ref.current!
+    client.connect()
+    return () => client.close()
+  }, [])
+
+  return ref.current
+}
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd web && pnpm test`
 Expected: PASS — framing, golden-file, and all `FlueClient` tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add web/src/client
-git commit -m "feat(web): add protocol client with reconnect and seq tracking"
+git commit -m "feat(web): add protocol client with reconnect, seq tracking, and React hook"
 ```
 
 ---
 
-### Task 10: Terminal view, keyboard modes, and routing
+### Task 12: Terminal route and keyboard modes
 
 **Files:**
-- Create: `web/src/ui/terminal-view.ts`
-- Create: `web/src/ui/keyboard.ts`
-- Create: `web/src/ui/route.ts`
-- Create: `web/src/ui/styles.css`
-- Create: `web/src/main.ts`
-- Test: `web/src/ui/route.test.ts`
-- Test: `web/src/ui/keyboard.test.ts`
+- Create: `web/src/lib/keyboard.ts`
+- Create: `web/src/components/terminal.tsx`
+- Modify: `web/src/routes/terminal.tsx`
+- Test: `web/src/lib/keyboard.test.ts`
 
 **Interfaces:**
-- Consumes: `Emulator` from Task 8, `FlueClient` from Task 9.
+- Consumes: `Emulator` (Task 10), `FlueClient` and `useFlueClient` (Task 11).
 - Produces:
-  - `parseRoute(url: string): Route` where `Route = { kind: 'session'; deviceId: string; sessionId: string } | { kind: 'home'; cwd?: string }`
-  - `stripToken(url: string): string` — removes `?t=…` while preserving other query parameters
   - `createKeyboardModes(el: HTMLElement): { mode(): 'tab' | 'focus'; enterFocus(): Promise<void>; exitFocus(): Promise<void> }`
-  - `mountTerminal(opts): { dispose(): void }`
+  - `<Terminal sessionId?: string; cwd?: string />`
 
-- [ ] **Step 1: Write the failing routing test**
+- [ ] **Step 1: Write the failing keyboard test**
 
-`web/src/ui/route.test.ts`:
-
-```ts
-import { describe, expect, it } from 'vitest'
-import { parseRoute, stripToken } from './route'
-
-describe('parseRoute', () => {
-  it('parses a session URL', () => {
-    expect(parseRoute('http://127.0.0.1:7717/d/local/s/abc123')).toEqual({
-      kind: 'session',
-      deviceId: 'local',
-      sessionId: 'abc123',
-    })
-  })
-
-  it('parses the home route', () => {
-    expect(parseRoute('http://127.0.0.1:7717/')).toEqual({ kind: 'home' })
-  })
-
-  it('carries cwd through the home route so flue open lands in the right directory', () => {
-    expect(parseRoute('http://127.0.0.1:7717/?cwd=%2Fhome%2Fkarn%2Fcode')).toEqual({
-      kind: 'home',
-      cwd: '/home/karn/code',
-    })
-  })
-
-  it('treats an unknown path as home', () => {
-    expect(parseRoute('http://127.0.0.1:7717/nonsense')).toEqual({ kind: 'home' })
-  })
-})
-
-describe('stripToken', () => {
-  it('removes the token', () => {
-    expect(stripToken('http://127.0.0.1:7717/?t=secret')).toBe('http://127.0.0.1:7717/')
-  })
-
-  it('preserves other parameters', () => {
-    const got = stripToken('http://127.0.0.1:7717/?t=secret&cwd=%2Ftmp')
-    expect(got).toBe('http://127.0.0.1:7717/?cwd=%2Ftmp')
-  })
-
-  it('leaves a URL without a token untouched', () => {
-    expect(stripToken('http://127.0.0.1:7717/d/local/s/abc')).toBe(
-      'http://127.0.0.1:7717/d/local/s/abc',
-    )
-  })
-})
-```
-
-- [ ] **Step 2: Write the failing keyboard test**
-
-`web/src/ui/keyboard.test.ts`:
+`web/src/lib/keyboard.test.ts`:
 
 ```ts
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -4364,54 +5016,14 @@ describe('createKeyboardModes', () => {
 })
 ```
 
-- [ ] **Step 3: Run both tests to verify they fail**
+- [ ] **Step 2: Run the test to verify it fails**
 
 Run: `cd web && pnpm test`
-Expected: FAIL — cannot resolve `./route` or `./keyboard`.
+Expected: FAIL — cannot resolve `./keyboard`.
 
-- [ ] **Step 4: Implement routing**
+- [ ] **Step 3: Implement keyboard modes**
 
-`web/src/ui/route.ts`:
-
-```ts
-export type Route =
-  | { kind: 'session'; deviceId: string; sessionId: string }
-  | { kind: 'home'; cwd?: string }
-
-/**
- * Session URLs are /d/<deviceId>/s/<sessionId>. They are bookmarkable,
- * pinnable, and restorable by the browser like any other tab — which is the
- * entire premise of flue.
- */
-export function parseRoute(url: string): Route {
-  const u = new URL(url)
-  const parts = u.pathname.split('/').filter(Boolean)
-
-  if (parts.length === 4 && parts[0] === 'd' && parts[2] === 's') {
-    return { kind: 'session', deviceId: parts[1]!, sessionId: parts[3]! }
-  }
-
-  const cwd = u.searchParams.get('cwd')
-  return cwd ? { kind: 'home', cwd } : { kind: 'home' }
-}
-
-/**
- * Remove the token from a URL. The daemon moves it into an HttpOnly cookie
- * on first load; the page then calls this and replaceState so the secret
- * stops appearing in history and referrers.
- */
-export function stripToken(url: string): string {
-  const u = new URL(url)
-  if (!u.searchParams.has('t')) return url
-  u.searchParams.delete('t')
-  const query = u.searchParams.toString()
-  return `${u.origin}${u.pathname}${query ? `?${query}` : ''}`
-}
-```
-
-- [ ] **Step 5: Implement keyboard modes**
-
-`web/src/ui/keyboard.ts`:
+`web/src/lib/keyboard.ts`:
 
 ```ts
 export type KeyboardMode = 'tab' | 'focus'
@@ -4426,8 +5038,8 @@ interface KeyboardLock {
  * a page cannot preventDefault them.
  *
  * - tab mode: the browser keeps its shortcuts, so tab groups, tab search,
- *   and switching all work. This is the default and the reason flue lives in
- *   a browser at all.
+ *   and switching all work. This is the default, and the reason flue lives
+ *   in a browser at all.
  * - focus mode: fullscreen plus navigator.keyboard.lock(), so the terminal
  *   receives every key. Chromium's hold-Esc gesture remains the way out.
  */
@@ -4475,225 +5087,448 @@ export function createKeyboardModes(el: HTMLElement) {
 }
 ```
 
-- [ ] **Step 6: Implement the terminal view**
+- [ ] **Step 4: Implement the terminal component**
 
-`web/src/ui/terminal-view.ts`:
+`web/src/components/terminal.tsx`:
 
-```ts
+```tsx
+import { useEffect, useRef, useState } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
-import type { Emulator } from '../emulator/types'
-import { createXtermEmulator } from '../emulator/xterm'
-import type { FlueClient } from '../client/client'
-import { createKeyboardModes } from './keyboard'
+import { createXtermEmulator } from '@/emulator/xterm'
+import type { Emulator } from '@/emulator/types'
+import { useFlueClient } from '@/client/use-flue-client'
+import { createKeyboardModes } from '@/lib/keyboard'
+import { cn } from '@/lib/utils'
 
-export interface MountOptions {
-  el: HTMLElement
-  client: FlueClient
+export interface TerminalProps {
   /** Attach to this session, or spawn a new one when absent. */
   sessionId?: string
   cwd?: string
 }
 
 /**
- * Mounts a terminal, wires it to a client, and applies the resize policy:
- * the primary client owns the PTY dimensions; everyone else scales the
- * primary's grid to fit. That is what stops a phone at 40 columns from
- * shrinking a laptop's view.
+ * Full-bleed terminal. Applies the resize policy: the primary client owns
+ * the PTY dimensions, and everyone else scales the primary's grid to fit —
+ * which is what stops a phone at 40 columns from shrinking a laptop's view.
  */
-export function mountTerminal(opts: MountOptions): { dispose(): void } {
-  const { el, client } = opts
+export function Terminal({ sessionId, cwd }: TerminalProps) {
+  const client = useFlueClient()
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const surfaceRef = useRef<HTMLDivElement>(null)
+  const emulatorRef = useRef<Emulator | null>(null)
+  const refRef = useRef<number | null>(null)
+  const primaryRef = useRef(false)
+  const [status, setStatus] = useState<'connecting' | 'live' | 'reconnecting' | 'exited'>(
+    'connecting',
+  )
 
-  const wrap = document.createElement('div')
-  wrap.className = 'flue-term-wrap'
-  const surface = document.createElement('div')
-  surface.className = 'flue-term-surface'
-  wrap.appendChild(surface)
-  el.appendChild(wrap)
+  useEffect(() => {
+    const wrap = wrapRef.current
+    const surface = surfaceRef.current
+    if (!wrap || !surface) return
 
-  const emulator: Emulator = createXtermEmulator({ cols: 80, rows: 24 })
-  emulator.attachTo(surface)
+    const emulator = createXtermEmulator({ cols: 80, rows: 24 })
+    emulatorRef.current = emulator
+    emulator.attachTo(surface)
 
-  const keys = createKeyboardModes(wrap)
-  let ref: number | null = null
-  let primary = false
+    const encoder = new TextEncoder()
+    const keys = createKeyboardModes(wrap)
+    const fit = new FitAddon()
 
-  emulator.onData((bytes) => {
-    if (ref !== null) client.sendInput(ref, bytes)
-  })
-
-  client.onAttached((a) => {
-    ref = a.ref
-    primary = a.primary
-    // A truncated attach means the requested offset had been evicted, so
-    // the bytes that follow are a fresh snapshot rather than a continuation.
-    if (a.truncated) emulator.write(new TextEncoder().encode('[2J[H'))
-    emulator.resize(a.cols, a.rows)
-    applyScale(a.cols, a.rows)
-  })
-
-  client.onOutput((outRef, bytes) => {
-    if (outRef === ref) emulator.write(bytes)
-  })
-
-  client.onSizeChanged((m) => {
-    if (m.ref !== ref) return
-    primary = m.primary
-    emulator.resize(m.cols, m.rows)
-    applyScale(m.cols, m.rows)
-  })
-
-  client.onExit((exitRef, code) => {
-    if (exitRef !== ref) return
-    emulator.write(new TextEncoder().encode(`\r\n[90m[process exited: ${code}][0m\r\n`))
-  })
-
-  /**
-   * Non-primary clients letterbox the primary's grid with a CSS transform
-   * rather than resizing the PTY.
-   */
-  function applyScale(cols: number, rows: number) {
-    if (primary) {
-      surface.style.transform = ''
-      surface.style.transformOrigin = ''
-      return
+    /** Non-primary clients letterbox rather than resizing the PTY. */
+    function applyScale() {
+      if (primaryRef.current) {
+        surface!.style.removeProperty('--flue-scale')
+        surface!.classList.remove('origin-top-left', 'scale-(--flue-scale)')
+        return
+      }
+      const box = surface!.getBoundingClientRect()
+      if (box.width === 0 || box.height === 0) return
+      const scale = Math.min(wrap!.clientWidth / box.width, wrap!.clientHeight / box.height, 1)
+      surface!.style.setProperty('--flue-scale', String(scale))
+      surface!.classList.add('origin-top-left', 'scale-(--flue-scale)')
     }
-    const wanted = surface.getBoundingClientRect()
-    if (wanted.width === 0 || wanted.height === 0) return
-    const scale = Math.min(wrap.clientWidth / wanted.width, wrap.clientHeight / wanted.height, 1)
-    surface.style.transformOrigin = 'top left'
-    surface.style.transform = `scale(${scale})`
-    void cols
-    void rows
-  }
 
-  const fit = new FitAddon()
-  const onResize = () => {
-    if (ref === null) return
-    if (!primary) {
-      applyScale(0, 0)
-      return
+    emulator.onData((bytes) => {
+      if (refRef.current !== null) client.sendInput(refRef.current, bytes)
+    })
+
+    client.onStatus((s) => {
+      if (s === 'open') setStatus('live')
+      else if (s === 'reconnecting') setStatus('reconnecting')
+    })
+
+    client.onAttached((a) => {
+      refRef.current = a.ref
+      primaryRef.current = a.primary
+      // A truncated attach means the requested offset had been evicted, so
+      // what follows is a fresh snapshot rather than a continuation.
+      if (a.truncated) emulator.write(encoder.encode('[2J[H'))
+      emulator.resize(a.cols, a.rows)
+      applyScale()
+      document.title = a.title || 'flue'
+      setStatus('live')
+    })
+
+    client.onOutput((ref, bytes) => {
+      if (ref === refRef.current) emulator.write(bytes)
+    })
+
+    client.onSizeChanged((m) => {
+      if (m.ref !== refRef.current) return
+      primaryRef.current = m.primary
+      emulator.resize(m.cols, m.rows)
+      applyScale()
+    })
+
+    client.onExit((ref, code) => {
+      if (ref !== refRef.current) return
+      emulator.write(encoder.encode(`\r\n[90m[process exited: ${code}][0m\r\n`))
+      setStatus('exited')
+    })
+
+    const onResize = () => {
+      if (refRef.current === null) return
+      if (!primaryRef.current) {
+        applyScale()
+        return
+      }
+      const dims = fit.proposeDimensions()
+      if (dims) client.resize(refRef.current, dims.cols, dims.rows, true)
     }
-    const dims = fit.proposeDimensions()
-    if (dims) client.resize(ref, dims.cols, dims.rows, true)
-  }
-  window.addEventListener('resize', onResize)
+    window.addEventListener('resize', onResize)
 
-  // Focus mode toggle: Ctrl+Shift+Enter is reachable in tab mode because
-  // the browser does not claim it.
-  const onKey = (e: KeyboardEvent) => {
-    if (e.ctrlKey && e.shiftKey && e.key === 'Enter') {
-      e.preventDefault()
-      void (keys.mode() === 'focus' ? keys.exitFocus() : keys.enterFocus())
+    // Ctrl+Shift+Enter is reachable in tab mode because the browser does
+    // not claim it.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key === 'Enter') {
+        e.preventDefault()
+        void (keys.mode() === 'focus' ? keys.exitFocus() : keys.enterFocus())
+      }
     }
-  }
-  window.addEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey)
 
-  if (opts.sessionId) {
-    client.attach(opts.sessionId, 0)
-  } else {
-    client.spawn({ cwd: opts.cwd, cols: 80, rows: 24 })
-  }
+    if (sessionId) client.attach(sessionId, 0)
+    else client.spawn({ cwd, cols: 80, rows: 24 })
 
-  return {
-    dispose() {
+    return () => {
       window.removeEventListener('resize', onResize)
       window.removeEventListener('keydown', onKey)
       emulator.dispose()
-      wrap.remove()
-    },
-  }
+      emulatorRef.current = null
+    }
+  }, [client, sessionId, cwd])
+
+  return (
+    <div ref={wrapRef} className="relative h-full w-full overflow-hidden bg-zinc-950">
+      <div ref={surfaceRef} className="flue-term-surface" />
+      {status !== 'live' && (
+        <div
+          role="status"
+          className={cn(
+            'absolute top-3 right-3 rounded-md px-2 py-1 text-base/6 font-medium sm:text-sm/6',
+            'bg-zinc-900 text-zinc-300 inset-ring inset-ring-white/10',
+          )}
+        >
+          {status === 'reconnecting'
+            ? 'Reconnecting…'
+            : status === 'exited'
+              ? 'Process exited'
+              : 'Connecting…'}
+        </div>
+      )}
+    </div>
+  )
 }
 ```
 
-- [ ] **Step 7: Add styles and the entry point**
+- [ ] **Step 5: Wire the terminal route**
 
-`web/src/ui/styles.css`:
+`web/src/routes/terminal.tsx`:
 
-```css
-:root {
-  color-scheme: dark;
-  --flue-bg: #0b0b0d;
-  --flue-fg: #e6e6e6;
-}
+```tsx
+import { useParams } from '@tanstack/react-router'
+import { Terminal } from '@/components/terminal'
 
-html, body, #app {
-  height: 100%;
-  margin: 0;
-  background: var(--flue-bg);
-  color: var(--flue-fg);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.flue-term-wrap {
-  height: 100%;
-  width: 100%;
-  overflow: hidden;
-}
-
-.flue-term-surface {
-  height: 100%;
-  width: 100%;
+export function TerminalRoute() {
+  const { sessionId } = useParams({ from: '/d/$deviceId/s/$sessionId' })
+  return <Terminal sessionId={sessionId} />
 }
 ```
 
-`web/src/main.ts`:
-
-```ts
-import '@xterm/xterm/css/xterm.css'
-import './ui/styles.css'
-import { FlueClient } from './client/client'
-import { mountTerminal } from './ui/terminal-view'
-import { parseRoute, stripToken } from './ui/route'
-
-const app = document.getElementById('app')!
-
-// The daemon has already moved the token into an HttpOnly cookie, so drop
-// it from the URL before it reaches history or a referrer header.
-const cleaned = stripToken(location.href)
-if (cleaned !== location.href) history.replaceState(null, '', cleaned)
-
-const route = parseRoute(location.href)
-const wsURL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
-const client = new FlueClient(wsURL)
-
-client.onAttached((a) => {
-  if (route.kind !== 'session') {
-    history.replaceState(null, '', `/d/local/s/${a.id}`)
-  }
-  document.title = a.title || 'flue'
-})
-
-client.onError((e) => console.error('flue:', e.code, e.msg))
-client.connect()
-
-mountTerminal({
-  el: app,
-  client,
-  sessionId: route.kind === 'session' ? route.sessionId : undefined,
-  cwd: route.kind === 'home' ? route.cwd : undefined,
-})
-```
-
-- [ ] **Step 8: Run the tests to verify they pass**
+- [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `cd web && pnpm test`
-Expected: PASS — routing, keyboard, emulator, and client suites.
+Expected: PASS, including the four keyboard tests.
 
-- [ ] **Step 9: Type-check and build**
+- [ ] **Step 7: Type-check**
 
-Run: `cd web && pnpm build`
-Expected: `tsc --noEmit` clean, and a `web/dist` directory produced.
+Run: `cd web && pnpm lint`
+Expected: no TypeScript errors.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add web/src/ui web/src/main.ts
-git commit -m "feat(web): add terminal view, keyboard modes, and session routing"
+git add web/src/lib/keyboard.ts web/src/components/terminal.tsx web/src/routes/terminal.tsx
+git commit -m "feat(web): add full-bleed terminal route with both keyboard modes"
 ```
 
 ---
 
-### Task 11: Embed the UI and verify end to end
+### Task 13: Sessions route
+
+**Files:**
+- Modify: `web/src/routes/sessions.tsx`
+- Create: `web/src/components/session-table.tsx`
+- Test: `web/src/components/session-table.test.tsx`
+
+**Interfaces:**
+- Consumes: `SessionInfo` (Task 11), `Button` from shadcn (Task 8).
+- Produces: `<SessionTable sessions={SessionInfo[]} onOpen={(id: string) => void} />`
+
+**Surface treatment.** A table on the page background with horizontal row dividers — no card wrapper, no vertical rules, no outer border. Sibling rows in a shared context need the lightest separation that works, and cards here would imply each row is an independent object when the set is really one list.
+
+- [ ] **Step 1: Write the failing test**
+
+`web/src/components/session-table.test.tsx`:
+
+```tsx
+import { describe, expect, it, vi } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { SessionTable } from './session-table'
+import type { SessionInfo } from '@/client/protocol'
+
+const sessions: SessionInfo[] = [
+  {
+    id: 'a1b2c3d4', title: 'zsh', cwd: '/Users/karn/code/flue', cmd: ['zsh', '-l'],
+    state: 'running', exitCode: 0, cols: 120, rows: 40,
+    lastActive: '2026-07-28T10:00:00Z',
+  },
+  {
+    id: 'e5f6a7b8', title: 'build', cwd: '/Users/karn/code/reins', cmd: ['pnpm', 'build'],
+    state: 'exited', exitCode: 1, cols: 80, rows: 24,
+    lastActive: '2026-07-28T09:30:00Z',
+  },
+]
+
+describe('SessionTable', () => {
+  it('renders a row per session', () => {
+    render(<SessionTable sessions={sessions} onOpen={() => {}} />)
+    expect(screen.getByText('/Users/karn/code/flue')).toBeTruthy()
+    expect(screen.getByText('/Users/karn/code/reins')).toBeTruthy()
+  })
+
+  it('distinguishes running from exited', () => {
+    render(<SessionTable sessions={sessions} onOpen={() => {}} />)
+    expect(screen.getByText('Running')).toBeTruthy()
+    expect(screen.getByText('Exited 1')).toBeTruthy()
+  })
+
+  it('calls onOpen with the session id', async () => {
+    const onOpen = vi.fn()
+    render(<SessionTable sessions={sessions} onOpen={onOpen} />)
+    await userEvent.click(screen.getAllByRole('button', { name: /open/i })[0]!)
+    expect(onOpen).toHaveBeenCalledWith('a1b2c3d4')
+  })
+
+  it('shows an empty state when there are no sessions', () => {
+    render(<SessionTable sessions={[]} onOpen={() => {}} />)
+    expect(screen.getByText(/No sessions yet/i)).toBeTruthy()
+  })
+
+  it('uses sentence case headings, never uppercase', () => {
+    render(<SessionTable sessions={sessions} onOpen={() => {}} />)
+    const heading = screen.getByRole('columnheader', { name: 'Directory' })
+    expect(heading.className).not.toMatch(/\buppercase\b/)
+  })
+})
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd web && pnpm test`
+Expected: FAIL — cannot resolve `./session-table`.
+
+- [ ] **Step 3: Implement the table**
+
+`web/src/components/session-table.tsx`:
+
+```tsx
+import { Button } from '@/components/ui/button'
+import type { SessionInfo } from '@/client/protocol'
+import { cn } from '@/lib/utils'
+
+export interface SessionTableProps {
+  sessions: SessionInfo[]
+  onOpen: (id: string) => void
+}
+
+function StateCell({ session }: { session: SessionInfo }) {
+  const running = session.state === 'running'
+  return (
+    <div className="flex items-center gap-x-2">
+      <span
+        aria-hidden="true"
+        className={cn(
+          'size-1.5 shrink-0 rounded-full',
+          running ? 'bg-amber-500' : 'bg-zinc-950/30 dark:bg-white/30',
+        )}
+      />
+      <span>{running ? 'Running' : `Exited ${session.exitCode}`}</span>
+    </div>
+  )
+}
+
+/**
+ * Rows sit directly on the page background with horizontal dividers only.
+ * Cards would imply each row is an independent object; this is one list.
+ */
+export function SessionTable({ sessions, onOpen }: SessionTableProps) {
+  if (sessions.length === 0) {
+    return (
+      <p className="max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+        No sessions yet. Run <code className="font-mono">flue open</code> in a directory, or start
+        one here.
+      </p>
+    )
+  }
+
+  return (
+    <div className="-mx-4 -my-2 overflow-x-auto whitespace-nowrap sm:-mx-6 lg:-mx-8">
+      <div className="inline-block min-w-full px-4 py-2 align-middle sm:px-6 lg:px-8">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b border-zinc-950/10 dark:border-white/10">
+              <th
+                scope="col"
+                className="py-2 pr-3 text-base/6 font-medium whitespace-nowrap text-zinc-950 sm:text-sm/6 dark:text-white"
+              >
+                Directory
+              </th>
+              <th
+                scope="col"
+                className="px-3 py-2 text-base/6 font-medium whitespace-nowrap text-zinc-950 sm:text-sm/6 dark:text-white"
+              >
+                Command
+              </th>
+              <th
+                scope="col"
+                className="px-3 py-2 text-base/6 font-medium whitespace-nowrap text-zinc-950 sm:text-sm/6 dark:text-white"
+              >
+                State
+              </th>
+              <th scope="col" className="py-2 pl-3">
+                <span className="sr-only">Actions</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {sessions.map((s) => (
+              <tr key={s.id} className="border-b border-zinc-950/5 dark:border-white/5">
+                <td className="py-2.5 pr-3 text-base/6 text-zinc-950 sm:text-sm/6 dark:text-white">
+                  {s.cwd}
+                </td>
+                <td className="px-3 py-2.5 font-mono text-base/6 text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+                  {s.cmd.join(' ')}
+                </td>
+                <td className="px-3 py-2.5 text-base/6 tabular-nums text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+                  <StateCell session={s} />
+                </td>
+                <td className="py-2.5 pl-3 text-right">
+                  <Button variant="outline" size="sm" onClick={() => onOpen(s.id)}>
+                    Open
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+```
+
+- [ ] **Step 4: Implement the sessions route**
+
+`web/src/routes/sessions.tsx`:
+
+```tsx
+import { useEffect, useState } from 'react'
+import { useNavigate } from '@tanstack/react-router'
+import { Button } from '@/components/ui/button'
+import { SessionTable } from '@/components/session-table'
+import { useFlueClient } from '@/client/use-flue-client'
+import type { SessionInfo } from '@/client/protocol'
+
+export function SessionsRoute() {
+  const client = useFlueClient()
+  const navigate = useNavigate()
+  const [sessions, setSessions] = useState<SessionInfo[]>([])
+
+  useEffect(() => {
+    client.onSessions(setSessions)
+    client.onAttached((a) => {
+      void navigate({ to: '/d/$deviceId/s/$sessionId', params: { deviceId: 'local', sessionId: a.id } })
+    })
+    client.list()
+    const poll = setInterval(() => client.list(), 3000)
+    return () => clearInterval(poll)
+  }, [client, navigate])
+
+  function open(id: string) {
+    void navigate({ to: '/d/$deviceId/s/$sessionId', params: { deviceId: 'local', sessionId: id } })
+  }
+
+  return (
+    <div className="flex flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
+      <div className="flex items-start justify-between gap-x-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
+            Sessions
+          </h1>
+          <p className="mt-1 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+            Closing a tab detaches. Whatever is running keeps running.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          className="shrink-0 bg-amber-500 text-zinc-950 hover:bg-amber-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500"
+          onClick={() => client.spawn({ cols: 80, rows: 24 })}
+        >
+          New session
+        </Button>
+      </div>
+
+      <SessionTable sessions={sessions} onOpen={open} />
+    </div>
+  )
+}
+```
+
+This is the only filled/solid button on the screen; every other control uses `outline` or `ghost`, per the one-primary-button rule.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `cd web && pnpm test`
+Expected: PASS across every suite.
+
+- [ ] **Step 6: Type-check and build**
+
+Run: `cd web && pnpm build`
+Expected: `tsc --noEmit` clean, and `web/dist` produced.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add web/src/routes/sessions.tsx web/src/components/session-table.tsx
+git commit -m "feat(web): add sessions route with a session table"
+```
+
+---
+
+### Task 14: Embed the UI and verify end to end
 
 **Files:**
 - Create: `web/embed.go`
@@ -4703,7 +5538,7 @@ git commit -m "feat(web): add terminal view, keyboard modes, and session routing
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `web.Handler() http.Handler` — serves the built app from the embedded filesystem, falling back to `index.html` so client-side routes like `/d/local/s/abc` resolve.
+- Produces: `web.Handler() http.Handler` — serves the built app from the embedded filesystem, falling back to `index.html` so client-side routes such as `/d/local/s/abc` resolve.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4739,7 +5574,7 @@ func TestEmbeddedUIServesIndex(t *testing.T) {
 }
 
 func TestEmbeddedUIFallsBackForClientRoutes(t *testing.T) {
-	// /d/local/s/<id> is a client-side route; the server must return
+	// /d/local/s/<id> is a TanStack Router route; the server must return
 	// index.html rather than 404, or a bookmarked session tab breaks.
 	ts := httptest.NewServer(web.Handler())
 	defer ts.Close()
@@ -4790,8 +5625,7 @@ func Handler() http.Handler {
 			http.Error(w, "flue: UI not built; run `make web`", http.StatusInternalServerError)
 		})
 	}
-	files := http.FS(sub)
-	fileServer := http.FileServer(files)
+	fileServer := http.FileServer(http.FS(sub))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clean := path.Clean(strings.TrimPrefix(r.URL.Path, "/"))
@@ -4827,7 +5661,7 @@ and add `"github.com/karnstack/flue/web"` to the imports.
 `Makefile`:
 
 ```make
-.PHONY: all web build test test-go test-web clean
+.PHONY: all web build test test-go test-web lint clean
 
 all: build
 
@@ -4845,18 +5679,23 @@ test-go:
 test-web:
 	cd web && pnpm test
 
+lint:
+	go vet ./...
+	cd web && pnpm lint
+
 clean:
 	rm -rf bin web/dist
 ```
 
-- [ ] **Step 6: Build and run the tests**
+- [ ] **Step 6: Build and run the full suite**
 
 ```bash
 make web
-go test ./... -v
+make test
+make lint
 ```
 
-Expected: PASS, including both embed tests. `go build` fails before `make web` because `//go:embed all:dist` needs the directory to exist — that is intentional, and the Makefile encodes the ordering.
+Expected: PASS everywhere. `go build` fails before `make web` because `//go:embed all:dist` requires the directory to exist — that is intentional, and the Makefile encodes the ordering.
 
 - [ ] **Step 7: Manual end-to-end verification**
 
@@ -4869,12 +5708,15 @@ Verify each of these:
 
 1. A browser tab opens with a working shell in `~/code`.
 2. `ls` and `vim` render correctly; colours and cursor movement work.
-3. The URL becomes `/d/local/s/<id>` and contains no `t=` parameter.
+3. The URL is `/d/local/s/<id>` and contains no `t=` parameter.
 4. Resizing the window reflows the terminal.
-5. Run `sleep 300`, close the tab, reopen the same URL — the session reattaches with its scrollback and `sleep` is still running.
+5. Run `sleep 300`, close the tab, reopen the same URL — the session reattaches with its scrollback, and `sleep` is still running.
 6. Open the same URL in a second tab, type in one, and confirm it mirrors into the other.
-7. Press Ctrl+Shift+Enter to enter focus mode; confirm the page goes fullscreen and Cmd+W no longer closes the tab. Hold Esc to leave.
-8. Run `./bin/flue status` and confirm it lists the running session.
+7. Visit `/sessions` and confirm both sessions are listed with the right directories and states.
+8. Press Ctrl+Shift+Enter to enter focus mode; confirm the page goes fullscreen and Cmd+W no longer closes the tab. Hold Esc to leave.
+9. Narrow the window below `lg` and confirm the sidebar collapses into the hamburger sheet.
+10. Toggle the OS between light and dark appearance and confirm the chrome follows, with no unreadable text in either.
+11. Run `./bin/flue status` and confirm it lists the running sessions.
 
 - [ ] **Step 8: Commit**
 
@@ -4903,10 +5745,12 @@ git push origin main
 
 ## Self-review notes
 
-Checked against `docs/superpowers/specs/2026-07-28-flue-design.md`:
+Checked against `docs/superpowers/specs/2026-07-28-flue-design.md`.
 
-**Covered:** seq-addressed ring with eviction and `truncated` (Tasks 1, 3, 9, 10); OSC 0/2 title scanner as the server-side VT seam (Task 2); PTY sessions, login-shell default, environment inheritance, exited retention and reaping (Task 3); binary frame layout, control messages, shared golden fixtures, `spec/protocol.md` (Tasks 4, 9); loopback token plus Origin plus Host with the DNS-rebinding defence, cookie exchange, `Referrer-Policy`, no wildcard CORS (Task 5); `127.0.0.1`-only bind, CSP, mirroring, primary-owns-dimensions with promotion (Task 6); `flue open`/`status` (Task 7); the `Emulator` seam and the VT conformance corpus that makes the libghostty swap a substitution (Task 8); reconnect with backoff and reattach by `lastSeq` (Task 9); both keyboard modes and bookmarkable session URLs (Task 10); single-binary distribution with no runtime Node (Task 11).
+**Covered:** seq-addressed ring with eviction and `truncated` (Tasks 1, 3, 11, 12); OSC 0/2 title scanner as the server-side VT seam (Task 2); PTY sessions, login-shell default, environment inheritance, exited retention and reaping (Task 3); binary frame layout, control messages, shared golden fixtures, `spec/protocol.md` (Tasks 4, 11); loopback token plus Origin plus Host with the DNS-rebinding defence, cookie exchange, `Referrer-Policy`, no wildcard CORS (Task 5); `127.0.0.1`-only bind, CSP, mirroring, primary-owns-dimensions with promotion (Task 6); `flue open` and `flue status` (Task 7); the `Emulator` seam and the VT conformance corpus that makes the libghostty swap a substitution (Task 10); reconnect with backoff and reattach by `lastSeq` (Task 11); both keyboard modes and bookmarkable session URLs (Task 12); the sessions surface (Task 13); single-binary distribution with no runtime Node (Task 14).
 
-**Deliberately deferred**, each belonging to a later build-order step in the spec: `flue enable`/`disable` and the `service` package (step 2); pairing, device management, and Noise IK (step 3); the provider registry, Cloudflare REST client, and relay (step 4); `tailscale` and `cftunnel` (steps 5–6); the extension (step 7); `libghostty-vt` (step 8). The full session/device/settings UI arrives with step 2 — this plan ships the terminal view alone, which is what makes the local path daily-drivable.
+**Design guidelines applied:** zinc neutrals rather than gray or slate; amber accent, never used for body text; both themes via `prefers-color-scheme` with no toggle; `antialiased` on the root and `isolate` on the app container; nav active state uses a muted background and accent text with identical font weight across states; the sidebar collapses to a sheet below `lg:`; body text is `text-base` on mobile and `sm:text-sm` above; headings use `font-semibold` with `tracking-tight` and no `leading-*`; Heroicons Micro at `size-4` only, each with `shrink-0`; `min-w-0` on the flex-1 main region; the session table sits on the background with horizontal dividers only, sentence-case headings, `w-full`, and the two-div responsive wrapper; opacity-based divider colors; one primary button per screen; `tabular-nums` on the state column; `role="list"` on the nav list.
 
-**One spec deviation, made explicit:** the spec's `local` auth requires an Origin match. Task 5 accepts a *missing* Origin while rejecting any present-but-unlisted one, because non-browser clients such as `curl` and the flue CLI send no Origin header, and only browsers can be induced into cross-origin requests. The test `TestAuthAllowsMissingOriginForNonBrowserClients` pins this behaviour.
+**Deliberately deferred**, each belonging to a later build-order step in the spec: `flue enable`/`disable` and the `service` package (step 2); pairing, device management, and Noise IK (step 3); the provider registry, Cloudflare REST client, and relay (step 4); `tailscale` and `cftunnel` (steps 5–6); the extension (step 7); `libghostty-vt` (step 8). The `/devices` nav entry and the settings screen are present but intentionally thin — they become real in step 2.
+
+**One spec deviation, made explicit:** the spec's `local` auth requires an Origin match. Task 5 accepts a *missing* Origin while rejecting any present-but-unlisted one, because non-browser clients such as `curl` and the flue CLI send no Origin header, and only browsers can be induced into cross-origin requests. `TestAuthAllowsMissingOriginForNonBrowserClients` pins this behaviour.
