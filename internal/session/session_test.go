@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -277,19 +278,30 @@ func TestSubscribeAfterCloseReturnsClosedChannel(t *testing.T) {
 	}
 }
 
-// TestCloseTerminatesBackgroundChildren guards against Close killing only
-// the shell and leaving a background job (which inherits the shell's
-// stdout/stderr on the pty slave) running: that job would keep the slave
-// open, so the pump's master Read would never see a hangup, State would
-// never become "exited", and the child itself would be leaked.
+// TestCloseTerminatesBackgroundChildren guards against Close killing only the
+// shell and leaving a background job running.
 //
-// The child sets its SIGHUP disposition to ignore (an empty shell trap
-// body, inherited across its fork+exec the same way nohup works) so it does
-// not incidentally die from the kernel's own hangup-on-session-leader-death
-// or hangup-on-master-close delivery — both of those are SIGHUP-based and
-// would otherwise mask whether Close's own kill is leader-only or
-// whole-group.
+// This shell exits the instant it has echoed, so by the time anyone calls
+// Close its leader has been reaped and only the background job survives —
+// which is the ordinary case, not a corner one: `sleep 1000 &` in a script
+// that then returns is a shape people write on purpose. Close therefore has to
+// signal a group whose leader is already gone, and it can, because the group
+// pins its own id until its last member goes.
+//
+// The test waits for the reap on purpose rather than racing it. An earlier
+// version called Close immediately and passed on an idle machine by arriving
+// before the reaper; under CPU contention it failed roughly one run in eight,
+// leaking an orphan each time. Waiting first makes the post-reap path the only
+// path this exercises.
+//
+// The child sets its SIGHUP disposition to ignore (an empty shell trap body,
+// inherited across its fork+exec the same way nohup works) so it does not
+// incidentally die from the kernel's own hangup-on-session-leader-death or
+// hangup-on-master-close delivery — both of those are SIGHUP-based and would
+// otherwise mask whether Close's own kill is leader-only or whole-group.
 func TestCloseTerminatesBackgroundChildren(t *testing.T) {
+	spy := installKillSpy(t)
+
 	r := NewRegistry(time.Now)
 	s, err := r.Spawn(SpawnOpts{
 		Cmd:  []string{"sh", "-c", "trap '' HUP; sleep 1000 & echo child-pid=$!"},
@@ -302,26 +314,27 @@ func TestCloseTerminatesBackgroundChildren(t *testing.T) {
 	sub := s.Subscribe(0)
 	out := waitFor(t, sub, "child-pid=", 5*time.Second)
 	s.Unsubscribe(sub)
-
 	childPID := parseChildPID(t, out)
+
+	// Barrier: the leader has been reaped and its status recorded.
+	waitExited(t, s, 5*time.Second)
+
 	if err := syscall.Kill(childPID, 0); err != nil {
-		t.Fatalf("background child pid %d not running before Close: %v", childPID, err)
+		t.Fatalf("background child pid %d already gone before Close, so this run tests nothing: %v", childPID, err)
+	}
+	select {
+	case <-s.gone:
+		t.Fatal("supervisor gave up the process group while a member of it was still alive")
+	default:
 	}
 
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	deadline := time.After(5 * time.Second)
-	for s.Info().State != "exited" {
-		select {
-		case <-deadline:
-			t.Fatal(`session never reached "exited"; a lingering background child likely kept the pty slave open`)
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-
-	waitGone(t, childPID, 2*time.Second)
+	spy.waitForKill(t, -s.pid, syscall.SIGKILL, 5*time.Second)
+	waitGone(t, childPID, 5*time.Second)
+	waitSupervisorGone(t, s, 5*time.Second)
 }
 
 // TestSignalReachesChildProcess guards against Signal only reaching the
@@ -469,15 +482,33 @@ func waitExited(t *testing.T, s *Session, timeout time.Duration) {
 	}
 }
 
-// TestSignalOnReapedSessionIssuesNoSyscall guards against the pid-reuse
-// hazard of signalling a session after cmd.Wait() has already reaped it:
-// once reaped, the kernel is free to recycle that pid for an unrelated
-// process (plausibly another session's leader, since Setsid makes every
-// leader its own process-group leader too), so signalGroup's negated-pid
-// kill must never be issued again. Signal must also not surface this as an
-// error the caller has to special-case — there is simply nothing left to
-// signal.
-func TestSignalOnReapedSessionIssuesNoSyscall(t *testing.T) {
+// waitSupervisorGone blocks until the session's supervisor has finished: the
+// child reaped and its process group then observed empty. This is a strictly
+// later moment than "exited", and it is the one that matters for signalling —
+// a group outlives its leader, and stays signallable for as long as it does.
+func waitSupervisorGone(t *testing.T, s *Session, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-s.gone:
+	case <-time.After(timeout):
+		t.Fatalf("supervisor did not release the process group within %s", timeout)
+	}
+}
+
+// TestSignalAfterGroupIsGoneIssuesNoSyscall guards against the pid-reuse
+// hazard at the far end of a session's life. A process group pins its own id
+// for as long as it has members, so signalling it after its leader is reaped
+// is still safe; but once the last member goes, the kernel is free to hand
+// that number to an unrelated new group — plausibly another flue session's,
+// since Setsid makes every leader a group leader too. From that moment
+// signalGroup's negated-pid kill must never be issued again, and Signal must
+// not surface the refusal as an error the caller has to special-case, because
+// there is simply nothing left to signal.
+//
+// Note the barrier: this waits for the group to be gone, not merely for the
+// session to be "exited". Those are different moments, and only the later one
+// disables signalling.
+func TestSignalAfterGroupIsGoneIssuesNoSyscall(t *testing.T) {
 	spy := installKillSpy(t)
 
 	r := NewRegistry(time.Now)
@@ -487,23 +518,28 @@ func TestSignalOnReapedSessionIssuesNoSyscall(t *testing.T) {
 	}
 	defer s.Close()
 
-	waitExited(t, s, 5*time.Second)
+	waitSupervisorGone(t, s, 5*time.Second)
+	if got := s.Info().State; got != "exited" {
+		t.Fatalf(`State = %q after the group is gone, want "exited"`, got)
+	}
 	spy.reset() // natural exit alone must not have signalled anything either
 
 	if err := s.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("Signal on an already-exited session returned an error the caller must handle: %v", err)
+		t.Fatalf("Signal on a session whose group is gone returned an error the caller must handle: %v", err)
 	}
 	if n := spy.count(); n != 0 {
-		t.Fatalf("Signal on an already-exited (reaped) session issued %d group-kill syscall(s), want 0 — this would risk signalling a recycled pid", n)
+		t.Fatalf("Signal after the process group emptied issued %d group-kill syscall(s), want 0 — this would risk signalling a recycled pgid", n)
 	}
 }
 
-// TestCloseOnReapedSessionIssuesNoSyscallButStillTearsDown guards against
-// the same pid-reuse hazard on the Close path — Registry.Reap calls Close
-// on every naturally-exited session it collects, which is exactly this
-// case — while confirming Close still does its other job: releasing the
-// pty and closing out any subscriber that's still attached.
-func TestCloseOnReapedSessionIssuesNoSyscallButStillTearsDown(t *testing.T) {
+// TestCloseAfterGroupIsGoneIssuesNoSyscallButStillTearsDown guards against the
+// same pid-reuse hazard on the Close path, which is the one that matters most:
+// Registry.Reap calls Close on every collected session ExitedRetention after
+// it exited, and a ten-minute-stale pgid is exactly the kind that gets
+// recycled. It also confirms Close still does its other jobs — releasing the
+// pty and closing out any subscriber still attached — when it has nothing left
+// to signal.
+func TestCloseAfterGroupIsGoneIssuesNoSyscallButStillTearsDown(t *testing.T) {
 	spy := installKillSpy(t)
 
 	r := NewRegistry(time.Now)
@@ -512,18 +548,18 @@ func TestCloseOnReapedSessionIssuesNoSyscallButStillTearsDown(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 
-	waitExited(t, s, 5*time.Second)
+	waitSupervisorGone(t, s, 5*time.Second)
 	spy.reset()
 
 	sub := s.Subscribe(0)
-	mustNotBlock(t, "Close on an already-reaped session", 5*time.Second, func() {
+	mustNotBlock(t, "Close on a session whose group is gone", 5*time.Second, func() {
 		if err := s.Close(); err != nil {
 			t.Errorf("Close: %v", err)
 		}
 	})
 
 	if n := spy.count(); n != 0 {
-		t.Fatalf("Close on an already-exited (reaped) session issued %d group-kill syscall(s), want 0 — this would risk signalling a recycled pid", n)
+		t.Fatalf("Close after the process group emptied issued %d group-kill syscall(s), want 0 — this would risk signalling a recycled pgid", n)
 	}
 
 	select {
@@ -643,17 +679,30 @@ func TestMasterEndedWithLiveChildKeepsSessionUsable(t *testing.T) {
 // TestConcurrentCloseSignalAndRegistryOps hammers the interleaving the two
 // previous rounds each got wrong in a different way: a session exiting on its
 // own at the same moment something else is trying to signal or close it, while
-// the registry is being read.
+// the registry collects and closes it underneath.
 //
 // Sequential "let it exit, then call Close" tests pass under any lock
 // discipline and prove nothing about that interleaving. This one is checked by
 // the race detector for torn state and by mustNotBlock for the deadlock, and
-// it asserts the outcome that has to hold either way: every session ends up
-// reaped exactly once, with a coherent exited state, and every subscriber's
-// channel is closed.
+// it asserts the outcome that has to hold either way: the session ends up
+// reaped exactly once with a coherent exited state, its subscriber's channel
+// is closed exactly once, and the registry actually collects it.
+//
+// The clock matters. With time.Now and a ten-minute ExitedRetention, Reap
+// finds nothing to collect however often it is called, so the collect-then-
+// close path — the one that concurrently calls Close on a session another
+// goroutine is already closing — is never entered at all. The clock below
+// jumps a full retention window on every reading, which makes any Reap after
+// the exit collect.
 func TestConcurrentCloseSignalAndRegistryOps(t *testing.T) {
+	epoch := time.Now()
+	var ticks atomic.Int64
+	clock := func() time.Time {
+		return epoch.Add(time.Duration(ticks.Add(1)) * (ExitedRetention + time.Second))
+	}
+
 	for i := 0; i < 25; i++ {
-		r := NewRegistry(time.Now)
+		r := NewRegistry(clock)
 		s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "echo tick"}, Cols: 80, Rows: 24})
 		if err != nil {
 			t.Fatalf("Spawn: %v", err)
@@ -666,13 +715,23 @@ func TestConcurrentCloseSignalAndRegistryOps(t *testing.T) {
 		go func() { defer wg.Done(); <-start; _ = s.Close() }()
 		go func() { defer wg.Done(); <-start; _ = s.Signal(syscall.SIGTERM) }()
 		go func() {
+			// Keeps reaping until it has actually collected the session, so
+			// the collect-then-close path is exercised inside the concurrent
+			// window rather than merely being reachable in principle.
 			defer wg.Done()
 			<-start
-			for j := 0; j < 100; j++ {
+			deadline := time.Now().Add(20 * time.Second)
+			for {
 				_ = s.Info()
 				_ = r.List()
-				_, _ = r.Get(s.ID())
 				r.Reap()
+				if _, ok := r.Get(s.ID()); !ok {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Errorf("Reap never collected the exited session")
+					return
+				}
 			}
 		}()
 		go func() {
@@ -692,17 +751,16 @@ func TestConcurrentCloseSignalAndRegistryOps(t *testing.T) {
 }
 
 // TestGroupSignalRequestIsAnsweredWhileTheSessionLockIsHeld pins down the one
-// ordering inside the supervisor that a reader would not otherwise think
-// twice about: it publishes the reap on done *before* it takes s.mu to record
-// the exit.
+// thing inside the supervisor that a reader would not otherwise think twice
+// about: it records the child's exit with a TryLock, not a Lock.
 //
-// The supervisor is the only thing that may signal the process group, so
-// every caller has to wait for it. If it announced the reap only after
-// recording the exit, a caller holding s.mu while it waited would deadlock
-// outright — the request channel has no reader until markExited returns, and
-// markExited cannot return until the caller lets go. That is a narrow window
-// to hit by luck, so this test does not try: it takes s.mu itself, holds it
-// across the child's exit, and only then asks for a signal.
+// The supervisor is the only thing that may signal the process group, so every
+// caller has to wait for it. If it blocked on s.mu to record the exit, a
+// caller holding s.mu while it waited would deadlock outright — the request
+// channel has no reader until that record completes, and it cannot complete
+// until the caller lets go. That is a narrow window to hit by luck, so this
+// test does not try: it takes s.mu itself, holds it across the child's exit,
+// and only then asks for a signal.
 func TestGroupSignalRequestIsAnsweredWhileTheSessionLockIsHeld(t *testing.T) {
 	r := NewRegistry(time.Now)
 	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
@@ -726,8 +784,8 @@ func TestGroupSignalRequestIsAnsweredWhileTheSessionLockIsHeld(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("a group-signal request went unanswered while s.mu was held: " +
-			"the supervisor is publishing the reap only after it takes the lock, " +
-			"so any caller holding the lock deadlocks it")
+			"the supervisor is blocking on the session lock to record the exit, " +
+			"so any caller that holds it while waiting deadlocks the pair")
 	}
 	s.mu.Unlock()
 

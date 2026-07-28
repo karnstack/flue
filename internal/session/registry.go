@@ -94,7 +94,7 @@ func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
 		kill:      killGroup,
 		sigReq:    make(chan sigRequest),
 		masterEnd: make(chan struct{}, 1),
-		done:      make(chan struct{}),
+		gone:      make(chan struct{}),
 		ring:      NewRing(size),
 		title:     NewTitleScanner(),
 		subs:      map[*Sub]struct{}{},

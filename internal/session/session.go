@@ -97,8 +97,9 @@ type sigRequest struct {
 //     held across a syscall that can block, and callers release it before
 //     waiting on the supervisor, which takes s.mu itself when the child
 //     exits. That second rule is a courtesy rather than a correctness
-//     requirement: the supervisor closes done before it ever reaches for
-//     s.mu, so a caller that holds the lock and waits still gets an answer.
+//     requirement: the supervisor takes s.mu with TryLock and retries rather
+//     than blocking, so a caller that holds the lock and waits still gets an
+//     answer.
 //   - Registry.mu is only ever acquired before s.mu, never after.
 type Session struct {
 	id    string
@@ -126,10 +127,11 @@ type Session struct {
 	// producing output. It is a hint about the file descriptor, not about the
 	// process; see noteMasterEnded.
 	masterEnd chan struct{}
-	// done is closed once the supervisor has reaped the child and stopped.
-	// After it closes, no group signal may ever be issued for this session
-	// again.
-	done chan struct{}
+	// gone is closed once the child has been reaped *and* its process group
+	// has been observed empty — not merely once the child has exited. Until
+	// then the surviving members pin the pgid and it is still ours to signal;
+	// after it, the number may be recycled and must never be signalled again.
+	gone chan struct{}
 
 	mu       sync.Mutex
 	ring     *Ring
@@ -197,19 +199,20 @@ func (s *Session) Signal(sig os.Signal) error {
 // requestGroupSignal asks the supervisor to signal the process group and waits
 // for it to report back.
 //
-// If the supervisor has already stopped then it has already reaped the child,
-// which returned the pid — and with it the process-group id, since they are
-// the same number — to the kernel's allocator. There is nothing left that is
-// either safe or useful to signal, and that is not an error the caller needs
-// to special-case: it is the same "already gone" outcome that signalGroup
-// reports as success when the kernel answers ESRCH.
+// Reaping the child does not end this: the group outlives its leader, and
+// while it has members its id is still unambiguously ours (see groupGone). The
+// supervisor keeps serving requests until the group is empty. Only then does
+// it close gone, and only then does this refuse — because there is by then
+// nothing to signal and the id may be recycled. That is not an error the
+// caller needs to special-case; it is the same "already gone" outcome
+// signalGroup reports as success when the kernel answers ESRCH.
 func (s *Session) requestGroupSignal(sig syscall.Signal) error {
 	reply := make(chan error, 1)
 	select {
 	case s.sigReq <- sigRequest{sig: sig, reply: reply}:
 		// The supervisor always answers a request it has accepted.
 		return <-reply
-	case <-s.done:
+	case <-s.gone:
 		return nil
 	}
 }
@@ -271,6 +274,11 @@ func (s *Session) dropLocked(sub *Sub) {
 }
 
 // Close terminates the session's process group and releases the PTY.
+//
+// "Process group", not "child": a shell that exits leaving `sleep 1000 &`
+// behind has been reaped long before anyone calls Close, and the survivor is
+// exactly what Close exists to clean up. It is still reachable, because the
+// group pins its own id until the last member goes (see groupGone).
 func (s *Session) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -341,15 +349,24 @@ func (s *Session) pump() {
 // PTY master.
 //
 // This says nothing about whether the child has exited, and the two must not
-// be conflated. On Linux the master reports EIO as soon as the last descriptor
-// on the slave is released, so a script that does `exec >log 2>&1 </dev/null`
-// and then works for an hour ends the master's stream at once while its
-// process group runs — and still needs killing. On Darwin the opposite skew
-// applies: BSD keeps the master readable for as long as the session leader
-// lives, so the stream can outlast a leader that has already gone, and it can
-// equally outlast it on Linux when a background job still holds the slave
-// open. Neither direction is reliable, so the supervisor uses this only to
-// shorten its poll interval — never to decide the session's state.
+// be conflated. The platforms disagree about what the master's stream even
+// tracks:
+//
+//   - On Linux it tracks the slave descriptors. It ends when the last one is
+//     released, which skews in both directions: a script that does
+//     `exec >log 2>&1 </dev/null` and then works for an hour ends the stream
+//     immediately while its process group runs on and still needs killing,
+//     and conversely a background job holding the slave keeps the master
+//     readable long after the leader has gone.
+//   - On Darwin it tracks the session leader. BSD ctty semantics keep the
+//     master readable while the leader lives even after every slave
+//     descriptor is released, and error it when the leader exits even though
+//     a background job still holds one. So the early-EOF case above cannot be
+//     reproduced on Darwin at all.
+//
+// No platform makes the two events coincide reliably, so the supervisor uses
+// this only to shorten its poll interval — never to decide the session's
+// state.
 //
 // The hint is delivered at most once per call and dropped if one is already
 // pending, so it is safe to call more than once and from more than one place.
@@ -374,9 +391,12 @@ func (s *Session) noteMasterEnded() {
 // is a live process, not a missing one.) Doing both jobs in a single goroutine
 // makes "signal, then reap" a local ordering rather than a race between
 // goroutines — every signal this goroutine issues is issued from the select
-// below, and it never reaches that select again once a reap has succeeded, so
-// no signal can follow a reap. Callers ask for a signal on sigReq; they never
-// issue one themselves.
+// below, and it never reaches that select again once the group is gone.
+// Callers ask for a signal on sigReq; they never issue one themselves.
+//
+// Note that the reap is not the point at which signalling has to stop: the
+// process group outlives its leader, and while it has members the pgid is
+// still ours. See groupGone, which is what actually ends signalling.
 //
 // The reap is a non-blocking wait4(WNOHANG) poll rather than cmd.Wait().
 // cmd.Wait() blocks until the child exits, and a supervisor parked there could
@@ -389,28 +409,45 @@ func (s *Session) noteMasterEnded() {
 // reachable from the standard library and wait4 rejects WNOWAIT on Linux. So
 // polling is the portable way to keep the reap under this goroutine's control.
 func (s *Session) supervise() {
-	delay := reapPollMin
+	var (
+		delay    = reapPollMin
+		exitCode int
+		reaped   bool
+		recorded bool
+	)
 	for {
-		if code, exited := s.reapIfExited(); exited {
-			// Publish the reap before taking s.mu, not after. This is the
-			// only point where the supervisor needs a lock that a caller
-			// might already hold, and a caller that holds s.mu while
-			// waiting for an answer here would otherwise deadlock: the
-			// request channel has no reader until markExited returns, and
-			// markExited cannot return until the caller lets go. Closing
-			// done first means every waiting caller is answered — "already
-			// reaped, nothing left to signal" — whatever it happens to be
-			// holding. This is the sole return path, so done is always
-			// closed exactly once.
-			close(s.done)
-			s.markExited(code)
+		if !reaped {
+			if code, exited := s.reapIfExited(); exited {
+				exitCode, reaped = code, true
+				delay = reapPollMin
+			}
+		}
+		if reaped && !recorded {
+			// Publish the exit without ever blocking this loop on s.mu. A
+			// caller can be waiting on this goroutine for a signal reply, and
+			// though Close and Signal both release s.mu before they wait,
+			// blocking here on a lock such a caller holds would deadlock the
+			// pair — the request channel would have no reader until this
+			// returned, and it could not return until the caller let go. A
+			// busy lock is simply a reason to come back next turn.
+			if s.mu.TryLock() {
+				s.markExitedLocked(exitCode)
+				s.mu.Unlock()
+				recorded = true
+			}
+			delay = reapPollMin
+		}
+		if recorded && s.groupGone() {
+			// Nothing pins the pgid any more, so from here it may name a
+			// stranger. Stop signalling, permanently.
+			close(s.gone)
 			return
 		}
 		select {
 		case req := <-s.sigReq:
-			// The check above did not reap, and this goroutine is the only
-			// thing that ever reaps, so the pid is still our child's and
-			// -pid is still our child's process group.
+			// Either the child is unreaped, or it is reaped and the probe
+			// above found the group still populated. Either way the pgid is
+			// still pinned by a process of ours, so -pid names our group.
 			req.reply <- s.signalGroup(req.sig)
 			delay = reapPollMin
 		case <-s.masterEnd:
@@ -422,6 +459,38 @@ func (s *Session) supervise() {
 			}
 		}
 	}
+}
+
+// groupGone reports whether the child's process group has emptied, which is
+// the moment signalling must stop for good.
+//
+// The reasoning this rests on is worth spelling out, because the obvious
+// assumption — that reaping the leader frees its pid — is what made an earlier
+// version of this code refuse to kill surviving background jobs. A pid is not
+// returned to the allocator while it is still in use as a process-group id:
+// Linux frees a struct pid only once no task references it under any type,
+// PIDTYPE_PGID included, and XNU's pid allocator skips any candidate that
+// pgfind or session_find still resolves. So a group outlives its leader, and
+// for as long as it has members, -pgid unambiguously names our group even
+// though its leader has been reaped and waited for. kill reports the
+// transition to empty as ESRCH, and that first ESRCH is the moment to stop.
+//
+// The probe runs on the supervisor's poll schedule rather than lazily at the
+// next signal, and that is load-bearing rather than tidiness. A session sits
+// in the registry for ExitedRetention — ten minutes — before Reap closes it,
+// which is ample time for a busy machine to cycle the pid space; and since
+// every session flue spawns calls setsid, a recycled pid plausibly leads a
+// brand-new process group. Deferring the check to Close would mean signalling
+// a ten-minute-stale pgid. Probing bounds the exposure to one poll interval.
+//
+// A non-ESRCH error (EPERM, say, from a member that changed uid) leaves the
+// group presumed alive. That is the conservative answer: it keeps signalling
+// enabled for an id that is definitely not recycled.
+//
+// The probe deliberately does not go through s.kill. The test spy counts the
+// signals a session delivers, and a liveness probe is not a delivery.
+func (s *Session) groupGone() bool {
+	return errors.Is(syscall.Kill(-s.pid, 0), syscall.ESRCH)
 }
 
 // reapIfExited collects the child if it has already exited, without blocking.
@@ -437,12 +506,17 @@ func (s *Session) reapIfExited() (int, bool) {
 		switch {
 		case errors.Is(err, syscall.EINTR):
 			continue
-		case err != nil:
-			// Realistically only ECHILD: something outside this package
-			// reaped the child. The pid is gone either way, so stop
-			// signalling and report the same unknown status that a failed
-			// wait has always reported here.
+		case errors.Is(err, syscall.ECHILD):
+			// Something outside this package reaped the child. It is gone
+			// and its status is now unknowable, which is the one case worth
+			// reporting as an exit we cannot describe.
 			return -1, true
+		case err != nil:
+			// No other errno is expected. Do not treat an unknown one as an
+			// exit: that would declare a live session dead and, worse, start
+			// the countdown to disabling its signalling. Leave it running
+			// and ask again on the next poll.
+			return 0, false
 		case wpid == 0:
 			return 0, false
 		}
@@ -459,13 +533,14 @@ func (s *Session) reapIfExited() (int, bool) {
 	}
 }
 
-// markExited records the child's exit and closes out its subscribers.
+// markExitedLocked records the child's exit and closes out its subscribers.
+// The caller must hold s.mu.
 //
 // It runs only once reapIfExited has confirmed the child is actually gone, so
 // State never reports "exited" on the strength of a read error on the master.
-func (s *Session) markExited(code int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Note that it says nothing about the child's process group, which may well
+// outlive it.
+func (s *Session) markExitedLocked(code int) {
 	s.info.State = "exited"
 	s.info.ExitCode = code
 	s.exitedAt = s.clock()
