@@ -28,8 +28,14 @@ device its owner has.
 
 - **Open source, no hosted service.** There is no flue account, no flue server,
   no billing. Every remote path runs on infrastructure the user owns.
-- **Transports are the extension point.** No single remote transport is forced on
-  anyone. Users who refuse Cloudflare, or refuse Tailscale, still have a path.
+- **The UI is the product surface.** The CLI is four commands and exists to
+  bootstrap and diagnose. Everything else — sessions, devices, pairing, remote
+  setup, settings — is in the browser, because that is where the user already is.
+- **No favoured provider.** Remote access is a capability with interchangeable
+  providers. None is the default; the UI presents them by what the user already
+  has.
+- **One binary, no runtimes.** No Node, no Python, no toolchain on the user's
+  machine. Ever.
 - **Same-origin always** (see below). The UI is served by whatever is already
   terminating the user's connection.
 - **End-to-end encrypted wherever an intermediary exists.** Terminal traffic is
@@ -66,10 +72,10 @@ The UI is always served by the same origin that terminates the connection:
 
 | transport | UI served by | origin |
 |---|---|---|
-| loopback | the daemon | `http://127.0.0.1:PORT` |
-| relay | the user's Worker | `https://<name>.workers.dev` |
-| tunnel | the daemon, via `cloudflared` | `https://flue.example.com` |
-| tailnet | the daemon | `https://host.tailnet.ts.net:PORT` |
+| local | the daemon | `http://127.0.0.1:PORT` |
+| cloudflare-relay | the user's Worker | `https://<name>.workers.dev` |
+| cloudflare-tunnel | the daemon, via `cloudflared` | `https://flue.example.com` |
+| tailscale | the daemon | `https://host.tailnet.ts.net:PORT` |
 
 Consequences: no mixed-content problem, no Chrome Private Network Access
 preflight, and — most importantly — no cross-origin allowlist sitting between the
@@ -79,7 +85,7 @@ allowlist. Removing the hosted service removed the attack surface.
 
 ## User experience
 
-### Install
+### Install and enable
 
 ```
 brew install karnstack/tap/flue
@@ -87,84 +93,111 @@ brew install karnstack/tap/flue
 curl -fsSL https://flue.sh/install | sh
 ```
 
-Single static binary. No runtime prerequisites.
-
-### Local — the ten-second path
+Single static binary, no runtime prerequisites.
 
 ```
-$ cd ~/code/myproject
-$ flue open
+$ flue enable
 
-  daemon started on 127.0.0.1:7717
-  session 1a2b · ~/code/myproject · zsh
-  opening http://127.0.0.1:7717/d/local/s/1a2b
+  ✓ login service installed
+  ✓ daemon running on 127.0.0.1:7717
+  opening http://127.0.0.1:7717
 ```
 
-A browser tab opens with a shell in that directory. That is the entire local
-story: no config file, no account, no cloud, no network. Closing the tab detaches;
-the shell keeps running. Reopening the URL reattaches.
+`enable` installs a launchd (macOS) or systemd user (Linux) unit so the daemon
+starts at login, then opens the UI. It is an explicit, reversible act rather than
+something first run does silently: this is a service that spawns shells at login,
+and that deserves a deliberate command.
 
-This path must stay this short. It is the first thing anyone tries.
+**After this, the terminal is never required again.** Everything below happens in
+the browser.
 
-### Remote via relay — one-time setup, roughly two minutes
+### In the UI
 
-```
-$ flue relay deploy
+The UI is the whole product:
 
-  ✓ wrangler found (logged in as karn@example.com)
-  ✓ deployed relay to your Cloudflare account
-  ✓ device key generated, registered as "macbook"
+- **Sessions** — list across every device, with title, cwd, command, running or
+  exited, last active. Create, attach, rename, kill.
+- **Devices** — every paired browser, with a label and last-seen. Pair a new one.
+  Revoke.
+- **Remote access** — provider setup, described below.
+- **Settings** — scrollback size, keyboard mode binding, theme, fonts.
 
-  relay: https://flue-relay.karn.workers.dev
-  free tier is sufficient for personal use
-```
+Attaching a session opens it in its own browser tab at `/d/<deviceId>/s/<id>`,
+which is bookmarkable, pinnable, and restorable by the browser like any other
+tab. That is the point of the project.
 
-Then run the daemon with the relay adapter enabled:
+### Setting up remote access
 
-```
-$ flue serve --relay
-  connected to relay · outbound only, no ports opened
-```
-
-Pair a phone:
-
-```
-$ flue pair
-
-  ┌───────────────┐
-  │   ▄▄▄▄▄ ▄ ▄▄  │   scan with your phone camera
-  │   █   █ ▀▄█▄  │
-  │   █▄▄▄█ █ ▄█  │   or open the relay URL and enter:
-  └───────────────┘        warm-otter-4821
-
-  waiting… ✓ paired "karn's iPhone"
-```
-
-The QR carries the relay URL, the daemon's static public key, and a single-use
-pairing token. The phone generates its own keypair and completes a Noise IK
-handshake against the pinned daemon key, so the relay cannot impersonate either
-side. From then on the phone loads the relay URL, sees the device list, taps a
-session, and is attached. Adding it to the home screen makes it a PWA.
-
-### Other transports
+One screen, one question, phrased by what the user already has rather than by
+mechanism. Providers are ordered by what `Detect()` finds installed:
 
 ```
-$ flue serve --tunnel flue.karn.dev    # requires a domain on Cloudflare
-$ flue serve --tailnet                 # requires Tailscale on each device
+  How do you want to reach this machine?
+
+  ▸ Tailscale            already running on this machine
+      Direct connection, nothing in between. Needs Tailscale on each device.
+
+  ▸ Cloudflare
+      Runs on your own Cloudflare account. Free tier is enough.
+      No domain required.
+
+  ▸ Cloudflare + your domain
+      Uses a domain you already have on Cloudflare, with Access for sign-in.
+
+  ▸ Not now
+      This machine only. You can add remote access any time.
 ```
 
-Adapters compose; `flue serve --relay --tailnet` runs both.
-
-### Everyday commands
+Each provider then renders its own setup steps in the UI. For Cloudflare:
 
 ```
-flue open [path]     # spawn a session and open it in the browser
-flue list            # sessions on this daemon
-flue kill <id>       # terminate a session
-flue devices         # paired browsers, with labels and last-seen
-flue revoke <id>     # revoke a paired device
-flue status          # daemon state, active adapters, session count
+  Connect Cloudflare
+
+  1. Create an API token with these permissions:
+       Account · Workers Scripts · Edit
+       Account · Account Settings · Read
+
+     [ Open Cloudflare token page ]
+
+  2. Paste it here:  [________________________]
+
+     flue uses this once to deploy, then deletes it.
 ```
+
+Then flue discovers the account, deploys the Worker, enables the `workers.dev`
+subdomain, sets the shared secret, registers this device, and **deletes the API
+token**. Progress is shown step by step. The user pastes one string and clicks
+once.
+
+### Pairing a phone
+
+From Devices → Pair, the laptop's browser renders a QR on screen. The phone's
+camera scans it and lands on the relay URL, already pairing. A typed phrase
+(`warm-otter-4821`) is the fallback.
+
+Rendering the QR in the browser rather than as ASCII in a terminal is the whole
+reason this flow belongs in the UI.
+
+The QR carries the transport URL, the daemon's static public key, and a
+single-use pairing token. The phone generates its own keypair and completes a
+Noise IK handshake against the pinned daemon key, so the intermediary cannot
+impersonate either side.
+
+Once paired, the phone has the same UI and the same capabilities as the laptop.
+See *Security* for why there is deliberately no split between them.
+
+### CLI surface
+
+```
+flue enable       # install the login service, start the daemon, open the UI
+flue disable      # remove the login service
+flue status       # daemon state, active providers, session count — diagnostics
+flue open [path]  # spawn a session in path and open it
+```
+
+`flue open` survives the move to a UI-first design only because it is genuinely
+useful from a shell prompt: you are already in a directory and want a flue
+session there.
 
 Sessions spawned without an explicit command run the user's login shell
 (`$SHELL`, falling back to the passwd entry) as a login shell, inheriting the
@@ -181,19 +214,22 @@ flue/
   internal/
     session/              # PTY, ring buffer, registry
     transport/            # adapter interface + implementations
-      loopback/
-      relay/
-      tunnel/
-      tailnet/
+      local/
+      cfrelay/
+      cftunnel/
+      tailscale/
+    provider/             # provider registry: detection, setup steps, config
+    cloudflare/           # REST client: script upload, subdomain, secrets
     crypto/               # Noise IK handshake, framing, device keystore
+    service/              # launchd / systemd unit install and removal
     wire/                 # protocol codec (Go side)
     config/
-  relay/                  # Cloudflare Worker + Durable Object, deployed by user
+  relay/                  # Cloudflare Worker + Durable Object source
   web/                    # TS app, pnpm + vite
     src/emulator/         # Emulator interface + xterm.js implementation
     src/client/           # protocol client, reconnect, delta application
     src/crypto/           # browser half of Noise IK, key storage
-    src/ui/               # device rail, session list, terminal view
+    src/ui/               # sessions, devices, providers, settings, terminal
   spec/protocol.md        # language-neutral wire spec
   testdata/
     vt/                   # VT conformance corpus, consumed by Go and TS
@@ -202,12 +238,28 @@ flue/
 ```
 
 The daemon embeds the built web app via `go:embed web/dist`. The relay Worker
-serves the identical artifact. One build, several homes.
+serves the identical artifact.
 
 Language: **Go** for the daemon. It must run on every machine the user owns and
-install as a single static binary. A Node runtime prerequisite is the wrong tax
-for that. `creack/pty` handles PTYs; goroutine-per-session fits. The web app is
-TypeScript with pnpm.
+install as a single static binary. `creack/pty` handles PTYs; goroutine-per-
+session fits. The web app and the Worker are TypeScript, bundled at release time.
+
+### No Node on the user's machine
+
+The Worker is bundled with esbuild **in CI, at release time**, into a single JS
+module that is embedded in the Go binary via `go:embed`. Deployment then happens
+over the Cloudflare REST API directly:
+
+```
+PUT  /accounts/{account_id}/workers/scripts/{name}
+       multipart: metadata (main_module, DO binding, new_sqlite_classes
+       migration, compatibility_date) + the bundled module
+POST /accounts/{account_id}/workers/scripts/{name}/subdomain   {"enabled": true}
+PUT  /accounts/{account_id}/workers/scripts/{name}/secrets
+```
+
+Node is a build dependency for the project, never a runtime dependency for the
+user. `wrangler` is not invoked, not vendored, and not required.
 
 ### Units
 
@@ -228,14 +280,21 @@ Session.Close() error
 **`internal/transport`** — yields authenticated connections. Knows nothing about
 sessions.
 
-**`internal/crypto`** — Noise IK handshake, transport-layer framing, device
-keystore. Pure; no I/O.
+**`internal/provider`** — setup and detection for each remote-access option.
+Separate from `transport` because setup and data flow have different lifetimes:
+setup runs once, interactively, driven by the UI.
+
+**`internal/cloudflare`** — REST client. Pure HTTP, no shelling out.
+
+**`internal/crypto`** — Noise IK handshake, framing, device keystore. Pure.
+
+**`internal/service`** — installs and removes the launchd or systemd unit.
 
 **`internal/wire`** — protocol encode/decode. Pure functions.
 
 **`web/src/emulator`** — the `Emulator` interface and its xterm.js
-implementation. This is the seam that makes the libghostty swap a substitution
-rather than a rewrite.
+implementation. The seam that makes the libghostty swap a substitution rather
+than a rewrite.
 
 ```ts
 interface Emulator {
@@ -251,13 +310,14 @@ interface Emulator {
 **`web/src/client`** — connect, attach, reconnect with backoff, apply deltas,
 request a full snapshot on eviction. No DOM knowledge.
 
-**`web/src/ui`** — device rail, session list, terminal view, keyboard modes.
+**`web/src/ui`** — sessions, devices, provider setup, settings, terminal view,
+keyboard modes.
 
 ### Transport adapters
 
-The critical detail: loopback **listens**, relay **dials out**. An interface
-shaped like `Serve(listener)` cannot express both. So the abstraction is
-"produces authenticated connections", direction-agnostic.
+The critical detail: local **listens**, relay **dials out**. An interface shaped
+like `Serve(listener)` cannot express both. So the abstraction is "produces
+authenticated connections", direction-agnostic.
 
 ```go
 type Transport interface {
@@ -270,22 +330,47 @@ type Transport interface {
 
 `Discover()` generalizes peer discovery per transport rather than special-casing
 it: the relay Durable Object knows registered devices, `tailscale status` knows
-tailnet peers, tunnel is a manually configured hostname, loopback is itself.
+tailnet peers, tunnel is a configured hostname, local is itself.
 
-| adapter | direction | authentication | intermediary | setup cost |
+| adapter | direction | authentication | intermediary | needs |
 |---|---|---|---|---|
-| `loopback` | listen `127.0.0.1` | token file + Origin + Host | none | none |
-| `relay` | dial `wss://` outbound | device key at the Worker; Noise IK end-to-end | user's Worker (ciphertext only) | `wrangler deploy`, no domain needed |
-| `tunnel` | listen loopback behind `cloudflared` | Cloudflare Access `Cf-Access-Jwt-Assertion` | Cloudflare | domain on Cloudflare |
-| `tailnet` | listen tailnet address | tailscaled LocalAPI `WhoIs` → login allowlist | none; often direct peer-to-peer | Tailscale on each device |
+| `local` | listen `127.0.0.1` | token file + Origin + Host | none | nothing |
+| `tailscale` | listen tailnet address | tailscaled LocalAPI `WhoIs` → login allowlist | none; often direct peer-to-peer | Tailscale per device |
+| `cfrelay` | dial `wss://` outbound | device key at the Worker; Noise IK end-to-end | user's Worker, ciphertext only | Cloudflare account |
+| `cftunnel` | listen loopback behind `cloudflared` | Cloudflare Access `Cf-Access-Jwt-Assertion` | Cloudflare | domain on Cloudflare |
 
-None binds `0.0.0.0`, ever. Binding all interfaces would expose a shell-spawning
-port on every network the machine joins, including untrusted ones.
+No adapter binds `0.0.0.0`, ever. Binding all interfaces would expose a
+shell-spawning port on every network the machine joins, including untrusted ones.
 
-The relay carries every browser attached to a device over one outbound socket,
-so the relay link adds a channel header — `[4B channel][payload]` — leaving the
-session protocol untouched. That framing is confined entirely to the relay
-adapter; nothing above it knows a relay exists.
+`local` is always on. Every other adapter is opt-in, and none is preferred by the
+software — ordering in the UI comes from `Detect()`, which reflects what the user
+already runs.
+
+The relay carries every browser attached to a device over one outbound socket, so
+the relay link adds a channel header — `[4B channel][payload]` — leaving the
+session protocol untouched. That framing is confined to the `cfrelay` adapter;
+nothing above it knows a relay exists.
+
+### Provider registry
+
+Transports move bytes. Providers handle the one-time setup, and are what the UI
+actually renders.
+
+```go
+type Provider interface {
+    ID() string                             // "tailscale", "cloudflare-relay"
+    Describe() ProviderInfo                 // title, blurb, requirements, docs URL
+    Detect(ctx) (Availability, error)       // installed? configured? reachable?
+    SetupSteps() []Step                     // declarative; the UI renders these
+    Configure(ctx, answers map[string]any) error
+    Transport(cfg Config) (Transport, error)
+}
+```
+
+`SetupSteps()` returns a declarative description — instructions, input fields,
+external links, and progress items — so the UI needs no per-provider code and a
+new provider is a registry entry rather than a UI change. Adding a self-hosted
+relay or a WireGuard provider later touches nothing outside its own package.
 
 ### Protocol
 
@@ -315,6 +400,7 @@ s→c  welcome     {daemonId, host, ver, caps}
      attached    {ref, id, cols, rows, title, seq, truncated}
      exit        {ref, code}
      sizeChanged {ref, cols, rows, primary}
+     revoked     {reason}
      error       {code, msg}
 ```
 
@@ -387,24 +473,18 @@ phone appears live in the laptop's browser.
 
 ### End-to-end encryption
 
-Applies to any adapter with an intermediary in the data path — `relay` today,
-and `tunnel` if it is added there later. Default on, not optional: a security
-default that is off is security that mostly does not exist.
+Applies to any adapter with an intermediary — `cfrelay` today, `cftunnel` if
+added there later. Default on, not optional: a security default that is off is
+security that mostly does not exist.
 
 **Handshake: Noise IK.** The browser initiates and already knows the daemon's
 static public key from the pairing QR, so the daemon's identity is pinned. This
 gives mutual authentication and forward secrecy, and means a malicious or
-compromised relay cannot impersonate either side or read anything.
+compromised intermediary cannot impersonate either side or read anything.
 
 **Primitives:** X25519, HKDF-SHA256, ChaCha20-Poly1305. `flynn/noise` on the Go
 side; `@noble/curves` and `@noble/ciphers` in the browser — audited, small, and
 free of WebCrypto's patchy X25519 support.
-
-**Pairing.** `flue pair` prints a QR containing the relay URL, the daemon static
-public key, and a single-use, short-lived pairing token. The browser generates
-its own keypair, and the token authorizes registering that public key with the
-daemon. A typed phrase (`warm-otter-4821`) is offered as a fallback for devices
-without a camera.
 
 **Nonces and replay.** A strictly incrementing counter per direction; frames
 arriving out of order or reusing a counter are rejected and the connection is
@@ -412,9 +492,7 @@ torn down. The underlying WebSocket is ordered and reliable, so no reordering
 window is needed.
 
 **Key storage.** Browser keys live in IndexedDB. Daemon keys live in
-`$XDG_CONFIG_HOME/flue/keys`, mode `0600`. Since a stolen browser key is a
-persistent grant, `flue devices` lists paired devices with labels and last-seen
-times, and `flue revoke <id>` removes one.
+`$XDG_CONFIG_HOME/flue/keys`, mode `0600`.
 
 ## Error handling
 
@@ -424,27 +502,58 @@ times, and `flue revoke <id>` removes one.
 | Connection drops | Client reconnects with exponential backoff and jitter, reattaches with `lastSeq` |
 | `lastSeq` evicted from ring | `attached{truncated:true}`; client resets emulator, writes the full ring, renders a truncation marker |
 | Ring overflow | Evict oldest bytes, advance `baseSeq` |
-| Daemon crash or restart | All sessions die. Accepted: scrollback is memory-only by design |
-| Relay unreachable | Daemon retries outbound with backoff; loopback stays fully functional throughout |
+| Daemon crash | The login service restarts it; sessions do not survive. Accepted: scrollback is memory-only by design |
+| Intermediary unreachable | Daemon retries outbound with backoff; `local` stays fully functional throughout |
 | Noise handshake failure | Connection closed, no protocol frames processed, event logged |
 | Replayed or out-of-order nonce | Connection torn down immediately and logged |
 | Unpaired device key | `error{code:"unpaired"}`; the daemon does not reveal whether the device ID exists |
-| Invalid or missing token (loopback) | 401, no upgrade |
-| Disallowed Origin or Host (loopback) | 403, no upgrade, logged |
+| Device revoked mid-session | `revoked{reason}` sent, connection closed, key removed — live sessions drop immediately |
+| Pairing token expired or reused | Pairing refused; the daemon leaves pairing mode |
+| Invalid or missing token (local) | 401, no upgrade |
+| Disallowed Origin or Host (local) | 403, no upgrade, logged |
 | Unknown tailnet peer | 403, no upgrade, logged with the resolved identity |
-| `spawn` on an unauthenticated connection | `error{code:"unauthenticated"}` |
-| Adapter prerequisite missing (`wrangler`, `cloudflared`, `tailscaled`) | That adapter fails to start with a specific, actionable message; other adapters are unaffected |
+| Cloudflare API rejects deploy | Setup surfaces the API's own error text and the step that failed; the token is still discarded |
+| Provider prerequisite missing | That provider reports unavailable in the UI with the specific reason; others are unaffected |
 
 ## Security
 
 flue is a daemon whose purpose is spawning shells. The controls below are
 requirements.
 
-**Universal.** No adapter binds `0.0.0.0`. `spawn` requires an authenticated
-connection. Every attach is logged with the resolved peer identity and session
-ID. Every rejection is logged.
+### Pairing is the only trust boundary
 
-**Loopback.** A random token is generated at first start and stored `0600` at
+There is deliberately no privileged/unprivileged split between devices. A paired
+device has a terminal on the machine, and a terminal is already every capability
+flue's UI could offer — it can read the config, pair further devices, or install
+anything. Restricting the UI while granting a shell would be theatre. Pairing is
+therefore the boundary, and all the weight sits on the ceremony and on
+revocation:
+
+- Pairing tokens are single-use with a short TTL (about two minutes), and the
+  daemon accepts pairing only while explicitly in pairing mode, entered from an
+  already-trusted UI. There is no long-lived join code.
+- The QR is rendered on a screen the user physically controls and contains the
+  daemon's static public key, so the phone pins the daemon's identity and no
+  intermediary can interpose.
+- Devices are listed with labels and last-seen times. Revocation removes the key
+  **and terminates that device's live connections immediately**, so it is a real
+  control rather than a bookkeeping one.
+
+### Credentials
+
+The Cloudflare API token is the one credential whose blast radius extends beyond
+this machine — it can deploy Workers across the user's whole account. It is used
+once during setup and then deleted from disk, and re-requested when a redeploy is
+needed. The scoped runtime secrets that remain are useful only against flue's own
+Worker.
+
+### Per-adapter
+
+**Universal.** No adapter binds `0.0.0.0`. `spawn` requires an authenticated
+connection. Every attach, pairing, revocation, and rejection is logged with the
+resolved peer identity.
+
+**Local.** A random token is generated at first start and stored `0600` at
 `$XDG_CONFIG_HOME/flue/token`, required on every request and upgrade. The Origin
 must be the daemon's own; the `Host` header must be `127.0.0.1:PORT` or
 `localhost:PORT`, which defends against DNS rebinding — an attacker-controlled
@@ -454,25 +563,31 @@ so it is immediately exchanged for an `HttpOnly; SameSite=Strict` cookie,
 stripped from the URL with `history.replaceState`, and every response sets
 `Referrer-Policy: no-referrer`.
 
-**Relay.** Two independent layers. The Worker authenticates who may open a
-channel at all, using a device key for the daemon and a deploy-time secret for
-browsers — this is a denial-of-service and enumeration control, not a
-confidentiality one. Confidentiality comes from Noise IK, under which the Worker
-only ever forwards ciphertext. Compromising the Worker yields no plaintext and no
-ability to impersonate.
+**cfrelay.** Two independent layers. The Worker authenticates who may open a
+channel at all, using a device key for the daemon and a scoped secret for
+browsers — a denial-of-service and enumeration control, not a confidentiality
+one. Confidentiality comes from Noise IK, under which the Worker only ever
+forwards ciphertext. Compromising the Worker yields no plaintext and no ability
+to impersonate.
 
-**Tunnel.** The daemon verifies the `Cf-Access-Jwt-Assertion` JWT against the
+**cftunnel.** The daemon verifies the `Cf-Access-Jwt-Assertion` JWT against the
 configured Access AUD and issuer on every request, and accepts a configured
 public origin. It must not trust `cloudflared` merely because the connection
 arrived on loopback.
 
-**Tailnet.** Binds the specific tailnet address. Peer identity is resolved via
+**tailscale.** Binds the specific tailnet address. Peer identity is resolved via
 the local tailscaled LocalAPI `WhoIs`; only logins on the configured allowlist
 are accepted. Being on the tailnet is not by itself authorization.
 
 **Web UI.** A strict Content-Security-Policy on every origin that serves it. This
 matters more than usual because browser-held Noise keys are a persistent grant to
 a shell, and XSS would be key theft.
+
+### Login service
+
+`flue enable` installs a unit that starts a shell-spawning daemon at login. It is
+never installed implicitly. `flue disable` removes it, and `flue status` reports
+whether it is installed and running.
 
 ## Testing
 
@@ -482,10 +597,15 @@ either is a remote shell.
 - **Adapter auth**, table-driven per adapter: disallowed Origin, wrong Host,
   missing token, malformed token, unknown tailnet login, invalid Access JWT,
   expired Access JWT, unpaired device key. Every case must be rejected.
+- **Pairing**: expired token refused, reused token refused, pairing outside
+  pairing mode refused, revocation terminates live connections.
 - **Noise handshake vectors** in `testdata/noise/`, executed by both the Go and
-  the TypeScript implementations so they cannot drift. Plus negative tests: a
-  wrong static key must fail; a replayed nonce must tear down the connection; a
+  the TypeScript implementations so they cannot drift. Negative tests: a wrong
+  static key must fail; a replayed nonce must tear down the connection; a
   tampered ciphertext must fail authentication.
+- **Cloudflare REST client** against recorded fixtures: script upload multipart
+  shape, subdomain enable, secret set, and error surfacing. Plus one manual
+  end-to-end deploy per release against a real account.
 - **Session units**: ring eviction advances `baseSeq`; a delta from a valid
   `lastSeq` is byte-exact; `truncated` is set when `lastSeq < baseSeq`; resize
   propagates, asserted via `stty size` inside the PTY; exited sessions are held
@@ -496,8 +616,10 @@ either is a remote shell.
   expected grid state. TypeScript runs it against xterm.js; Go runs it against
   the OSC title scanner now and `libghostty-vt` later. Writing this corpus early
   is what makes the libghostty swap a substitution rather than a rewrite.
-- **Relay Worker** tested with `@cloudflare/vitest-pool-workers`, including
-  Durable Object hibernation and resumption.
+- **Relay Worker** with `@cloudflare/vitest-pool-workers`, including Durable
+  Object hibernation and resumption.
+- **Service install** on macOS and Linux: enable, verify running, disable, verify
+  removed, and that `enable` is idempotent.
 - **Client reconnect logic** under vitest with a fake socket: backoff, reattach
   with `lastSeq`, delta application, emulator reset on `truncated`.
 - **End-to-end** via `reins` driving Dia: open a session URL, type a command,
@@ -512,26 +634,31 @@ either is a remote shell.
 Dependency order, not phases. Nothing in the design is shaped by where these
 boundaries fall.
 
-1. `session` + `wire` + `loopback` + web app with the xterm.js emulator — the
-   ten-second local path, daily-drivable.
-2. `crypto` + `relay` adapter + the Worker + pairing — phone access.
-3. `tunnel` adapter — for people with a domain on Cloudflare.
-4. `tailnet` adapter — for people already on Tailscale.
-5. Browser extension: tab-group binding, `term://` scheme.
-6. `libghostty-vt`: native in the daemon first, so reattach sends a rendered
+1. `session` + `wire` + `local` + web app with the xterm.js emulator — a
+   daily-drivable terminal in a browser tab.
+2. `service` + `flue enable` + the UI shell: sessions, devices, settings.
+3. `crypto` + pairing, exercised first over `local` so the ceremony is proven
+   before an intermediary exists.
+4. `provider` registry + `cloudflare` REST client + `cfrelay` + the Worker —
+   phone access.
+5. `tailscale` provider.
+6. `cftunnel` provider.
+7. Browser extension: tab-group binding, `term://` scheme.
+8. `libghostty-vt`: native in the daemon first, so reattach sends a rendered
    snapshot; then wasm in the browser with a WebGL renderer, replacing xterm.js
    behind the `Emulator` seam.
 
 ## Open items to resolve during implementation
 
-1. **Ring size default.** 2 MiB is a starting guess; measure against a real build
-   log before fixing it.
-2. **Durable Object hibernation under load.** Confirm that a hibernating DO
-   resumes cleanly mid-stream and that the free tier's 13,000 GB-s/day holds for
+1. **Exact Cloudflare API token permissions.** Verify the minimum set that
+   permits script upload with a Durable Object migration and subdomain enable.
+   The UI's instructions must match exactly, or setup fails confusingly.
+2. **Account selection.** Users with several Cloudflare accounts need a picker
+   after the token is pasted; users with one should never see it.
+3. **Ring size default.** 2 MiB is a starting guess; measure against a real build
+   log.
+4. **Durable Object hibernation under load.** Confirm a hibernating DO resumes
+   cleanly mid-stream and that the free tier's 13,000 GB-s/day holds for
    realistic daily use.
-3. **`flue relay deploy` without a global wrangler.** Decide whether to vendor
-   wrangler, shell out to `npx wrangler`, or drive the Cloudflare API directly.
-   Requiring a Node toolchain would undercut the single-binary promise.
-4. **Keyboard lock behavior in Dia specifically.** Dia is Chromium-based, but
-   confirm `navigator.keyboard.lock()` and hold-`Esc` behave as they do in stock
-   Chrome.
+5. **Keyboard lock behavior in Dia specifically.** Dia is Chromium-based, but
+   confirm `navigator.keyboard.lock()` and hold-`Esc` behave as in stock Chrome.

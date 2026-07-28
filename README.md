@@ -24,41 +24,49 @@ laptop.
 A small Go daemon owns the PTYs and their scrollback. A web app renders them. A
 tab close detaches; the build keeps running. Reattach replays what you missed.
 Attach from two devices and they mirror live — typing on the phone shows up in
-the laptop's browser.
+the laptop's browser, and the phone's 40 columns don't shrink the laptop.
 
-## Local, in ten seconds
+## Setup
 
 ```
-$ cd ~/code/myproject
-$ flue open
-
-  daemon started on 127.0.0.1:7717
-  session 1a2b · ~/code/myproject · zsh
-  opening http://127.0.0.1:7717/d/local/s/1a2b
+brew install karnstack/tap/flue
+flue enable
 ```
 
-No config, no account, no cloud, no network.
+That's it. `flue enable` installs a login service and opens the UI. Everything
+after that — sessions, devices, pairing, remote access, settings — happens in the
+browser.
 
-## Everywhere else
+Single static binary. No Node, no Python, no toolchain, ever.
 
-Transports are adapters, and you pick one — nothing is forced on you.
+The CLI stays at four commands on purpose:
 
-| adapter | what it needs | intermediary |
+```
+flue enable       # install the login service, start the daemon, open the UI
+flue disable      # remove it
+flue status       # diagnostics
+flue open [path]  # spawn a session here — handy from a shell prompt
+```
+
+## Reaching it from elsewhere
+
+Remote access is opt-in and provider-agnostic. flue has no preferred option; the
+UI orders them by what you already have installed.
+
+| provider | what it needs | intermediary |
 |---|---|---|
-| `loopback` | nothing | none |
-| `relay` | a Cloudflare account, free tier is enough | your own Worker, ciphertext only |
-| `tunnel` | a domain on Cloudflare | Cloudflare |
-| `tailnet` | Tailscale on each device | none |
+| local | nothing, always on | none |
+| Tailscale | Tailscale on each device | none, often direct peer-to-peer |
+| Cloudflare | a Cloudflare account, free tier is enough | your own Worker, ciphertext only |
+| Cloudflare + your domain | a domain on Cloudflare | Cloudflare |
 
-```
-$ flue relay deploy      # deploys to YOUR Cloudflare account
-$ flue serve --relay     # outbound only, no ports opened
-$ flue pair              # scan the QR with your phone
-```
+Setup happens in the UI. For Cloudflare you paste one API token; flue deploys the
+Worker to *your* account over the REST API, then deletes the token. Pairing a
+phone renders a QR on your laptop's screen — scan it and you're in.
 
-Traffic through a relay is end-to-end encrypted by default (Noise IK, with the
-daemon's key pinned at pairing), so the Worker forwards ciphertext and can never
-read your shell.
+Anything through an intermediary is end-to-end encrypted by default (Noise IK,
+with the daemon's key pinned at pairing), so the Worker forwards ciphertext and
+can never read your shell.
 
 **There is no hosted service.** No flue account, no flue server, no billing.
 Every remote path runs on infrastructure you own. `flue.sh` is docs and
