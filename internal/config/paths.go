@@ -54,32 +54,69 @@ func LoadOrCreateToken() (string, error) {
 		return "", err
 	}
 	tok := hex.EncodeToString(raw[:])
-	if err := os.WriteFile(path, []byte(tok), 0o600); err != nil {
-		return "", err
-	}
-	// os.WriteFile only applies its mode argument when it creates the
-	// file; if path already existed (blank content, or the loose-mode
-	// case readExistingToken just rejected) it truncates in place and
-	// leaves whatever mode was already there. Chmod explicitly so a
-	// freshly generated secret is never persisted at a looser mode than
-	// the one it's replacing.
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := writeTokenAtomically(dir, path, tok); err != nil {
 		return "", err
 	}
 	return tok, nil
 }
 
+// writeTokenAtomically replaces path's contents with tok without ever
+// writing through path's existing inode. Two reasons:
+//
+//  1. Unix permission checks happen at open, not at read. If path already
+//     existed at a loose mode (blank content, or the exposed-secret case
+//     readExistingToken just rejected) and some other local process had
+//     already opened it and kept the descriptor open, an in-place
+//     truncate+write would hand that process the brand-new secret on its
+//     next read through the retained descriptor — regardless of when the
+//     regeneration happened. Landing the replacement on a fresh inode and
+//     renaming it over path leaves any such retained descriptor pointing
+//     at the old (now-unlinked) file instead.
+//  2. os.WriteFile only applies its mode argument when it creates a file;
+//     truncating an existing one in place would leave the new secret at
+//     the old file's mode until a separate chmod call catches up — a real
+//     window where the secret sits on disk world- or group-readable.
+//     os.CreateTemp creates its file at 0600 from the start, so there's
+//     no window at all.
+//
+// The rename is also atomic, so a crash mid-write can't leave a truncated
+// or empty token file.
+func writeTokenAtomically(dir, path, tok string) error {
+	tmp, err := os.CreateTemp(dir, "token-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below has succeeded
+
+	if _, err := tmp.WriteString(tok); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
 // readExistingToken returns the token stored at path, but only if it's
 // safe to trust: non-blank content, and — where the platform's permission
-// bits are meaningful — stored at exactly 0600. A looser mode is treated
-// exactly like blank content: not fixed in place, but discarded. A loose
-// mode is positive evidence the secret may already have been readable by
-// another local user or process (a stray chmod, a backup/sync tool, a
-// migration from an older version); silently tightening the mode and
-// continuing to trust the same token would make the daemon look secure
-// while it kept using a known-exposed credential, and it would erase the
-// only signal a user could ever have noticed. Regenerating costs one
-// invalidated browser session.
+// bits are meaningful — no group or other access bit set. A mode with any
+// of those bits (0644, 0640, 0666, ...) is treated exactly like blank
+// content: not fixed in place, but discarded. A loose mode is positive
+// evidence the secret may already have been readable by another local
+// user or process (a stray chmod, a backup/sync tool, a migration from an
+// older version); silently tightening the mode and continuing to trust
+// the same token would make the daemon look secure while it kept using a
+// known-exposed credential, and it would erase the only signal a user
+// could ever have noticed. Regenerating costs one invalidated browser
+// session.
+//
+// A mode stricter than 0600 (0400, 0000, ...) is not evidence of anything
+// and must be accepted as-is: it's a plausible deliberate hardening (a
+// config-management rule, a manual chmod), and rejecting it would send
+// the caller into the regeneration path, which then fails outright trying
+// to overwrite a file the owner can't even open for writing.
 func readExistingToken(path string) (tok string, ok bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -91,7 +128,7 @@ func readExistingToken(path string) (tok string, ok bool) {
 	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(path)
-		if err != nil || info.Mode().Perm() != 0o600 {
+		if err != nil || info.Mode().Perm()&0o077 != 0 {
 			return "", false
 		}
 	}
