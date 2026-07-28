@@ -1,5 +1,8 @@
 web/dist/
 web/node_modules/
 flued
+# `go build ./cmd/flue` drops the binary here. Anchored so it can't shadow
+# the cmd/flue package directory.
+/flue
 .DS_Store
 .superpowers/
