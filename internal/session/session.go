@@ -77,6 +77,7 @@ type Session struct {
 	info       Info
 	exitedAt   time.Time
 	closed     bool
+	reaped     bool // true once cmd.Wait() has returned; the pid may be recycled
 	exitedOnce sync.Once
 }
 
@@ -121,8 +122,23 @@ func (s *Session) Signal(sig os.Signal) error {
 	if s.closed || s.cmd.Process == nil {
 		return ErrSessionClosed
 	}
+	if s.reaped {
+		// cmd.Wait() has already returned, so the OS is free to recycle
+		// this pid for an unrelated process at any time — signalling -pid
+		// again could hit whatever now leads that group instead. There is
+		// nothing left to signal, which is not an error the caller needs
+		// to special-case; it's the same "already gone" outcome
+		// signalGroup already treats as success via ESRCH, just observed
+		// a different way.
+		return nil
+	}
 	return signalGroup(s.cmd.Process.Pid, sig)
 }
+
+// killGroup is syscall.Kill, indirected through a package variable so tests
+// can substitute a spy and assert a group signal was (or was not) issued
+// without depending on real process lifecycle or pid-reuse timing.
+var killGroup = syscall.Kill
 
 // signalGroup delivers sig to the process group led by pid. pty.StartWithSize
 // starts the leader in a new session (Setsid), which makes it its own
@@ -131,12 +147,17 @@ func (s *Session) Signal(sig os.Signal) error {
 // closing a real terminal window takes its whole job tree down with it. A
 // group that has already exited (ESRCH) is not treated as an error the
 // caller needs to handle.
+//
+// Callers must have already established (under s.mu, consistently with how
+// markExited sets s.reaped under the same lock) that the pid has not yet
+// been reaped: once cmd.Wait() has returned, the pid is eligible for reuse
+// by the kernel and must never be signalled again.
 func signalGroup(pid int, sig os.Signal) error {
 	ss, ok := sig.(syscall.Signal)
 	if !ok {
 		return fmt.Errorf("session: signal %v is not a syscall.Signal", sig)
 	}
-	if err := syscall.Kill(-pid, ss); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := killGroup(-pid, ss); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
 	return nil
@@ -209,16 +230,24 @@ func (s *Session) Close() error {
 	for sub := range s.subs {
 		s.dropLocked(sub)
 	}
-	s.mu.Unlock()
-
-	if s.cmd.Process != nil {
+	if !s.reaped && s.cmd.Process != nil {
 		// Kill the whole process group, not just the leader: a background
 		// child (e.g. a job started with &) keeps its inherited stdout/
 		// stderr open on the pty slave even after the leader exits, which
 		// would otherwise keep pump's Read blocked forever waiting for a
 		// hangup that never comes.
+		//
+		// This runs while still holding s.mu, the same lock markExited
+		// holds across its own cmd.Wait() call (see below), so this check
+		// and that reap are fully serialised: either this observes
+		// s.reaped already true (Wait has returned, pid may be recycled,
+		// skip signalling) and does nothing, or it runs first and the pid
+		// is still guaranteed live for the signal to land on. A session
+		// that already exited on its own has nothing left to kill.
 		_ = signalGroup(s.cmd.Process.Pid, syscall.SIGKILL)
 	}
+	s.mu.Unlock()
+
 	return s.pty.Close()
 }
 
@@ -257,6 +286,19 @@ func (s *Session) pump() {
 
 func (s *Session) markExited() {
 	s.exitedOnce.Do(func() {
+		// s.mu is held across cmd.Wait() itself, not just the state update
+		// after it: Signal and Close both check s.reaped and (if not
+		// reaped) call signalGroup while holding s.mu too, so this is what
+		// makes "is the pid still safe to signal" and "reap the pid" fully
+		// mutually exclusive. pump only calls markExited after the pty's
+		// master Read has already errored out, which — since that error
+		// means the slave has been fully released — implies the process
+		// is already a zombie; Wait() here just collects it and should
+		// return immediately, so holding the lock across it does not
+		// stall other session operations in practice.
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
 		code := 0
 		if err := s.cmd.Wait(); err != nil {
 			var ee *exec.ExitError
@@ -266,13 +308,12 @@ func (s *Session) markExited() {
 				code = -1
 			}
 		}
-		s.mu.Lock()
 		s.info.State = "exited"
 		s.info.ExitCode = code
 		s.exitedAt = s.clock()
+		s.reaped = true
 		for sub := range s.subs {
 			s.dropLocked(sub)
 		}
-		s.mu.Unlock()
 	})
 }

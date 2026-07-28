@@ -359,3 +359,107 @@ func TestSignalReachesChildProcess(t *testing.T) {
 
 	waitGone(t, childPID, 2*time.Second)
 }
+
+// spyKillGroup substitutes killGroup with a spy that records every pid
+// signalled and delegates to the real syscall, so tests can assert on
+// whether a group signal was issued at all — a property that can't be
+// observed reliably from wall-clock timing or from watching a process
+// disappear, especially when the point of the test is that nothing should
+// be signalled. It is restored via t.Cleanup regardless of how the test
+// ends.
+func spyKillGroup(t *testing.T) *[]int {
+	t.Helper()
+	var calls []int
+	orig := killGroup
+	killGroup = func(pid int, sig syscall.Signal) error {
+		calls = append(calls, pid)
+		return orig(pid, sig)
+	}
+	t.Cleanup(func() { killGroup = orig })
+	return &calls
+}
+
+// waitExited polls (rather than sleeping a fixed interval) until s reaches
+// the "exited" state. Once observed, markExited's cmd.Wait() and its
+// s.reaped update have both already completed — both happen inside the
+// same locked section that sets State, before it is released.
+func waitExited(t *testing.T, s *Session, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for s.Info().State != "exited" {
+		select {
+		case <-deadline:
+			t.Fatalf("session did not reach \"exited\" within %s", timeout)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestSignalOnReapedSessionIssuesNoSyscall guards against the pid-reuse
+// hazard of signalling a session after cmd.Wait() has already reaped it:
+// once reaped, the kernel is free to recycle that pid for an unrelated
+// process (plausibly another session's leader, since Setsid makes every
+// leader its own process-group leader too), so signalGroup's negated-pid
+// kill must never be issued again. Signal must also not surface this as an
+// error the caller has to special-case — there is simply nothing left to
+// signal.
+func TestSignalOnReapedSessionIssuesNoSyscall(t *testing.T) {
+	calls := spyKillGroup(t)
+
+	r := NewRegistry(time.Now)
+	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	waitExited(t, s, 5*time.Second)
+	*calls = nil // natural exit alone must not have signalled anything either
+
+	if err := s.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal on an already-exited session returned an error the caller must handle: %v", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("Signal on an already-exited (reaped) session issued %d group-kill syscall(s), want 0 — this would risk signalling a recycled pid", len(*calls))
+	}
+}
+
+// TestCloseOnReapedSessionIssuesNoSyscallButStillTearsDown guards against
+// the same pid-reuse hazard on the Close path — Registry.Reap calls Close
+// on every naturally-exited session it collects, which is exactly this
+// case — while confirming Close still does its other job: releasing the
+// pty and closing out any subscriber that's still attached.
+func TestCloseOnReapedSessionIssuesNoSyscallButStillTearsDown(t *testing.T) {
+	calls := spyKillGroup(t)
+
+	r := NewRegistry(time.Now)
+	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	waitExited(t, s, 5*time.Second)
+	*calls = nil
+
+	sub := s.Subscribe(0)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if len(*calls) != 0 {
+		t.Fatalf("Close on an already-exited (reaped) session issued %d group-kill syscall(s), want 0 — this would risk signalling a recycled pid", len(*calls))
+	}
+
+	select {
+	case _, ok := <-sub.C:
+		if ok {
+			t.Fatal("C delivered a value after Close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not close an already-attached subscriber's channel")
+	}
+
+	if _, err := s.pty.Write([]byte("x")); err == nil {
+		t.Fatal("pty.Write succeeded after Close; want Close to have released the pty even when it skipped signalling")
+	}
+}
