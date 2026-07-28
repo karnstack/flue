@@ -61,3 +61,40 @@ func TestTitleScannerBoundsRunawaySequence(t *testing.T) {
 		t.Fatalf("Feed = %q, %v; want %q, true", title, ok, "ok")
 	}
 }
+
+func TestTitleScannerUnterminatedOtherOSCFollowedByTitle(t *testing.T) {
+	s := NewTitleScanner()
+	// Long unterminated OSC 8 sequence, longer than maxTitleLen
+	long := make([]byte, 0, maxTitleLen+64)
+	long = append(long, "\x1b]8;;"...)
+	for i := 0; i < maxTitleLen+32; i++ {
+		long = append(long, 'x')
+	}
+	if _, ok := s.Feed(long); ok {
+		t.Fatal("Feed accepted an unterminated oversized ignored sequence")
+	}
+	// The scanner must have abandoned the ignored sequence, so a well-formed
+	// OSC 0 title that follows still parses.
+	title, ok := s.Feed([]byte("\x1b]0;recovered\x07"))
+	if !ok || title != "recovered" {
+		t.Fatalf("Feed = %q, %v; want %q, true", title, ok, "recovered")
+	}
+}
+
+func TestTitleScannerESCMidParameter(t *testing.T) {
+	s := NewTitleScanner()
+	// ESC in the middle of the parameter should reset and re-dispatch
+	title, ok := s.Feed([]byte("\x1b]0\x1b]0;second\x07"))
+	if !ok || title != "second" {
+		t.Fatalf("Feed = %q, %v; want %q, true", title, ok, "second")
+	}
+}
+
+func TestTitleScannerESCMidPayload(t *testing.T) {
+	s := NewTitleScanner()
+	// ESC in the middle of the payload should reset and re-dispatch
+	title, ok := s.Feed([]byte("\x1b]0;first\x1b\x1b]0;second\x07"))
+	if !ok || title != "second" {
+		t.Fatalf("Feed = %q, %v; want %q, true", title, ok, "second")
+	}
+}
