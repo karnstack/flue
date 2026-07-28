@@ -86,13 +86,18 @@ func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
 	}
 
 	s := &Session{
-		id:    newID(),
-		pty:   f,
-		cmd:   cmd,
-		clock: r.clock,
-		ring:  NewRing(size),
-		title: NewTitleScanner(),
-		subs:  map[*Sub]struct{}{},
+		id:        newID(),
+		pty:       f,
+		cmd:       cmd,
+		clock:     r.clock,
+		pid:       cmd.Process.Pid,
+		kill:      killGroup,
+		sigReq:    make(chan sigRequest),
+		masterEnd: make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		ring:      NewRing(size),
+		title:     NewTitleScanner(),
+		subs:      map[*Sub]struct{}{},
 		info: Info{
 			Cwd:        cwd,
 			Cmd:        argv,
@@ -104,6 +109,7 @@ func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
 	}
 	s.info.ID = s.id
 	go s.pump()
+	go s.supervise()
 
 	r.mu.Lock()
 	r.sessions[s.id] = s
@@ -129,18 +135,28 @@ func (r *Registry) List() []*Session {
 }
 
 // Reap removes sessions that exited more than ExitedRetention ago.
+//
+// Victims are collected under r.mu and closed only after it has been
+// released. Close signals a process group, waits for the session's supervisor
+// to answer and closes a file descriptor; doing any of that while holding r.mu
+// would turn a stall in one session into a stall of Get, List, Spawn and every
+// other session too. The one session call made under r.mu, exitStatus, reads
+// two fields under s.mu and returns.
 func (r *Registry) Reap() {
 	now := r.clock()
+
+	var victims []*Session
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	for id, s := range r.sessions {
-		s.mu.Lock()
-		exited := s.info.State == "exited"
-		at := s.exitedAt
-		s.mu.Unlock()
+		exited, at := s.exitStatus()
 		if exited && now.Sub(at) >= ExitedRetention {
-			_ = s.Close()
+			victims = append(victims, s)
 			delete(r.sessions, id)
 		}
+	}
+	r.mu.Unlock()
+
+	for _, s := range victims {
+		_ = s.Close()
 	}
 }
