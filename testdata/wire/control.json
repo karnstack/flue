@@ -8,7 +8,10 @@
   { "name": "signal",      "json": { "type": "signal", "ref": 3, "sig": "SIGINT" } },
   { "name": "close",       "json": { "type": "close", "ref": 3 } },
   { "name": "welcome",     "json": { "type": "welcome", "daemonId": "local", "host": "macbook", "ver": "0.1.0" } },
-  { "name": "sessions",    "json": { "type": "sessions", "sessions": [] } },
+  { "name": "sessions",    "json": { "type": "sessions", "sessions": [
+    { "id": "s1", "title": "zsh", "cwd": "/home/karn/code", "cmd": ["zsh", "-l"], "state": "running", "exitCode": 0, "cols": 120, "rows": 40, "lastActive": "2026-07-28T10:30:00Z" },
+    { "id": "s2", "title": "vim", "cwd": "/home/karn/work", "cmd": ["vim", "file.txt"], "state": "exited", "exitCode": 1, "cols": 80, "rows": 24, "lastActive": "2026-07-28T09:00:00Z" }
+  ] } },
   { "name": "attached",    "json": { "type": "attached", "ref": 3, "id": "a1b2c3d4e5f60718", "cols": 120, "rows": 40, "title": "zsh", "seq": 4096, "truncated": false, "primary": true } },
   { "name": "attachedTrunc","json": { "type": "attached", "ref": 4, "id": "a1b2c3d4e5f60718", "cols": 120, "rows": 40, "title": "zsh", "seq": 99000, "truncated": true, "primary": false } },
   { "name": "exit",        "json": { "type": "exit", "ref": 3, "code": 130 } },

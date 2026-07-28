@@ -83,6 +83,9 @@ func TestEncodeControlSetsTypeField(t *testing.T) {
 
 // TestGoldenControlMessages pins the wire format so the Go and TypeScript
 // implementations cannot drift. web/src/client decodes this same file.
+// It verifies field-level fidelity via round-trip: decode the fixture,
+// re-encode it, and ensure the JSON round-trips cleanly. This catches
+// wrong tags, missing fields, and wrong discriminators.
 func TestGoldenControlMessages(t *testing.T) {
 	raw, err := os.ReadFile("../../testdata/wire/control.json")
 	if err != nil {
@@ -99,8 +102,83 @@ func TestGoldenControlMessages(t *testing.T) {
 		t.Fatal("golden file has no cases")
 	}
 	for _, c := range cases {
-		if _, err := DecodeControl(c.JSON); err != nil {
+		// Decode the fixture JSON to a concrete message type.
+		msg, err := DecodeControl(c.JSON)
+		if err != nil {
 			t.Errorf("%s: DecodeControl: %v", c.Name, err)
+			continue
 		}
+		// Re-encode the decoded message.
+		reenc, err := EncodeControl(msg)
+		if err != nil {
+			t.Errorf("%s: EncodeControl: %v", c.Name, err)
+			continue
+		}
+		// Compare fixture and re-encoded as maps. This catches wrong tags,
+		// dropped fields, and wrong discriminators. Omitempty fields stay
+		// absent on both sides, so they do not cause false failures.
+		var fixtureMap, reencMap map[string]any
+		if err := json.Unmarshal(c.JSON, &fixtureMap); err != nil {
+			t.Errorf("%s: unmarshal fixture: %v", c.Name, err)
+			continue
+		}
+		if err := json.Unmarshal(reenc, &reencMap); err != nil {
+			t.Errorf("%s: unmarshal re-encoded: %v", c.Name, err)
+			continue
+		}
+		if !deepEqual(fixtureMap, reencMap) {
+			t.Errorf("%s: fixture and re-encoded do not match\nfixture: %v\nre-encoded: %v",
+				c.Name, fixtureMap, reencMap)
+		}
+	}
+}
+
+// deepEqual recursively compares two any values for equality, handling
+// nested maps and slices. Used by TestGoldenControlMessages to verify
+// round-trip fidelity while tolerating type differences between JSON
+// numbers (int vs float64) and nested structures.
+func deepEqual(a, b any) bool {
+	switch av := a.(type) {
+	case map[string]any:
+		bv, ok := b.(map[string]any)
+		if !ok {
+			return false
+		}
+		if len(av) != len(bv) {
+			return false
+		}
+		for k, v := range av {
+			bv2, ok := bv[k]
+			if !ok || !deepEqual(v, bv2) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		bv, ok := b.([]any)
+		if !ok {
+			return false
+		}
+		if len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !deepEqual(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	case float64:
+		// JSON unmarshals numbers as float64. Compare with tolerance for
+		// integers encoded as JSON numbers.
+		bv, ok := b.(float64)
+		if !ok {
+			return false
+		}
+		return av == bv
+	case string, bool, nil:
+		return av == b
+	default:
+		return av == b
 	}
 }
