@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -44,16 +45,8 @@ func LoadOrCreateToken() (string, error) {
 	}
 	path := filepath.Join(dir, "token")
 
-	if b, err := os.ReadFile(path); err == nil {
-		if tok := strings.TrimSpace(string(b)); tok != "" {
-			// Same reasoning as Dir: an existing file's permissions are
-			// not something we control, so re-assert 0600 before trusting
-			// its contents as a secret.
-			if err := os.Chmod(path, 0o600); err != nil {
-				return "", err
-			}
-			return tok, nil
-		}
+	if tok, ok := readExistingToken(path); ok {
+		return tok, nil
 	}
 
 	var raw [32]byte
@@ -64,5 +57,43 @@ func LoadOrCreateToken() (string, error) {
 	if err := os.WriteFile(path, []byte(tok), 0o600); err != nil {
 		return "", err
 	}
+	// os.WriteFile only applies its mode argument when it creates the
+	// file; if path already existed (blank content, or the loose-mode
+	// case readExistingToken just rejected) it truncates in place and
+	// leaves whatever mode was already there. Chmod explicitly so a
+	// freshly generated secret is never persisted at a looser mode than
+	// the one it's replacing.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return "", err
+	}
 	return tok, nil
+}
+
+// readExistingToken returns the token stored at path, but only if it's
+// safe to trust: non-blank content, and — where the platform's permission
+// bits are meaningful — stored at exactly 0600. A looser mode is treated
+// exactly like blank content: not fixed in place, but discarded. A loose
+// mode is positive evidence the secret may already have been readable by
+// another local user or process (a stray chmod, a backup/sync tool, a
+// migration from an older version); silently tightening the mode and
+// continuing to trust the same token would make the daemon look secure
+// while it kept using a known-exposed credential, and it would erase the
+// only signal a user could ever have noticed. Regenerating costs one
+// invalidated browser session.
+func readExistingToken(path string) (tok string, ok bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	tok = strings.TrimSpace(string(b))
+	if tok == "" {
+		return "", false
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			return "", false
+		}
+	}
+	return tok, true
 }

@@ -153,3 +153,101 @@ func TestAuthRejectsEmptyConfiguredToken(t *testing.T) {
 		t.Fatal("Check err = nil for empty configured token and no supplied token, want an error")
 	}
 }
+
+// TestAuthRejectsSameSiteCrossPortViaFetchMetadata guards against a gap the
+// Origin check alone leaves open. SameSite=Strict computes "site" as
+// scheme+host — the port is not part of it — so a page on another loopback
+// port (e.g. an unrelated dev server at 127.0.0.1:3000) is same-site with
+// this daemon at 127.0.0.1:7717. Its Origin-less GETs (an <img> tag, a
+// plain navigation) still carry the flue_token cookie, because SameSite
+// doesn't distinguish the ports. A missing Origin plus a valid cookie plus
+// a valid Host would otherwise authenticate this request. Sec-Fetch-Site is
+// the signal that actually tells same-site-different-port apart from
+// same-origin: a modern browser sends "same-site" (not "same-origin") for
+// exactly this request shape, so Check must reject it.
+func TestAuthRejectsSameSiteCrossPortViaFetchMetadata(t *testing.T) {
+	a := NewAuth(testToken, 7717)
+	r := req(t, "127.0.0.1:7717", "", "", testToken)
+	r.Header.Set("Sec-Fetch-Site", "same-site")
+	if err := a.Check(r); err == nil {
+		t.Fatal("Check err = nil for Sec-Fetch-Site: same-site, want rejection")
+	}
+}
+
+// TestAuthRejectsCrossSiteFetchMetadata is the more obvious sibling of the
+// same-site case above: a request whose own metadata says it originated
+// from a different site must not pass regardless of what Origin/Host say.
+func TestAuthRejectsCrossSiteFetchMetadata(t *testing.T) {
+	a := NewAuth(testToken, 7717)
+	r := req(t, "127.0.0.1:7717", "", "?t="+testToken, "")
+	r.Header.Set("Sec-Fetch-Site", "cross-site")
+	if err := a.Check(r); err == nil {
+		t.Fatal("Check err = nil for Sec-Fetch-Site: cross-site, want rejection")
+	}
+}
+
+// TestAuthAllowsSameOriginAndNoneFetchMetadata is the positive control for
+// the two tests above: "same-origin" (the flue web app talking to its own
+// daemon) and "none" (a direct, user-typed navigation — the first-load
+// token-in-URL flow) must keep working.
+func TestAuthAllowsSameOriginAndNoneFetchMetadata(t *testing.T) {
+	a := NewAuth(testToken, 7717)
+	for _, sfs := range []string{"same-origin", "none"} {
+		r := req(t, "127.0.0.1:7717", "", "?t="+testToken, "")
+		r.Header.Set("Sec-Fetch-Site", sfs)
+		if err := a.Check(r); err != nil {
+			t.Errorf("Sec-Fetch-Site=%q: Check err = %v, want nil", sfs, err)
+		}
+	}
+}
+
+// TestAuthRejectsMultipleOriginHeaders guards against relying on
+// http.Header.Get, which silently returns only the first value of a
+// repeated header. A second Origin value must not be able to ride along
+// unexamined behind a first value that happens to be allowed.
+func TestAuthRejectsMultipleOriginHeaders(t *testing.T) {
+	a := NewAuth(testToken, 7717)
+	r := req(t, "127.0.0.1:7717", "http://127.0.0.1:7717", "?t="+testToken, "")
+	r.Header.Add("Origin", "https://evil.example.com")
+	if err := a.Check(r); err == nil {
+		t.Fatal("Check err = nil for a request with two Origin headers, want rejection")
+	}
+}
+
+// TestAuthRejectsURLHostMismatch makes the Host check independent of the
+// invariant (upheld by net/http today, but not guaranteed by this package)
+// that r.URL.Host and r.Host always agree. An absolute-form request target
+// is the case where they could plausibly diverge; reject outright rather
+// than pick one field and ignore the other.
+func TestAuthRejectsURLHostMismatch(t *testing.T) {
+	a := NewAuth(testToken, 7717)
+	r := req(t, "127.0.0.1:7717", "http://127.0.0.1:7717", "?t="+testToken, "")
+	r.URL.Host = "evil.example.com:7717"
+	if err := a.Check(r); err == nil {
+		t.Fatal("Check err = nil when r.URL.Host and r.Host disagree, want rejection")
+	}
+}
+
+// TestMiddlewareSetsNoCookieOnRejectedRequest guards the ordering invariant
+// in Middleware directly, rather than relying on reading the source: the
+// cookie exchange must never run before Check has approved the request. If
+// it were ever hoisted above Check, the daemon would hand its token to any
+// cross-origin prober carrying a "t=" query parameter.
+func TestMiddlewareSetsNoCookieOnRejectedRequest(t *testing.T) {
+	a := NewAuth(testToken, 7717)
+	h := a.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler ran for an unauthenticated request")
+	}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req(t, "127.0.0.1:7717", "https://evil.example.com", "?t="+testToken, ""))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == CookieName {
+			t.Fatalf("rejected request still got a %s cookie set", CookieName)
+		}
+	}
+}

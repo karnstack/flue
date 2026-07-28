@@ -99,7 +99,12 @@ func TestLoadOrCreateTokenRegeneratesWhenFileIsEmpty(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	path := filepath.Join(dir, "token")
-	if err := os.WriteFile(path, []byte("  \n"), 0o600); err != nil {
+	// Pre-created at 0644, not 0600: os.WriteFile only applies its mode
+	// argument when it creates a file. The empty-content regeneration
+	// path below truncates and rewrites this file in place, so without an
+	// explicit chmod after that write, the freshly generated secret would
+	// be persisted at this looser, pre-existing mode.
+	if err := os.WriteFile(path, []byte("  \n"), 0o644); err != nil {
 		t.Fatalf("write empty token file: %v", err)
 	}
 
@@ -113,9 +118,19 @@ func TestLoadOrCreateTokenRegeneratesWhenFileIsEmpty(t *testing.T) {
 	if len(tok) != 64 {
 		t.Errorf("len(token) = %d, want 64", len(tok))
 	}
+
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("token file mode = %o, want 0600 (regenerating over a pre-existing file must not leave its old, looser mode in place)", mode)
+		}
+	}
 }
 
-func TestLoadOrCreateTokenTightensPreExistingLoosePermissions(t *testing.T) {
+func TestLoadOrCreateTokenRegeneratesOnLoosePreExistingPermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix permission bits only")
 	}
@@ -127,12 +142,24 @@ func TestLoadOrCreateTokenTightensPreExistingLoosePermissions(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	path := filepath.Join(dir, "token")
-	if err := os.WriteFile(path, []byte("deadbeef"), 0o644); err != nil {
+	const stale = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
 		t.Fatalf("pre-create token file: %v", err)
 	}
 
-	if _, err := LoadOrCreateToken(); err != nil {
+	tok, err := LoadOrCreateToken()
+	if err != nil {
 		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	// A loose mode is evidence the old secret may already have been
+	// exposed to another local user or process. LoadOrCreateToken must
+	// not keep trusting it — it must discard it and mint a new one, not
+	// just tighten the mode on an already-exposed value.
+	if tok == stale {
+		t.Fatal("LoadOrCreateToken returned the pre-existing token unchanged despite its loose permissions, want a freshly generated token")
+	}
+	if len(tok) != 64 {
+		t.Errorf("len(token) = %d, want 64", len(tok))
 	}
 
 	info, err := os.Stat(path)
@@ -140,7 +167,15 @@ func TestLoadOrCreateTokenTightensPreExistingLoosePermissions(t *testing.T) {
 		t.Fatalf("Stat: %v", err)
 	}
 	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("token file mode = %o, want 0600 (LoadOrCreateToken must tighten pre-existing loose permissions)", mode)
+		t.Errorf("token file mode = %o, want 0600", mode)
+	}
+
+	tok2, err := LoadOrCreateToken()
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken (second call): %v", err)
+	}
+	if tok2 != tok {
+		t.Errorf("token changed across calls after regeneration: %q != %q, want persisted", tok, tok2)
 	}
 }
 

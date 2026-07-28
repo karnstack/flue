@@ -15,9 +15,10 @@ import (
 const CookieName = "flue_token"
 
 var (
-	ErrNoToken   = errors.New("local: missing or invalid token")
-	ErrBadOrigin = errors.New("local: origin not allowed")
-	ErrBadHost   = errors.New("local: host not allowed")
+	ErrNoToken      = errors.New("local: missing or invalid token")
+	ErrBadOrigin    = errors.New("local: origin not allowed")
+	ErrBadHost      = errors.New("local: host not allowed")
+	ErrBadFetchSite = errors.New("local: fetch metadata not allowed")
 )
 
 // Auth enforces loopback authentication. All three checks are required:
@@ -45,17 +46,49 @@ func NewAuth(token string, port int) *Auth {
 
 // Check reports whether r is authenticated.
 func (a *Auth) Check(r *http.Request) error {
+	// An absolute-form request target ("GET http://x/y HTTP/1.1", used by
+	// proxies) is parsed by net/http with r.Host set from the request
+	// line; the two fields only diverge if that invariant is ever broken
+	// between the socket and here. Don't depend on net/http always
+	// getting that right — reject any divergence outright.
+	if r.URL.Host != "" && r.URL.Host != r.Host {
+		return ErrBadHost
+	}
 	if _, ok := a.hosts[r.Host]; !ok {
 		return ErrBadHost
 	}
+
 	// A missing Origin is allowed: non-browser clients (curl, the flue CLI)
 	// do not send one, and only browsers can be induced into cross-origin
 	// requests. A present-but-unlisted Origin is always rejected.
+	// http.Header.Get silently returns only the first value of a repeated
+	// header, so a second, smuggled Origin must be rejected outright
+	// rather than left unexamined behind an allowed first one.
+	if len(r.Header.Values("Origin")) > 1 {
+		return ErrBadOrigin
+	}
 	if origin := r.Header.Get("Origin"); origin != "" {
 		if _, ok := a.origins[origin]; !ok {
 			return ErrBadOrigin
 		}
 	}
+
+	// Origin alone isn't enough: SameSite=Strict scopes "site" to
+	// scheme+host, not scheme+host+port, so a page on another loopback
+	// port (an unrelated dev server at 127.0.0.1:3000, say) is same-site
+	// with this daemon. Its plain, Origin-less GETs — an <img> tag, a
+	// top-level navigation — still carry the flue_token cookie, because
+	// SameSite doesn't see the port difference. Sec-Fetch-Site does: a
+	// browser sends "same-site" (not "same-origin") for exactly that
+	// request shape, and "cross-site" for a request from an unrelated
+	// site. Every modern browser sends this header on every request;
+	// curl and net/http clients never do, so its absence is treated the
+	// same as a missing Origin — not evidence of an attack, just evidence
+	// of a non-browser client.
+	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" && sfs != "same-origin" && sfs != "none" {
+		return ErrBadFetchSite
+	}
+
 	if !a.validToken(r) {
 		return ErrNoToken
 	}
