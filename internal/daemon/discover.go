@@ -68,22 +68,36 @@ func WriteRuntime(port int) error {
 // confirm what is actually listening before trusting it with anything —
 // above all before sending it the auth token.
 func ReadRuntime() (int, bool) {
+	port, _, ok := ReadRuntimeRecord()
+	return port, ok
+}
+
+// ReadRuntimeRecord returns the recorded port together with the PID of the
+// process that wrote it.
+//
+// The PID is the only part of the record that says anything about *whose*
+// daemon this is. What is listening on a port can be identified as flue by
+// asking it, but one flue daemon looks exactly like another — including one
+// belonging to a different user on a shared machine, which must never be sent
+// this user's token. A live process the caller is allowed to signal is the
+// available evidence that the recorded daemon is its own.
+func ReadRuntimeRecord() (port, pid int, ok bool) {
 	path, err := runtimePath()
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	var rf runtimeFile
 	if err := json.Unmarshal(b, &rf); err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	if rf.Port == 0 {
-		return 0, false
+		return 0, 0, false
 	}
-	return rf.Port, true
+	return rf.Port, rf.PID, true
 }
 
 // ClearRuntime removes this process's runtime record. A daemon calls it on the

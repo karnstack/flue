@@ -2,10 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
@@ -226,6 +231,145 @@ func TestEnsureDaemonSpawnsExactlyOnceUnderConcurrentCallers(t *testing.T) {
 	if n := spawns.Load(); n != 1 {
 		t.Fatalf("%d concurrent ensureDaemon calls spawned %d daemons, want exactly 1", callers, n)
 	}
+}
+
+// TestEnsureDaemonIgnoresARecordFromADeadProcess: the record outlives the
+// daemon, and the port it names is then free for anything to take. A real flue
+// daemon answering there is not enough to adopt it — the record has to name a
+// process that still exists.
+func TestEnsureDaemonIgnoresARecordFromADeadProcess(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	port := newTestDaemon(t, "tok")
+	writeRuntimeRecord(t, port, deadPID(t))
+
+	var spawns atomic.Int32
+	restore := swapSpawn(t, func() error {
+		spawns.Add(1)
+		return errors.New("spawn refused by the test")
+	})
+	defer restore()
+
+	if got, err := ensureDaemon(); err == nil {
+		t.Fatalf("ensureDaemon = %d, nil for a record naming a dead process; want it to start a new daemon instead of adopting that one", got)
+	}
+	if n := spawns.Load(); n != 1 {
+		t.Fatalf("ensureDaemon made %d spawn attempts, want 1", n)
+	}
+}
+
+// TestEnsureDaemonIgnoresAnotherUsersRecord is the case a "is a flue daemon
+// listening there" check cannot catch on its own, because the answer is yes:
+// on a shared machine the process now holding flue's default port may be
+// another user's flue daemon, which looks identical from outside. Adopting it
+// would hand that user this user's token, and the token is unrestricted shell
+// access. PID 1 stands in for it — a live process this user cannot signal.
+func TestEnsureDaemonIgnoresAnotherUsersRecord(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: every live process is signalable, so there is no foreign PID to test with")
+	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	port := newTestDaemon(t, "tok")
+	writeRuntimeRecord(t, port, 1) // init/launchd: alive, and not ours
+
+	var spawns atomic.Int32
+	restore := swapSpawn(t, func() error {
+		spawns.Add(1)
+		return errors.New("spawn refused by the test")
+	})
+	defer restore()
+
+	if got, err := ensureDaemon(); err == nil {
+		t.Fatalf("ensureDaemon = %d, nil for a record owned by another user; want it not to adopt that daemon", got)
+	}
+	if n := spawns.Load(); n != 1 {
+		t.Fatalf("ensureDaemon made %d spawn attempts, want 1", n)
+	}
+}
+
+func TestOwnedByUs(t *testing.T) {
+	if !ownedByUs(os.Getpid()) {
+		t.Error("ownedByUs(own pid) = false, want true")
+	}
+	if !ownedByUs(0) {
+		t.Error("ownedByUs(0) = false; a record with no PID is not evidence of anything and must be left to the probe")
+	}
+	if ownedByUs(-1) {
+		t.Error("ownedByUs(-1) = true; kill(2) reads a negative pid as a process group, which must never be treated as ownership")
+	}
+	if pid := deadPID(t); ownedByUs(pid) {
+		t.Errorf("ownedByUs(%d) = true for a reaped process, want false", pid)
+	}
+}
+
+// TestLoadTokenLockedIsConsistentAcrossConcurrentCallers is the second half of
+// the start-lock story, and the half that actually matters. Serializing the
+// *spawn* is only useful if every process also ends up holding the same token:
+// config.LoadOrCreateToken generates on first use and installs with a
+// last-writer-wins rename, so two unserialized creations leave one caller
+// holding a token that is not the one on disk. When that caller is the daemon,
+// every later flue open reads the other token and gets a 401 forever.
+func TestLoadTokenLockedIsConsistentAcrossConcurrentCallers(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	const callers = 8
+	got := make([]string, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i], errs[i] = loadTokenLocked()
+		}()
+	}
+	wg.Wait()
+
+	dir, err := config.Dir()
+	if err != nil {
+		t.Fatalf("config.Dir: %v", err)
+	}
+	onDisk, err := os.ReadFile(filepath.Join(dir, "token"))
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	want := strings.TrimSpace(string(onDisk))
+	if want == "" {
+		t.Fatal("token file is empty after loadTokenLocked")
+	}
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: loadTokenLocked: %v", i, errs[i])
+		}
+		if got[i] != want {
+			t.Fatalf("caller %d got token %q but the token on disk is %q; a daemon holding one and the CLI reading the other means 401 on every request", i, got[i], want)
+		}
+	}
+}
+
+// writeRuntimeRecord writes a runtime record naming an arbitrary PID, which
+// daemon.WriteRuntime deliberately will not do (it always records its own).
+func writeRuntimeRecord(t *testing.T, port, pid int) {
+	t.Helper()
+	dir, err := config.Dir()
+	if err != nil {
+		t.Fatalf("config.Dir: %v", err)
+	}
+	rec := fmt.Sprintf(`{"port":%d,"pid":%d}`, port, pid)
+	if err := os.WriteFile(filepath.Join(dir, "runtime.json"), []byte(rec), 0o600); err != nil {
+		t.Fatalf("write runtime record: %v", err)
+	}
+}
+
+// deadPID returns the PID of a process that has exited and been reaped.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run true: %v", err)
+	}
+	return cmd.Process.Pid
 }
 
 func swapSpawn(t *testing.T, fn func() error) (restore func()) {

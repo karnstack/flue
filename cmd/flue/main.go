@@ -112,7 +112,11 @@ func cmdServe(args []string) error {
 		return fmt.Errorf("port must be between 1 and 65535, got %d", *port)
 	}
 
-	token, err := loadToken()
+	// Locked, because flue serve is one of the two ways a token gets created
+	// and the other one (flue open, via ensureDaemon) can be running at the
+	// same time in another terminal or from a login service. See
+	// loadTokenLocked for what an unserialized creation costs.
+	token, err := loadTokenLocked()
 	if err != nil {
 		return fmt.Errorf("load auth token: %w", err)
 	}
@@ -273,13 +277,17 @@ func openURL(port int, token, cwd string) string {
 }
 
 func cmdStatus() error {
-	port, ok := daemon.ReadRuntime()
+	recorded, _, ok := daemon.ReadRuntimeRecord()
 	if !ok {
 		fmt.Println("daemon: not running")
 		return nil
 	}
-	if !daemonAt(port) {
-		fmt.Printf("daemon: not running (stale runtime record for port %d)\n", port)
+	// A record naming a process that is gone, or one this user cannot signal,
+	// is as stale as a record naming a port nothing answers on: either way
+	// the daemon it describes is not this user's to talk to.
+	port, ok := ourDaemon()
+	if !ok {
+		fmt.Printf("daemon: not running (stale runtime record for port %d)\n", recorded)
 		return nil
 	}
 	token, err := loadToken()
@@ -321,23 +329,73 @@ var probeClient = &http.Client{
 	},
 }
 
+// ourDaemon returns the recorded port of a daemon this process may treat as
+// its own, and is the only way flue open and flue status are allowed to
+// decide where the daemon is.
+//
+// It is two checks because one is not enough, and the shortfall of each is
+// what the other covers:
+//
+//   - The record outlives the daemon that wrote it — a crash, a kill -9, a
+//     reboot with the config directory intact — and the port it names is then
+//     free for anything else on the machine to take. So what is listening has
+//     to identify itself as flue (daemonAt) before it is sent anything.
+//
+//   - But one flue daemon looks exactly like another, and on a shared machine
+//     the process now holding flue's default port may be another user's
+//     daemon. It would answer daemonAt perfectly. Sending it this user's
+//     token — which is unrestricted shell access as this user — is the worst
+//     outcome in this file, and it is also the *likeliest* mistaken identity,
+//     since flue's own default port is exactly the port another flue picks.
+//     Signal 0 against the recorded PID is the available evidence: it
+//     succeeds only for a live process this user is allowed to signal, so a
+//     dead daemon (ESRCH) and another user's daemon (EPERM) both fail it.
+//
+// Neither check is proof. A PID can be recycled onto an unrelated process of
+// this user's, and a local process can trivially imitate the daemon's
+// refusal, so a determined local attacker who can bind the port first is not
+// shut out by this — only by not being able to bind it. What this does rule
+// out is every accident: stale records, ports reused by unrelated services,
+// and other users' daemons.
+func ourDaemon() (int, bool) {
+	port, pid, ok := daemon.ReadRuntimeRecord()
+	if !ok || !ownedByUs(pid) {
+		return 0, false
+	}
+	if !daemonAt(port) {
+		return 0, false
+	}
+	return port, true
+}
+
+// ownedByUs reports whether pid is a live process this user could signal.
+// Signal 0 runs the existence and permission checks and delivers nothing.
+//
+// A record with no PID at all is not evidence of anything — nothing flue
+// writes omits it — so it is left to the probe rather than rejected outright.
+func ownedByUs(pid int) bool {
+	if pid == 0 {
+		return true
+	}
+	// A negative PID is a process group to kill(2), not a process, and -1 is
+	// every process it can reach. Neither is an ownership question, so never
+	// let one become a syscall.
+	if pid < 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
 // daemonAt reports whether a flue daemon — not merely *something* — is
 // listening on port.
-//
-// A bare "can I open a TCP connection" check is not enough to act on, and the
-// difference is a security one rather than a cosmetic one. A runtime record
-// outlives the daemon that wrote it (a crash, a kill -9, a reboot with the
-// config directory intact), and the port it names is then free for any other
-// local process to take. Both flue open and flue status go on to send the auth
-// token to whatever answers there, and that token is unrestricted shell access
-// on this machine. So the port must identify itself as flue *before* it is
-// trusted with anything.
 //
 // The probe deliberately carries no token: it asks an authenticated endpoint
 // for something it is not allowed to have, and a flue daemon is recognised by
 // the shape of its refusal — 401 from local.Auth's middleware, wrapped in the
-// response headers daemon.Server sets on every response. A wrong guess costs
-// only a spurious "not running", never a leaked credential.
+// response headers daemon.Server sets on every response. So being wrong about
+// an unrelated service costs a spurious "not running", never a leaked
+// credential. It says nothing about *which* flue daemon answered; that is
+// ourDaemon's PID check, and this must not be used without it.
 func daemonAt(port int) bool {
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/sessions", port), nil)
 	if err != nil {
@@ -413,7 +471,7 @@ func fetchSessions(port int, token string) ([]session.Info, error) {
 // makes exactly one flue process responsible for it at a time; everyone else
 // waits for the lock and then re-checks, rather than racing the winner.
 func ensureDaemon() (int, error) {
-	if port, ok := daemon.ReadRuntime(); ok && daemonAt(port) {
+	if port, ok := ourDaemon(); ok {
 		return port, nil
 	}
 
@@ -425,17 +483,14 @@ func ensureDaemon() (int, error) {
 
 	// Whoever held the lock before us may have already finished starting a
 	// daemon while we were waiting for it.
-	if port, ok := daemon.ReadRuntime(); ok && daemonAt(port) {
+	if port, ok := ourDaemon(); ok {
 		return port, nil
 	}
 
-	// Persist the token here, under the lock, before any daemon can generate
-	// one. config.LoadOrCreateToken creates on first use, and its atomic
-	// rename keeps the *file* from tearing — but it does nothing to stop two
-	// daemons each generating their own and the loser's copy being the one
-	// left on disk. Doing it here means the daemon we are about to start
-	// only ever reads a token that already exists.
-	if _, err := loadToken(); err != nil {
+	// Persist the token before any daemon can generate one, under the lock
+	// that keeps the creation single. Doing it here means the daemon we are
+	// about to start only ever reads a token that already exists.
+	if _, err := loadTokenLocked(); err != nil {
 		return 0, fmt.Errorf("load auth token: %w", err)
 	}
 
@@ -445,15 +500,23 @@ func ensureDaemon() (int, error) {
 
 	deadline := time.Now().Add(startTimeout)
 	for time.Now().Before(deadline) {
-		if port, ok := daemon.ReadRuntime(); ok && daemonAt(port) {
+		if port, ok := ourDaemon(); ok {
 			return port, nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	// The most likely reason a daemon we just started never showed up is
-	// that it could not bind. Its output went to /dev/null, so say what can
-	// still be observed from here rather than leaving the user with a bare
-	// timeout.
+	// A daemon we just started and never saw almost certainly could not bind.
+	// Its output went to /dev/null, so report what can still be observed from
+	// here rather than leaving the user with a bare timeout.
+	//
+	// A flue daemon on the port with no record naming it is a real state — a
+	// record deleted by hand, or one this user does not own — and it is not
+	// recoverable from here. Adopting it would mean sending this user's token
+	// to a daemon nothing identifies as theirs, which is the one thing
+	// ourDaemon exists to prevent; so say what is in the way instead.
+	if daemonAt(defaultPort) {
+		return 0, fmt.Errorf("a flue daemon is already listening on 127.0.0.1:%d, but no runtime record identifies it as yours; stop it and run flue open again", defaultPort)
+	}
 	if portOpen(defaultPort) {
 		return 0, fmt.Errorf("daemon did not start within %s: 127.0.0.1:%d is held by another process", startTimeout, defaultPort)
 	}
@@ -497,21 +560,50 @@ func daemonWorkDir() string {
 
 // acquireStartLock serializes ensureDaemon's check-load-spawn sequence
 // across flue processes.
-//
-// It is an flock(2) advisory lock rather than a lock *file*'s mere
-// existence, because the lock must be released if its holder dies partway
-// through starting a daemon — a crash, a kill -9, a panic — and flock ties
-// the lock to the open file descriptor's lifetime, which the kernel cleans
-// up when the holding process exits for any reason. A lock implemented as
-// "does this file exist" has no such guarantee: a holder that dies mid
-// startup would wedge every future flue open behind a lock nobody is left to
-// release.
 func acquireStartLock(timeout time.Duration) (unlock func(), err error) {
+	return acquireLock("start.lock", timeout)
+}
+
+// loadTokenLocked loads the auth token, serializing its *creation* across flue
+// processes.
+//
+// config.LoadOrCreateToken generates a token on first use and installs it with
+// an atomic rename. That keeps the file from tearing, but it is last-writer-
+// wins: two processes reaching a fresh config directory together each generate
+// their own token, and the one left on disk need not be the one held by the
+// process that went on to become the daemon. Every later flue open then reads
+// a token the running daemon rejects — a 401 on every request, forever, until
+// someone kills the daemon by hand.
+//
+// The lock is separate from the start lock on purpose. ensureDaemon holds the
+// start lock across the spawn and takes this one inside it, while flue serve
+// takes only this one — so the daemon a flue open starts can never block on a
+// lock its own parent is holding. The nesting only ever goes start -> token.
+func loadTokenLocked() (string, error) {
+	unlock, err := acquireLock("token.lock", lockTimeout)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	return loadToken()
+}
+
+// acquireLock takes an flock(2) advisory lock on a file in the config
+// directory, waiting up to timeout for it.
+//
+// It is flock rather than a lock *file*'s mere existence, because the lock
+// must be released if its holder dies while holding it — a crash, a kill -9,
+// a panic — and flock ties the lock to the open file descriptor's lifetime,
+// which the kernel cleans up when the holding process exits for any reason. A
+// lock implemented as "does this file exist" has no such guarantee: one holder
+// dying at the wrong moment would wedge every future flue invocation behind a
+// lock nobody is left to release.
+func acquireLock(name string, timeout time.Duration) (unlock func(), err error) {
 	dir, err := config.Dir()
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "start.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -531,7 +623,7 @@ func acquireStartLock(timeout time.Duration) (unlock func(), err error) {
 		}
 		if time.Now().After(deadline) {
 			_ = f.Close()
-			return nil, errors.New("timed out waiting for another flue process to finish starting the daemon")
+			return nil, fmt.Errorf("timed out waiting for another flue process to release %s", name)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

@@ -35,6 +35,24 @@ func TestRuntimeOverwrites(t *testing.T) {
 	}
 }
 
+// TestReadRuntimeRecordReportsTheWriterPID: the PID is what a reader uses to
+// tell its own daemon from another user's, so it has to survive the round
+// trip rather than being written and forgotten.
+func TestReadRuntimeRecordReportsTheWriterPID(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := WriteRuntime(7717); err != nil {
+		t.Fatalf("WriteRuntime: %v", err)
+	}
+	port, pid, ok := ReadRuntimeRecord()
+	if !ok || port != 7717 {
+		t.Fatalf("ReadRuntimeRecord = %d, %d, %v; want 7717, %d, true", port, pid, ok, os.Getpid())
+	}
+	if pid != os.Getpid() {
+		t.Fatalf("ReadRuntimeRecord pid = %d, want the writing process %d", pid, os.Getpid())
+	}
+}
+
 // TestClearRuntimeRemovesOurOwnRecord: a daemon that shuts down cleanly must
 // take its runtime record with it, so a later flue open or flue status reports
 // "not running" outright instead of falling back to probing a port that may by
