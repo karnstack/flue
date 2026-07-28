@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -424,32 +425,42 @@ func TestNoStateChangeIsReachableByGET(t *testing.T) {
 	}
 	defer s.Close()
 
-	// No such endpoint may exist at all: a 2xx would mean something answered.
-	absent := []string{
+	// No such API endpoint may exist at all: a 2xx would mean something
+	// answered. The assertion is scoped to /api/ on purpose. Task 14 embeds an
+	// SPA that serves index.html for unknown paths, so an unknown URL outside
+	// /api/ will legitimately start answering 200 — asserting otherwise would
+	// leave a trap that fails for a reason unrelated to what this test guards.
+	absentAPI := []string{
 		"/api/spawn",
 		"/api/spawn?cmd=sh",
 		"/api/sessions/" + s.ID() + "/kill",
 		"/api/sessions/" + s.ID() + "/signal?sig=SIGKILL",
 		"/api/sessions/" + s.ID() + "?method=delete",
 		"/api/sessions/" + s.ID() + "/resize?cols=1&rows=1",
-		"/spawn",
-		"/kill?id=" + s.ID(),
 	}
-	for _, p := range absent {
+	for _, p := range absentAPI {
 		resp := get(t, ts, p, "none")
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			t.Errorf("GET %s = %d; no mutating URL may answer 2xx", p, resp.StatusCode)
 		}
 	}
 
-	// The routes that do answer must be pure reads: a query parameter must
-	// never be a verb in disguise.
-	for _, p := range []string{"/api/sessions?spawn=1", "/api/sessions?kill=" + s.ID(), "/?spawn=1"} {
+	// Whatever these answer — 404 today, the app shell once Task 14 lands —
+	// none of them may change anything. That assertion is independent of what
+	// the UI handler does, which is what makes it the durable one.
+	outside := []string{
+		"/spawn",
+		"/kill?id=" + s.ID(),
+		"/api/sessions?spawn=1",
+		"/api/sessions?kill=" + s.ID(),
+		"/?spawn=1",
+	}
+	for _, p := range outside {
 		get(t, ts, p, "none")
 	}
 
 	if n := len(reg.List()); n != 1 {
-		t.Fatalf("session count = %d after %d authenticated GETs, want 1", n, len(absent)+3)
+		t.Fatalf("session count = %d after %d authenticated GETs, want 1", n, len(absentAPI)+len(outside))
 	}
 	if got := reg.List()[0].Info(); got.State != "running" {
 		t.Fatalf("session state = %q after authenticated GETs, want %q", got.State, "running")
@@ -476,6 +487,26 @@ func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
 			t.Fatalf("%s cookie was set to the client-supplied %q, want the daemon's own token",
 				local.CookieName, c.Value)
 		}
+	}
+
+	// The negative above is satisfied by setting no cookie at all, so pin the
+	// positive too: the first-load flow must still hand the token to the
+	// browser, or the app works once and never again.
+	resp = get(t, ts, "/?t="+tok, "none")
+	var found *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == local.CookieName {
+			found = c
+		}
+	}
+	if found == nil {
+		t.Fatalf("first load with ?t= set no %s cookie", local.CookieName)
+	}
+	if found.Value != tok {
+		t.Fatalf("%s cookie = %q, want the daemon's token", local.CookieName, found.Value)
+	}
+	if !found.HttpOnly {
+		t.Error("cookie HttpOnly = false, want true")
 	}
 }
 
@@ -523,6 +554,35 @@ func TestWebSocketUpgradeRejectsFetchSiteNone(t *testing.T) {
 	}
 	if resp != nil && resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+// TestWebSocketRejectsForeignOrigin covers the check that
+// AcceptOptions.InsecureSkipVerify makes load-bearing. Disabling the
+// library's own origin comparison is only safe because Auth.Check enforces a
+// stricter scheme+host+port allowlist first; if that ever stopped running,
+// nothing else would notice. The co-resident loopback port is the case that
+// matters — it is same-site with this daemon, so the cookie rides along.
+func TestWebSocketRejectsForeignOrigin(t *testing.T) {
+	ts, _ := newTestServer(t)
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?t=" + tok
+
+	for _, origin := range []string{
+		"http://127.0.0.1:3000", // an unrelated dev server on this machine
+		"https://evil.example.com",
+		"null", // an opaque origin: a sandboxed iframe, a data: URL
+	} {
+		c, resp, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{
+			HTTPHeader: http.Header{"Origin": []string{origin}},
+		})
+		if err == nil {
+			c.Close(websocket.StatusNormalClosure, "")
+			t.Errorf("upgrade with Origin %q succeeded, want rejection", origin)
+			continue
+		}
+		if resp != nil && resp.StatusCode != http.StatusForbidden {
+			t.Errorf("Origin %q: status = %d, want 403", origin, resp.StatusCode)
+		}
 	}
 }
 
@@ -802,6 +862,161 @@ func TestEndToEndOverRealListener(t *testing.T) {
 	}
 	if got := reg.List()[0].Info().Cols; got != 100 {
 		t.Fatalf("Cols = %d, want the 100 the spawning client asked for", got)
+	}
+}
+
+// TestShutdownClosesEstablishedWebSockets covers a connection net/http cannot
+// close for us. websocket.Accept hijacks the connection, at which point the
+// server untracks it — so Server.Close, which only closes what it is still
+// tracking, leaves every established socket running. Without a server-owned
+// context the handler never returns, its stream goroutines keep going, and a
+// client can keep spawning shells on a daemon that was asked to stop.
+func TestShutdownClosesEstablishedWebSockets(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	probe.Close()
+
+	reg := session.NewRegistry(time.Now)
+	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- srv.ListenAndServe(ctx, port) }()
+
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws?t=%s", port, tok)
+	var c *websocket.Conn
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		dctx, dcancel := context.WithTimeout(context.Background(), time.Second)
+		conn, _, err := websocket.Dial(dctx, url, nil)
+		dcancel()
+		if err == nil {
+			c = conn
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dial: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	// Establish the connection properly, and attach to a live session so the
+	// teardown has a stream goroutine to unwind as well.
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Spawn{Cmd: []string{"sleep", "30"}, Cols: 80, Rows: 24})
+	readUntil(t, c, func(msg any, _ []byte) bool { _, ok := msg.(wire.Attached); return ok })
+
+	cancel()
+
+	// The socket must die on its own, without the client writing anything.
+	rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer rcancel()
+	for {
+		if _, _, err := c.Read(rctx); err != nil {
+			if rctx.Err() != nil {
+				t.Fatal("established WebSocket outlived the daemon's shutdown")
+			}
+			break
+		}
+	}
+
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatalf("ListenAndServe on a cancelled context returned %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ListenAndServe did not return after its context was cancelled")
+	}
+}
+
+// TestEnqueueNeverBlocksAndDropsABackloggedClient tests the outbox directly.
+// A mutex around the socket would bound each write but not the wait for one:
+// a peer parked in a ten-second write holds the mutex for all ten, so anyone
+// queued behind it waits that long before its own deadline even starts. The
+// queue has to remove the wait, not shorten it.
+func TestEnqueueNeverBlocksAndDropsABackloggedClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := newConn(ctx, cancel, nil, nil)
+
+	// Fill the outbox with no writer draining it, i.e. a client that has
+	// stopped reading its socket.
+	for i := 0; i < outboxDepth; i++ {
+		if err := c.enqueue(frame{websocket.MessageText, []byte("x")}); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- c.enqueue(frame{websocket.MessageText, []byte("overflow")}) }()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errConnBacklogged) {
+			t.Fatalf("enqueue on a full outbox = %v, want errConnBacklogged", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueue blocked on a full outbox; it must never wait")
+	}
+
+	if ctx.Err() == nil {
+		t.Fatal("a backlogged client was not dropped")
+	}
+}
+
+// TestBroadcastDoesNotWaitOnABackloggedPeer is the property that matters at
+// the server level: walking a session's clients to tell them the terminal
+// resized must not put the resizing client's read loop at the mercy of a peer
+// that stopped reading. The wedged peer is dropped; the healthy one still
+// gets its frame.
+func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
+	reg := session.NewRegistry(time.Now)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "10"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+	srv := New(reg, nil, nil, "test")
+
+	newPeer := func() *conn {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		c := newConn(ctx, cancel, nil, srv)
+		c.attach[1] = &attachment{ref: 1, s: s, sub: s.Subscribe(0), done: make(chan struct{})}
+		srv.claimPrimaryIfUnset(s.ID(), c)
+		return c
+	}
+
+	wedged := newPeer()
+	healthy := newPeer()
+	for i := 0; i < outboxDepth; i++ {
+		if err := wedged.enqueue(frame{websocket.MessageText, []byte("x")}); err != nil {
+			t.Fatalf("filling the wedged peer: %v", err)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() { srv.broadcastSize(s.ID(), 100, 30); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcastSize waited on a peer that had stopped reading")
+	}
+
+	if wedged.ctx.Err() == nil {
+		t.Error("the wedged peer was not dropped")
+	}
+	select {
+	case <-healthy.out:
+	default:
+		t.Error("the healthy peer was not told about the resize")
 	}
 }
 

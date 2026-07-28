@@ -72,6 +72,18 @@ type Server struct {
 	version  string
 	hostname string
 
+	// baseCtx is the parent of every WebSocket connection's context, and
+	// baseCancel is how shutdown reaches them.
+	//
+	// It cannot be the request context. net/http stops tracking a connection
+	// once websocket.Accept hijacks it, and Server.Close only closes the
+	// connections it is still tracking — so on shutdown an established socket
+	// would survive its own daemon: handleWS never returns, its stream
+	// goroutines keep running, and the client can keep spawning shells on a
+	// daemon that was told to stop.
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
+
 	authMu sync.RWMutex
 	auth   *local.Auth
 
@@ -88,16 +100,24 @@ func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version strin
 	if ui == nil {
 		ui = http.NotFoundHandler()
 	}
+	baseCtx, baseCancel := context.WithCancel(context.Background())
 	return &Server{
-		reg:      reg,
-		ui:       ui,
-		version:  version,
-		hostname: host,
-		auth:     auth,
-		primary:  map[string]*conn{},
-		attached: map[string][]*conn{},
+		reg:        reg,
+		ui:         ui,
+		version:    version,
+		hostname:   host,
+		baseCtx:    baseCtx,
+		baseCancel: baseCancel,
+		auth:       auth,
+		primary:    map[string]*conn{},
+		attached:   map[string][]*conn{},
 	}
 }
+
+// Shutdown closes every established WebSocket connection. ListenAndServe calls
+// it when its context is cancelled; it is exported so an embedder driving
+// Handler directly can reach the same teardown.
+func (s *Server) Shutdown() { s.baseCancel() }
 
 // SetAuth swaps the authenticator. Used by tests, which learn their port
 // only after the listener is bound.
@@ -262,10 +282,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(readLimit)
 	defer ws.CloseNow()
 
-	ctx, cancel := context.WithCancel(r.Context())
+	// Parented to the server, not to the request: see Server.baseCtx.
+	ctx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
 
-	c := newConn(ctx, ws, s)
+	c := newConn(ctx, cancel, ws, s)
 	c.serve()
 	_ = ws.Close(websocket.StatusNormalClosure, "")
 }
@@ -277,6 +298,10 @@ func listenAddr(port int) string {
 }
 
 // ListenAndServe binds 127.0.0.1 only. No adapter ever binds 0.0.0.0.
+//
+// It blocks until ctx is cancelled or the listener fails. A shutdown caused by
+// ctx returns nil rather than http.ErrServerClosed: being asked to stop, and
+// stopping, is not an error the caller has to recognise and filter out.
 func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 	// Refuse before binding. Whoever starts the daemon is responsible for
 	// treating a failed or empty token as fatal; this is the backstop that
@@ -291,6 +316,11 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 		return err
 	}
 
+	// Whatever ends this call, established WebSockets end with it. Serve
+	// returning on a listener error is as much a reason to tear them down as
+	// an explicit shutdown; the difference matters only to the return value.
+	defer s.Shutdown()
+
 	srv := &http.Server{Handler: s.Handler()}
 	done := make(chan struct{})
 	defer close(done)
@@ -301,6 +331,9 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 		for {
 			select {
 			case <-ctx.Done():
+				// Close the hijacked sockets first: net/http has already
+				// forgotten them, so srv.Close will not.
+				s.Shutdown()
 				_ = srv.Close()
 				return
 			case <-done:
@@ -311,7 +344,12 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 			}
 		}
 	}()
-	return srv.Serve(ln)
+
+	err = srv.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 // --- primary bookkeeping ---

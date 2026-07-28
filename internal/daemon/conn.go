@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"syscall"
@@ -17,13 +18,19 @@ const (
 	// are tiny; a paste is the only thing that gets near this.
 	readLimit = 1 << 20
 
-	// writeTimeout bounds one frame write. Frames destined for one client are
-	// produced by other clients (a resize broadcast) and by the session's
-	// pump, so a peer that has stopped reading its socket would otherwise
-	// stall goroutines that do not belong to it. Ten seconds is far longer
-	// than a healthy loopback write and short enough that a wedged peer is
-	// disconnected rather than tolerated.
+	// writeTimeout bounds one frame write, on the writer goroutine. Ten
+	// seconds is far longer than a healthy loopback write and short enough
+	// that a wedged peer is disconnected rather than tolerated. It bounds only
+	// the writer: nothing else ever waits on a write, because everything else
+	// hands frames to the outbox.
 	writeTimeout = 10 * time.Second
+
+	// outboxDepth is how many frames may be queued for one client before it is
+	// dropped. It matches session.subChanDepth deliberately: a client that has
+	// fallen this far behind was already going to be dropped by the session's
+	// own subscriber bound, so the two limits agree on when a peer has stopped
+	// keeping up rather than disagreeing by an order of magnitude.
+	outboxDepth = 256
 
 	// exitDrain is how long stream waits for silence before reporting an exit
 	// it found already recorded at attach time. The exit is recorded when the
@@ -42,6 +49,11 @@ const (
 	// exitPoll is how often that wait re-reads the state. Session exposes no
 	// exit channel, so this is a poll by necessity, over a bounded window.
 	exitPoll = 10 * time.Millisecond
+)
+
+var (
+	errConnClosed     = errors.New("daemon: connection closed")
+	errConnBacklogged = errors.New("daemon: client is not draining its socket")
 )
 
 // signals is the set of signals a client may deliver, by both their canonical
@@ -89,28 +101,54 @@ func (a *attachment) released() bool {
 	}
 }
 
-// conn is the per-WebSocket state machine. Every write to the socket goes
-// through writeMu, because control and output frames originate on different
-// goroutines.
+// frame is one queued WebSocket message.
+type frame struct {
+	typ websocket.MessageType
+	b   []byte
+}
+
+// conn is the per-WebSocket state machine.
+//
+// Frames destined for this socket are produced by three different goroutines —
+// this connection's read loop, its attachments' stream goroutines, and *other*
+// connections broadcasting a resize or a promotion — so they are funnelled
+// through a single bounded outbox drained by one writer goroutine. Sending is
+// therefore a non-blocking channel send: no goroutine ever waits on this
+// socket, and in particular no client's read loop can be stalled by a peer
+// that has stopped reading its own.
+//
+// A lock would not do here. Serialising writes on a mutex bounds each
+// individual write but not the wait for it: a peer parked in a ten-second
+// write holds the mutex for all ten, so a broadcaster queued behind it waits
+// that long before its own timeout even begins. The queue removes the wait
+// entirely rather than shortening it.
 type conn struct {
 	ws  *websocket.Conn
 	srv *Server
 
-	// ctx bounds this connection's life. Writes are always issued under this
-	// connection's own context, never under the context of whichever client
-	// caused the write, so one client's disconnect cannot cancel a frame
-	// owed to another.
-	ctx context.Context
+	// ctx bounds this connection's life, and cancel ends it. Writes are always
+	// issued under this connection's own context, never under the context of
+	// whichever client caused the write, so one client's disconnect cannot
+	// cancel a frame owed to another.
+	ctx    context.Context
+	cancel context.CancelFunc
 
-	writeMu sync.Mutex
+	out chan frame
 
 	mu      sync.Mutex
 	nextRef uint32
 	attach  map[uint32]*attachment
 }
 
-func newConn(ctx context.Context, ws *websocket.Conn, srv *Server) *conn {
-	return &conn{ctx: ctx, ws: ws, srv: srv, attach: map[uint32]*attachment{}}
+func newConn(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, srv *Server) *conn {
+	return &conn{
+		ctx:    ctx,
+		cancel: cancel,
+		ws:     ws,
+		srv:    srv,
+		out:    make(chan frame, outboxDepth),
+		attach: map[uint32]*attachment{},
+	}
 }
 
 func (c *conn) sendControl(msg any) error {
@@ -118,21 +156,53 @@ func (c *conn) sendControl(msg any) error {
 	if err != nil {
 		return err
 	}
-	return c.write(websocket.MessageText, b)
+	return c.enqueue(frame{websocket.MessageText, b})
 }
 
 func (c *conn) sendBinary(typ byte, ref uint32, payload []byte) error {
-	return c.write(websocket.MessageBinary, wire.EncodeBinary(typ, ref, payload))
+	return c.enqueue(frame{websocket.MessageBinary, wire.EncodeBinary(typ, ref, payload)})
 }
 
-func (c *conn) write(typ websocket.MessageType, b []byte) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	// The deadline starts when this frame starts, not when it queued behind
-	// the frame in front of it.
-	ctx, cancel := context.WithTimeout(c.ctx, writeTimeout)
-	defer cancel()
-	return c.ws.Write(ctx, typ, b)
+// enqueue hands a frame to the writer without ever blocking.
+//
+// A full outbox means this client has not drained outboxDepth frames while the
+// writer was trying to send them, so it is dropped — the same answer, for the
+// same reason, that session gives a subscriber which falls subChanDepth behind.
+// The alternative, blocking, is what puts one client's fate in another's hands.
+func (c *conn) enqueue(f frame) error {
+	select {
+	case c.out <- f:
+		return nil
+	case <-c.ctx.Done():
+		return errConnClosed
+	default:
+		c.fail()
+		return errConnBacklogged
+	}
+}
+
+// fail tears the connection down. Cancelling the context unblocks the read
+// loop, which runs the ordinary cleanup path on its way out.
+func (c *conn) fail() { c.cancel() }
+
+// runWriter is the only goroutine that writes to the socket, so frames leave
+// in the order they were queued and no write can overlap another.
+func (c *conn) runWriter(done chan<- struct{}) {
+	defer close(done)
+	for {
+		select {
+		case f := <-c.out:
+			ctx, cancel := context.WithTimeout(c.ctx, writeTimeout)
+			err := c.ws.Write(ctx, f.typ, f.b)
+			cancel()
+			if err != nil {
+				c.fail()
+				return
+			}
+		case <-c.ctx.Done():
+			return
+		}
+	}
 }
 
 func (c *conn) sendError(code, msg string) {
@@ -141,7 +211,16 @@ func (c *conn) sendError(code, msg string) {
 
 // serve runs the read loop until the socket closes.
 func (c *conn) serve() {
-	defer c.closeAll()
+	writerDone := make(chan struct{})
+	go c.runWriter(writerDone)
+	defer func() {
+		// Stop the writer and wait for it before unwinding, so nothing is
+		// still writing to the socket once serve has returned and its caller
+		// starts closing it.
+		c.cancel()
+		<-writerDone
+		c.closeAll()
+	}()
 
 	_ = c.sendControl(wire.Welcome{
 		DaemonID: "local",
