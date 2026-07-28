@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -292,8 +293,8 @@ func TestOwnedByUs(t *testing.T) {
 	if !ownedByUs(os.Getpid()) {
 		t.Error("ownedByUs(own pid) = false, want true")
 	}
-	if !ownedByUs(0) {
-		t.Error("ownedByUs(0) = false; a record with no PID is not evidence of anything and must be left to the probe")
+	if ownedByUs(0) {
+		t.Error("ownedByUs(0) = true; a record that cannot say who owns it must fail closed, not fall back to a probe-only check")
 	}
 	if ownedByUs(-1) {
 		t.Error("ownedByUs(-1) = true; kill(2) reads a negative pid as a process group, which must never be treated as ownership")
@@ -348,6 +349,118 @@ func TestLoadTokenLockedIsConsistentAcrossConcurrentCallers(t *testing.T) {
 	}
 }
 
+// --- holding the runtime record ---
+
+// TestHoldRuntimeRestoresARecordAnotherDaemonRemoved is the whole reason
+// holdRuntime exists, in the order it actually happens:
+//
+//	daemon A serves 7717 and owns the record
+//	the user runs `flue serve --port 7718` by hand, and B takes the record
+//	the user stops B, whose PID-guarded ClearRuntime correctly removes it
+//	A is now alive, serving, and named by nothing
+//
+// Without a re-assertion that state is permanent, and every later flue open
+// starts a daemon that cannot bind and then refuses — until the user kills a
+// daemon that was working fine.
+func TestHoldRuntimeRestoresARecordAnotherDaemonRemoved(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := daemon.WriteRuntime(7717); err != nil {
+		t.Fatalf("WriteRuntime: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		holdRuntime(ctx, 7717, 10*time.Millisecond)
+	}()
+
+	removeRuntimeRecord(t)
+	waitFor(t, 2*time.Second, "the daemon to re-assert its own record", func() bool {
+		port, pid, ok := daemon.ReadRuntimeRecord()
+		return ok && port == 7717 && pid == os.Getpid()
+	})
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("holdRuntime did not return when its context was cancelled")
+	}
+}
+
+func TestReassertRuntimeTakesOverARecordNamingADeadProcess(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	writeRuntimeRecord(t, 7718, deadPID(t))
+	reassertRuntime(7717)
+
+	port, pid, ok := daemon.ReadRuntimeRecord()
+	if !ok || port != 7717 || pid != os.Getpid() {
+		t.Fatalf("record = %d, %d, %v after reassert over a dead process's record; want 7717, %d, true", port, pid, ok, os.Getpid())
+	}
+}
+
+// TestReassertRuntimeLeavesALiveDaemonsRecord: two daemons are allowed to be
+// up at once, and only one of them can be in the record. Whichever wrote it
+// last keeps it — if both re-asserted over each other every tick, flue open
+// would land on a different daemon each time it looked.
+func TestReassertRuntimeLeavesALiveDaemonsRecord(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	other := livePID(t)
+	writeRuntimeRecord(t, 7718, other)
+	reassertRuntime(7717)
+
+	port, pid, ok := daemon.ReadRuntimeRecord()
+	if !ok || port != 7718 || pid != other {
+		t.Fatalf("record = %d, %d, %v; want the live daemon's own record 7718, %d, true left untouched", port, pid, ok, other)
+	}
+}
+
+// --- cmdServe takes the token lock ---
+
+// TestCmdServeWaitsForTheTokenLock pins the fix that the empty-token test
+// cannot: both loadToken and loadTokenLocked bottom out in the same package
+// variable, so swapping it says nothing about which one cmdServe called.
+// Holding token.lock does: an unlocked read finishes immediately, a locked one
+// cannot start until the lock is free.
+func TestCmdServeWaitsForTheTokenLock(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// Refuse as soon as the token is reached, so cmdServe returns without
+	// binding anything once it gets past the lock.
+	orig := loadToken
+	loadToken = func() (string, error) { return "", nil }
+	defer func() { loadToken = orig }()
+
+	unlock, err := acquireLock("token.lock", 2*time.Second)
+	if err != nil {
+		t.Fatalf("acquireLock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmdServe(nil) }()
+
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("cmdServe returned (%v) while token.lock was held; it must create the token under that lock, not read it unlocked", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cmdServe = nil once the lock was released, want the empty-token refusal")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cmdServe did not finish after token.lock was released")
+	}
+}
+
 // writeRuntimeRecord writes a runtime record naming an arbitrary PID, which
 // daemon.WriteRuntime deliberately will not do (it always records its own).
 func writeRuntimeRecord(t *testing.T, port, pid int) {
@@ -362,6 +475,17 @@ func writeRuntimeRecord(t *testing.T, port, pid int) {
 	}
 }
 
+func removeRuntimeRecord(t *testing.T) {
+	t.Helper()
+	dir, err := config.Dir()
+	if err != nil {
+		t.Fatalf("config.Dir: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "runtime.json")); err != nil {
+		t.Fatalf("remove runtime record: %v", err)
+	}
+}
+
 // deadPID returns the PID of a process that has exited and been reaped.
 func deadPID(t *testing.T) int {
 	t.Helper()
@@ -370,6 +494,33 @@ func deadPID(t *testing.T) int {
 		t.Fatalf("run true: %v", err)
 	}
 	return cmd.Process.Pid
+}
+
+// livePID returns the PID of a live process this user owns, other than the
+// test process itself.
+func livePID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process.Pid
+}
+
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s", timeout, what)
 }
 
 func swapSpawn(t *testing.T, fn func() error) (restore func()) {

@@ -152,7 +152,23 @@ func cmdServe(args []string) error {
 	// nothing runs on SIGKILL — but when it does run it turns a later "flue
 	// status" from a guess about whatever now holds the port into a plain
 	// "not running".
+	//
+	// Registered before the hold below so it runs after it: the deferred
+	// stop waits for holdRuntime to have returned, which is what stops a
+	// re-assertion from landing after this removal and leaving behind exactly
+	// the stale record it was there to prevent.
 	defer func() { _ = daemon.ClearRuntime() }()
+
+	holdCtx, stopHold := context.WithCancel(ctx)
+	held := make(chan struct{})
+	go func() {
+		defer close(held)
+		holdRuntime(holdCtx, *port, reassertInterval)
+	}()
+	defer func() {
+		stopHold()
+		<-held
+	}()
 
 	fmt.Printf("daemon running on 127.0.0.1:%d\n", *port)
 	fmt.Printf("  http://127.0.0.1:%d/?t=%s\n", *port, token)
@@ -161,6 +177,58 @@ func cmdServe(args []string) error {
 	// http.ErrServerClosed, so there is nothing to filter out here: whatever
 	// it returns is the exit status of the daemon.
 	return <-serveErr
+}
+
+// reassertInterval is how often a serving daemon checks that the runtime
+// record still names a live process, and takes the slot back if it does not.
+//
+// It has to stay comfortably below startTimeout, because that is what makes
+// the repair invisible: a flue open that arrives inside the window finds no
+// record, starts a daemon that cannot bind, and then waits startTimeout for
+// one to appear — during which this fires and the record comes back, so the
+// wait loop finds it and the invocation succeeds normally instead of failing.
+const reassertInterval = 2 * time.Second
+
+// holdRuntime keeps this daemon's runtime record in place for as long as it
+// is serving.
+//
+// runtime.json is a single slot in a design that permits more than one daemon,
+// so a daemon can be orphaned from its own record without anything going
+// wrong: start a second one on another port (flue serve --port 7718), stop it,
+// and its correct, PID-guarded ClearRuntime removes the record that by then
+// describes it — leaving the first daemon alive, serving, and nameless. No
+// crash and no adversary is needed to reach that, and it does not heal on its
+// own: every later flue open starts a daemon that cannot bind, waits out the
+// timeout, and refuses, until the user kills a daemon that was working fine.
+//
+// The daemon is the right place to fix it, because it is the one process that
+// can prove it owns the port. Re-asserting here means flue open never has to
+// adopt an unidentified listener to recover, so the identity check stays
+// exactly as strict as it was.
+func holdRuntime(ctx context.Context, port int, every time.Duration) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reassertRuntime(port)
+		}
+	}
+}
+
+// reassertRuntime takes the runtime slot back if no live process holds it.
+func reassertRuntime(port int) {
+	if _, pid, ok := daemon.ReadRuntimeRecord(); ok && ownedByUs(pid) {
+		// Some live process of this user's owns the slot — this daemon, or
+		// another one that is also up. Leave it alone. Two daemons each
+		// overwriting the other's record every tick would leave flue open
+		// landing on a different one every time it looked; last writer wins
+		// is at least stable, and this is what keeps it stable.
+		return
+	}
+	_ = daemon.WriteRuntime(port)
 }
 
 // listenGrace is how long confirmListening gives ListenAndServe to fail
@@ -371,16 +439,19 @@ func ourDaemon() (int, bool) {
 // ownedByUs reports whether pid is a live process this user could signal.
 // Signal 0 runs the existence and permission checks and delivers nothing.
 //
-// A record with no PID at all is not evidence of anything — nothing flue
-// writes omits it — so it is left to the probe rather than rejected outright.
+// A record with no PID is not an ownership claim that succeeds by default: it
+// is a record that cannot answer the question, and answering "yes" to it would
+// silently degrade ourDaemon back to a probe-only check — the exact hole the
+// PID exists to close — with nothing to notice it had happened. Nothing flue
+// writes omits the PID, so this only fires on a hand-edited or future record,
+// which is precisely when failing closed is worth its cost: one spurious
+// "not running", recovered by starting a daemon.
+//
+// A PID below zero never reaches the syscall at all. kill(2) reads a negative
+// PID as a process group and -1 as every process it can reach; neither is an
+// ownership question.
 func ownedByUs(pid int) bool {
-	if pid == 0 {
-		return true
-	}
-	// A negative PID is a process group to kill(2), not a process, and -1 is
-	// every process it can reach. Neither is an ownership question, so never
-	// let one become a syscall.
-	if pid < 0 {
+	if pid < 1 {
 		return false
 	}
 	return syscall.Kill(pid, 0) == nil
