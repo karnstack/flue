@@ -1,0 +1,964 @@
+package daemon
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/karnstack/flue/internal/session"
+	"github.com/karnstack/flue/internal/transport/local"
+	"github.com/karnstack/flue/internal/wire"
+)
+
+const tok = "0123456789abcdef"
+
+func newTestServer(t *testing.T) (*httptest.Server, *session.Registry) {
+	t.Helper()
+	ts, reg, _ := newTestServerUI(t, http.NotFoundHandler())
+	return ts, reg
+}
+
+// newTestServerUI is newTestServer with the UI handler and the *Server exposed,
+// for the tests that need to observe what the app shell actually served or to
+// drive the server directly.
+func newTestServerUI(t *testing.T, ui http.Handler) (*httptest.Server, *session.Registry, *Server) {
+	t.Helper()
+	reg := session.NewRegistry(time.Now)
+	srv := New(reg, nil, ui, "test")
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// Rebuild auth against the port httptest actually chose.
+	port := 0
+	if _, p, ok := strings.Cut(strings.TrimPrefix(ts.URL, "http://"), ":"); ok {
+		for _, c := range p {
+			port = port*10 + int(c-'0')
+		}
+	}
+	srv.SetAuth(local.NewAuth(tok, port))
+	return ts, reg, srv
+}
+
+func dial(t *testing.T, ts *httptest.Server) *websocket.Conn {
+	t.Helper()
+	return dialWith(t, ts, nil)
+}
+
+func dialWith(t *testing.T, ts *httptest.Server, header http.Header) *websocket.Conn {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?t=" + tok
+	c, _, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { c.Close(websocket.StatusNormalClosure, "") })
+	return c
+}
+
+func writeControl(t *testing.T, c *websocket.Conn, msg any) {
+	t.Helper()
+	b, err := wire.EncodeControl(msg)
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	if err := c.Write(context.Background(), websocket.MessageText, b); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+// readUntil reads frames until pred returns true or the deadline passes.
+// Binary payloads are accumulated so callers can assert on output.
+func readUntil(t *testing.T, c *websocket.Conn, pred func(msg any, out []byte) bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var out []byte
+	for {
+		typ, data, err := c.Read(ctx)
+		if err != nil {
+			t.Fatalf("read: %v (output so far %q)", err, out)
+		}
+		if typ == websocket.MessageBinary {
+			_, _, payload, err := wire.DecodeBinary(data)
+			if err != nil {
+				t.Fatalf("DecodeBinary: %v", err)
+			}
+			out = append(out, payload...)
+			if pred(nil, out) {
+				return
+			}
+			continue
+		}
+		msg, err := wire.DecodeControl(data)
+		if err != nil {
+			t.Fatalf("DecodeControl: %v", err)
+		}
+		if pred(msg, out) {
+			return
+		}
+	}
+}
+
+// attach dials, says hello, attaches to s and returns the ref the daemon
+// assigned.
+func attach(t *testing.T, ts *httptest.Server, id string) (*websocket.Conn, uint32) {
+	t.Helper()
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: id, LastSeq: 0})
+	var ref uint32
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok {
+			ref = a.Ref
+		}
+		return ok
+	})
+	return c, ref
+}
+
+func TestWebSocketRejectsUnauthenticated(t *testing.T) {
+	ts, _ := newTestServer(t)
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	if _, _, err := websocket.Dial(context.Background(), url, nil); err == nil {
+		t.Fatal("dial without a token succeeded, want failure")
+	}
+}
+
+func TestHelloReturnsWelcome(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		_, ok := msg.(wire.Welcome)
+		return ok
+	})
+}
+
+func TestSpawnAttachAndOutput(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Spawn{Cmd: []string{"sh", "-c", "echo spawned-ok; sleep 2"}, Cols: 80, Rows: 24})
+
+	readUntil(t, c, func(msg any, out []byte) bool {
+		return bytes.Contains(out, []byte("spawned-ok"))
+	})
+}
+
+func TestAttachedCarriesRefAndSeq(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0})
+
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if !ok {
+			return false
+		}
+		if a.ID != s.ID() {
+			t.Fatalf("Attached.ID = %q, want %q", a.ID, s.ID())
+		}
+		if !a.Primary {
+			t.Fatal("first attacher Primary = false, want true")
+		}
+		return true
+	})
+}
+
+func TestInputReachesPTYAndMirrorsToBothClients(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	var refs [2]uint32
+	conns := [2]*websocket.Conn{dial(t, ts), dial(t, ts)}
+	for i, c := range conns {
+		writeControl(t, c, wire.Hello{Ver: "test"})
+		writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0})
+		idx := i
+		readUntil(t, c, func(msg any, _ []byte) bool {
+			a, ok := msg.(wire.Attached)
+			if ok {
+				refs[idx] = a.Ref
+			}
+			return ok
+		})
+	}
+
+	frame := wire.EncodeBinary(wire.FrameInput, refs[0], []byte("mirrored\n"))
+	if err := conns[0].Write(context.Background(), websocket.MessageBinary, frame); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+
+	for _, c := range conns {
+		readUntil(t, c, func(_ any, out []byte) bool {
+			return bytes.Contains(out, []byte("mirrored"))
+		})
+	}
+}
+
+func TestSecondAttacherIsNotPrimary(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	first := dial(t, ts)
+	writeControl(t, first, wire.Hello{Ver: "test"})
+	writeControl(t, first, wire.Attach{ID: s.ID(), LastSeq: 0})
+	readUntil(t, first, func(msg any, _ []byte) bool { _, ok := msg.(wire.Attached); return ok })
+
+	second := dial(t, ts)
+	writeControl(t, second, wire.Hello{Ver: "test"})
+	writeControl(t, second, wire.Attach{ID: s.ID(), LastSeq: 0})
+	readUntil(t, second, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok && a.Primary {
+			t.Fatal("second attacher Primary = true, want false")
+		}
+		return ok
+	})
+}
+
+func TestNonPrimaryResizeDoesNotChangePTY(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	first := dial(t, ts)
+	writeControl(t, first, wire.Hello{Ver: "test"})
+	writeControl(t, first, wire.Attach{ID: s.ID(), LastSeq: 0})
+	readUntil(t, first, func(msg any, _ []byte) bool { _, ok := msg.(wire.Attached); return ok })
+
+	second := dial(t, ts)
+	writeControl(t, second, wire.Hello{Ver: "test"})
+	writeControl(t, second, wire.Attach{ID: s.ID(), LastSeq: 0})
+	var ref uint32
+	readUntil(t, second, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok {
+			ref = a.Ref
+		}
+		return ok
+	})
+
+	writeControl(t, second, wire.Resize{Ref: ref, Cols: 40, Rows: 10, Primary: false})
+	time.Sleep(200 * time.Millisecond)
+
+	if got := s.Info().Cols; got != 80 {
+		t.Fatalf("Cols = %d after a non-primary resize, want 80", got)
+	}
+}
+
+func TestPrimarySeizureResizesPTY(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0})
+	var ref uint32
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok {
+			ref = a.Ref
+		}
+		return ok
+	})
+
+	writeControl(t, c, wire.Resize{Ref: ref, Cols: 120, Rows: 40, Primary: true})
+
+	deadline := time.After(3 * time.Second)
+	for s.Info().Cols != 120 {
+		select {
+		case <-deadline:
+			t.Fatalf("Cols = %d, want 120", s.Info().Cols)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestListReturnsSessions(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.List{})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		l, ok := msg.(wire.Sessions)
+		if !ok {
+			return false
+		}
+		for _, info := range l.Sessions {
+			if info.ID == s.ID() {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestAttachUnknownSessionReturnsError(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: "does-not-exist"})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "not_found"
+	})
+}
+
+func TestHTTPSessionsEndpointRequiresAuth(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp, err := http.Get(ts.URL + "/api/sessions")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("status = 200 without a token, want a rejection")
+	}
+}
+
+func TestHTTPSessionsEndpointWithAuth(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	resp, err := http.Get(ts.URL + "/api/sessions?t=" + tok)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		Sessions []session.Info `json:"sessions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Sessions) == 0 {
+		t.Fatal("sessions is empty, want at least one")
+	}
+}
+
+// --- carried constraint 1: no mutation reachable by GET ---
+
+// get issues an authenticated GET the way a redirect-laundered navigation
+// would: valid cookie, correct Host, no Origin, and Sec-Fetch-Site: none.
+// Task 5's Check passes every one of those, which is precisely why the
+// endpoint policy — not the token check — has to be what stops it.
+func get(t *testing.T, ts *httptest.Server, path, fetchSite string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: local.CookieName, Value: tok})
+	if fetchSite != "" {
+		req.Header.Set("Sec-Fetch-Site", fetchSite)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do %s: %v", path, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestNoStateChangeIsReachableByGET is the structural half of the
+// redirect-laundered-Sec-Fetch-Site defence. A co-resident untrusted origin
+// (an unrelated dev server on another loopback port) can answer a
+// user-initiated navigation with 302 -> http://127.0.0.1:<flue>/<path>, and
+// the redirected request arrives carrying Sec-Fetch-Site: none, no Origin, a
+// correct Host and the flue_token cookie — every check in Task 5 passes. The
+// only durable answer is that no URL, GET-fetchable or otherwise, changes any
+// state: every mutation lives behind an established WebSocket.
+func TestNoStateChangeIsReachableByGET(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	// No such endpoint may exist at all: a 2xx would mean something answered.
+	absent := []string{
+		"/api/spawn",
+		"/api/spawn?cmd=sh",
+		"/api/sessions/" + s.ID() + "/kill",
+		"/api/sessions/" + s.ID() + "/signal?sig=SIGKILL",
+		"/api/sessions/" + s.ID() + "?method=delete",
+		"/api/sessions/" + s.ID() + "/resize?cols=1&rows=1",
+		"/spawn",
+		"/kill?id=" + s.ID(),
+	}
+	for _, p := range absent {
+		resp := get(t, ts, p, "none")
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			t.Errorf("GET %s = %d; no mutating URL may answer 2xx", p, resp.StatusCode)
+		}
+	}
+
+	// The routes that do answer must be pure reads: a query parameter must
+	// never be a verb in disguise.
+	for _, p := range []string{"/api/sessions?spawn=1", "/api/sessions?kill=" + s.ID(), "/?spawn=1"} {
+		get(t, ts, p, "none")
+	}
+
+	if n := len(reg.List()); n != 1 {
+		t.Fatalf("session count = %d after %d authenticated GETs, want 1", n, len(absent)+3)
+	}
+	if got := reg.List()[0].Info(); got.State != "running" {
+		t.Fatalf("session state = %q after authenticated GETs, want %q", got.State, "running")
+	}
+	if got := s.Info().Cols; got != 80 {
+		t.Fatalf("Cols = %d after authenticated GETs, want 80", got)
+	}
+}
+
+// TestCookieExchangeNeverStoresAClientSuppliedToken covers the one piece of
+// state a GET on this daemon really can change: the browser's stored
+// credential. A request authenticated by a valid cookie may still carry a
+// "t" query parameter, and echoing that parameter back into the cookie hands
+// its value to whoever wrote the URL. A redirect-laundered navigation to
+// /?t=garbage would then overwrite a working token with garbage and lock the
+// user out of their own terminal — a mutating GET wearing a login flow's
+// clothes. The cookie must only ever be set to the daemon's own token.
+func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	resp := get(t, ts, "/?t=not-the-token", "none")
+	for _, c := range resp.Cookies() {
+		if c.Name == local.CookieName && c.Value != tok {
+			t.Fatalf("%s cookie was set to the client-supplied %q, want the daemon's own token",
+				local.CookieName, c.Value)
+		}
+	}
+}
+
+// TestOnlySafeMethodsAreRouted pins the invariant the test above depends on:
+// flue's HTTP surface is read-only, so a mutation cannot be bolted onto it by
+// a later task without this failing first.
+func TestOnlySafeMethodsAreRouted(t *testing.T) {
+	ts, _ := newTestServer(t)
+	for _, path := range []string{"/", "/api/sessions", "/ws"} {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
+			req, err := http.NewRequest(method, ts.URL+path+"?t="+tok, nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", method, path, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s = %d, want 405", method, path, resp.StatusCode)
+			}
+		}
+	}
+}
+
+// TestWebSocketUpgradeRejectsFetchSiteNone is the endpoint-policy half of the
+// same defence. The upgrade is the one GET that leads to state changes —
+// spawn, signal and close all ride an established socket — so it must not
+// admit the one Sec-Fetch-Site value a redirect can launder. No browser can
+// produce a WebSocket handshake carrying "none": a handshake is always
+// page-initiated (same-origin / same-site / cross-site), never a user
+// navigation, and handshake responses are not redirect-followed. So rejecting
+// "none" here costs a real client nothing.
+func TestWebSocketUpgradeRejectsFetchSiteNone(t *testing.T) {
+	ts, _ := newTestServer(t)
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?t=" + tok
+	c, resp, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Sec-Fetch-Site": []string{"none"}},
+	})
+	if err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("upgrade with Sec-Fetch-Site: none succeeded, want rejection")
+	}
+	if resp != nil && resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+// TestWebSocketUpgradeAcceptsSameOrigin is the positive control: the flue web
+// app's own socket, which a browser labels same-origin, must still connect.
+func TestWebSocketUpgradeAcceptsSameOrigin(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dialWith(t, ts, http.Header{"Sec-Fetch-Site": []string{"same-origin"}})
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	readUntil(t, c, func(msg any, _ []byte) bool { _, ok := msg.(wire.Welcome); return ok })
+}
+
+// TestAppShellAllowsFetchSiteNone is the other positive control: a typed URL
+// or a bookmark is exactly the "none" case, and it is what the first-load
+// token-in-URL flow depends on. Only safe, side-effect-free reads may accept
+// it.
+func TestAppShellAllowsFetchSiteNone(t *testing.T) {
+	ui := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("app shell"))
+	})
+	ts, _, _ := newTestServerUI(t, ui)
+
+	resp := get(t, ts, "/?t="+tok, "none")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / with Sec-Fetch-Site: none = %d, want 200", resp.StatusCode)
+	}
+
+	resp = get(t, ts, "/api/sessions", "none")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/sessions with Sec-Fetch-Site: none = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp := get(t, ts, "/api/sessions", "same-origin")
+
+	if got := resp.Header.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want %q", got, "no-referrer")
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	for _, want := range []string{
+		"default-src 'self'",
+		"script-src 'self'",
+		"object-src 'none'",
+		"base-uri 'none'",
+		"frame-ancestors 'none'",
+	} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("CSP %q is missing %q", csp, want)
+		}
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want none", got)
+	}
+}
+
+// --- carried constraint 2: an exited session must not park the handler ---
+
+func waitForExit(t *testing.T, s *session.Session) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.Info().State == "exited" {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("session did not reach state \"exited\" within 10s")
+}
+
+// TestAttachToExitedSessionReportsExitPromptly guards the trap carried out of
+// Task 3. Session.Subscribe on a session that has exited but has not yet been
+// Closed hands back an open channel that nothing closes: markExited only drops
+// the subscribers that existed when the child was reaped, and nothing revisits
+// the set until Close, which Registry.Reap does not call for ExitedRetention —
+// ten minutes. A handler that treats channel closure as its end-of-stream
+// signal parks for those ten minutes and the client never learns the session
+// is over. The exit has to be read from the session's own state instead.
+func TestAttachToExitedSessionReportsExitPromptly(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sh", "-c", "echo bye; exit 3"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+	waitForExit(t, s)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0})
+
+	var sawBacklog bool
+	readUntil(t, c, func(msg any, out []byte) bool {
+		if bytes.Contains(out, []byte("bye")) {
+			sawBacklog = true
+		}
+		e, ok := msg.(wire.Exit)
+		if ok && e.Code != 3 {
+			t.Fatalf("Exit.Code = %d, want 3", e.Code)
+		}
+		return ok
+	})
+	if !sawBacklog {
+		t.Error("attaching to an exited session delivered no scrollback")
+	}
+}
+
+// TestCloseSessionReportsExit covers the sibling case: Session.Close drops
+// every subscriber while State is still "running" — it only becomes "exited"
+// once the supervisor has killed and reaped the group a few milliseconds
+// later. A handler that reads the state at the instant the channel closes
+// sees "running", concludes nothing, and leaves the client waiting forever
+// for an exit that already happened.
+func TestCloseSessionReportsExit(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "30"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c, ref := attach(t, ts, s.ID())
+	writeControl(t, c, wire.CloseSession{Ref: ref})
+
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Exit)
+		if ok && e.Ref != ref {
+			t.Fatalf("Exit.Ref = %d, want %d", e.Ref, ref)
+		}
+		return ok
+	})
+}
+
+// --- carried constraint 3: refuse to serve without an authenticator ---
+
+// TestServerWithoutAuthFailsClosed pins the fail-closed default. A daemon
+// whose token could not be loaded must not serve a shell-spawning port to
+// anyone who asks; a nil authenticator is a misconfiguration, never a
+// permission.
+func TestServerWithoutAuthFailsClosed(t *testing.T) {
+	reg := session.NewRegistry(time.Now)
+	srv := New(reg, nil, http.NotFoundHandler(), "test")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	for _, path := range []string{"/", "/api/sessions", "/ws"} {
+		resp, err := http.Get(ts.URL + path + "?t=" + tok)
+		if err != nil {
+			t.Fatalf("get %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Errorf("GET %s = 200 with no authenticator configured, want a rejection", path)
+		}
+	}
+
+	if err := srv.ListenAndServe(context.Background(), 0); err == nil {
+		t.Fatal("ListenAndServe err = nil with no authenticator configured, want an error")
+	}
+}
+
+// --- bind, resize policy, and protocol hygiene ---
+
+func TestListenAddrIsLoopbackOnly(t *testing.T) {
+	if got := listenAddr(7717); got != "127.0.0.1:7717" {
+		t.Fatalf("listenAddr(7717) = %q, want %q", got, "127.0.0.1:7717")
+	}
+}
+
+// TestListenAndServeBindsLoopbackOnly dials the daemon on a non-loopback
+// address of this host. Binding 0.0.0.0 would expose a shell-spawning port on
+// every network the machine joins, so the connection must be refused.
+func TestListenAndServeBindsLoopbackOnly(t *testing.T) {
+	external := externalIP(t)
+
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	probe.Close()
+
+	reg := session.NewRegistry(time.Now)
+	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe(ctx, port) }()
+
+	loopback := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", loopback, 200*time.Millisecond)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon never accepted on %s: %v", loopback, err)
+		}
+		select {
+		case err := <-errc:
+			t.Fatalf("ListenAndServe returned early: %v", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	if c, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", external, port), time.Second); err == nil {
+		c.Close()
+		t.Fatalf("daemon accepted a connection on %s:%d; it must bind 127.0.0.1 only", external, port)
+	}
+}
+
+// TestEndToEndOverRealListener drives the production path the httptest
+// harness bypasses: the real ListenAndServe, on a real loopback port, with
+// the header shape a browser actually sends — an Origin, and Sec-Fetch-Site:
+// same-origin — through to a real PTY and its exit code.
+func TestEndToEndOverRealListener(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe listen: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	probe.Close()
+
+	reg := session.NewRegistry(time.Now)
+	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.ListenAndServe(ctx, port) }()
+
+	origin := fmt.Sprintf("http://127.0.0.1:%d", port)
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws?t=%s", port, tok)
+
+	var c *websocket.Conn
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		dctx, dcancel := context.WithTimeout(context.Background(), time.Second)
+		conn, _, err := websocket.Dial(dctx, url, &websocket.DialOptions{HTTPHeader: http.Header{
+			"Origin":         []string{origin},
+			"Sec-Fetch-Site": []string{"same-origin"},
+		}})
+		dcancel()
+		if err == nil {
+			c = conn
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dial %s: %v", url, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Spawn{Cmd: []string{"sh", "-c", "echo real-listener-ok; exit 7"}, Cols: 100, Rows: 30})
+
+	var sawOutput bool
+	readUntil(t, c, func(msg any, out []byte) bool {
+		if bytes.Contains(out, []byte("real-listener-ok")) {
+			sawOutput = true
+		}
+		e, ok := msg.(wire.Exit)
+		if ok && e.Code != 7 {
+			t.Fatalf("Exit.Code = %d, want 7", e.Code)
+		}
+		return ok
+	})
+	if !sawOutput {
+		t.Error("no PTY output reached the client over the real listener")
+	}
+	if n := len(reg.List()); n != 1 {
+		t.Fatalf("session count = %d, want 1", n)
+	}
+	if got := reg.List()[0].Info().Cols; got != 100 {
+		t.Fatalf("Cols = %d, want the 100 the spawning client asked for", got)
+	}
+}
+
+func externalIP(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Skipf("InterfaceAddrs: %v", err)
+	}
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok || n.IP.IsLoopback() || n.IP.To4() == nil {
+			continue
+		}
+		return n.IP.String()
+	}
+	t.Skip("no non-loopback IPv4 address on this host")
+	return ""
+}
+
+// TestPrimaryPromotionOnDetach covers the half of the resize policy the brief
+// states but does not test: when the primary leaves, someone else has to own
+// the PTY dimensions, and has to be told so.
+func TestPrimaryPromotionOnDetach(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "10"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	first, firstRef := attach(t, ts, s.ID())
+	second, secondRef := attach(t, ts, s.ID())
+
+	writeControl(t, first, wire.Detach{Ref: firstRef})
+
+	readUntil(t, second, func(msg any, _ []byte) bool {
+		sc, ok := msg.(wire.SizeChanged)
+		return ok && sc.Ref == secondRef && sc.Primary
+	})
+
+	// A plain resize from the promoted client — no seizure flag — must now
+	// reach the PTY.
+	writeControl(t, second, wire.Resize{Ref: secondRef, Cols: 100, Rows: 30, Primary: false})
+	deadline := time.After(3 * time.Second)
+	for s.Info().Cols != 100 {
+		select {
+		case <-deadline:
+			t.Fatalf("Cols = %d after the promoted client resized, want 100", s.Info().Cols)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestPrimarySeizureDemotesTheOldPrimary checks the notification the seizure
+// path owes the client that just lost the dimensions.
+func TestPrimarySeizureDemotesTheOldPrimary(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "10"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	first, firstRef := attach(t, ts, s.ID())
+	second, secondRef := attach(t, ts, s.ID())
+
+	writeControl(t, second, wire.Resize{Ref: secondRef, Cols: 60, Rows: 20, Primary: true})
+
+	readUntil(t, first, func(msg any, _ []byte) bool {
+		sc, ok := msg.(wire.SizeChanged)
+		if !ok || sc.Ref != firstRef {
+			return false
+		}
+		if sc.Primary {
+			t.Fatal("the demoted client was told Primary = true")
+		}
+		if sc.Cols != 60 || sc.Rows != 20 {
+			t.Fatalf("SizeChanged = %dx%d, want 60x20", sc.Cols, sc.Rows)
+		}
+		return true
+	})
+}
+
+func TestUnknownSignalIsRejected(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "10"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c, ref := attach(t, ts, s.ID())
+	writeControl(t, c, wire.Signal{Ref: ref, Sig: "SIGSTOP"})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "bad_signal"
+	})
+
+	if got := s.Info().State; got != "running" {
+		t.Fatalf("state = %q after an unknown signal, want %q", got, "running")
+	}
+}
+
+func TestSignalReachesTheSession(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "30"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c, ref := attach(t, ts, s.ID())
+	writeControl(t, c, wire.Signal{Ref: ref, Sig: "SIGKILL"})
+	readUntil(t, c, func(msg any, _ []byte) bool { _, ok := msg.(wire.Exit); return ok })
+}
+
+func TestUnknownRefIsRejected(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Resize{Ref: 99, Cols: 10, Rows: 10, Primary: true})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "bad_ref"
+	})
+}
+
+// TestClientsMayNotSendOutputFrames stops a client from injecting bytes into
+// its own scrollback as though the PTY had produced them.
+func TestClientsMayNotSendOutputFrames(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c, ref := attach(t, ts, s.ID())
+	frame := wire.EncodeBinary(wire.FrameOutput, ref, []byte("forged"))
+	if err := c.Write(context.Background(), websocket.MessageBinary, frame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "bad_frame"
+	})
+}
+
+func TestMalformedControlMessageIsRejected(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	if err := c.Write(context.Background(), websocket.MessageText, []byte(`{"type":"nope"}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "bad_message"
+	})
+}
