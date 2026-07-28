@@ -2,9 +2,11 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -119,7 +121,25 @@ func (s *Session) Signal(sig os.Signal) error {
 	if s.closed || s.cmd.Process == nil {
 		return ErrSessionClosed
 	}
-	return s.cmd.Process.Signal(sig)
+	return signalGroup(s.cmd.Process.Pid, sig)
+}
+
+// signalGroup delivers sig to the process group led by pid. pty.StartWithSize
+// starts the leader in a new session (Setsid), which makes it its own
+// process-group leader too (pgid == pid), so signalling -pid reaches the
+// leader and everything it has spawned — not just the leader — the same way
+// closing a real terminal window takes its whole job tree down with it. A
+// group that has already exited (ESRCH) is not treated as an error the
+// caller needs to handle.
+func signalGroup(pid int, sig os.Signal) error {
+	ss, ok := sig.(syscall.Signal)
+	if !ok {
+		return fmt.Errorf("session: signal %v is not a syscall.Signal", sig)
+	}
+	if err := syscall.Kill(-pid, ss); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
 }
 
 // Subscribe registers a subscriber for output at or after fromSeq. The
@@ -144,6 +164,17 @@ func (s *Session) Subscribe(fromSeq uint64) *Sub {
 		Truncated: truncated,
 		C:         ch,
 		ch:        ch,
+	}
+	if s.closed {
+		// Close has already run its one-time drop loop, and nothing will
+		// ever visit this session's subs again — a subscriber registered
+		// now would sit on an open channel forever. Close it immediately
+		// instead: the invariant "every Sub's channel is eventually
+		// closed" then holds trivially for both the open and closed cases,
+		// rather than depending on a future event that will never come.
+		sub.closed = true
+		close(ch)
+		return sub
 	}
 	s.subs[sub] = struct{}{}
 	return sub
@@ -181,7 +212,12 @@ func (s *Session) Close() error {
 	s.mu.Unlock()
 
 	if s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+		// Kill the whole process group, not just the leader: a background
+		// child (e.g. a job started with &) keeps its inherited stdout/
+		// stderr open on the pty slave even after the leader exits, which
+		// would otherwise keep pump's Read blocked forever waiting for a
+		// hangup that never comes.
+		_ = signalGroup(s.cmd.Process.Pid, syscall.SIGKILL)
 	}
 	return s.pty.Close()
 }

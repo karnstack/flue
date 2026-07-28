@@ -507,11 +507,13 @@ git commit -m "feat(session): add streaming OSC 0/2 title scanner"
   - `(*Registry).Reap()` — removes sessions that exited more than `ExitedRetention` ago
   - `(*Session).ID() string`, `.Info() Info`, `.Write(p []byte) error`, `.Resize(cols, rows uint16) error`, `.Signal(sig os.Signal) error`, `.Close() error`
   - `(*Session).Subscribe(fromSeq uint64) *Sub` and `(*Session).Unsubscribe(*Sub)`
-  - `session.Sub{Backlog []byte; StartSeq uint64; Truncated bool; C <-chan []byte; Done <-chan struct{}}`
+  - `session.Sub{Backlog []byte; StartSeq uint64; Truncated bool; C <-chan []byte}` — closing `C` is the only "subscriber is over" signal; there is no separate `Done` channel
   - `session.Info{ID, Title, Cwd string; Cmd []string; State string; ExitCode int; Cols, Rows uint16; LastActive time.Time}`
   - `session.ExitedRetention = 10 * time.Minute`
 
 `Subscribe` is atomic: the returned `Backlog` plus everything subsequently delivered on `C` is exactly the byte stream from `StartSeq` onward, with no gap and no duplication. A subscriber that cannot keep up has its channel closed and is dropped, which surfaces to the client as a disconnect; it then reattaches with its `lastSeq`.
+
+> **Corrected during execution — see the fix commit on this task.** Review found three lifecycle defects in the reference code below. `Subscribe` did not check `s.closed`, so a tab attaching during the 10-minute retention window got a channel nothing would ever close, hanging the Task 6 handler. `Close` could not interrupt the pump's blocked `Read` — creack/pty's master fd is not registered with Go's netpoller on Darwin, and `Setsize` detaches it on Linux — so a shell with a surviving background job leaked the pump goroutine, a zombie, the fd, and the ring permanently. And `Signal`'s comment promised process-group delivery that `Process.Signal` does not provide, since creack/pty sets `Setsid` but never `Setpgid`. Ruling: **signal the process group** via a negated pid, which matches the comment, matches how a terminal behaves, and closes the slave so the pump's `Read` returns.
 
 - [ ] **Step 1: Add the PTY dependency**
 
