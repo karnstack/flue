@@ -273,6 +273,8 @@ git commit -m "feat(session): add seq-addressed scrollback ring"
 
 This is the server-side VT seam. Today it recognises only OSC 0 and OSC 2; later `libghostty-vt` replaces it wholesale.
 
+> **The reference implementation below is buggy — see commit `0afcf3f` for the corrected version.** Task review caught two defects in it during execution. First, the ignore path (`stIgnore`/`stIgnoreEsc`) had no bound analogous to `maxTitleLen`, so a single unterminated non-title OSC sequence — a truncated OSC 8 hyperlink, say — wedged the scanner permanently, and it then consumed the terminator of the *next* legitimate title as well. Second, the abandon transitions consumed the byte that triggered them, so an `ESC` arriving mid-sequence was swallowed instead of starting a fresh one. The fix bounds the ignore path and re-dispatches the triggering byte after resetting to ground. The prose requirement above governs: the scanner must always return to a state where a subsequent well-formed sequence still parses.
+
 - [ ] **Step 1: Write the failing test**
 
 `internal/session/title_test.go`:
