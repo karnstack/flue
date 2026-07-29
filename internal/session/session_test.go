@@ -576,6 +576,102 @@ func TestCloseAfterGroupIsGoneIssuesNoSyscallButStillTearsDown(t *testing.T) {
 	}
 }
 
+// TestNoGroupSignalIsIssuedBeforeTheGroupHasBeenProbed covers the one state the
+// other two pid-reuse tests cannot reach: reaped, group already empty, exit not
+// yet published.
+//
+// The supervisor publishes an exit under s.mu, which it takes with TryLock so a
+// caller waiting on it can never deadlock the pair. Losing that TryLock is
+// ordinary rather than exotic — the pump holds s.mu for every chunk of output —
+// and the loop then comes back on the next 5 ms turn. Gating the group-empty
+// probe on "the exit has been published" instead of "the child has been reaped"
+// meant that in exactly those turns a signal request was served with no probe
+// having run at all, against a pid the kernel had already handed back. That is
+// the catastrophe the whole supervisor design exists to make unreachable, and a
+// 5 ms window is still a window.
+//
+// The lock is held by the test to hold the supervisor in that state
+// deterministically, which is the only way it can be observed: from outside,
+// "reaped but unpublished" is a few microseconds long.
+func TestNoGroupSignalIsIssuedBeforeTheGroupHasBeenProbed(t *testing.T) {
+	spy := installKillSpy(t)
+
+	r := NewRegistry(time.Now)
+	// The sleep is not decoration: it guarantees the child is still running
+	// when the lock below is taken, so the supervisor cannot have published
+	// the exit already and leave this measuring nothing.
+	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "sleep 0.1; exit 0"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+
+	locked := true
+	unlock := func() {
+		if locked {
+			locked = false
+			s.mu.Unlock()
+		}
+	}
+	defer s.Close()
+	defer unlock()
+
+	s.mu.Lock()
+	if st := s.info.State; st != "running" {
+		t.Fatalf("State = %q before the lock was taken, want %q; the supervisor got ahead of this test", st, "running")
+	}
+
+	// Wait for the pgid to be genuinely free. kill(-pid, 0) answers ESRCH only
+	// once the leader has been reaped — a zombie is still a member of its own
+	// group — and nothing else is left in the group. Only the supervisor
+	// reaps, and reaping needs no lock, so this is also how the test knows the
+	// supervisor is now sitting on an unpublished exit.
+	deadline := time.After(5 * time.Second)
+	for !s.groupGone() {
+		select {
+		case <-deadline:
+			t.Fatal("the child's process group did not empty within 5s")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	spy.reset()
+
+	// requestGroupSignal rather than Signal, because Signal reads s.closed
+	// under s.mu first and would simply block on this test's own lock. The
+	// point being measured is what the supervisor does with the request, not
+	// how it gets there.
+	answered := make(chan error, 1)
+	go func() { answered <- s.requestGroupSignal(syscall.SIGTERM) }()
+
+	// Comfortably many supervisor turns: it is looping at reapPollMin here,
+	// since every branch that fires resets the delay to it.
+	time.Sleep(40 * reapPollMin)
+	if n := spy.count(); n != 0 {
+		t.Fatalf("the supervisor issued %d group-kill syscall(s) while the child was reaped and its group empty, want 0 — the pid is free and may already name a stranger's group: %v", n, spy.snapshot())
+	}
+
+	// Not delivered, but still answered, and answered from under the held lock.
+	// Deferring the reply until the exit could be published would swap one
+	// hazard for another: publishing needs s.mu, this test is holding it, and a
+	// caller that waited on the reply while holding it is the deadlock the
+	// TryLock exists to rule out. See the test below, which pins that on its own.
+	select {
+	case err := <-answered:
+		if err != nil {
+			t.Fatalf("requestGroupSignal returned an error the caller must handle: %v", err)
+		}
+	default:
+		t.Fatal("the request was neither delivered nor answered while s.mu was held; a caller waiting on a reply that needs the session lock deadlocks the pair")
+	}
+
+	// Releasing the lock lets the exit be published, which retires the group
+	// for good. Nothing may have been signalled along the way.
+	unlock()
+	waitSupervisorGone(t, s, 5*time.Second)
+	if n := spy.count(); n != 0 {
+		t.Fatalf("a group-kill syscall was issued after the group emptied: %v", spy.snapshot())
+	}
+}
+
 // TestMasterEndedWithLiveChildKeepsSessionUsable is the regression test for
 // the deadlock this package's lifecycle was redesigned to remove, and for the
 // false premise that caused it.

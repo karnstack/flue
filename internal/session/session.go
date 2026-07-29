@@ -201,10 +201,11 @@ func (s *Session) Signal(sig os.Signal) error {
 //
 // Reaping the child does not end this: the group outlives its leader, and
 // while it has members its id is still unambiguously ours (see groupGone). The
-// supervisor keeps serving requests until the group is empty. Only then does
-// it close gone, and only then does this refuse — because there is by then
-// nothing to signal and the id may be recycled. That is not an error the
-// caller needs to special-case; it is the same "already gone" outcome
+// supervisor delivers on request until the group is empty. From that moment it
+// delivers nothing — there is nothing left to signal and the id may be recycled
+// — and it closes gone once it has also published the exit, after which this
+// takes the second branch below instead. Both roads answer nil. That is not an
+// error the caller needs to special-case; it is the same "already gone" outcome
 // signalGroup reports as success when the kernel answers ESRCH.
 func (s *Session) requestGroupSignal(sig syscall.Signal) error {
 	reply := make(chan error, 1)
@@ -391,7 +392,7 @@ func (s *Session) noteMasterEnded() {
 // is a live process, not a missing one.) Doing both jobs in a single goroutine
 // makes "signal, then reap" a local ordering rather than a race between
 // goroutines — every signal this goroutine issues is issued from the select
-// below, and it never reaches that select again once the group is gone.
+// below, and it issues none at all once the group has been observed empty.
 // Callers ask for a signal on sigReq; they never issue one themselves.
 //
 // Note that the reap is not the point at which signalling has to stop: the
@@ -414,6 +415,12 @@ func (s *Session) supervise() {
 		exitCode int
 		reaped   bool
 		recorded bool
+		// groupEmpty latches the one-way transition groupGone reports. It is
+		// deliberately separate from recorded: one is about what the kernel
+		// says of the pgid, the other about whether this goroutine has managed
+		// to publish the exit to callers, and conflating them is what let a
+		// signal go out with no probe behind it.
+		groupEmpty bool
 	)
 	for {
 		if !reaped {
@@ -437,18 +444,42 @@ func (s *Session) supervise() {
 			}
 			delay = reapPollMin
 		}
-		if recorded && s.groupGone() {
+		// Gated on the reap and on nothing else, because the reap is the event
+		// that makes the pgid a question at all. Gating the probe on recorded
+		// instead left a reachable state — reaped, exit not yet published
+		// because the TryLock above lost — in which this loop fell through to
+		// the select and signalled with no probe having run. The pump holds
+		// s.mu on every output chunk, so losing that TryLock is ordinary.
+		if reaped && !groupEmpty {
+			groupEmpty = s.groupGone()
+		}
+		if recorded && groupEmpty {
 			// Nothing pins the pgid any more, so from here it may name a
 			// stranger. Stop signalling, permanently.
 			close(s.gone)
 			return
 		}
+
 		select {
 		case req := <-s.sigReq:
-			// Either the child is unreaped, or it is reaped and the probe
-			// above found the group still populated. Either way the pgid is
-			// still pinned by a process of ours, so -pid names our group.
-			req.reply <- s.signalGroup(req.sig)
+			if groupEmpty {
+				// The group has emptied, so nothing is delivered: the pgid is
+				// pinned by nothing of ours and may already name a stranger.
+				//
+				// Answered here rather than left for gone to answer, and that
+				// is load-bearing. This goroutine may not have published the
+				// exit yet, which needs s.mu, and the caller waiting on this
+				// reply may be the very thing holding s.mu — the TryLock above
+				// exists precisely so that pair cannot deadlock. nil is what
+				// gone would have given a moment later anyway.
+				req.reply <- nil
+			} else {
+				// Either the child is unreaped — so the pid is still the
+				// kernel's record of it — or it is reaped and the probe on this
+				// very turn found the group still populated. Either way the
+				// pgid is pinned by a process of ours, so -pid names our group.
+				req.reply <- s.signalGroup(req.sig)
+			}
 			delay = reapPollMin
 		case <-s.masterEnd:
 			delay = reapPollMin
