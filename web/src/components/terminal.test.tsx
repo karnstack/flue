@@ -113,7 +113,7 @@ describe('Terminal', () => {
     ))
     live = sock
 
-    expect(live.ofType('attach')).toEqual([{ type: 'attach', id: 's1', lastSeq: 0 }])
+    expect(live.ofType('attach')).toEqual([{ type: 'attach', id: 's1', lastSeq: 0, reqId: 1 }])
   })
 
   it('writes the output for its own ref and nobody else’s', () => {
@@ -246,8 +246,8 @@ describe('Terminal', () => {
     expect(sock.ofType('attach')).toHaveLength(2)
 
     act(() => {
-      sock.emitControl(attached({ ref: 1, id: 's1', cols: 111, rows: 11 }))
-      sock.emitControl(attached({ ref: 2, id: 's1', cols: 222, rows: 22 }))
+      sock.emitControl(attached({ ref: 1, id: 's1', cols: 111, rows: 11, reqId: 1 }))
+      sock.emitControl(attached({ ref: 2, id: 's1', cols: 222, rows: 22, reqId: 2 }))
     })
 
     expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 1 }])
@@ -342,7 +342,9 @@ describe('Terminal', () => {
     act(() => sock.close())
     await act(() => vi.advanceTimersByTimeAsync(125))
     act(() => sockets[1]!.open())
-    expect(sockets[1]!.ofType('attach')).toEqual([{ type: 'attach', id: 's1', lastSeq: 0 }])
+    expect(sockets[1]!.ofType('attach')).toEqual([
+      { type: 'attach', id: 's1', lastSeq: 0, reqId: 2 },
+    ])
 
     act(() =>
       sockets[1]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }),

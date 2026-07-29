@@ -163,7 +163,7 @@ describe('SessionsRoute', () => {
 
     await userEvent.click(newSession())
 
-    expect(sock.ofType('spawn')).toEqual([{ type: 'spawn', cols: 80, rows: 24 }])
+    expect(sock.ofType('spawn')).toEqual([{ type: 'spawn', cols: 80, rows: 24, reqId: 1 }])
   })
 
   it('hands back the attachment the daemon gave it, then opens the new session', async () => {

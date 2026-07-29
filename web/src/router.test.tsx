@@ -108,7 +108,7 @@ describe('createFlueRouter', () => {
     act(() => sockets[0]!.open())
 
     expect(sockets[0]!.ofType('attach')).toEqual([
-      { type: 'attach', id: 'abc123', lastSeq: 0 },
+      { type: 'attach', id: 'abc123', lastSeq: 0, reqId: 1 },
     ])
   })
 
