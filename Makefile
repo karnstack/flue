@@ -6,7 +6,7 @@
 #
 # web/dist is gitignored on purpose and must stay that way — see web/embed.go.
 
-.PHONY: all web build test test-go test-web lint clean
+.PHONY: all web build test test-go test-web lint clean site-dev site-deploy
 
 all: build
 
@@ -31,3 +31,20 @@ lint: web
 
 clean:
 	rm -rf bin web/dist
+
+# The landing site (site/) has no build step; these targets exist for the
+# one moving part: install.sh's canonical source is scripts/install.sh (the
+# release infra owns it), and site/public/install.sh is a deploy-time copy,
+# gitignored, so the installer cannot drift between two committed copies.
+
+site-dev:
+	@if [ -f scripts/install.sh ]; then cp scripts/install.sh site/public/install.sh; fi
+	cd site && pnpm dlx wrangler@4 dev
+
+site-deploy:
+	@test -f scripts/install.sh || { \
+		echo "site-deploy: scripts/install.sh not found — the infra lane creates it;" >&2; \
+		echo "refusing to deploy flue.sh without the installer it advertises" >&2; \
+		exit 1; }
+	cp scripts/install.sh site/public/install.sh
+	cd site && pnpm dlx wrangler@4 deploy

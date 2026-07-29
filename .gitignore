@@ -8,3 +8,5 @@ flued
 /bin/
 .DS_Store
 .superpowers/
+# Deploy-time copy of scripts/install.sh; `make site-deploy` stages it.
+/site/public/install.sh
