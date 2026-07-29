@@ -36,9 +36,13 @@ export function FlueClientProvider({ children, client }: FlueClientProviderProps
   useEffect(() => {
     active.connect()
     // Stopping on unmount is what makes a closed tab a clean detach while the
-    // daemon keeps the PTY running. React double-invokes this in development,
-    // so `close` has to cancel the pending reconnect as well as the socket —
-    // it does, and provider.test.tsx holds it to that.
+    // daemon keeps the PTY running.
+    //
+    // React double-invokes this in development, so the pair has to survive
+    // connect / close / connect on one client: `close` releases the socket
+    // outright rather than waiting to be told it shut, and `connect` starts a
+    // new one. The StrictMode case in provider.test.tsx checks that leaves
+    // exactly one live socket and nothing armed behind it.
     return () => active.close()
   }, [active])
 
