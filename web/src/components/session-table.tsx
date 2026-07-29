@@ -7,36 +7,29 @@ export interface SessionTableProps {
   onOpen: (id: string) => void
 }
 
-/** Millis since the epoch, or -Infinity for a timestamp that will not parse. */
-function activeAt(s: SessionInfo): number {
-  const at = Date.parse(s.lastActive)
-  return Number.isNaN(at) ? -Infinity : at
-}
-
 /**
- * Most recently active first, ties broken by id.
+ * By directory, ties broken by id.
  *
- * Not decoration. The daemon answers `list` by ranging over a Go map, and Go
- * randomises that order on every single call — so rows given straight through
- * would reshuffle under the reader on each poll, and the row their pointer was
- * over would not be the row they clicked. Ordering has to happen somewhere,
- * and doing it here is what stops the next consumer forgetting it.
+ * Ordering has to happen somewhere. The daemon answers `list` by ranging over
+ * a Go map, and Go randomises that order on every single call, so rows given
+ * straight through would reshuffle on each poll and the row under the reader's
+ * pointer would not be the row they clicked. Doing it here is what stops the
+ * next consumer forgetting it.
  *
- * The tie-break is what makes it stable rather than merely sorted: `lastActive`
- * has second resolution on the wire, so two sessions touched in the same second
- * compare equal, and equal keys leave the rest to whatever order arrived.
+ * The sort key is the part worth explaining, because the obvious one is wrong.
+ * "Most recently active first" reads well and moves rows for a living: the
+ * daemon stamps `lastActive` on every byte written to a pty *and* every chunk
+ * read back from one, so a session tailing a log climbs to the top between one
+ * poll and the next. That is the same defect as the random order, arriving by
+ * a different route — deterministic per snapshot, but not stable across them.
  *
- * Note the shape of the comparator. Subtracting the two timestamps would be
- * shorter and would return NaN for two unparseable ones, which is not a
- * comparator at all: Array#sort is free to leave such elements anywhere.
+ * `cwd` is fixed when the session is spawned and never written again, so this
+ * order does not move at all, and it sorts the rows by the column they lead
+ * with. `id` breaks the tie, since two sessions in one directory is the
+ * ordinary case rather than the exotic one.
  */
 function ordered(sessions: SessionInfo[]): SessionInfo[] {
-  return [...sessions].sort((a, b) => {
-    const left = activeAt(a)
-    const right = activeAt(b)
-    if (left !== right) return left < right ? 1 : -1
-    return a.id.localeCompare(b.id)
-  })
+  return [...sessions].sort((a, b) => a.cwd.localeCompare(b.cwd) || a.id.localeCompare(b.id))
 }
 
 /**

@@ -1,10 +1,17 @@
-import { act, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  RouterProvider,
+} from '@tanstack/react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { FlueClientProvider } from '@/client/provider'
 import type { SessionInfo } from '@/client/protocol'
-import { renderWithRouter } from '@/testing/render'
 import { attached, fakeClient, type FakeSocket } from '@/testing/socket'
 import { SessionsRoute } from './sessions'
 
@@ -23,24 +30,56 @@ function info(over: Partial<SessionInfo> & { id: string }): SessionInfo {
 }
 
 /**
- * Mount the screen under a router, with a client whose socket is up unless
- * asked otherwise.
+ * Mount the screen under a router that really routes.
  *
- * The socket is opened *after* the first render on purpose: a screen reached
- * by navigating mounts into a connection that is already established, but the
- * very first paint of the tab does not, and `list` has to survive both.
+ * Deliberately not `testing/render.tsx`'s helper. That one mounts the tree as
+ * the *root* route's component, so it renders whatever the location is — which
+ * means navigating never unmounts anything, and every property this screen has
+ * on the way out would go untested. Here the screen is the component of `/` and
+ * `/sessions` only, so navigating anywhere else tears it down exactly as the
+ * real router does: the terminal route is a sibling of the shell, and the nav
+ * links leave for other shell routes.
+ *
+ * The socket is opened *after* the first render on purpose: a screen reached by
+ * navigating mounts into a connection that is already established, but the very
+ * first paint of the tab does not, and `list` has to survive both.
  */
 async function mountSessions({ open = true } = {}) {
   const { client, sockets } = fakeClient()
-  const view = await renderWithRouter(
+
+  const rootRoute = createRootRoute({ component: () => <Outlet /> })
+  const routeTree = rootRoute.addChildren([
+    ...['/', '/sessions'].map((path) =>
+      createRoute({ getParentRoute: () => rootRoute, path, component: SessionsRoute }),
+    ),
+    ...['/devices', '/settings', '/d/$deviceId/s/$sessionId'].map((path) =>
+      createRoute({ getParentRoute: () => rootRoute, path, component: () => null }),
+    ),
+  ])
+  const router = createRouter({
+    routeTree,
+    history: createMemoryHistory({ initialEntries: ['/sessions'] }),
+  })
+  // The first match resolves asynchronously, so a bare render commits an empty
+  // tree and every query misses.
+  await router.load()
+
+  const view = render(
     <FlueClientProvider client={client}>
-      <SessionsRoute />
+      <RouterProvider router={router as never} />
     </FlueClientProvider>,
   )
   const sock = sockets[0]!
   if (open) act(() => sock.open())
-  return { ...view, client, sockets, sock }
+
+  /** Navigate, and settle, so the screen has really gone by the next line. */
+  const goTo = (to: string) => act(async () => void (await router.navigate({ to })))
+
+  return { ...view, router, goTo, client, sockets, sock }
 }
+
+/** Whether the screen under test is still on show. */
+const onScreen = () => screen.queryByRole('heading', { name: 'Sessions' }) !== null
 
 function listed(sock: FakeSocket, sessions: SessionInfo[]) {
   act(() => sock.emitControl({ type: 'sessions', sessions }))
@@ -186,6 +225,82 @@ describe('SessionsRoute', () => {
     expect(sock.ofType('spawn')).toHaveLength(2)
   })
 
+  it('hands back a spawn answered after the screen has gone', async () => {
+    // Disabling the button closes the second-click path and nothing else. A
+    // row's Open and every nav link navigate unconditionally, and this screen
+    // begins its own navigation one line before it unmounts — so a reply
+    // arriving with no listener left is the ordinary case, not the exotic one.
+    const { sock, goTo } = await mountSessions()
+    await userEvent.click(newSession())
+
+    await goTo('/settings')
+    expect(onScreen()).toBe(false)
+    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan' })))
+
+    expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 7 }])
+  })
+
+  it('leaves nothing behind for the reattach plan to re-establish', async () => {
+    // The other half of the same defect, and the half that lasts: an adopted
+    // reply seeds `wanted`, so the daemon would be asked for that session on
+    // every reconnect for the life of the tab.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { sock, sockets, goTo } = await mountSessions()
+    await userEvent.click(newSession())
+    await goTo('/settings')
+    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan' })))
+
+    act(() => sock.close())
+    await act(() => vi.advanceTimersByTimeAsync(125))
+    act(() => sockets[1]!.open())
+
+    expect(sockets[1]!.ofType('attach')).toEqual([])
+    vi.restoreAllMocks()
+  })
+
+  it('stops refusing once the outage has answered for the reply', async () => {
+    // The hazard the refusal introduces. Left armed past the outage it would
+    // hand back the first `attached` of the next connection — a terminal's own
+    // — leaving that view holding a ref this client had already detached.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { sock, sockets, goTo } = await mountSessions()
+    await userEvent.click(newSession())
+    await goTo('/settings')
+
+    act(() => sock.close())
+    await act(() => vi.advanceTimersByTimeAsync(125))
+    act(() => sockets[1]!.open())
+    act(() => sockets[1]!.emitControl(attached({ ref: 1, id: 'a-terminal' })))
+
+    expect(sockets[1]!.ofType('detach')).toEqual([])
+    vi.restoreAllMocks()
+  })
+
+  it('does not claim a reply an earlier refusal already handed back', async () => {
+    // Come back to the screen inside the first spawn's round trip and there
+    // are two claims on the wire: a refusal armed by the unmount, and a fresh
+    // debt from the new mount. Spending both on the first reply would navigate
+    // to a session that was just detached and orphan the second.
+    const { sock, router, goTo } = await mountSessions()
+    await userEvent.click(newSession())
+    await goTo('/settings')
+    await goTo('/sessions')
+    await userEvent.click(newSession())
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 'first' })))
+    expect(router.state.location.pathname).toBe('/sessions')
+
+    act(() => sock.emitControl(attached({ ref: 2, id: 'second' })))
+
+    expect(sock.ofType('detach')).toEqual([
+      { type: 'detach', ref: 1 },
+      { type: 'detach', ref: 2 },
+    ])
+    await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/second'))
+  })
+
   it('says so when the daemon refuses to start a session', async () => {
     const { sock } = await mountSessions()
     await userEvent.click(newSession())
@@ -225,6 +340,18 @@ describe('SessionsRoute', () => {
   it('reports a lost daemon rather than showing an empty screen', async () => {
     const { sock } = await mountSessions()
     listed(sock, [info({ id: 's1' })])
+
+    act(() => sock.close())
+
+    expect(screen.getByRole('status').textContent).toMatch(/reconnecting/i)
+  })
+
+  it('has the live region on the page before it has anything to say', async () => {
+    // Several screen readers announce only changes to a live region that was
+    // already in the accessibility tree, so one that arrives together with its
+    // first message is a message nobody hears.
+    const { sock } = await mountSessions()
+    expect(screen.getByRole('status').textContent).toBe('')
 
     act(() => sock.close())
 

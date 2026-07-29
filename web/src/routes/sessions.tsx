@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 
-import type { ConnStatus } from '@/client/client'
+import type { ConnStatus, FlueClient } from '@/client/client'
 import { useFlueClient } from '@/client/provider'
 import type { SessionInfo } from '@/client/protocol'
 import { SessionTable } from '@/components/session-table'
@@ -28,6 +28,52 @@ const REFRESH_MS = 3_000
  */
 const TERMINAL_PATH = '/d/$deviceId/s/$sessionId' as const
 const LOCAL_DEVICE = 'local'
+
+/**
+ * Hand back the next `count` attachments this tab is given, then stop.
+ *
+ * The screen that asked for them is gone. Navigating away inside a spawn's
+ * round trip is not exotic — Open sits on every row, the nav links are always
+ * there, and this screen's own navigation begins one line before it unmounts —
+ * and once the listeners are released nothing is left to refuse the reply.
+ * `FlueClient` then adopts it into both its attachment map and its reattach
+ * plan, so the daemon streams a session to a tab with nothing behind it and
+ * the plan re-establishes that on every reconnect for the life of the tab.
+ *
+ * Disabling the button only closes the one path a second click takes. This
+ * closes all of them, because it is armed by the unmount itself.
+ *
+ * `attached` names no request, so this is the same shape of heuristic as the
+ * counter it drains, and sound for the same reason: one connection answers in
+ * order, and nothing else in this tab has a spawn outstanding.
+ *
+ * Two bounds, and neither is optional.
+ *
+ * A reply already handed back by an earlier refusal is skipped rather than
+ * counted, which `lastSeqFor` can tell because `detach` removed the ref from
+ * the client's attachments. Without it, two refusals armed in turn would both
+ * spend themselves on the first reply and leave the second unclaimed.
+ *
+ * And the whole thing is retired when the connection is: a reply owed on a
+ * socket that dropped is never coming, and a refusal left armed past the
+ * outage would hand back the *next* connection's first `attached` — a
+ * terminal's own — leaving that view holding a ref this client had detached.
+ */
+function refuseNext(client: FlueClient, count: number) {
+  let left = count
+  const stop = () => {
+    offAttached()
+    offStatus()
+  }
+  const offAttached = client.onAttached((a) => {
+    if (client.lastSeqFor(a.ref) === undefined) return
+    client.detach(a.ref)
+    if (--left <= 0) stop()
+  })
+  const offStatus = client.onStatus((s) => {
+    if (s !== 'open') stop()
+  })
+}
 
 /** What to say about a connection that is not currently carrying anything. */
 function connectionNotice(status: ConnStatus): string | null {
@@ -115,6 +161,12 @@ export function SessionsRoute() {
 
       client.onAttached((a) => {
         if (owed.current === 0) return
+        // A reply a refusal armed by an earlier mount has already handed back
+        // is not this screen's to claim, and `detach` is what makes that
+        // legible: it drops the ref from the client's attachments, so
+        // `lastSeqFor` no longer knows it. The debt stays owed, because the
+        // reply that settles it is still on the wire behind this one.
+        if (client.lastSeqFor(a.ref) === undefined) return
         owe(owed.current - 1)
         // Hand the ref straight back. This screen renders no terminal, and the
         // route it is about to navigate to attaches on its own — so keeping
@@ -138,6 +190,8 @@ export function SessionsRoute() {
     return () => {
       clearInterval(poll)
       for (const off of offs) off()
+      // Whatever this screen asked for and did not live to see answered.
+      if (owed.current > 0) refuseNext(client, owed.current)
     }
   }, [client, navigate, owe])
 
@@ -175,32 +229,41 @@ export function SessionsRoute() {
           <p className="mt-1 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
             Closing a tab detaches. Whatever the shell is doing carries on.
           </p>
+          {/*
+            Always rendered, never mounted with its text. Several screen
+            readers announce only changes to a live region that was already in
+            the accessibility tree, so a region that appears alongside its
+            first message is a message nobody hears. Which is also why this is
+            not `hidden` when empty: display:none takes it back out of the tree
+            and puts the same problem back.
+
+            It sits inside this block rather than below the heading row because
+            the column outside is gapped, and a gap is paid for an empty child.
+            Empty, this contributes no line box at all, and `empty:mt-0` takes
+            the margin with it.
+          */}
+          <p
+            role="status"
+            className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 empty:mt-0 sm:text-sm/6 dark:text-zinc-400"
+          >
+            {message}
+          </p>
         </div>
         {/*
           The one filled button on this screen, and it takes its amber from
           --primary rather than naming a colour, so the accent stays a token.
           Every other control here is the bordered variant.
 
-          Held shut while a spawn is unanswered, which is not only manners. A
-          second click starts a second shell, and this screen navigates away on
-          the first reply — so the second one's `attached` lands after the
-          listener is gone, and the ref it carries is never handed back. That is
-          an attachment streaming output to a tab with nothing behind it, kept
-          alive across every reconnect by the client's plan.
+          Held shut while a spawn is unanswered. That is the cheap half of the
+          same problem `refuseNext` exists for: a second click starts a second
+          shell whose `attached` arrives after this screen has navigated away
+          on the first. Closing the click path here keeps the common case from
+          ever reaching the cleanup path at all.
         */}
         <Button size="sm" className="shrink-0" disabled={starting} onClick={startSession}>
           New session
         </Button>
       </div>
-
-      {message && (
-        <p
-          role="status"
-          className="max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400"
-        >
-          {message}
-        </p>
-      )}
 
       {sessions !== null && <SessionTable sessions={sessions} onOpen={open} />}
     </div>

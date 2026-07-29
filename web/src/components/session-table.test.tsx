@@ -34,13 +34,16 @@ const sessions: SessionInfo[] = [
   }),
 ]
 
-/** The directory cell of every body row, top to bottom. */
-function directories(): string[] {
+/** Column `at` of every body row, top to bottom. */
+function column(at: number): string[] {
   const body = screen.getAllByRole('rowgroup')[1]!
   return within(body)
     .getAllByRole('row')
-    .map((row) => within(row).getAllByRole('cell')[0]!.textContent!)
+    .map((row) => within(row).getAllByRole('cell')[at]!.textContent!)
 }
+
+const directories = () => column(0)
+const commands = () => column(1)
 
 describe('SessionTable', () => {
   it('renders a row per session', () => {
@@ -85,35 +88,44 @@ describe('SessionTable', () => {
     expect(heading.className).not.toMatch(/\buppercase\b/)
   })
 
-  it('puts the most recently active session first, whatever order it was given', () => {
+  it('orders by directory, whatever order it was given', () => {
     // Not cosmetic. The daemon builds `sessions` by ranging over a Go map, and
     // Go randomises that order per call — so unsorted rows would reshuffle
     // under the reader on every poll.
-    const older = session({ id: 'older', cwd: '/older', lastActive: '2026-07-28T08:00:00Z' })
-    const newer = session({ id: 'newer', cwd: '/newer', lastActive: '2026-07-28T12:00:00Z' })
-
-    render(<SessionTable sessions={[older, newer]} onOpen={() => {}} />)
-    expect(directories()).toEqual(['/newer', '/older'])
-  })
-
-  it('orders sessions that share a timestamp by id, so the order cannot drift', () => {
-    const same = '2026-07-28T08:00:00Z'
-    const b = session({ id: 'b', cwd: '/b', lastActive: same })
-    const a = session({ id: 'a', cwd: '/a', lastActive: same })
+    const b = session({ id: 'b', cwd: '/b' })
+    const a = session({ id: 'a', cwd: '/a' })
 
     render(<SessionTable sessions={[b, a]} onOpen={() => {}} />)
     expect(directories()).toEqual(['/a', '/b'])
   })
 
-  it('still renders every row when a timestamp is unusable', () => {
-    // A comparator that returns NaN leaves Array#sort free to drop rows on the
-    // floor in some engines and to reorder arbitrarily in all of them.
-    const bad = session({ id: 'bad', cwd: '/bad', lastActive: 'not a date' })
-    const worse = session({ id: 'worse', cwd: '/worse', lastActive: '' })
-    const good = session({ id: 'good', cwd: '/good', lastActive: '2026-07-28T08:00:00Z' })
+  it('orders sessions that share a directory by id, so the order cannot drift', () => {
+    // Two sessions in one directory is the ordinary case here, not the exotic
+    // one, so the tie-break is what makes this stable rather than just sorted.
+    const second = session({ id: 'b', cwd: '/same', cmd: ['second'] })
+    const first = session({ id: 'a', cwd: '/same', cmd: ['first'] })
 
-    render(<SessionTable sessions={[bad, good, worse]} onOpen={() => {}} />)
-    expect(directories()).toEqual(['/good', '/bad', '/worse'])
+    render(<SessionTable sessions={[second, first]} onOpen={() => {}} />)
+    expect(commands()).toEqual(['first', 'second'])
+  })
+
+  it('does not move a row because the daemon touched the session', () => {
+    // The reason the order is not "most recently active". The daemon stamps
+    // lastActive on every byte written to a pty and every chunk read back from
+    // one, so a session tailing a log would climb the table between one poll
+    // and the next. Deterministic per snapshot is not enough — it has to be
+    // the same order next time, or rows still move under the pointer.
+    const a = session({ id: 'a', cwd: '/a', lastActive: '2026-07-28T08:00:00Z' })
+    const b = session({ id: 'b', cwd: '/b', lastActive: '2026-07-28T09:00:00Z' })
+    const { rerender } = render(<SessionTable sessions={[a, b]} onOpen={() => {}} />)
+    expect(directories()).toEqual(['/a', '/b'])
+
+    // The next poll: the same two sessions, one of them busy since, and the
+    // daemon's map handing them over the other way round.
+    const busy = { ...b, lastActive: '2026-07-28T12:00:00Z' }
+    rerender(<SessionTable sessions={[busy, a]} onOpen={() => {}} />)
+
+    expect(directories()).toEqual(['/a', '/b'])
   })
 
   it('does not draw the rows as cards', () => {
