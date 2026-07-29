@@ -334,7 +334,7 @@ tailnet peers, tunnel is a configured hostname, local is itself.
 
 | adapter | direction | authentication | intermediary | needs |
 |---|---|---|---|---|
-| `local` | listen `127.0.0.1` | token file + Origin + Host | none | nothing |
+| `local` | listen `127.0.0.1` | token file + Origin + Host + Sec-Fetch-Site (the load-bearing check against a co-resident loopback origin) | none | nothing |
 | `tailscale` | listen tailnet address | tailscaled LocalAPI `WhoIs` → login allowlist | none; often direct peer-to-peer | Tailscale per device |
 | `cfrelay` | dial `wss://` outbound | device key at the Worker; Noise IK end-to-end | user's Worker, ciphertext only | Cloudflare account |
 | `cftunnel` | listen loopback behind `cloudflared` | Cloudflare Access `Cf-Access-Jwt-Assertion` | Cloudflare | domain on Cloudflare |

@@ -7,8 +7,8 @@
   <a href="docs/superpowers/specs/2026-07-28-flue-design.md">design</a>
 </p>
 
-> Status: local terminal works. `flue enable`, remote transports, and pairing
-> are next.
+> Status: local terminal works and `flue enable` installs the login service.
+> Remote transports and pairing are next.
 
 ## Why
 
