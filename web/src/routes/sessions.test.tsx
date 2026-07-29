@@ -164,6 +164,28 @@ describe('SessionsRoute', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/mine'))
   })
 
+  it('starts one session per click, not one per impatient click', async () => {
+    // The second shell's `attached` would land after this screen has navigated
+    // away on the first, with no listener to hand its ref back — an attachment
+    // streaming output to nothing, held open across every reconnect.
+    const { sock } = await mountSessions()
+
+    await userEvent.click(newSession())
+    await userEvent.click(newSession())
+
+    expect(sock.ofType('spawn')).toHaveLength(1)
+  })
+
+  it('lets the user try again once a spawn has been answered', async () => {
+    const { sock } = await mountSessions()
+    await userEvent.click(newSession())
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope' }))
+
+    await userEvent.click(newSession())
+
+    expect(sock.ofType('spawn')).toHaveLength(2)
+  })
+
   it('says so when the daemon refuses to start a session', async () => {
     const { sock } = await mountSessions()
     await userEvent.click(newSession())

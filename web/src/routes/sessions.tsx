@@ -72,10 +72,20 @@ export function SessionsRoute() {
    * replayed after a reconnect. Counting what was asked for is what keeps one
    * of those from navigating the user somewhere they never chose.
    *
-   * A ref rather than state: it is read inside an effect that must not be torn
-   * down and rebuilt every time the count moves, and nothing renders from it.
+   * A ref rather than state, because it is read inside listeners that must not
+   * be torn down and re-registered every time the count moves. `starting`
+   * shadows it for the one thing that does render from it, and `owe` is what
+   * keeps the two in step.
    */
   const owed = useRef(0)
+  const [starting, setStarting] = useState(false)
+
+  // Stable, so the effect below can hold it without re-subscribing: it closes
+  // over a ref and a setter, and every instance would behave identically.
+  const owe = useCallback((next: number) => {
+    owed.current = Math.max(0, next)
+    setStarting(owed.current > 0)
+  }, [])
 
   useEffect(() => {
     const offs = [
@@ -91,7 +101,7 @@ export function SessionsRoute() {
         // — on a connection this screen knows nothing about — to a navigation
         // nobody asked for. Counts do not survive their socket, for the same
         // reason FlueClient clears its own on teardown.
-        if (s !== 'open') owed.current = 0
+        if (s !== 'open') owe(0)
       }),
 
       client.onError((e) => {
@@ -99,13 +109,13 @@ export function SessionsRoute() {
         // `attached`, so the debt above has to be written off here or the next
         // unrelated reply would be mistaken for it.
         if (e.code !== 'spawn_failed') return
-        if (owed.current > 0) owed.current--
+        owe(owed.current - 1)
         setNotice(`Could not start a session: ${e.msg}`)
       }),
 
       client.onAttached((a) => {
         if (owed.current === 0) return
-        owed.current--
+        owe(owed.current - 1)
         // Hand the ref straight back. This screen renders no terminal, and the
         // route it is about to navigate to attaches on its own — so keeping
         // this one would leave a single tab holding two attachments to one
@@ -129,7 +139,7 @@ export function SessionsRoute() {
       clearInterval(poll)
       for (const off of offs) off()
     }
-  }, [client, navigate])
+  }, [client, navigate, owe])
 
   const open = useCallback(
     (id: string) => {
@@ -144,7 +154,7 @@ export function SessionsRoute() {
     // with some dimensions, and the terminal corrects them the moment it can
     // measure a pane: it attaches as primary and asks for the cells that fit.
     if (client.spawn({ cols: 80, rows: 24 })) {
-      owed.current++
+      owe(owed.current + 1)
       return
     }
     // `spawn` is deliberately dropped rather than held while the socket is
@@ -170,8 +180,15 @@ export function SessionsRoute() {
           The one filled button on this screen, and it takes its amber from
           --primary rather than naming a colour, so the accent stays a token.
           Every other control here is the bordered variant.
+
+          Held shut while a spawn is unanswered, which is not only manners. A
+          second click starts a second shell, and this screen navigates away on
+          the first reply — so the second one's `attached` lands after the
+          listener is gone, and the ref it carries is never handed back. That is
+          an attachment streaming output to a tab with nothing behind it, kept
+          alive across every reconnect by the client's plan.
         */}
-        <Button size="sm" className="shrink-0" onClick={startSession}>
+        <Button size="sm" className="shrink-0" disabled={starting} onClick={startSession}>
           New session
         </Button>
       </div>
