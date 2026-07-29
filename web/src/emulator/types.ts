@@ -31,9 +31,22 @@ export interface Emulator {
   resize(cols: number, rows: number): void
   /** Capture the current grid. */
   snapshot(): Grid
-  /** Register a callback for user input, encoded as UTF-8 bytes. */
+  /**
+   * Register a callback for user input, encoded as UTF-8 bytes.
+   *
+   * There is no unregister: a registration lasts until `dispose`, and every
+   * registered callback receives every keystroke. Register once. If a
+   * reconnect needs to send input somewhere else, close over a mutable
+   * destination rather than registering a second callback.
+   */
   onData(cb: (bytes: Uint8Array) => void): void
-  /** Mount into the DOM. */
+  /**
+   * Mount into the DOM.
+   *
+   * One emulator, one mount. Mounting twice opens a second renderer over the
+   * same terminal; to move a terminal, or to remount under React's
+   * double-invoked effects, dispose and build a new one.
+   */
   attachTo(el: HTMLElement): void
   /** Release all resources. Safe to call more than once. */
   dispose(): void
