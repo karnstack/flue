@@ -630,32 +630,43 @@ func TestOpenURLInjectionAttemptCannotOverrideHandoff(t *testing.T) {
 
 // --- the handoff token ---
 
-// TestOpenURLNeverCarriesTheSessionToken is the requirement of task 7b at the
-// place it is easiest to regress. A URL is argv the moment it reaches open(1)
-// or xdg-open(1), and argv is readable by any local user at Linux's default
-// hidepid=0 and by ps(1) on macOS.
-func TestOpenURLNeverCarriesTheSessionToken(t *testing.T) {
-	const sessionToken = "0123456789abcdef-the-session-token"
+// TestOpenURLEmitsNoSessionTokenParameter pins the shape of the URL: a handoff
+// parameter and nothing that could ever have been the session token.
+//
+// It cannot prove the stronger claim in its own right — openURL is no longer
+// handed the session token, so it could not emit one if it tried. The live
+// assertion here is that the "t" parameter is gone, which is what would have to
+// come back for a regression to reintroduce the exposure.
+// TestCmdOpenPutsNoSessionTokenInTheBrowserCommandLine is the real coverage:
+// it drives cmdOpen against a real daemon and inspects the exact string handed
+// to the browser, with the actual token on disk to compare against.
+func TestOpenURLEmitsNoSessionTokenParameter(t *testing.T) {
 	got := openURL(7717, "a-fresh-handoff", "/tmp/work")
-	if strings.Contains(got, sessionToken) {
-		t.Fatalf("openURL leaked the session token: %s", got)
-	}
 	u, err := url.Parse(got)
 	if err != nil {
 		t.Fatalf("unparseable URL %q: %v", got, err)
 	}
-	for name, vals := range u.Query() {
-		if name == "cwd" {
-			continue
-		}
-		for _, v := range vals {
-			if v == sessionToken {
-				t.Fatalf("query parameter %q carries the session token", name)
-			}
-		}
-	}
 	if u.Query().Has("t") {
 		t.Fatalf("openURL still emits a \"t\" parameter: %s", got)
+	}
+	if vals := u.Query()[local.HandoffParam]; len(vals) != 1 || vals[0] != "a-fresh-handoff" {
+		t.Fatalf("%s values = %v, want exactly [\"a-fresh-handoff\"]: %s", local.HandoffParam, vals, got)
+	}
+}
+
+// TestOpenURLOmitsAnEmptyCwd: flue serve's banner has no directory to offer, and
+// a blank "cwd=" would be one more thing the app has to tell apart from absent.
+func TestOpenURLOmitsAnEmptyCwd(t *testing.T) {
+	got := openURL(7717, "a-fresh-handoff", "")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("unparseable URL %q: %v", got, err)
+	}
+	if u.Query().Has("cwd") {
+		t.Fatalf("openURL emitted a cwd parameter for an empty cwd: %s", got)
+	}
+	if u.Query().Get(local.HandoffParam) != "a-fresh-handoff" {
+		t.Fatalf("handoff lost when cwd is empty: %s", got)
 	}
 }
 
@@ -842,26 +853,135 @@ func TestCmdOpenFailsRatherThanFallBackWhenTheTokenIsStale(t *testing.T) {
 	}
 }
 
-// TestCmdServeBannerCarriesNoCredential. The old banner printed the session
-// token into terminal scrollback. A handoff token would be no better here and
-// would also be dead within seconds, so the banner points at flue open instead.
-func TestCmdServeBannerCarriesNoCredential(t *testing.T) {
-	const token = "0123456789abcdef-the-session-token"
-	out := serveBanner(7717)
-
-	if strings.Contains(out, token) {
-		t.Errorf("flue serve banner contains the session token: %s", out)
-	}
-	for _, bad := range []string{"?t=", "?" + local.HandoffParam + "=", "t=", "="} {
-		if strings.Contains(out, bad) {
-			t.Errorf("flue serve banner contains a query parameter (%q), so it is carrying a credential: %s", bad, out)
+// bannerURL returns the http:// link in a banner, or "" if there is none.
+func bannerURL(banner string) string {
+	for _, f := range strings.Fields(banner) {
+		if strings.HasPrefix(f, "http://") {
+			return f
 		}
 	}
+	return ""
+}
+
+// TestServeBannerMintsRatherThanPrintingTheSessionToken is the regression this
+// banner is most likely to suffer, because printing the session token is
+// exactly what it used to do. The banner takes the authenticator and mints for
+// itself, so there is no parameter along which the session token could be
+// handed to it — this asserts the consequence: what it advertises is not the
+// session token, is redeemable against that very authenticator, and is spent
+// afterwards.
+func TestServeBannerMintsRatherThanPrintingTheSessionToken(t *testing.T) {
+	const sessionToken = "0123456789abcdef-the-session-token"
+	auth := local.NewAuth(sessionToken, 7717)
+
+	out := serveBanner(7717, auth)
+	if strings.Contains(out, sessionToken) {
+		t.Fatalf("banner printed the session token: %s", out)
+	}
 	if !strings.Contains(out, "127.0.0.1:7717") {
-		t.Errorf("flue serve banner does not say where the daemon is: %s", out)
+		t.Errorf("banner does not say where the daemon is: %s", out)
+	}
+
+	raw := bannerURL(out)
+	if raw == "" {
+		t.Fatalf("banner has no link: %s", out)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("banner link %q is unparseable: %v", raw, err)
+	}
+	if u.Query().Has("t") {
+		t.Fatalf("banner link carries a \"t\" parameter: %s", raw)
+	}
+	h := u.Query().Get(local.HandoffParam)
+	if h == "" {
+		t.Fatalf("banner link carries no handoff token: %s", raw)
+	}
+	if !auth.Redeem(h) {
+		t.Fatal("the banner advertised a token its own daemon will not accept")
+	}
+	if auth.Redeem(h) {
+		t.Fatal("the banner's token was redeemable twice")
+	}
+
+	// The link dies in seconds, so the banner has to say so — otherwise the
+	// user meets that fact as an unexplained 401.
+	if !strings.Contains(out, local.HandoffTTL.String()) {
+		t.Errorf("banner does not tell the user the link expires in %s: %s", local.HandoffTTL, out)
 	}
 	if !strings.Contains(out, "flue open") {
-		t.Errorf("flue serve banner does not tell the user how to get a browser tab: %s", out)
+		t.Errorf("banner does not say how to get another way in: %s", out)
+	}
+}
+
+// TestServeBannerDegradesWhenMintingFails. Mint's only failure mode is the
+// system entropy source, and a daemon that refused to serve because it could
+// not decorate its own banner would be a bad trade. The degraded banner must
+// still name the daemon and still point at flue open — and it must not reach
+// for the session token as a consolation prize.
+func TestServeBannerDegradesWhenMintingFails(t *testing.T) {
+	out := bannerText(7717, "")
+
+	if !strings.Contains(out, "127.0.0.1:7717") {
+		t.Errorf("degraded banner does not say where the daemon is: %s", out)
+	}
+	if !strings.Contains(out, "flue open") {
+		t.Errorf("degraded banner does not tell the user how to get in: %s", out)
+	}
+	if strings.Contains(out, "?") || strings.Contains(out, "=") {
+		t.Errorf("degraded banner carries a query parameter, so it is carrying a credential: %s", out)
+	}
+}
+
+// TestServeBannerLinkWorksExactlyOnceAgainstARealDaemon is the integration
+// half: the banner's convenience is only real if the link actually logs you in
+// over HTTP, and the security claim is only real if it does so once.
+func TestServeBannerLinkWorksExactlyOnceAgainstARealDaemon(t *testing.T) {
+	srv := daemon.New(session.NewRegistry(time.Now), nil, uiHandler(), version)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	t.Cleanup(srv.Shutdown)
+
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("parse %q: %v", ts.URL, err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("parse port from %q: %v", ts.URL, err)
+	}
+	auth := local.NewAuth("the-session-token", port)
+	srv.SetAuth(auth)
+
+	banner := serveBanner(port, auth)
+	if strings.Contains(banner, "the-session-token") {
+		t.Fatalf("banner leaked the session token: %s", banner)
+	}
+
+	link := bannerURL(banner)
+	if link == "" {
+		t.Fatalf("banner has no link: %s", banner)
+	}
+
+	load := func() int {
+		req, err := http.NewRequest(http.MethodGet, link, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Sec-Fetch-Site", "none")
+		resp, err := probeClient.Do(req)
+		if err != nil {
+			t.Fatalf("load %s: %v", link, err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if got := load(); got != http.StatusOK {
+		t.Fatalf("the banner's link answered %d, want 200 — the banner promises a way in", got)
+	}
+	if got := load(); got != http.StatusUnauthorized {
+		t.Fatalf("the banner's link still worked on a second load (%d), want 401", got)
 	}
 }
 

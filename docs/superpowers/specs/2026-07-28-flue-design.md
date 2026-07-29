@@ -580,9 +580,24 @@ Instead, `flue open` performs a **one-time handoff**:
    `Sec-Fetch-Site` header at all — every browser sends that header and the CLI
    never does, so requiring its absence limits minting to a local process that
    can read the token file.
-2. The handoff token — 256 bits from `crypto/rand`, in memory only, never written
-   to disk and never logged — goes in the URL as `?h=<token>`. It lives about ten
-   seconds and is single-use.
+2. The handoff token — 256 bits from `crypto/rand`, held in memory only — goes in
+   the URL as `?h=<token>`. It lives about ten seconds and is single-use. It is
+   **never written to disk, never logged, and never sent anywhere but the browser
+   being launched**, with exactly two deliberate exceptions, both of which write
+   to the user's own terminal and nowhere else:
+
+   - `flue serve`'s startup banner prints a link carrying one, so that starting
+     the daemon in a terminal still gives a clickable way in. (When `flue open`
+     starts the daemon detached, that banner goes to `/dev/null` and the token is
+     simply wasted.)
+   - `flue open` prints the full URL only when launching the browser *failed*,
+     because otherwise the user has no way in at all.
+
+   Both are acceptable for the same reason: what lands in scrollback is
+   single-use and dead within about ten seconds, so an attacker who scrapes a
+   terminal buffer gets nothing — which is precisely the exposure that made the
+   permanent session token unacceptable in that position. Normal `flue open`
+   prints only the credential-free origin.
 3. The first load exchanges it for the `HttpOnly; SameSite=Strict` `flue_token`
    cookie. Redemption is a find-and-delete under one lock, so two concurrent
    presentations yield exactly one success, and a token is removed whether or not
@@ -603,8 +618,11 @@ cookie it is already entitled to (strictly worse for the attacker than spending
 it themselves), and the cookie's value is a constant chosen by the daemon rather
 than anything from the request, so session fixation is impossible.
 
-`flue serve` prints no credential: its banner gives the origin and points at
-`flue open`.
+`flue serve`'s banner prints a handoff link and says, in the banner itself, that
+it works once and expires — so the user meets that fact as a sentence rather than
+as an unexplained 401. If minting fails the daemon still starts and the banner
+degrades to naming the daemon and pointing at `flue open`; it never falls back to
+printing the session token.
 
 **cfrelay.** Two independent layers. The Worker authenticates who may open a
 channel at all, using a device key for the daemon and a scoped secret for

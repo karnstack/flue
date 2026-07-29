@@ -783,9 +783,17 @@ func TestHandoffIsRedeemableExactlyOnceOverHTTP(t *testing.T) {
 	}
 }
 
-// TestConcurrentHandoffExchangesYieldExactlyOneSuccess. Two browsers — or the
-// real browser and whoever raced it — presenting the same token at the same
-// instant must not both be admitted. Run under -race.
+// TestConcurrentHandoffExchangesYieldExactlyOneSuccess checks that the whole
+// HTTP path — not just the store — hands out one cookie for one token when
+// several clients present it together.
+//
+// It is a smoke test and must not be read as proof of atomicity. It does not
+// reliably race: TCP connect and HTTP round-trip jitter serialise the callers
+// well enough that splitting Redeem's critical section still passes here. The
+// test that actually pins single-use under contention is
+// local.TestConcurrentRedeemYieldsExactlyOneWinner, which races the store
+// directly with no I/O in the way. What this one adds is that nothing above the
+// store — the middleware ordering, the cookie write — turns one winner into two.
 func TestConcurrentHandoffExchangesYieldExactlyOneSuccess(t *testing.T) {
 	ts, _, _ := newTestServerUI(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 

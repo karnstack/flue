@@ -29,9 +29,13 @@ const HandoffParam = "h"
 
 // handoff is one outstanding one-time token.
 //
-// It is in-memory only. It is never written to disk and never logged: the whole
-// point of the exchange is that the credential in the browser opener's argv is
-// short-lived and single-use, and persisting it anywhere would undo that.
+// The store is in memory only: nothing here is written to disk, and this package
+// logs nothing at all. The token does reach two of the CLI's terminal writeouts
+// — flue serve's startup banner, and flue open's fallback when launching the
+// browser failed — and that is a deliberate exception rather than an oversight.
+// What lands in scrollback is single-use and dead within HandoffTTL, so it is
+// worth nothing by the time anyone reads it; the permanent session token, which
+// those lines used to carry, was not.
 type handoff struct {
 	token   string
 	expires time.Time

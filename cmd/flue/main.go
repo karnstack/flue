@@ -133,7 +133,12 @@ func cmdServe(args []string) error {
 	}
 
 	reg := session.NewRegistry(time.Now)
-	srv := daemon.New(reg, local.NewAuth(token, *port), uiHandler(), version)
+	// Held rather than inlined into daemon.New because the banner below mints
+	// its own handoff token from it. Doing that in-process needs no
+	// authentication ceremony: this is the process that read the token file, so
+	// it is by construction the principal CheckMint exists to identify.
+	auth := local.NewAuth(token, *port)
+	srv := daemon.New(reg, auth, uiHandler(), version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -170,7 +175,10 @@ func cmdServe(args []string) error {
 		<-held
 	}()
 
-	fmt.Print(serveBanner(*port))
+	// Only now, after the bind is confirmed and the runtime record is in place,
+	// so the link is never printed for a daemon that turned out not to be
+	// serving.
+	fmt.Print(serveBanner(*port, auth))
 
 	// ListenAndServe reports a ctx-caused shutdown as nil, not as
 	// http.ErrServerClosed, so there is nothing to filter out here: whatever
@@ -180,13 +188,56 @@ func cmdServe(args []string) error {
 
 // serveBanner is what flue serve prints once it is listening.
 //
-// It carries no credential. The URL it prints will 401 on its own, and that is
-// deliberate: the session token must never be written into terminal scrollback,
-// and a handoff token minted here would be spent or expired long before anyone
-// read the line. The way in is flue open, which mints one and launches the
-// browser in the same breath.
-func serveBanner(port int) string {
-	return fmt.Sprintf("daemon running on 127.0.0.1:%d\n  run \"flue open\" to get a browser tab\n", port)
+// It takes the authenticator rather than a token string on purpose. The banner
+// mints its own handoff token, so there is no parameter along which the session
+// token could ever be handed to it — the mistake this line is most likely to
+// regress into, since it is exactly what it used to print. Minting in-process
+// needs no authentication ceremony: flue serve read the token file, so it is by
+// construction the principal CheckMint exists to identify.
+//
+// The link carries a one-time handoff token, which is a deliberate and narrow
+// exception to "a handoff token is never written out". Two things make it an
+// acceptable one. What lands in scrollback is single-use and dead in
+// HandoffTTL, so it is worth nothing by the time anyone reads it — which is
+// precisely the exposure that made the permanent session token unacceptable
+// here. And it is the user's own terminal: not a log file, not argv, and not
+// anything another process can read without already being able to read far
+// more.
+//
+// A mint failure is not a reason to refuse to serve. Its only cause is the
+// system entropy source, and a daemon that shut itself down because it could
+// not decorate its own banner would be a far worse trade than a banner that
+// just points at flue open. That is why this returns a string and no error:
+// cmdServe cannot propagate a failure it is never told about, so "the daemon
+// still starts" is a property of this signature rather than of anyone
+// remembering to ignore an error. It degrades to *no* credential, never to the
+// session token.
+//
+// When flue open starts the daemon detached, this banner goes to /dev/null
+// (startDetachedDaemon leaves Stdout nil), so the token is wasted rather than
+// leaked. Wasting one costs nothing: the store is bounded and it expires on its
+// own.
+func serveBanner(port int, auth *local.Auth) string {
+	handoff, err := auth.Mint()
+	if err != nil {
+		return bannerText(port, "")
+	}
+	return bannerText(port, handoff)
+}
+
+// bannerText formats the banner. An empty handoff yields the degraded form.
+//
+// The TTL is short enough that the link is convenience for someone watching the
+// daemon start rather than something to come back to, so the banner says so —
+// otherwise the user meets that fact as an unexplained 401.
+func bannerText(port int, handoff string) string {
+	head := fmt.Sprintf("daemon running on 127.0.0.1:%d\n", port)
+	if handoff == "" {
+		return head + "  run \"flue open\" to get a browser tab\n"
+	}
+	return head +
+		fmt.Sprintf("  %s\n", openURL(port, handoff, "")) +
+		fmt.Sprintf("  that link works once and expires in %s; run \"flue open\" for another\n", local.HandoffTTL)
 }
 
 // reassertInterval is how often a serving daemon checks that the runtime
@@ -431,7 +482,13 @@ func openURL(port int, handoff, cwd string) string {
 	}
 	q := u.Query()
 	q.Set(local.HandoffParam, handoff)
-	q.Set("cwd", cwd)
+	// An empty cwd is omitted rather than emitted as "cwd=". flue serve's
+	// banner has no directory to offer — it is a bookmark-shaped entry point,
+	// like a typed URL — and a blank parameter would be one more thing the app
+	// has to distinguish from "absent".
+	if cwd != "" {
+		q.Set("cwd", cwd)
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }
