@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { renderWithRouter } from '@/test-utils'
+import { renderWithRouter } from '@/testing/render'
 import { AppShell } from './app-shell'
 
 describe('AppShell', () => {

@@ -20,6 +20,13 @@
  * manufactures its own evidence is not a guard.
  */
 @source not '**/*.test.{ts,tsx}';
+/*
+ * And test *helpers*, which are not named `*.test.*` and so were inside the
+ * scan perimeter — one `className` away from the exact failure the rule above
+ * exists to prevent. Anything under src/testing/ is test-only by definition;
+ * put helpers there rather than beside the code they help.
+ */
+@source not 'testing/**';
 
 /*
  * flue design tokens.

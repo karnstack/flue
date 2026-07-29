@@ -129,6 +129,25 @@ async function cacheFirst(request: Request): Promise<Response> {
 }
 
 /**
+ * Whether a response really is the app document.
+ *
+ * "This request is a navigation" is a good proxy for "the answer will be the
+ * shell" only because the daemon serves the shell for every path it does not
+ * have a file at. Typing `/favicon.svg`, `/manifest.webmanifest` or `/sw.js`
+ * into the address bar is *also* a navigation, and each of those has a real
+ * file behind it — so without this check the next load with the daemon down
+ * would render an SVG, or the worker's own source, as the app.
+ *
+ * Asking the response what it is beats predicting it from the path: a list of
+ * static prefixes would have to be kept in step with public/ and with whatever
+ * the build emits, and would drift silently the first time it was not. A
+ * missing Content-Type fails closed.
+ */
+function isShellDocument(response: Response): boolean {
+  return response.headers.get('content-type')?.includes('text/html') ?? false
+}
+
+/**
  * Navigations: the daemon answers if it can, and the cached shell answers if
  * it cannot.
  *
@@ -144,7 +163,7 @@ async function networkFirst(request: Request): Promise<Response> {
     // Only a successful shell is worth keeping. A 401 from an expired session
     // is a real answer and is passed straight through, but caching it would
     // make the failure outlive its cause.
-    if (response.ok && response.type === 'basic') {
+    if (response.ok && response.type === 'basic' && isShellDocument(response)) {
       await cache.put(SHELL_URL, response.clone())
     }
     return response

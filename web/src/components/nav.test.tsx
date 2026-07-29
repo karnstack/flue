@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { renderWithRouter } from '@/test-utils'
+import { renderWithRouter } from '@/testing/render'
 import { isNavItemActive, Nav, NAV_ITEMS } from './nav'
 
 /**

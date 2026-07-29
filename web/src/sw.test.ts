@@ -196,15 +196,60 @@ describe('fetch', () => {
   it('does not cache an unsuccessful shell response', async () => {
     // A 401 from an expired session is a real answer and is passed straight
     // through, but caching it would make the failure outlive its cause.
-    // Same-origin, so `type` is 'basic' just like a good response: what must
-    // keep this out of the cache is the status, not the filtering.
-    fetchMock.mockResolvedValue(basic(new Response('unauthorized', { status: 401 })))
+    // Same-origin and text/html, exactly like a good shell response: what
+    // must keep this out of the cache is the status alone, not the response
+    // filtering and not the content type.
+    fetchMock.mockResolvedValue(typed('unauthorized', 'text/html; charset=utf-8', 401))
     const request = new Request(`${ORIGIN}/`)
     Object.defineProperty(request, 'mode', { value: 'navigate' })
     const answered = await dispatchFetch(request)
 
     expect(answered!.status).toBe(401)
     expect([...theCache().store.keys()]).not.toContain('/')
+  })
+
+  it.each([
+    ['/favicon.svg', '<svg/>', 'image/svg+xml'],
+    ['/manifest.webmanifest', '{"name":"flue"}', 'application/manifest+json'],
+    ['/sw.js', 'self.addEventListener', 'text/javascript; charset=utf-8'],
+    ['/assets/index-abc123.js', 'const a=1', 'text/javascript; charset=utf-8'],
+  ])('does not let a navigation to %s overwrite the cached shell', async (path, body, type) => {
+    // Typing any of these into the address bar is a navigation, so it takes
+    // the shell path — but the daemon has a real file behind each one, so the
+    // body is not the shell. Without the content-type guard the next load
+    // with the daemon down would render an SVG, a JSON manifest, or the
+    // worker's own source as the app.
+    await dispatch('install')
+    fetchMock.mockResolvedValue(typed(body, type))
+
+    const request = new Request(`${ORIGIN}${path}`)
+    Object.defineProperty(request, 'mode', { value: 'navigate' })
+    const answered = await dispatchFetch(request)
+
+    // The request really was handled and really did hit the network —
+    // otherwise the cache assertion below would pass on a no-op.
+    expect(answered).not.toBeNull()
+    expect(fetchMock).toHaveBeenCalled()
+    expect(await answered!.text()).toBe(body)
+
+    // Still the body install put there, not this one.
+    expect(await theCache().store.get('/')!.text()).toBe('body of /')
+  })
+
+  it('does not cache a navigation response that will not say what it is', async () => {
+    // Fail closed. A 200 with no Content-Type at all is not evidence of a
+    // shell, and treating "unknown" as "yes" is how the guard above quietly
+    // stops guarding anything.
+    await dispatch('install')
+    fetchMock.mockResolvedValue(basic(new Response(null, { status: 200 })))
+
+    const request = new Request(`${ORIGIN}/mystery`)
+    Object.defineProperty(request, 'mode', { value: 'navigate' })
+    const answered = await dispatchFetch(request)
+
+    expect(answered).not.toBeNull()
+    expect(fetchMock).toHaveBeenCalled()
+    expect(await theCache().store.get('/')!.text()).toBe('body of /')
   })
 
   it('serves a hashed asset from the cache without touching the network', async () => {
@@ -233,7 +278,7 @@ describe('fetch', () => {
 
   it('fetches and stores a hashed asset it has never seen', async () => {
     await dispatch('install')
-    fetchMock.mockResolvedValue(shellResponse('fresh bundle'))
+    fetchMock.mockResolvedValue(assetResponse('fresh bundle'))
 
     const url = `${ORIGIN}/assets/index-def456.js`
     const answered = await dispatchFetch(new Request(url))
@@ -252,6 +297,22 @@ function basic(response: Response): Response {
   return response
 }
 
+/**
+ * A response of a stated type.
+ *
+ * The Content-Type has to be explicit: the Response constructor labels a
+ * string body `text/plain`, so a fixture that left it out would be refused by
+ * the shell's content-type guard and every "did it cache?" assertion would
+ * pass for the wrong reason.
+ */
+function typed(body: string | null, contentType: string, status = 200): Response {
+  return basic(new Response(body, { status, headers: { 'content-type': contentType } }))
+}
+
 function shellResponse(body = '<!doctype html><html></html>'): Response {
-  return basic(new Response(body, { status: 200 }))
+  return typed(body, 'text/html; charset=utf-8')
+}
+
+function assetResponse(body: string): Response {
+  return typed(body, 'text/javascript; charset=utf-8')
 }
