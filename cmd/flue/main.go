@@ -90,7 +90,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue enable             install the login service, start the daemon, open the UI
   flue disable            remove the login service
   flue status             daemon, login service, and session diagnostics
-  flue open [path]        spawn a session and open it in the browser
+  flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N]   run the daemon in the foreground
 `
 

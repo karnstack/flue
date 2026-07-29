@@ -6,6 +6,7 @@ import { useFlueClient } from '@/client/provider'
 import type { SessionInfo } from '@/client/protocol'
 import { SessionTable } from '@/components/session-table'
 import { Button } from '@/components/ui/button'
+import { takeCwd } from '@/lib/url'
 
 /**
  * How often the session set is re-read while this screen is on show.
@@ -81,11 +82,30 @@ export function SessionsRoute() {
   const spawns = useRef(new Set<number>())
   const [starting, setStarting] = useState(false)
 
+  /**
+   * The directory flue open asked for, taken from the URL exactly once —
+   * `undefined` before the first render has looked. Held until the socket
+   * can carry the spawn: a cold load from flue open mounts this screen
+   * while the client is still connecting.
+   */
+  const pendingCwd = useRef<string | null | undefined>(undefined)
+  if (pendingCwd.current === undefined) pendingCwd.current = takeCwd()
+
   const settle = useCallback((reqId: number): boolean => {
     if (!spawns.current.delete(reqId)) return false
     setStarting(spawns.current.size > 0)
     return true
   }, [])
+
+  const spawnPendingCwd = useCallback(() => {
+    const cwd = pendingCwd.current
+    if (typeof cwd !== 'string') return
+    const reqId = client.spawn({ cwd, cols: 80, rows: 24 })
+    if (reqId === null) return // still down; the next open retries
+    pendingCwd.current = null
+    spawns.current.add(reqId)
+    setStarting(true)
+  }, [client])
 
   useEffect(() => {
     const offs = [
@@ -101,6 +121,7 @@ export function SessionsRoute() {
           spawns.current.clear()
           setStarting(false)
         }
+        if (s === 'open') spawnPendingCwd()
       }),
 
       client.onError((e) => {
@@ -123,6 +144,7 @@ export function SessionsRoute() {
     ]
 
     client.list()
+    spawnPendingCwd()
     const poll = setInterval(() => client.list(), REFRESH_MS)
 
     return () => {
@@ -133,7 +155,7 @@ export function SessionsRoute() {
       for (const reqId of spawns.current) client.abandon(reqId)
       spawns.current.clear()
     }
-  }, [client, navigate, settle])
+  }, [client, navigate, settle, spawnPendingCwd])
 
   const open = useCallback(
     (id: string) => {

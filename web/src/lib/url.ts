@@ -27,3 +27,21 @@ export function stripHandoff(url: string): string {
   const query = u.searchParams.toString()
   return `${u.origin}${u.pathname}${query ? `?${query}` : ''}${u.hash}`
 }
+
+/**
+ * Take the one-shot `cwd` that `flue open <path>` put in the URL.
+ *
+ * Read once and stripped immediately with replaceState, for the same reason
+ * a spawn never lives in a mount effect: anything that re-reads the URL — a
+ * StrictMode remount, a reload, a bookmark — must not start a second shell.
+ * Consuming the parameter is what makes the spawn once-only.
+ */
+export function takeCwd(): string | null {
+  const u = new URL(location.href)
+  const cwd = u.searchParams.get('cwd')
+  if (cwd === null) return null
+  u.searchParams.delete('cwd')
+  const query = u.searchParams.toString()
+  history.replaceState(null, '', `${u.origin}${u.pathname}${query ? `?${query}` : ''}${u.hash}`)
+  return cwd
+}

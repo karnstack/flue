@@ -424,4 +424,38 @@ describe('SessionsRoute', () => {
     expect(filled).toHaveLength(1)
     expect(filled[0]!.textContent).toBe('New session')
   })
+
+  describe('the cwd flue open hands over', () => {
+    afterEach(() => history.replaceState(null, '', '/'))
+
+    it('spawns a session in that directory and navigates to it', async () => {
+      history.replaceState(null, '', '/?cwd=%2FUsers%2Fkarn%2Fproj')
+      const { sock, router } = await mountSessions()
+
+      expect(sock.ofType('spawn')).toEqual([
+        { type: 'spawn', cwd: '/Users/karn/proj', cols: 80, rows: 24, reqId: 1 },
+      ])
+      expect(location.search).toBe('') // consumed, so a reload spawns nothing
+
+      act(() => sock.emitControl(attached({ ref: 1, id: 'fresh', reqId: 1 })))
+      await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh'))
+    })
+
+    it('holds the spawn until the socket opens', async () => {
+      history.replaceState(null, '', '/?cwd=%2Ftmp')
+      const { sock } = await mountSessions({ open: false })
+      expect(sock.ofType('spawn')).toEqual([])
+
+      act(() => sock.open())
+
+      expect(sock.ofType('spawn')).toEqual([
+        { type: 'spawn', cwd: '/tmp', cols: 80, rows: 24, reqId: 1 },
+      ])
+    })
+
+    it('spawns nothing when no cwd was handed over', async () => {
+      const { sock } = await mountSessions()
+      expect(sock.ofType('spawn')).toEqual([])
+    })
+  })
 })

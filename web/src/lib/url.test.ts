@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { stripHandoff } from './url'
+import { afterEach, describe, expect, it } from 'vitest'
+import { stripHandoff, takeCwd } from './url'
 
 describe('stripHandoff', () => {
   it('removes the handoff token', () => {
@@ -37,5 +37,27 @@ describe('stripHandoff', () => {
   it('is idempotent', () => {
     const once = stripHandoff('http://127.0.0.1:7717/?h=secret&cwd=%2Ftmp')
     expect(stripHandoff(once)).toBe(once)
+  })
+})
+
+describe('takeCwd', () => {
+  afterEach(() => history.replaceState(null, '', '/'))
+
+  it('returns the cwd and strips it from the URL', () => {
+    history.replaceState(null, '', '/?cwd=%2FUsers%2Fkarn%2Fcode%2Fflue&other=1')
+
+    expect(takeCwd()).toBe('/Users/karn/code/flue')
+    expect(location.search).toBe('?other=1')
+  })
+
+  it('returns null when there is nothing to take', () => {
+    history.replaceState(null, '', '/')
+    expect(takeCwd()).toBeNull()
+  })
+
+  it('takes it exactly once', () => {
+    history.replaceState(null, '', '/?cwd=%2Ftmp')
+    expect(takeCwd()).toBe('/tmp')
+    expect(takeCwd()).toBeNull()
   })
 })
