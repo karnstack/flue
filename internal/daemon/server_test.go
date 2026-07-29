@@ -1662,3 +1662,76 @@ func TestMalformedControlMessageIsRejected(t *testing.T) {
 		return ok && e.Code == "bad_message"
 	})
 }
+
+// --- reqId correlation ---
+
+func TestAttachedEchoesReqID(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0, ReqID: 42})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok && a.ReqID != 42 {
+			t.Fatalf("Attached.ReqID = %d, want 42", a.ReqID)
+		}
+		return ok
+	})
+}
+
+func TestSpawnAttachedEchoesReqID(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Spawn{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24, ReqID: 5})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok && a.ReqID != 5 {
+			t.Fatalf("Attached.ReqID = %d, want 5", a.ReqID)
+		}
+		return ok
+	})
+}
+
+// TestNotFoundEchoesReqID is the mandatory error half: not_found arrives as
+// an error, so the field has to ride wire.Error or the fourth consumer stays
+// a heuristic.
+func TestNotFoundEchoesReqID(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: "does-not-exist", ReqID: 7})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		if !ok || e.Code != "not_found" {
+			return false
+		}
+		if e.ReqID != 7 {
+			t.Fatalf("Error.ReqID = %d, want 7", e.ReqID)
+		}
+		return true
+	})
+}
+
+func TestSpawnFailedEchoesReqID(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Spawn{Cwd: "/definitely/not/a/directory", Cmd: []string{"true"}, Cols: 80, Rows: 24, ReqID: 9})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		if !ok || e.Code != "spawn_failed" {
+			return false
+		}
+		if e.ReqID != 9 {
+			t.Fatalf("Error.ReqID = %d, want 9", e.ReqID)
+		}
+		return true
+	})
+}

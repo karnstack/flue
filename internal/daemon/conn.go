@@ -209,6 +209,14 @@ func (c *conn) sendError(code, msg string) {
 	_ = c.sendControl(wire.Error{Code: code, Msg: msg})
 }
 
+// sendErrorFor answers a specific request: the error echoes the client's
+// reqId so the reply is matched without leaning on arrival order. A zero
+// reqID marshals to nothing (omitempty), so uncorrelated requests are
+// answered exactly as before.
+func (c *conn) sendErrorFor(reqID uint64, code, msg string) {
+	_ = c.sendControl(wire.Error{ReqID: reqID, Code: code, Msg: msg})
+}
+
 // serve runs the read loop until the socket closes.
 func (c *conn) serve() {
 	writerDone := make(chan struct{})
@@ -307,18 +315,18 @@ func (c *conn) handleControl(msg any) {
 			Cwd: m.Cwd, Cmd: m.Cmd, Cols: m.Cols, Rows: m.Rows,
 		})
 		if err != nil {
-			c.sendError("spawn_failed", err.Error())
+			c.sendErrorFor(m.ReqID, "spawn_failed", err.Error())
 			return
 		}
-		c.attachTo(s, 0)
+		c.attachTo(s, 0, m.ReqID)
 
 	case wire.Attach:
 		s, ok := c.srv.reg.Get(m.ID)
 		if !ok {
-			c.sendError("not_found", "no such session")
+			c.sendErrorFor(m.ReqID, "not_found", "no such session")
 			return
 		}
-		c.attachTo(s, m.LastSeq)
+		c.attachTo(s, m.LastSeq, m.ReqID)
 
 	case wire.Detach:
 		c.detach(m.Ref)
@@ -374,8 +382,9 @@ func (c *conn) handleControl(msg any) {
 	}
 }
 
-// attachTo subscribes to s from lastSeq and starts streaming output.
-func (c *conn) attachTo(s *session.Session, lastSeq uint64) {
+// attachTo subscribes to s from lastSeq and starts streaming output. reqID
+// is echoed on the Attached so the client can match the reply to its request.
+func (c *conn) attachTo(s *session.Session, lastSeq uint64, reqID uint64) {
 	sub := s.Subscribe(lastSeq)
 
 	c.mu.Lock()
@@ -397,6 +406,7 @@ func (c *conn) attachTo(s *session.Session, lastSeq uint64) {
 		Seq:       sub.StartSeq,
 		Truncated: sub.Truncated,
 		Primary:   primary,
+		ReqID:     reqID,
 	})
 
 	if len(sub.Backlog) > 0 {
