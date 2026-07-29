@@ -1,4 +1,7 @@
 // @vitest-environment node
+import { readdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { build } from 'vite'
 import { beforeAll, describe, expect, it } from 'vitest'
 
@@ -135,6 +138,29 @@ function darkUtilities(source: string) {
 
   return found
 }
+
+describe('the directory held outside the scan', () => {
+  /**
+   * src/styles.css excludes src/client/ so that the `resize` control message —
+   * a quoted string, and therefore a scanner candidate — stops compiling a
+   * `.resize` rule. The cost is that a utility class named in there would
+   * silently never be compiled, which looks like nothing at all: the markup
+   * renders unstyled and no build step complains. A comment alone is not a
+   * guard against that, so this is.
+   */
+  it('names no utility class, because none of it would ever compile', () => {
+    const dir = join(dirname(fileURLToPath(import.meta.url)), 'client')
+    const files = readdirSync(dir).filter((f) => !f.includes('.test.'))
+
+    expect(files.length).toBeGreaterThan(0)
+    for (const file of files) {
+      const source = readFileSync(join(dir, file), 'utf8')
+      expect(source, `${file} is outside Tailwind's scan; move markup elsewhere`).not.toMatch(
+        /className|class=/,
+      )
+    }
+  })
+})
 
 describe('compiled document', () => {
   it('carries antialiased on the root element', () => {

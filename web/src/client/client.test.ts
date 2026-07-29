@@ -579,15 +579,134 @@ describe('FlueClient reconnect', () => {
     expect(sockets[1]!.sentControl().filter((m) => m.type === 'spawn')).toEqual([])
   })
 
-  it('keeps a session in the reattach plan while another ref still holds it', async () => {
-    // Two panes on one session is legal, and the plan is keyed by session ID
-    // rather than by ref. Letting go of one pane must not strand the other.
+  it('retires a session detached while the socket was down', async () => {
+    // The refs are gone by then, so the ref -> session mapping has to outlive
+    // the connection it came from. Without it the plan keeps the session for
+    // the life of the tab: every reconnect reattaches something nobody is
+    // watching, and no later call can name it, because the only handle the
+    // view ever had was that ref.
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)
     const { c, sockets } = harness()
 
     c.connect()
     sockets[0]!.open()
+    c.attach('s1', 0)
+    sockets[0]!.emitControl({
+      type: 'attached',
+      ref: 1,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      truncated: false,
+      primary: true,
+    })
+
+    sockets[0]!.close()
+    c.detach(1) // the view unmounts mid-outage, holding only its ref
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toEqual([])
+  })
+
+  it('retires a session by name, for a view that never got a ref', async () => {
+    // An attach answered with not_found leaves nothing to detach, and the
+    // error carries no id to match it against, so the plan would otherwise ask
+    // for a session that no longer exists on every reconnect, forever.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    c.attach('gone', 0)
+    sockets[0]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' })
+    c.forget('gone')
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toEqual([])
+  })
+
+  it('ignores a detach naming a ref the session has since been renumbered off', async () => {
+    // The daemon numbers from 1 again each connection and skips the sessions
+    // that have gone, so a session can come back under a ref another session
+    // used to hold. A view still holding the old number must not be able to
+    // retire the live attachment with it.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    c.attach('s1', 0)
+    c.attach('s2', 0)
+    sockets[0]!.emitControl({
+      type: 'attached',
+      ref: 1,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      truncated: false,
+      primary: true,
+    })
+    sockets[0]!.emitControl({
+      type: 'attached',
+      ref: 2,
+      id: 's2',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      truncated: false,
+      primary: false,
+    })
+    c.detach(1) // s1 is let go, so the reconnect only asks for s2
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+    sockets[1]!.emitControl({
+      type: 'attached',
+      ref: 1, // s2, renumbered
+      id: 's2',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      truncated: false,
+      primary: true,
+    })
+
+    c.detach(2) // a view that never noticed the reconnect
+    expect(sockets[1]!.sentControl()).not.toContainEqual({ type: 'detach', ref: 2 })
+
+    sockets[1]!.close()
+    await vi.advanceTimersByTimeAsync(250)
+    sockets[2]!.open()
+    expect(sockets[2]!.sentControl().filter((m) => m.type === 'attach')).toStrictEqual([
+      { type: 'attach', id: 's2', lastSeq: 0 },
+    ])
+  })
+
+  it('plans one attachment per session, however many refs it holds', async () => {
+    // Documented limit rather than an accident: `attached` says which session
+    // and which ref, never which of two views asked, so a second view could
+    // not be told which reply was its own even if two were sent.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    c.attach('s1', 0)
     c.attach('s1', 0)
     for (const ref of [1, 2]) {
       sockets[0]!.emitControl({
@@ -603,7 +722,8 @@ describe('FlueClient reconnect', () => {
       })
     }
     sockets[0]!.emitBinary(FRAME_OUTPUT, 1, 'abcd')
-    c.detach(2)
+    expect(c.lastSeqFor(1)).toBe(4)
+    expect(c.lastSeqFor(2)).toBe(0)
 
     sockets[0]!.close()
     await vi.advanceTimersByTimeAsync(125)
@@ -639,8 +759,10 @@ describe('FlueClient reconnect', () => {
     expect(sockets).toHaveLength(3)
   })
 
-  it('caps the delay so a long outage still retries about every ten seconds', async () => {
+  it('caps the delay at ten seconds however long the outage runs', async () => {
     vi.useFakeTimers()
+    // The top of the jitter range, so the delay is the ceiling exactly and the
+    // assertions below pin the cap rather than merely bounding it.
     vi.spyOn(Math, 'random').mockReturnValue(1)
     const { c, sockets } = harness()
 
@@ -650,6 +772,14 @@ describe('FlueClient reconnect', () => {
       await vi.advanceTimersByTimeAsync(10_000)
       expect(sockets).toHaveLength(i + 2)
     }
+
+    // Grown past the cap, the delay is still exactly ten seconds — not less,
+    // which a cap of one millisecond would also satisfy, and not more.
+    sockets[sockets.length - 1]!.close()
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(sockets).toHaveLength(41)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets).toHaveLength(42)
   })
 
   it('restarts the backoff after a connection that succeeded', async () => {
@@ -743,8 +873,24 @@ describe('FlueClient reconnect', () => {
 })
 
 describe('FlueClient sending', () => {
+  /** Attach `ref` on `sock` so ref-bearing sends have somewhere to land. */
+  function attachRef(sock: FakeSocket, ref: number, id = 's1') {
+    sock.emitControl({
+      type: 'attached',
+      ref,
+      id,
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      truncated: false,
+      primary: true,
+    })
+  }
+
   it('encodes input as a binary frame', () => {
     const { c, sock } = connected()
+    attachRef(sock, 3)
     c.sendInput(3, utf8.encode('k'))
 
     const bin = sock.sentBinary()[0]
@@ -755,16 +901,86 @@ describe('FlueClient sending', () => {
     expect(text(got.payload)).toBe('k')
   })
 
+  it('refuses to aim a ref-bearing message at a ref it does not hold', async () => {
+    // The daemon numbers refs from 1 again on every connection and skips the
+    // ones whose attach failed, so a view that has not yet noticed the
+    // reconnect holds a number that may now name a different session. Sending
+    // to it would put a stale pane's keystrokes into a live shell.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    attachRef(sockets[0]!, 1, 's1')
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+    attachRef(sockets[1]!, 1, 's2') // ref 1 now names a different session
+
+    // The stale view still thinks it owns ref 1 — and it does not, but the
+    // client cannot tell those apart, so what it enforces is the weaker and
+    // checkable rule: never send to a ref with no live attachment.
+    c.sendInput(7, utf8.encode('rm -rf /\r'))
+    c.resize(7, 80, 24, true)
+    c.signal(7, 'SIGINT')
+    c.closeSession(7)
+
+    expect(sockets[1]!.sentBinary()).toEqual([])
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello', 'attach'])
+  })
+
+  it('splits a paste under the daemon per-frame read limit', () => {
+    const { c, sock } = connected()
+    attachRef(sock, 1)
+    c.sendInput(1, new Uint8Array(1_500_000).fill(0x61))
+
+    const frames = sock.sentBinary()
+    expect(frames.length).toBeGreaterThan(1)
+    let total = 0
+    for (const f of frames) {
+      // 1 MiB is readLimit in internal/daemon/conn.go; over it the daemon
+      // closes the connection and the paste vanishes with no diagnosis.
+      expect(f.byteLength).toBeLessThan(1 << 20)
+      total += decodeBinary(f).payload.length
+    }
+    expect(total).toBe(1_500_000)
+  })
+
+  it('sends an empty input frame rather than nothing at all', () => {
+    const { c, sock } = connected()
+    attachRef(sock, 1)
+    c.sendInput(1, new Uint8Array())
+    expect(sock.sentBinary()).toHaveLength(1)
+  })
+
+  it('rounds and clamps dimensions into the daemon uint16 fields', () => {
+    // Columns come from a layout measurement, so a fraction is the realistic
+    // way in — and Go's uint16 refuses one at json.Unmarshal, which answers
+    // bad_message and drops the whole request.
+    const { c, sock } = connected()
+    attachRef(sock, 1)
+    c.resize(1, 80.4, 23.6, true)
+    c.spawn({ cols: 0, rows: 1e9 })
+
+    expect(sock.sentControl().slice(1)).toStrictEqual([
+      { type: 'resize', ref: 1, cols: 80, rows: 24, primary: true },
+      { type: 'spawn', cols: 1, rows: 65535 },
+    ])
+  })
+
   it('drops keystrokes typed while the socket is down instead of replaying them', async () => {
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)
     const { c, sockets } = harness()
 
     c.connect()
+    attachRef(sockets[0]!, 1) // ignored: the socket is not open yet
     expect(() => c.sendInput(1, utf8.encode('rm -rf /\r'))).not.toThrow()
     sockets[0]!.open()
     expect(sockets[0]!.sentBinary()).toEqual([])
 
+    attachRef(sockets[0]!, 1)
     sockets[0]!.close()
     expect(() => c.sendInput(1, utf8.encode('more\r'))).not.toThrow()
     await vi.advanceTimersByTimeAsync(125)
@@ -772,21 +988,29 @@ describe('FlueClient sending', () => {
     expect(sockets[1]!.sentBinary()).toEqual([])
   })
 
-  it('holds a session-free request issued before the socket opens', () => {
+  it('holds a list asked for before the socket opens', () => {
     const { c, sockets } = harness()
     c.connect()
     expect(() => c.list()).not.toThrow()
-    expect(() => c.spawn({ cols: 80, rows: 24 })).not.toThrow()
     sockets[0]!.open()
 
     expect(sockets[0]!.sentControl()).toStrictEqual([
       { type: 'hello', ver: PROTOCOL_VERSION, caps: ['binary'] },
       { type: 'list' },
-      { type: 'spawn', cols: 80, rows: 24 },
     ])
   })
 
-  it('drops a ref-bearing request issued while the socket is down', async () => {
+  it('asks once however many times a list was asked for while down', () => {
+    const { c, sockets } = harness()
+    c.connect()
+    for (let i = 0; i < 500; i++) c.list()
+    sockets[0]!.open()
+    expect(sockets[0]!.sentControl().map((m) => m.type)).toEqual(['hello', 'list'])
+  })
+
+  it('drops rather than holds a spawn issued while the socket is down', async () => {
+    // A held spawn would surface behind a ten-second backoff as a shell
+    // nobody asked for at a screen nobody is looking at.
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)
     const { c, sockets } = harness()
@@ -794,25 +1018,32 @@ describe('FlueClient sending', () => {
     c.connect()
     sockets[0]!.open()
     sockets[0]!.close()
-    // Refs belong to one connection. Replaying these after a reconnect would
-    // aim them at whatever the daemon numbered 1 the second time round.
-    expect(() => c.resize(1, 80, 24, true)).not.toThrow()
-    expect(() => c.signal(1, 'SIGINT')).not.toThrow()
-    expect(() => c.closeSession(1)).not.toThrow()
-    expect(() => c.detach(1)).not.toThrow()
-
+    c.spawn({ cols: 80, rows: 24 })
     await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+  })
+
+  it('does not carry a held list across a close', () => {
+    const { c, sockets } = harness()
+    c.connect()
+    c.list()
+    c.close()
+    c.connect()
     sockets[1]!.open()
     expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
   })
 
   it('sends the remaining control messages the protocol defines', () => {
     const { c, sock } = connected()
+    attachRef(sock, 3)
     c.list()
     c.spawn({ cwd: '/tmp', cmd: ['zsh', '-l'], cols: 120, rows: 40 })
     c.resize(3, 200, 50, true)
     c.signal(3, 'SIGINT')
     c.closeSession(3)
+    c.detach(3)
 
     expect(sock.sentControl().slice(1)).toStrictEqual([
       { type: 'list' },
@@ -820,16 +1051,8 @@ describe('FlueClient sending', () => {
       { type: 'resize', ref: 3, cols: 200, rows: 50, primary: true },
       { type: 'signal', ref: 3, sig: 'SIGINT' },
       { type: 'close', ref: 3 },
+      { type: 'detach', ref: 3 },
     ])
-  })
-
-  it('bounds how much it will hold for a daemon that never comes back', () => {
-    const { c, sockets } = harness()
-    c.connect()
-    for (let i = 0; i < 500; i++) c.list()
-    sockets[0]!.open()
-    // hello plus a bounded queue, not five hundred.
-    expect(sockets[0]!.sentControl().length).toBeLessThanOrEqual(65)
   })
 })
 

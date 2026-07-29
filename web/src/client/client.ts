@@ -42,10 +42,19 @@ const BACKOFF_BASE_MS = 250
 const BACKOFF_MAX_MS = 10_000
 
 /**
- * How many session-free requests are held while the socket is down. A daemon
- * that never comes back must not turn a retrying screen into a leak.
+ * The most input carried in one frame.
+ *
+ * The daemon caps a single client frame at 1 MiB (`readLimit` in
+ * internal/daemon/conn.go) and closes the connection on anything larger, so a
+ * paste is split well under it rather than costing the whole socket.
  */
-const PENDING_LIMIT = 64
+const MAX_INPUT_BYTES = 1 << 19
+
+/** Round and clamp a terminal dimension into the daemon's uint16 fields. */
+function dimension(n: number): number {
+  if (!Number.isFinite(n)) return 1
+  return Math.min(0xffff, Math.max(1, Math.round(n)))
+}
 
 type Listener<T extends unknown[]> = (...args: T) => void
 
@@ -90,6 +99,16 @@ class Emitter<T extends unknown[]> {
  * is wanted: `error{code:"lagged"}` is largely unreachable now that a
  * backlogged client loses its whole connection, so it is surfaced as an
  * ordinary error and nothing else.
+ *
+ * One limit worth knowing before building on this. **The reattach plan holds
+ * one entry per session, so one session survives a reconnect as one
+ * attachment.** Attaching the same session twice gives two refs while the
+ * connection lasts, but the next reconnect sends one `attach` and the daemon
+ * answers with one ref; the second view would sit on a dead ref with no error
+ * to tell it so. The interface could not support better anyway — `attached`
+ * carries a ref and a session ID and nothing that says *which* of two views
+ * asked — so the fix is a plan keyed per attachment and a handle returned from
+ * `attach`, not a wider map here. Until then: one view per session per tab.
  */
 export class FlueClient {
   private sock: SocketLike | null = null
@@ -109,8 +128,14 @@ export class FlueClient {
    */
   private wanted = new Map<string, number>()
 
-  /** Session-free requests issued before the socket was ready to carry them. */
-  private pending: ClientMessage[] = []
+  /**
+   * Which session each ref named, kept past the connection the ref came from
+   * so that `detach` still works during an outage. See `detach`.
+   */
+  private refOwner = new Map<number, string>()
+
+  /** A `list` asked for while the socket was down. See `list`. */
+  private listOwed = false
 
   private outputListeners = new Emitter<[number, Uint8Array]>()
   private attachedListeners = new Emitter<[Attached]>()
@@ -186,16 +211,34 @@ export class FlueClient {
     this.stopped = true
     this.clearRetry()
     this.attempt = 0
+    this.listOwed = false
     this.teardown()
     this.setStatus('closed')
   }
 
+  /**
+   * Ask for the session list.
+   *
+   * The one request held while the socket is down, because it is idempotent
+   * and because a `list()` in a mount effect that silently did nothing would
+   * leave the sessions screen permanently empty. One is held, not a queue: two
+   * answers to the same question are one answer.
+   */
   list() {
-    this.request({ type: 'list' })
+    if (!this.send({ type: 'list' })) this.listOwed = true
   }
 
+  /**
+   * Ask for a new session.
+   *
+   * Dropped rather than held when the socket is down: unlike `list` this
+   * starts a process, and one queued behind a ten-second backoff would appear
+   * minutes later at a screen nobody was looking at. Check `status` and
+   * disable the control instead.
+   */
   spawn(opts: { cwd?: string; cmd?: string[]; cols: number; rows: number }) {
-    this.request({ type: 'spawn', ...opts })
+    const { cols, rows, ...rest } = opts
+    this.send({ type: 'spawn', ...rest, cols: dimension(cols), rows: dimension(rows) })
   }
 
   /**
@@ -203,40 +246,80 @@ export class FlueClient {
    *
    * Recorded before it is sent, so a socket that is not ready yet — or that
    * drops before `attached` comes back — still replays this on open.
+   *
+   * One entry per session: attaching the same session twice gives two refs on
+   * the live connection but one plan entry, so only one survives a reconnect.
+   * See the class doc.
    */
   attach(id: string, lastSeq = 0) {
     this.wanted.set(id, lastSeq)
     this.send({ type: 'attach', id, lastSeq })
   }
 
+  /**
+   * Let go of an attachment.
+   *
+   * Works whether or not the socket is up, which is the point: a view that
+   * unmounts during an outage has only the ref it was given, and if that did
+   * not retire the session then the next reconnect would attach something
+   * nobody is watching — for the life of the tab, since no later call could
+   * name it. Hence `refOwner`, which outlives the connection the ref came
+   * from. The `detach` frame itself is only worth sending on a live socket;
+   * a dropped connection already retired every ref on the daemon's side.
+   */
   detach(ref: number) {
-    const a = this.attachments.get(ref)
-    if (a) {
-      this.attachments.delete(ref)
-      this.forgetIfLastRef(a.id)
-    }
-    this.send({ type: 'detach', ref })
+    const id = this.refOwner.get(ref)
+    this.refOwner.delete(ref)
+    const live = this.attachments.delete(ref)
+    if (id !== undefined) this.wanted.delete(id)
+    if (live) this.send({ type: 'detach', ref })
+  }
+
+  /**
+   * Stop trying to reattach a session, without naming a ref.
+   *
+   * The escape hatch for a view that never got one — an `attach` answered with
+   * `error{code:"not_found"}` leaves nothing to `detach`, and the error itself
+   * carries no id to match it to. Without this the plan would ask for that
+   * session on every reconnect, forever.
+   */
+  forget(id: string) {
+    this.wanted.delete(id)
   }
 
   sendInput(ref: number, bytes: Uint8Array) {
-    // Never queued. Keystrokes typed at a screen that has stopped responding
-    // are meant for the state the shell was in then; replaying them into a
+    // Never held. Keystrokes typed at a screen that has stopped responding
+    // were meant for the state the shell was in then; replaying them into a
     // reconnected shell seconds later runs something nobody asked for.
-    if (!this.ready || !this.sock) return
-    this.sock.send(encodeBinary(FRAME_INPUT, ref, bytes))
+    if (!this.ready || !this.sock || !this.attachments.has(ref)) return
+    // Split against the daemon's per-frame read limit. Over it, coder/websocket
+    // drops the connection, and the uniform recovery path would show that as an
+    // ordinary blink and reattach — a large paste vanishing with no diagnosis.
+    for (let at = 0; at < bytes.length || at === 0; at += MAX_INPUT_BYTES) {
+      this.sock.send(encodeBinary(FRAME_INPUT, ref, bytes.subarray(at, at + MAX_INPUT_BYTES)))
+    }
   }
 
   resize(ref: number, cols: number, rows: number, primary: boolean) {
-    this.send({ type: 'resize', ref, cols, rows, primary })
+    // Rounded and clamped, because these come from a layout measurement and
+    // the daemon's fields are uint16: a fractional width fails json.Unmarshal
+    // on the Go side, which answers bad_message and drops the whole resize.
+    this.sendForRef(ref, {
+      type: 'resize',
+      ref,
+      cols: dimension(cols),
+      rows: dimension(rows),
+      primary,
+    })
   }
 
   signal(ref: number, sig: string) {
-    this.send({ type: 'signal', ref, sig })
+    this.sendForRef(ref, { type: 'signal', ref, sig })
   }
 
   /** Ask the daemon to end the session behind `ref`. */
   closeSession(ref: number) {
-    this.send({ type: 'close', ref })
+    this.sendForRef(ref, { type: 'close', ref })
   }
 
   // -------------------------------------------------------------------------
@@ -261,9 +344,10 @@ export class FlueClient {
       for (const [id, lastSeq] of this.wanted) {
         this.send({ type: 'attach', id, lastSeq })
       }
-      const held = this.pending
-      this.pending = []
-      for (const msg of held) this.send(msg)
+      if (this.listOwed) {
+        this.listOwed = false
+        this.send({ type: 'list' })
+      }
     }
 
     sock.onclose = () => {
@@ -322,6 +406,16 @@ export class FlueClient {
         // snapshot. `truncated` is passed through untouched; deciding to clear
         // an emulator belongs to whatever owns one.
         this.attachments.set(msg.ref, { id: msg.id, lastSeq: msg.seq })
+        // Retire any ref this session was reached by on a connection that is
+        // gone. The daemon numbers refs from 1 again each time, so the usual
+        // case is this same key; a session that lands on a different number
+        // would otherwise leave the old one behind on every reconnect.
+        for (const [ref, id] of this.refOwner) {
+          if (id === msg.id && !this.attachments.has(ref)) this.refOwner.delete(ref)
+        }
+        this.refOwner.set(msg.ref, msg.id)
+        // Seeds the plan for a session created by spawn, which was never
+        // attached to explicitly and so appears nowhere else.
         this.wanted.set(msg.id, msg.seq)
         this.attachedListeners.emit(msg)
         break
@@ -335,9 +429,10 @@ export class FlueClient {
         const a = this.attachments.get(msg.ref)
         if (!a) break
         this.attachments.delete(msg.ref)
+        this.refOwner.delete(msg.ref)
         // The daemon retires the ref alongside this, and the session is over,
-        // so it is dropped from the reattach plan too.
-        this.forgetIfLastRef(a.id)
+        // so it leaves the reattach plan too.
+        this.wanted.delete(a.id)
         this.exitListeners.emit(msg.ref, msg.code)
         break
       }
@@ -345,9 +440,11 @@ export class FlueClient {
       case 'sizeChanged':
         // The daemon registers a ref before it enqueues that ref's `attached`,
         // so another connection broadcasting new dimensions can overtake it.
-        // Known and accepted daemon-side; the `attached` that follows carries
-        // the current dimensions anyway, so an unknown ref is dropped rather
-        // than raised.
+        // Known and accepted daemon-side, and an unknown ref is dropped rather
+        // than raised. Note the `attached` behind it is not a guaranteed
+        // repair: `attachTo` reads `s.Info()` before enqueuing, so it can
+        // carry pre-resize dimensions and the view then holds stale ones until
+        // the next real change.
         if (!this.attachments.has(msg.ref)) break
         this.sizeListeners.emit(msg)
         break
@@ -364,24 +461,24 @@ export class FlueClient {
     }
   }
 
-  /**
-   * Send now, or drop.
-   *
-   * Ref-bearing messages are never held: a ref belongs to one connection, so
-   * replaying `resize{ref:1}` after a reconnect would aim it at whatever the
-   * daemon numbered 1 the second time round.
-   */
   private send(msg: ClientMessage): boolean {
     if (!this.ready || !this.sock) return false
     this.sock.send(JSON.stringify(msg))
     return true
   }
 
-  /** Send now, or hold until the socket opens. Session-free messages only. */
-  private request(msg: ClientMessage) {
-    if (this.send(msg)) return
-    if (this.pending.length >= PENDING_LIMIT) return
-    this.pending.push(msg)
+  /**
+   * Send, but only while `ref` still names a live attachment.
+   *
+   * Refs belong to one connection and the daemon numbers them from 1 again on
+   * the next, skipping the ones whose attach failed. So a ref held by a view
+   * that has not yet noticed the reconnect does not merely miss — it can name
+   * a different session, and `resize` or `sendInput` would then reach a shell
+   * the user is not looking at.
+   */
+  private sendForRef(ref: number, msg: ClientMessage): boolean {
+    if (!this.attachments.has(ref)) return false
+    return this.send(msg)
   }
 
   /**
@@ -401,21 +498,10 @@ export class FlueClient {
       if (planned === undefined) continue
       this.wanted.set(a.id, Math.max(planned, a.lastSeq))
     }
+    // refOwner is deliberately left alone: it is what lets a view that unmounts
+    // during the outage still name the session its ref stood for.
     this.attachments.clear()
     sock?.close()
-  }
-
-  /**
-   * Drop `id` from the reattach plan once no ref refers to it any more.
-   *
-   * The check is not decoration: one session may legitimately be held by two
-   * refs, and letting go of one of them must not strand the other.
-   */
-  private forgetIfLastRef(id: string) {
-    for (const a of this.attachments.values()) {
-      if (a.id === id) return
-    }
-    this.wanted.delete(id)
   }
 
   private scheduleRetry() {
@@ -423,7 +509,9 @@ export class FlueClient {
     // Capped, so a long outage cannot overflow the exponent into Infinity and
     // so the count stays meaningful if it is ever reported.
     if (this.attempt < 30) this.attempt++
-    // Full jitter, so many tabs reconnecting do not synchronise.
+    // Equal jitter — half the delay fixed, half random — so a daemon restart
+    // does not bring every open tab back in the same millisecond, while still
+    // leaving a floor under the retry rate.
     const delay = ceiling * (0.5 + Math.random() * 0.5)
     this.retry = setTimeout(() => {
       this.retry = null
