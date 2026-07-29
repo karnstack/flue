@@ -323,6 +323,41 @@ describe('Terminal', () => {
     vi.useRealTimers()
   })
 
+  it('gives up on a session the restarted daemon has never heard of', async () => {
+    // The daemon restarting is the whole reason this path exists, and it is
+    // the one shape where the view already holds a ref: it went live, the
+    // socket dropped, the client replayed its attach, and the fresh daemon
+    // answers not_found because its registry is empty. A ref kept from the
+    // previous connection would make the view ignore that answer, and since
+    // nothing else ever clears it, every later reconnect would repeat it —
+    // "Reconnecting…" until the tab is reloaded by hand.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { sock, sockets } = mountTerminal((e) => (
+      <Terminal sessionId="s1" createEmulator={e.create} />
+    ))
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+    expect(screen.queryByRole('status')).toBeNull()
+
+    act(() => sock.close())
+    await act(() => vi.advanceTimersByTimeAsync(125))
+    act(() => sockets[1]!.open())
+    expect(sockets[1]!.ofType('attach')).toEqual([{ type: 'attach', id: 's1', lastSeq: 0 }])
+
+    act(() =>
+      sockets[1]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }),
+    )
+    expect(screen.getByRole('status').textContent).toContain('gone')
+
+    // And it stays given up on: the plan no longer names the session, so the
+    // next reconnect asks for nothing at all.
+    act(() => sockets[1]!.close())
+    await act(() => vi.advanceTimersByTimeAsync(125))
+    act(() => sockets[2]!.open())
+    expect(sockets[2]!.ofType('attach')).toEqual([])
+    vi.useRealTimers()
+  })
+
   it('goes on saying the session is gone through a reconnect', async () => {
     // Nothing is coming back, so walking the pill to "Reconnecting…" would
     // promise that waiting helps.

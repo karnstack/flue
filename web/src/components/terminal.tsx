@@ -202,6 +202,20 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
 
     offs.push(
       client.onStatus((s) => {
+        // A ref belongs to the connection that issued it and to nothing else,
+        // so anything other than `open` retires the one this view holds. Two
+        // things turn on that. The daemon numbers refs from 1 again on every
+        // connection, so a kept ref can come to name a stranger's attachment.
+        // And the `not_found` handler below is only entitled to act while no
+        // ref is held: a daemon that has been restarted answers the replayed
+        // attach with exactly that error, and a ref left over from the
+        // previous connection would swallow it — leaving this view saying
+        // "Reconnecting…" for the life of the tab, with a reload the only way
+        // out.
+        if (s !== 'open') {
+          ref = null
+          primary = false
+        }
         // `open` is deliberately not `live`. The socket being up says nothing
         // about this session: the attach is still a round-trip away, and the
         // screen on display is whatever was there before the outage.
