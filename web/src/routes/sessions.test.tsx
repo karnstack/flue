@@ -259,6 +259,24 @@ describe('SessionsRoute', () => {
     vi.restoreAllMocks()
   })
 
+  it('stops refusing when the spawn it was armed for failed', async () => {
+    // The third settlement, and the one that bites hardest if it is missing.
+    // A failed spawn is answered with an error and never with an `attached`,
+    // so the refusal would stay armed for the life of the connection and hand
+    // back the next attachment the tab is given — a terminal's own. That view
+    // shows itself live on a ref the client has discarded: every keystroke
+    // dropped in silence, no output, and nothing in the reattach plan for a
+    // reconnect to repair.
+    const { sock, goTo } = await mountSessions()
+    await userEvent.click(newSession())
+    await goTo('/settings')
+
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'fork: retry' }))
+    act(() => sock.emitControl(attached({ ref: 1, id: 'a-terminal' })))
+
+    expect(sock.ofType('detach')).toEqual([])
+  })
+
   it('stops refusing once the outage has answered for the reply', async () => {
     // The hazard the refusal introduces. Left armed past the outage it would
     // hand back the first `attached` of the next connection — a terminal's own

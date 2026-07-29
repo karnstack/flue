@@ -30,6 +30,23 @@ const TERMINAL_PATH = '/d/$deviceId/s/$sessionId' as const
 const LOCAL_DEVICE = 'local'
 
 /**
+ * The error a spawn is answered with when it is not answered with a session.
+ *
+ * **A spawn is settled by exactly one of three things: an `attached`, this, or
+ * the connection going away.** Both of the counters in this file — the mounted
+ * screen's `owed` and the cleanup's `refuseNext` — have to handle all three,
+ * and that is why the list is written down once here rather than left implicit
+ * at each site. Missing one is not a count that drifts by one. It is a
+ * listener that stays armed for the life of the connection and then acts on
+ * somebody else's reply, which is how the first version of `refuseNext`
+ * shipped a bug strictly worse than the one it fixed.
+ *
+ * `internal/daemon/conn.go`, `case wire.Spawn`: the error path returns before
+ * `attachTo`, so a failed spawn produces this and nothing else, ever.
+ */
+const SPAWN_FAILED = 'spawn_failed'
+
+/**
  * Hand back the next `count` attachments this tab is given, then stop.
  *
  * The screen that asked for them is gone. Navigating away inside a spawn's
@@ -47,28 +64,45 @@ const LOCAL_DEVICE = 'local'
  * counter it drains, and sound for the same reason: one connection answers in
  * order, and nothing else in this tab has a spawn outstanding.
  *
- * Two bounds, and neither is optional.
+ * Every one of the three settlements above retires this, and none of the three
+ * is optional. What each is holding the line against:
  *
- * A reply already handed back by an earlier refusal is skipped rather than
- * counted, which `lastSeqFor` can tell because `detach` removed the ref from
- * the client's attachments. Without it, two refusals armed in turn would both
- * spend themselves on the first reply and leave the second unclaimed.
- *
- * And the whole thing is retired when the connection is: a reply owed on a
- * socket that dropped is never coming, and a refusal left armed past the
- * outage would hand back the *next* connection's first `attached` — a
- * terminal's own — leaving that view holding a ref this client had detached.
+ * - **`attached`.** The ordinary case. A reply an *earlier* refusal already
+ *   handed back is skipped rather than counted, which `lastSeqFor` can tell
+ *   because `detach` drops the ref from the client's attachments. Without that,
+ *   two refusals armed in turn would both spend themselves on the first reply
+ *   and leave the second unclaimed.
+ * - **`spawn_failed`.** No `attached` is ever coming for that spawn, so
+ *   without this the refusal never reaches zero. It stays armed and hands back
+ *   the next attachment the tab is given — which is a terminal's own. That view
+ *   sets its ref and shows itself live on an attachment the client has already
+ *   discarded: `sendInput` is gated on `attachments.has(ref)` and the rest on
+ *   `sendForRef`, so every keystroke is dropped in silence, no output arrives,
+ *   and the session is no longer in `wanted` for a reconnect to repair. A
+ *   terminal that is dead and does not say so.
+ * - **The connection.** A reply owed on a socket that dropped is never coming,
+ *   and a refusal left armed past the outage reaches the next connection's
+ *   first `attached` the same way.
  */
 function refuseNext(client: FlueClient, count: number) {
   let left = count
   const stop = () => {
     offAttached()
+    offFailed()
     offStatus()
   }
+  /** One of the `count` spawns has been answered, whichever way. */
+  const settle = () => {
+    if (--left <= 0) stop()
+  }
+
   const offAttached = client.onAttached((a) => {
     if (client.lastSeqFor(a.ref) === undefined) return
     client.detach(a.ref)
-    if (--left <= 0) stop()
+    settle()
+  })
+  const offFailed = client.onError((e) => {
+    if (e.code === SPAWN_FAILED) settle()
   })
   const offStatus = client.onStatus((s) => {
     if (s !== 'open') stop()
@@ -151,10 +185,10 @@ export function SessionsRoute() {
       }),
 
       client.onError((e) => {
-        // A spawn that failed is answered with an error and never with an
-        // `attached`, so the debt above has to be written off here or the next
-        // unrelated reply would be mistaken for it.
-        if (e.code !== 'spawn_failed') return
+        // The second of the three settlements. A spawn that failed is answered
+        // with this and never with an `attached`, so the debt has to be written
+        // off here or the next unrelated reply would be mistaken for it.
+        if (e.code !== SPAWN_FAILED) return
         owe(owed.current - 1)
         setNotice(`Could not start a session: ${e.msg}`)
       }),
@@ -193,6 +227,11 @@ export function SessionsRoute() {
       // Whatever this screen asked for and did not live to see answered.
       if (owed.current > 0) refuseNext(client, owed.current)
     }
+    // `navigate` is the dep to watch. TanStack memoises it on the router, so it
+    // cannot change while this screen is mounted and this effect only ever
+    // tears down at a real unmount. If that identity ever became unstable, a
+    // re-run mid-spawn would arm a refusal *and* keep `owed` on the same mount,
+    // and the two would then race for one reply.
   }, [client, navigate, owe])
 
   const open = useCallback(
