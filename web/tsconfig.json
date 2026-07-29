@@ -9,9 +9,9 @@
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["vitest/globals"],
+    "types": ["vitest/globals", "node"],
     "baseUrl": ".",
     "paths": { "@/*": ["./src/*"] }
   },
-  "include": ["src"]
+  "include": ["src", "vite.config.ts"]
 }

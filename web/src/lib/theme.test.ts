@@ -41,8 +41,31 @@ describe('toHex', () => {
     expect(toHex(palette.amber[500])).toMatch(/^#[0-9a-f]{6}$/)
   })
 
+  // Tailwind v4 states achromatic swatches with a missing hue —
+  // `oklch(98.5% 0 none)` — which CSS Color 4 defines as "treat as zero".
+  // 13 entries in the palette look like this, zinc-50 among them, and
+  // zinc-50 is already the dark theme's --foreground. Because vite.config.ts
+  // imports this module at config-load time, throwing here does not fail a
+  // test, it fails the whole build.
+  it('accepts a missing component, as CSS Color 4 requires', () => {
+    expect(toHex(palette.zinc[50])).toBe('#fafafa')
+    expect(toHex('oklch(none none none)')).toBe('#000000')
+  })
+
+  it('converts every swatch in the palette without throwing', () => {
+    for (const entry of Object.values(palette)) {
+      const swatches = typeof entry === 'string' ? [entry] : Object.values(entry)
+      for (const swatch of swatches) {
+        // Keywords, not colours: nothing to convert.
+        if (/^(inherit|currentcolor|transparent)$/i.test(swatch)) continue
+        expect(toHex(swatch)).toMatch(/^#[0-9a-f]{6}$/)
+      }
+    }
+  })
+
   it('rejects a colour it cannot parse rather than guessing', () => {
     expect(() => toHex('rebeccapurple')).toThrow()
+    expect(() => toHex('oklch(50%)')).toThrow()
   })
 })
 

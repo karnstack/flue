@@ -2,6 +2,8 @@
   "name": "@karnstack/flue-web",
   "private": true,
   "type": "module",
+  "//": "pnpm 11 specifically: the allowBuilds key in pnpm-workspace.yaml is what stops ERR_PNPM_IGNORED_BUILDS aborting every install, and pnpm 10 spells that setting onlyBuiltDependencies instead.",
+  "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -29,6 +31,7 @@
     "@testing-library/dom": "^10.4.0",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.0",
+    "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.1.0",

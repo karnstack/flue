@@ -1,8 +1,14 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { buildManifest } from './manifest'
 import { chrome } from './theme'
 
 const manifest = buildManifest()
+// Vitest resolves the cwd to the Vite root, which is web/. Not
+// import.meta.url: Vite rewrites that to an http URL under the test
+// transform, and fileURLToPath then rejects it.
+const PUBLIC = join(process.cwd(), 'public')
 
 describe('buildManifest', () => {
   it('installs as a standalone app rather than a browser tab', () => {
@@ -42,7 +48,29 @@ describe('buildManifest', () => {
     }
   })
 
-  it('is serialisable as the JSON the manifest link points at', () => {
-    expect(() => JSON.parse(JSON.stringify(manifest))).not.toThrow()
+  // The manifest is only as good as the files it names. A renamed or missing
+  // icon does not fail the build, does not fail any other test here, and
+  // shows up only as an install prompt that never appears — so read the
+  // committed PNGs and check they are the size the manifest advertises.
+  it('names icons that exist, are PNGs, and are the advertised size', () => {
+    for (const icon of manifest.icons) {
+      const [width, height] = icon.sizes.split('x').map(Number)
+      expect(pngSize(icon.src)).toEqual({ width, height })
+    }
+  })
+
+  it('ships the apple-touch icon index.html points at', () => {
+    expect(pngSize('/icons/apple-touch-icon.png')).toEqual({
+      width: 180,
+      height: 180,
+    })
   })
 })
+
+/** Read a committed icon's real dimensions out of its PNG IHDR chunk. */
+function pngSize(src: string) {
+  const bytes = readFileSync(join(PUBLIC, src))
+  expect(bytes.subarray(1, 4).toString('latin1')).toBe('PNG')
+  expect(bytes.subarray(12, 16).toString('latin1')).toBe('IHDR')
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
+}

@@ -1,5 +1,10 @@
 @import 'tailwindcss';
-@import '@xterm/xterm/css/xterm.css';
+/* `layer(base)` is load-bearing. Imported bare, xterm.css lands unlayered,
+ * and unlayered CSS outranks every layered rule regardless of specificity —
+ * so no Tailwind utility could override anything it sets on .xterm,
+ * .xterm-viewport or .xterm-screen, including the flue-term-surface utility
+ * at the bottom of this file, which exists to size exactly those elements. */
+@import '@xterm/xterm/css/xterm.css' layer(base);
 /* `sheet` needs both: tw-animate-css supplies animate-in/animate-out and the
  * slide-in-from-* keyframes, shadcn/tailwind.css supplies the data-open and
  * data-closed variants its Radix state attributes are matched with. Neither
@@ -137,6 +142,10 @@
       --accent: var(--color-zinc-800);
       --accent-foreground: var(--color-zinc-50);
       --destructive: var(--color-red-400);
+      /* Not --flue-line. The button's `dark:bg-input/30` compounds the two
+       * alphas, so a 10% hairline would leave a 3% fill with no perceptible
+       * hover step; 15% is what stock shadcn uses here for that reason. */
+      --input: --alpha(var(--color-white) / 15%);
     }
   }
 

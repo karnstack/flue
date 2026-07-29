@@ -11,8 +11,19 @@ import palette from 'tailwindcss/colors'
  * `--color-amber-*` variables in styles.css.
  */
 
-const OKLCH = /^oklch\(\s*([\d.]+)(%?)\s+([\d.]+)\s+([\d.]+)\s*\)$/i
+// `none` is a legal component and Tailwind uses it: every achromatic swatch
+// is stated as e.g. `oklch(98.5% 0 none)`, because a hue is meaningless at
+// zero chroma. CSS Color 4 says a missing component is treated as zero in
+// conversions, which is what `component()` below does.
+const OKLCH = /^oklch\(\s*(none|[\d.]+%?)\s+(none|[\d.]+)\s+(none|[\d.]+)\s*\)$/i
 const HEX = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i
+
+function component(raw: string): number {
+  if (raw.toLowerCase() === 'none') return 0
+  const n = Number(raw.endsWith('%') ? raw.slice(0, -1) : raw)
+  if (!Number.isFinite(n)) throw new Error(`toHex: bad component ${raw}`)
+  return raw.endsWith('%') ? n / 100 : n
+}
 
 /**
  * Convert a Tailwind palette entry to a six-digit sRGB hex.
@@ -40,10 +51,11 @@ export function toHex(css: string): string {
   const oklch = OKLCH.exec(value)
   if (!oklch) throw new Error(`toHex: unsupported colour ${css}`)
 
-  // A bare number is already 0..1; a percentage is 0..100.
-  const l = Number(oklch[1]) / (oklch[2] === '%' ? 100 : 1)
-  const c = Number(oklch[3])
-  const h = (Number(oklch[4]) * Math.PI) / 180
+  // Lightness is 0..1 as a bare number and 0..100 as a percentage; chroma and
+  // hue are always bare.
+  const l = component(oklch[1]!)
+  const c = component(oklch[2]!)
+  const h = (component(oklch[3]!) * Math.PI) / 180
 
   return oklabToHex(l, c * Math.cos(h), c * Math.sin(h))
 }

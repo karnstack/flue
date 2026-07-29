@@ -25,7 +25,8 @@ const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'public')
  *
  * A maskable icon is cropped to a circle of 80% diameter by some launchers,
  * so `MASKABLE_SCALE` shrinks the mark about the centre until its furthest
- * point clears that radius (0.4). Un-scaled, the mark reaches ~0.455.
+ * point clears that radius (0.4). Un-scaled the mark reaches 0.437 (furthest
+ * endpoint 0.384 plus half the stroke); scaled, 0.349.
  */
 const STROKE = 0.105
 const CORNER = 0.225
