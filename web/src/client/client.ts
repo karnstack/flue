@@ -81,7 +81,21 @@ class Emitter<T extends unknown[]> {
 
   emit(...args: T) {
     // Copy first: a listener may unsubscribe itself while we iterate.
-    for (const cb of [...this.listeners]) cb(...args)
+    for (const cb of [...this.listeners]) {
+      try {
+        cb(...args)
+      } catch (err) {
+        // Reported, never rethrown. Delivery is not a place a consumer's bug
+        // may reach: `setStatus('reconnecting')` runs inside `onclose` one
+        // line before the retry is armed, so one throwing listener would
+        // otherwise abort the handler with nothing scheduled — a tab stuck at
+        // `reconnecting` forever, no socket, no timer, and nothing logged.
+        // The same shape sits in `onopen`, ahead of `hello` and the reattach
+        // replay. Isolating it here rather than at each call site is what
+        // makes that invariant hold for every emitter at once.
+        console.error('flue: a listener threw; delivery continues', err)
+      }
+    }
   }
 }
 
@@ -133,6 +147,13 @@ export class FlueClient {
    * so that `detach` still works during an outage. See `detach`.
    */
   private refOwner = new Map<number, string>()
+
+  /**
+   * Sessions let go of while their `attached` may still be in flight. See
+   * `forget`. An entry lives until that reply lands or the session is asked
+   * for again, so this holds only ids whose attach is outstanding or failed.
+   */
+  private refused = new Set<string>()
 
   /** A `list` asked for while the socket was down. See `list`. */
   private listOwed = false
@@ -233,12 +254,12 @@ export class FlueClient {
    *
    * Dropped rather than held when the socket is down: unlike `list` this
    * starts a process, and one queued behind a ten-second backoff would appear
-   * minutes later at a screen nobody was looking at. Check `status` and
-   * disable the control instead.
+   * minutes later at a screen nobody was looking at. Returns whether it went,
+   * so a caller need not infer that from `status`.
    */
-  spawn(opts: { cwd?: string; cmd?: string[]; cols: number; rows: number }) {
+  spawn(opts: { cwd?: string; cmd?: string[]; cols: number; rows: number }): boolean {
     const { cols, rows, ...rest } = opts
-    this.send({ type: 'spawn', ...rest, cols: dimension(cols), rows: dimension(rows) })
+    return this.send({ type: 'spawn', ...rest, cols: dimension(cols), rows: dimension(rows) })
   }
 
   /**
@@ -252,6 +273,7 @@ export class FlueClient {
    * See the class doc.
    */
   attach(id: string, lastSeq = 0) {
+    this.refused.delete(id)
     this.wanted.set(id, lastSeq)
     this.send({ type: 'attach', id, lastSeq })
   }
@@ -276,15 +298,23 @@ export class FlueClient {
   }
 
   /**
-   * Stop trying to reattach a session, without naming a ref.
+   * Stop trying to reattach a session, without naming a ref. Final.
    *
    * The escape hatch for a view that never got one — an `attach` answered with
    * `error{code:"not_found"}` leaves nothing to `detach`, and the error itself
    * carries no id to match it to. Without this the plan would ask for that
    * session on every reconnect, forever.
+   *
+   * "Final" is the part that takes work. Clearing the plan is not enough,
+   * because an `attached` for this session may already be on the wire: a view
+   * that unmounts inside the attach round-trip would have the reply re-seed
+   * the plan behind it and leave exactly the abandoned attachment this exists
+   * to prevent. So the id is refused until something asks for it again, and a
+   * reply that lands in the meantime is detached rather than adopted.
    */
   forget(id: string) {
     this.wanted.delete(id)
+    this.refused.add(id)
   }
 
   sendInput(ref: number, bytes: Uint8Array) {
@@ -401,6 +431,15 @@ export class FlueClient {
   private handleControl(msg: ServerMessage) {
     switch (msg.type) {
       case 'attached': {
+        if (this.refused.has(msg.id)) {
+          // Asked for, then let go of before the answer arrived. Hand the ref
+          // straight back rather than adopting an attachment nobody is behind;
+          // the window closes here, so a later attach for the same session is
+          // an ordinary one.
+          this.refused.delete(msg.id)
+          this.send({ type: 'detach', ref: msg.ref })
+          break
+        }
         // seq is the offset of the first byte about to arrive, so it is the
         // right starting point whether this is a delta or a post-eviction
         // snapshot. `truncated` is passed through untouched; deciding to clear

@@ -147,16 +147,26 @@ describe('the directory held outside the scan', () => {
    * silently never be compiled, which looks like nothing at all: the markup
    * renders unstyled and no build step complains. A comment alone is not a
    * guard against that, so this is.
+   *
+   * What it catches is every route a class takes into markup in this codebase:
+   * a JSX or HTML attribute, the `cn`/`clsx`/`cva` helpers, and `classList`.
+   * What it cannot catch is a bare string assembled here and applied
+   * elsewhere, which is undecidable from one directory. That is why the rule
+   * this backs is "no markup in src/client/" rather than "no class names".
    */
   it('names no utility class, because none of it would ever compile', () => {
     const dir = join(dirname(fileURLToPath(import.meta.url)), 'client')
-    const files = readdirSync(dir).filter((f) => !f.includes('.test.'))
+    // Recursive: a non-recursive read would hand a subdirectory name to
+    // readFileSync and die with EISDIR instead of checking anything under it.
+    const files = readdirSync(dir, { recursive: true, withFileTypes: true }).filter(
+      (e) => e.isFile() && !e.name.includes('.test.'),
+    )
 
     expect(files.length).toBeGreaterThan(0)
-    for (const file of files) {
-      const source = readFileSync(join(dir, file), 'utf8')
-      expect(source, `${file} is outside Tailwind's scan; move markup elsewhere`).not.toMatch(
-        /className|class=/,
+    for (const entry of files) {
+      const source = readFileSync(join(entry.parentPath, entry.name), 'utf8')
+      expect(source, `${entry.name} is outside Tailwind's scan; move markup elsewhere`).not.toMatch(
+        /className|class=|\bcn\(|\bclsx\(|\bcva\(|classList/,
       )
     }
   })

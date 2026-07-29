@@ -696,6 +696,69 @@ describe('FlueClient reconnect', () => {
     ])
   })
 
+  it('refuses an attached that lands after the session was forgotten', async () => {
+    // A view unmounting inside the attach round-trip follows the documented
+    // cleanup and calls forget. If the reply then re-seeded the plan, the tab
+    // would reattach that session on every reconnect with nothing behind it —
+    // the exact abandoned attachment forget exists to prevent.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+    const seen: string[] = []
+
+    c.connect()
+    sockets[0]!.open()
+    c.onAttached((a) => seen.push(a.id))
+    c.attach('s1', 0)
+    c.forget('s1')
+    sockets[0]!.emitControl({
+      type: 'attached',
+      ref: 1,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      truncated: false,
+      primary: true,
+    })
+
+    // Adopted by nobody, and handed straight back.
+    expect(seen).toEqual([])
+    expect(c.lastSeqFor(1)).toBeUndefined()
+    expect(sockets[0]!.sentControl()).toContainEqual({ type: 'detach', ref: 1 })
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+    expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toEqual([])
+  })
+
+  it('accepts a session asked for again after it was forgotten', () => {
+    // The refusal covers one round-trip, not the session for ever.
+    const { c, sock } = connected()
+    const seen: string[] = []
+    c.onAttached((a) => seen.push(a.id))
+
+    c.attach('s1', 0)
+    c.forget('s1')
+    c.attach('s1', 0)
+    sock.emitControl({
+      type: 'attached',
+      ref: 1,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      truncated: false,
+      primary: true,
+    })
+
+    expect(seen).toEqual(['s1'])
+    expect(c.lastSeqFor(1)).toBe(0)
+  })
+
   it('plans one attachment per session, however many refs it holds', async () => {
     // Documented limit rather than an accident: `attached` says which session
     // and which ref, never which of two views asked, so a second view could
@@ -1008,6 +1071,14 @@ describe('FlueClient sending', () => {
     expect(sockets[0]!.sentControl().map((m) => m.type)).toEqual(['hello', 'list'])
   })
 
+  it('reports whether a spawn went, so the caller need not infer it', () => {
+    const { c, sockets } = harness()
+    c.connect()
+    expect(c.spawn({ cols: 80, rows: 24 })).toBe(false)
+    sockets[0]!.open()
+    expect(c.spawn({ cols: 80, rows: 24 })).toBe(true)
+  })
+
   it('drops rather than holds a spawn issued while the socket is down', async () => {
     // A held spawn would surface behind a ten-second backoff as a shell
     // nobody asked for at a screen nobody is looking at.
@@ -1216,6 +1287,57 @@ describe('FlueClient listeners', () => {
 
     sock.emitControl({ type: 'error', code: 'x', msg: '' })
     expect(calls).toBe(1)
+  })
+
+  it('keeps reconnecting when a status listener throws', async () => {
+    // The status change is announced inside onclose, one line before the retry
+    // is armed. An exception escaping delivery would abort the handler with no
+    // socket and no timer: a tab stuck at `reconnecting` for good.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { c, sockets } = harness()
+
+    c.onStatus(() => {
+      throw new Error('consumer bug')
+    })
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.close()
+
+    await vi.advanceTimersByTimeAsync(125)
+    expect(sockets).toHaveLength(2)
+    sockets[1]!.open()
+    expect(c.status).toBe('open')
+    expect(logged).toHaveBeenCalled()
+  })
+
+  it('completes the handshake when a status listener throws on open', () => {
+    // Same shape as above, ahead of hello and the reattach replay instead.
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { c, sockets } = harness()
+
+    c.attach('s1', 9)
+    c.onStatus(() => {
+      throw new Error('consumer bug')
+    })
+    c.connect()
+    sockets[0]!.open()
+
+    expect(sockets[0]!.sentControl().map((m) => m.type)).toEqual(['hello', 'attach'])
+  })
+
+  it('still delivers to the listeners behind one that threw', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { c, sock } = connected()
+    const seen: string[] = []
+    c.onError(() => {
+      throw new Error('consumer bug')
+    })
+    c.onError((e) => seen.push(e.code))
+
+    sock.emitControl({ type: 'error', code: 'not_found', msg: '' })
+    expect(seen).toEqual(['not_found'])
   })
 
   it('registers every kind of listener and hands back an unsubscribe', () => {
