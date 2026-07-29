@@ -277,6 +277,20 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 				http.Error(w, ErrBadHandoff.Error(), http.StatusUnauthorized)
 				return
 			}
+			// Never stored, by anything. This is the only response flue ever
+			// sends that carries the permanent session token in a Set-Cookie,
+			// and it is also precisely the response the service worker is
+			// instructed to keep: GET /?h=… is a navigation, so web/src/sw.ts
+			// routes it to its network-first strategy and, being an ok, basic,
+			// text/html answer, writes it into CacheStorage as the app shell.
+			// Only the very first load of all escapes that, since no worker is
+			// registered yet; every flue open afterwards is intercepted.
+			//
+			// Whether a stored response replays its Set-Cookie is browser
+			// behaviour — the same open question for CacheStorage and for the
+			// ordinary HTTP cache — and this is not a thing to hold an opinion
+			// about when one header settles both. Matches handleMint.
+			w.Header().Set("Cache-Control", "no-store")
 			// Move the session token into an HttpOnly cookie so it stops
 			// appearing in the URL; the client then strips the spent handoff
 			// parameter from the URL with replaceState.

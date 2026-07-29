@@ -199,6 +199,30 @@ func TestMiddlewareExchangesHandoffForCookie(t *testing.T) {
 	}
 }
 
+// TestMiddlewareNeverCachesTheHandoffExchange. The exchange is the only
+// response flue sends that carries the session token in a Set-Cookie, and it is
+// also the one the service worker is told to keep as the app shell — GET /?h=…
+// is a navigation, and the answer is an ok, basic, text/html document. Whether
+// a cached copy would carry the Set-Cookie back out is browser behaviour, so
+// the response says not to keep it at all.
+func TestMiddlewareNeverCachesTheHandoffExchange(t *testing.T) {
+	a := NewAuth(testToken, 7717)
+	h, err := a.Mint()
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	a.Middleware(okHandler(t)).ServeHTTP(rec, req(t, "127.0.0.1:7717", "", "?"+HandoffParam+"="+h, ""))
+
+	if handoffCookie(rec) == nil {
+		t.Fatal("no cookie set, so this is not the response under test")
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q on the response carrying the session cookie, want %q", got, "no-store")
+	}
+}
+
 // TestMiddlewareRefusesASpentHandoff: whoever read the token out of the
 // browser opener's argv — or out of anywhere else — arrives second, and second
 // must fail.
