@@ -388,8 +388,11 @@ describe('Terminal', () => {
       )
 
       const surface = document.querySelector<HTMLElement>('[data-flue-surface]')!
-      await waitFor(() => expect(surface.style.scale).toBe('0.25'))
-      expect(surface.style.width).toBe('1600px')
+      // The gutter is laid out with the screen, so it is scaled with it too.
+      await waitFor(() =>
+        expect(parseFloat(surface.style.scale)).toBeCloseTo(400 / (1600 + GUTTER_PX), 4),
+      )
+      expect(surface.style.width).toBe(`${1600 + GUTTER_PX}px`)
       expect(surface.style.height).toBe('800px')
       expect(sock.ofType('resize')).toEqual([])
     })
@@ -402,6 +405,7 @@ describe('Terminal', () => {
       const { sock, em } = mountTerminal((e) => (
         <Terminal sessionId="s1" createEmulator={e.create} />
       ))
+      // Twice the pane's height, so height is what binds: 0.5 exactly.
       em.live().measured = { width: 1600, height: 816 }
 
       act(() =>

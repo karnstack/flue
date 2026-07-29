@@ -4,7 +4,14 @@ import { useFlueClient } from '@/client/provider'
 import { DARK_SCHEME_QUERY, prefersDark, terminalPalette } from '@/emulator/palette'
 import type { Emulator } from '@/emulator/types'
 import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
-import { cellBox, cellsThatFit, fitFactor, type Box, type Dimensions } from '@/lib/geometry'
+import {
+  cellBox,
+  cellsThatFit,
+  fitFactor,
+  GUTTER_PX,
+  type Box,
+  type Dimensions,
+} from '@/lib/geometry'
 import { createKeyboardModes, type KeyboardMode } from '@/lib/keyboard'
 import { cn } from '@/lib/utils'
 
@@ -162,13 +169,18 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
       // Someone else owns the dimensions. Lay the surface out at their screen's
       // true size and shrink the whole thing, rather than reflowing their text.
       //
+      // The gutter goes back on. The scrollbar is drawn at the right-hand edge
+      // of the surface, and a surface exactly as wide as the screen puts it on
+      // top of the last column — which is the very thing the primary reserves
+      // it to avoid, so both paths have to account for it.
+      const boxed = { width: content.width + GUTTER_PX, height: content.height }
       // These override flue-term-surface's 100% even though that utility is
       // written with the logical properties: logical and physical declarations
       // for the same axis cascade against each other, and a style attribute
       // outranks every author rule whatever layer it sits in.
-      surface.style.width = `${content.width}px`
-      surface.style.height = `${content.height}px`
-      surface.style.scale = String(fitFactor(content, paneBox()))
+      surface.style.width = `${boxed.width}px`
+      surface.style.height = `${boxed.height}px`
+      surface.style.scale = String(fitFactor(boxed, paneBox()))
     }
 
     const schedule = () => {
