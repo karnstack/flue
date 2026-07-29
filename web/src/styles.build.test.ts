@@ -83,6 +83,15 @@ describe('compiled stylesheet', () => {
     expect(css).toContain('-zinc-')
   })
 
+  it('compiles no utility that only a wire-protocol message name summoned', () => {
+    // The daemon's control message for changing a terminal's dimensions has
+    // to appear in src/client/ as a quoted string, and a quoted string is a
+    // scanner candidate exactly as a className is — it shipped
+    // `.resize{resize:both}` until src/styles.css excluded that directory.
+    // Naming it here is safe because this file is outside the scan.
+    expect(css).not.toMatch(/\.resize\s*\{/)
+  })
+
   it('keeps amber out of every neutral surface token', () => {
     // Amber is the single accent: active nav state, focus rings, and the one
     // primary button. It reaches components only through --primary and

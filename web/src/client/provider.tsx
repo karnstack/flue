@@ -1,0 +1,47 @@
+import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react'
+
+import { daemonSocketUrl, FlueClient } from './client'
+
+const FlueClientContext = createContext<FlueClient | null>(null)
+
+export interface FlueClientProviderProps {
+  children: ReactNode
+  /**
+   * A client to use instead of building one. The seam tests reach for; nothing
+   * in the app passes it, because there is meant to be exactly one client and
+   * this is where it lives.
+   */
+  client?: FlueClient
+}
+
+/**
+ * One client per browser tab, mounted above the router so a single WebSocket
+ * serves every route.
+ *
+ * Per-component clients would open a fresh socket on every navigation, and two
+ * components rendering at once would open two — each of which the daemon
+ * counts as a separate attachment with its own byte offsets.
+ */
+export function FlueClientProvider({ children, client }: FlueClientProviderProps) {
+  const own = useRef<FlueClient | null>(null)
+  if (!client && own.current === null) own.current = new FlueClient(daemonSocketUrl())
+  const active = client ?? own.current!
+
+  useEffect(() => {
+    active.connect()
+    // Stopping on unmount is what makes a closed tab a clean detach while the
+    // daemon keeps the PTY running. React double-invokes this in development,
+    // so `close` has to cancel the pending reconnect as well as the socket —
+    // it does, and provider.test.tsx holds it to that.
+    return () => active.close()
+  }, [active])
+
+  return <FlueClientContext.Provider value={active}>{children}</FlueClientContext.Provider>
+}
+
+/** The tab's client. Throws outside the provider rather than returning null. */
+export function useFlueClient(): FlueClient {
+  const client = useContext(FlueClientContext)
+  if (!client) throw new Error('flue: useFlueClient must be used inside FlueClientProvider')
+  return client
+}

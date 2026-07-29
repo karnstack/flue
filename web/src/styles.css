@@ -28,6 +28,18 @@
  */
 @source not 'testing/**';
 /*
+ * And the protocol client, for a reason no synonym can dodge: one of the
+ * daemon's control messages is named for the act of changing a terminal's
+ * dimensions, and that name has to appear as a quoted string on the wire. A
+ * quoted literal is a candidate — measured: `export const m = { type: '…' }`
+ * alone compiles the rule, while the same word as a bare identifier, as in a
+ * method name, does not — so `.resize{resize:both}` shipped until this rule
+ * existed. Everything under src/client/ is protocol plumbing and a context
+ * provider; none of it renders markup, so none of it has a class to lose.
+ * Put anything that does elsewhere. styles.build.test.ts holds the line.
+ */
+@source not 'client/**';
+/*
  * Worth knowing before writing a *comment* in any file still inside the
  * perimeter: Tailwind scans prose exactly as it scans markup, so an ordinary
  * English word that is also a bare utility name compiles a rule. `inline`,
