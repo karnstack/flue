@@ -174,7 +174,7 @@ describe('SessionsRoute', () => {
     const { sock, router } = await mountSessions()
     await userEvent.click(newSession())
 
-    act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1' })))
+    act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1', reqId: 1 })))
 
     expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 4 }])
     await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh1'))
@@ -196,7 +196,7 @@ describe('SessionsRoute', () => {
     const { sock, router } = await mountSessions()
     await userEvent.click(newSession())
 
-    act(() => sock.emitControl(attached({ ref: 1, id: 'mine' })))
+    act(() => sock.emitControl(attached({ ref: 1, id: 'mine', reqId: 1 })))
     act(() => sock.emitControl(attached({ ref: 2, id: 'not-mine' })))
 
     expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 1 }])
@@ -218,7 +218,7 @@ describe('SessionsRoute', () => {
   it('lets the user try again once a spawn has been answered', async () => {
     const { sock } = await mountSessions()
     await userEvent.click(newSession())
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope' }))
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 1 }))
 
     await userEvent.click(newSession())
 
@@ -235,7 +235,7 @@ describe('SessionsRoute', () => {
 
     await goTo('/settings')
     expect(onScreen()).toBe(false)
-    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan' })))
+    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan', reqId: 1 })))
 
     expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 7 }])
   })
@@ -249,7 +249,7 @@ describe('SessionsRoute', () => {
     const { sock, sockets, goTo } = await mountSessions()
     await userEvent.click(newSession())
     await goTo('/settings')
-    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan' })))
+    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan', reqId: 1 })))
 
     act(() => sock.close())
     await act(() => vi.advanceTimersByTimeAsync(125))
@@ -271,7 +271,7 @@ describe('SessionsRoute', () => {
     await userEvent.click(newSession())
     await goTo('/settings')
 
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'fork: retry' }))
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'fork: retry', reqId: 1 }))
     act(() => sock.emitControl(attached({ ref: 1, id: 'a-terminal' })))
 
     expect(sock.ofType('detach')).toEqual([])
@@ -307,10 +307,10 @@ describe('SessionsRoute', () => {
     await goTo('/sessions')
     await userEvent.click(newSession())
 
-    act(() => sock.emitControl(attached({ ref: 1, id: 'first' })))
+    act(() => sock.emitControl(attached({ ref: 1, id: 'first', reqId: 1 })))
     expect(router.state.location.pathname).toBe('/sessions')
 
-    act(() => sock.emitControl(attached({ ref: 2, id: 'second' })))
+    act(() => sock.emitControl(attached({ ref: 2, id: 'second', reqId: 2 })))
 
     expect(sock.ofType('detach')).toEqual([
       { type: 'detach', ref: 1 },
@@ -324,7 +324,12 @@ describe('SessionsRoute', () => {
     await userEvent.click(newSession())
 
     act(() =>
-      sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'chdir /nope: no such file' }),
+      sock.emitControl({
+        type: 'error',
+        code: 'spawn_failed',
+        msg: 'chdir /nope: no such file',
+        reqId: 1,
+      }),
     )
 
     expect(screen.getByRole('status').textContent).toContain('chdir /nope')
@@ -347,12 +352,25 @@ describe('SessionsRoute', () => {
     // stayed on the books, the next reattach to land would be mistaken for it.
     const { sock, router } = await mountSessions()
     await userEvent.click(newSession())
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope' }))
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 1 }))
 
     act(() => sock.emitControl(attached({ ref: 6, id: 'unrelated' })))
 
     expect(sock.ofType('detach')).toEqual([])
     expect(router.state.location.pathname).toBe('/sessions')
+  })
+
+  it('ignores a spawn_failed that answers someone else’s request', async () => {
+    // reqId is the whole point: an error naming another request must not
+    // write off this screen's debt or show its notice.
+    const { sock, router } = await mountSessions()
+    await userEvent.click(newSession())
+
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 99 }))
+    expect(screen.getByRole('status').textContent).not.toContain('nope')
+
+    act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1', reqId: 1 })))
+    await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh1'))
   })
 
   it('reports a lost daemon rather than showing an empty screen', async () => {
