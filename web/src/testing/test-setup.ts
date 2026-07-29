@@ -1,7 +1,8 @@
+import { afterEach, beforeEach } from 'vitest'
 import '@testing-library/dom'
 
-// jsdom implements neither of these, and both are exercised by the
-// terminal view's resize handling and focus mode.
+// jsdom implements neither of these, and both are exercised by the terminal
+// view's geometry handling and by focus mode.
 if (!globalThis.ResizeObserver) {
   globalThis.ResizeObserver = class {
     observe() {}
@@ -28,3 +29,43 @@ if (!globalThis.matchMedia) {
     dispatchEvent: () => false,
   })) as unknown as typeof matchMedia
 }
+
+/*
+ * Fail a test that logged one of flue's own swallowed errors.
+ *
+ * FlueClient's Emitter catches whatever a listener throws and reports it with
+ * console.error, on purpose: delivery happens one line before a reconnect is
+ * armed, so an exception escaping it would strand a tab at `reconnecting` for
+ * good. The cost is that a bug in an onOutput or onAttached handler — the two
+ * callbacks that write into a live xterm instance — logs and lets the suite
+ * stay green. Nothing trapped console before this.
+ *
+ * Only flue's own prefix is matched. React logs plenty through console.error
+ * that no test here is trying to police, and a blanket trap would make this a
+ * source of failures rather than a guard against one. A test that means to
+ * exercise the swallow spies on console.error itself, which replaces this
+ * wrapper for the duration and opts out on its own.
+ */
+const FLUE_PREFIX = 'flue:'
+const swallowed: string[] = []
+const passThrough = console.error.bind(console)
+
+console.error = (...args: unknown[]) => {
+  if (typeof args[0] === 'string' && args[0].startsWith(FLUE_PREFIX)) {
+    swallowed.push(args.map(String).join(' '))
+  }
+  passThrough(...args)
+}
+
+beforeEach(() => {
+  swallowed.length = 0
+})
+
+afterEach(() => {
+  if (swallowed.length === 0) return
+  const reported = swallowed.join('\n')
+  swallowed.length = 0
+  throw new Error(
+    `a listener threw and FlueClient swallowed it; delivery continued but the bug is real:\n${reported}`,
+  )
+})

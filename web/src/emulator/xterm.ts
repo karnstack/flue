@@ -1,10 +1,22 @@
 import { Terminal } from '@xterm/xterm'
-import type { Emulator, Grid } from './types'
+import type { Emulator, Grid, PixelSize, TerminalTheme } from './types'
 
 export interface XtermOptions {
   cols?: number
   rows?: number
+  theme?: TerminalTheme
 }
+
+/**
+ * The class xterm puts on the element whose box is exactly the rendered
+ * screen: `cols` cells wide and `rows` cells tall, in CSS pixels.
+ *
+ * Both the DOM renderer and the WebGL addon set that element's width and
+ * height explicitly, which is what makes it the one honest measurement of the
+ * screen. The `.xterm` element around it is a block box and takes its parent's
+ * width instead, so measuring that would report the pane, not the screen.
+ */
+const SCREEN_SELECTOR = '.xterm-screen'
 
 /**
  * Kept in step with `--font-mono` in styles.css, which emulator.test.ts
@@ -17,14 +29,15 @@ export const TERMINAL_FONT_FAMILY =
 /**
  * xterm.js behind the Emulator seam.
  *
- * Colours are deliberately not set here. xterm.css is imported into the base
- * layer by styles.css, and the terminal's palette is a visual decision that
- * belongs with the view that mounts it.
+ * The palette is passed in rather than chosen here: which colours a terminal
+ * wears is a design decision, and this file's job is only to hand them to
+ * xterm. See src/emulator/palette.ts for the ones flue ships.
  */
 export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
   const term = new Terminal({
     cols: opts.cols ?? 80,
     rows: opts.rows ?? 24,
+    theme: opts.theme,
     // Gates `unicode`, `markers`, character joiners and decorations. Nothing
     // here uses any of them yet; it stays on because the WebGL addon is
     // loaded through a catch-and-fall-back, so an API refusal inside it would
@@ -71,6 +84,31 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       if (disposed) return
       disposed = true
       term.dispose()
+    },
+
+    // The three below are all reachable after disposal: a queued animation
+    // frame, a media-query change landing mid-teardown, a focus effect racing
+    // an unmount. xterm throws from a disposed terminal, so each checks.
+
+    setTheme(theme: TerminalTheme) {
+      if (disposed) return
+      term.options.theme = theme
+    },
+
+    focus() {
+      if (disposed) return
+      term.focus()
+    },
+
+    contentSize(): PixelSize | null {
+      if (disposed) return null
+      const screen = term.element?.querySelector(SCREEN_SELECTOR)
+      if (!(screen instanceof HTMLElement)) return null
+      // offsetWidth/offsetHeight rather than getBoundingClientRect, because a
+      // non-primary view carries a CSS transform: the rect would report the
+      // scaled box, and dividing the pane by that converges on nothing.
+      const size = { width: screen.offsetWidth, height: screen.offsetHeight }
+      return size.width > 0 && size.height > 0 ? size : null
     },
 
     injectForTest(data: string) {

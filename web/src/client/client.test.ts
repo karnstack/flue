@@ -734,14 +734,51 @@ describe('FlueClient reconnect', () => {
     expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toEqual([])
   })
 
-  it('accepts a session asked for again after it was forgotten', () => {
-    // The refusal covers one round-trip, not the session for ever.
+  it('adopts only the second reply when a view re-attaches inside the round-trip', () => {
+    // React's StrictMode runs every mount effect twice — mount, clean up,
+    // mount — so attach / forget / attach inside one round-trip is not an edge
+    // case, it is what development does on every single mount.
+    //
+    // The daemon answers each attach, so two replies come back. Refusing "the
+    // session" rather than "one outstanding reply" adopted both: onAttached
+    // fired twice for one view, and the first ref stayed attached and stayed
+    // primary on the daemon until the socket dropped.
     const { c, sock } = connected()
-    const seen: string[] = []
-    c.onAttached((a) => seen.push(a.id))
+    const seen: number[] = []
+    c.onAttached((a) => seen.push(a.ref))
 
     c.attach('s1', 0)
     c.forget('s1')
+    c.attach('s1', 0)
+    for (const ref of [1, 2]) {
+      sock.emitControl({
+        type: 'attached',
+        ref,
+        id: 's1',
+        cols: 80,
+        rows: 24,
+        title: '',
+        seq: 0,
+        truncated: false,
+        primary: ref === 1,
+      })
+    }
+
+    expect(seen).toEqual([2])
+    expect(c.lastSeqFor(1)).toBeUndefined()
+    expect(c.lastSeqFor(2)).toBe(0)
+    expect(sock.sentControl()).toContainEqual({ type: 'detach', ref: 1 })
+    expect(sock.sentControl()).not.toContainEqual({ type: 'detach', ref: 2 })
+  })
+
+  it('does not let a forget with nothing outstanding refuse a later reply', () => {
+    // forget names a session, not a reply, so a count that simply grew on
+    // every call would eat the answer to an attach issued long afterwards —
+    // a terminal that silently never attaches, with no error anywhere.
+    const { c, sock } = connected()
+    const seen: number[] = []
+    c.onAttached((a) => seen.push(a.ref))
+
     c.attach('s1', 0)
     sock.emitControl({
       type: 'attached',
@@ -754,9 +791,57 @@ describe('FlueClient reconnect', () => {
       truncated: false,
       primary: true,
     })
+    c.forget('s1') // nothing in flight: the reply already landed
 
-    expect(seen).toEqual(['s1'])
-    expect(c.lastSeqFor(1)).toBe(0)
+    c.attach('s1', 0)
+    sock.emitControl({
+      type: 'attached',
+      ref: 2,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      truncated: false,
+      primary: true,
+    })
+
+    expect(seen).toEqual([1, 2])
+  })
+
+  it('drops an unanswered refusal when the connection goes', async () => {
+    // Refusals are counted against replies that are still on the wire. A
+    // socket that drops takes every one of them with it, so a count carried
+    // into the next connection would refuse an entirely unrelated attach.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+    const seen: number[] = []
+
+    c.connect()
+    sockets[0]!.open()
+    c.onAttached((a) => seen.push(a.ref))
+    c.attach('s1', 0)
+    c.forget('s1') // one reply owed a refusal, and it never arrives
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    c.attach('s1', 0)
+    sockets[1]!.emitControl({
+      type: 'attached',
+      ref: 1,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      truncated: false,
+      primary: true,
+    })
+
+    expect(seen).toEqual([1])
   })
 
   it('plans one attachment per session, however many refs it holds', async () => {

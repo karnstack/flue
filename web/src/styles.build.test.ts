@@ -86,13 +86,26 @@ describe('compiled stylesheet', () => {
     expect(css).toContain('-zinc-')
   })
 
-  it('compiles no utility that only a wire-protocol message name summoned', () => {
-    // The daemon's control message for changing a terminal's dimensions has
-    // to appear in src/client/ as a quoted string, and a quoted string is a
-    // scanner candidate exactly as a className is — it shipped
-    // `.resize{resize:both}` until src/styles.css excluded that directory.
-    // Naming it here is safe because this file is outside the scan.
-    expect(css).not.toMatch(/\.resize\s*\{/)
+  it('compiles no utility that only English prose summoned', () => {
+    // Tailwind scans comments and quoted strings exactly as it scans markup,
+    // so an ordinary word that is also a bare utility name ships a rule. Four
+    // have got in that way so far: `.resize` from "resize handling" and from
+    // the daemon's control message name, `.inline` from "parses inline",
+    // `.grid` from "the live grid", and `.container` from a doc comment in
+    // sw-register.ts. Every one was dead CSS reachable from no markup at all.
+    //
+    // These four are the words this codebase writes and does not use as
+    // classes. `fixed`, `hidden`, `visible`, `isolate`, `static` and
+    // `container` are all genuinely used somewhere and so cannot be asserted
+    // against; src/styles.css lists them for the reader. If a real need for
+    // one of these four ever arrives, take it off this list deliberately.
+    //
+    // Naming them here is safe because this file is outside the scan.
+    for (const word of ['resize', 'grid', 'inline', 'table']) {
+      expect(css, `.${word} was compiled from prose, not from markup`).not.toMatch(
+        new RegExp(`\\.${word}\\s*\\{`),
+      )
+    }
   })
 
   it('keeps amber out of every neutral surface token', () => {

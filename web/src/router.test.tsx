@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { RouterProvider } from '@tanstack/react-router'
+import { FlueClientProvider } from './client/provider'
+import { fakeClient } from './testing/socket'
 import { createFlueRouter, TERMINAL_ROUTE_ID } from './router'
 
 function routeIds(path: string): string[] {
@@ -15,12 +17,25 @@ function routeIds(path: string): string[] {
  * createFlueRouter deliberately takes no history argument — it is the app's
  * router, not a test fixture — so the location is set on jsdom's own history
  * before the router reads it.
+ *
+ * The client provider is here because main.tsx puts one above the router and
+ * the terminal route needs it. Without it that route throws into TanStack's
+ * default error boundary, which renders "Something went wrong!" — and every
+ * assertion below about the terminal is an assertion that something is
+ * *absent*, so all of them would have gone on passing. That is why the
+ * terminal case also asserts something positive.
  */
 async function renderAt(path: string) {
   window.history.replaceState(null, '', path)
   const router = createFlueRouter()
   await router.load()
-  return render(<RouterProvider router={router} />)
+  const { client, sockets } = fakeClient()
+  const view = render(
+    <FlueClientProvider client={client}>
+      <RouterProvider router={router} />
+    </FlueClientProvider>,
+  )
+  return { ...view, client, sockets }
 }
 
 describe('createFlueRouter', () => {
@@ -71,11 +86,30 @@ describe('createFlueRouter', () => {
     // consequence. A terminal session *is* the tab, so there must be no
     // sidebar, no header and no nav on screen — not merely a different
     // parent route.
-    await renderAt('/d/local/s/abc123')
+    const { container } = await renderAt('/d/local/s/abc123')
+
+    // First that a terminal is on screen at all. Every other assertion here
+    // is about absence, and a route that threw would satisfy all of them.
+    expect(container.querySelector('[data-flue-surface]')).not.toBeNull()
+
     expect(screen.queryByRole('complementary')).toBeNull()
     expect(screen.queryByRole('banner')).toBeNull()
     expect(screen.queryByRole('navigation')).toBeNull()
     expect(screen.queryAllByRole('link')).toHaveLength(0)
+  })
+
+  it('hands the session id from the path to the terminal', async () => {
+    // The route reads its param with a hard-coded `from`. TypeScript checks
+    // that against the registered tree, but only a render proves the param
+    // arrives: a `from` that drifted would hand back an empty params object,
+    // not an error, and the terminal would attach to `undefined`.
+    const { sockets } = await renderAt('/d/local/s/abc123')
+
+    act(() => sockets[0]!.open())
+
+    expect(sockets[0]!.ofType('attach')).toEqual([
+      { type: 'attach', id: 'abc123', lastSeq: 0 },
+    ])
   })
 
   it('marks Sessions as the current item on the index route', async () => {

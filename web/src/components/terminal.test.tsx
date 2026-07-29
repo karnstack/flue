@@ -1,0 +1,541 @@
+import { StrictMode, type ReactNode } from 'react'
+import { act, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { FlueClientProvider } from '@/client/provider'
+import { GUTTER_PX } from '@/lib/geometry'
+import { createFakeEmulator, type FakeEmulator } from '@/testing/emulator'
+import { attached, fakeClient, sizeChanged, type FakeSocket } from '@/testing/socket'
+import { Terminal, TERMINAL_SHORTCUT_HINT } from './terminal'
+
+/**
+ * One emulator per mount, all of them kept.
+ *
+ * Kept rather than replaced because StrictMode builds two, and "the second one
+ * is the live one" is a property worth being able to assert rather than assume.
+ */
+function emulators() {
+  const built: FakeEmulator[] = []
+  const create = (opts: { cols?: number; rows?: number }) => {
+    const em = createFakeEmulator(opts)
+    built.push(em)
+    return em
+  }
+  return { built, create, live: () => built[built.length - 1]! }
+}
+
+/** Pretend every element is this big. Only the pane is measured. */
+function paneOf(width: number, height: number) {
+  return vi
+    .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+    .mockReturnValue({ width, height, top: 0, left: 0, right: width, bottom: height } as DOMRect)
+}
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  document.title = 'flue'
+})
+
+/**
+ * Mount a terminal into a client that is already connected.
+ *
+ * The two-pass render is load-bearing, not ceremony. A terminal reached by
+ * navigating — which is every way a user reaches one after the first paint —
+ * mounts into a socket that is already open, and several of the behaviours
+ * below only exist in that shape. Rendering the whole tree at once instead
+ * would put every mount effect ahead of the socket opening.
+ */
+function mountTerminal(children: (em: ReturnType<typeof emulators>) => ReactNode) {
+  const { client, sockets } = fakeClient()
+  const em = emulators()
+  const view = render(<FlueClientProvider client={client}>{null}</FlueClientProvider>)
+  const sock = sockets[0]!
+  act(() => sock.open())
+
+  const show = (node: ReactNode) =>
+    view.rerender(<FlueClientProvider client={client}>{node}</FlueClientProvider>)
+
+  act(() => show(children(em)))
+  return { client, sockets, sock, em, view, show }
+}
+
+describe('Terminal', () => {
+  let live: FakeSocket
+
+  beforeEach(() => {
+    document.title = 'flue'
+  })
+
+  it('attaches to its own session on mount', () => {
+    const { sock } = mountTerminal((em) => (
+      <Terminal sessionId="s1" createEmulator={em.create} />
+    ))
+    live = sock
+
+    expect(live.ofType('attach')).toEqual([{ type: 'attach', id: 's1', lastSeq: 0 }])
+  })
+
+  it('writes the output for its own ref and nobody else’s', () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 2, id: 's1' })))
+    act(() => sock.emitOutput(2, 'mine'))
+    act(() => sock.emitOutput(3, 'someone else’s'))
+
+    expect(em.live().text()).toBe('mine')
+  })
+
+  it('resets the screen before a truncated snapshot', () => {
+    // `truncated` means the offset asked for had already been evicted, so what
+    // follows is a fresh snapshot rather than a continuation. Writing it on
+    // top of what is already there would interleave two different pasts.
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', truncated: true })))
+    act(() => sock.emitOutput(1, 'fresh'))
+
+    // A full reset, not an erase-in-display: the snapshot arrives with no
+    // assumptions about scroll region, character set, or attributes, and
+    // ESC[2J leaves every one of those where the evicted output left them.
+    expect(em.live().text()).toBe('\x1bcfresh')
+  })
+
+  it('does not reset when the attach is an ordinary continuation', () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', truncated: false, seq: 40 })))
+    act(() => sock.emitOutput(1, 'more'))
+
+    expect(em.live().text()).toBe('more')
+  })
+
+  it('ignores an attached for a session it is not showing', () => {
+    // One client serves the whole tab, so every listener sees every reply.
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 7, id: 'other', cols: 200, rows: 60 })))
+
+    expect(em.live().cols).toBe(80)
+    act(() => sock.emitOutput(7, 'not mine'))
+    expect(em.live().text()).toBe('')
+  })
+
+  it('sends what the user types to its own ref', () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    act(() => sock.emitControl(attached({ ref: 4, id: 's1' })))
+
+    act(() => em.live().send('ls\r'))
+
+    expect(sock.input()).toEqual([{ ref: 4, text: 'ls\r' }])
+  })
+
+  it('drops keystrokes typed before the attach comes back', () => {
+    // The client refuses input on an unknown ref anyway; the point is that the
+    // view does not invent one, which a `?? 0` would.
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => em.live().send('rm -rf /\r'))
+
+    expect(sock.input()).toEqual([])
+  })
+
+  it('takes its dimensions from the daemon rather than guessing', () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', cols: 132, rows: 43 })))
+
+    expect(em.live().cols).toBe(132)
+    expect(em.live().rows).toBe(43)
+  })
+
+  it('follows a size change broadcast by another client', () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', primary: false })))
+
+    act(() => sock.emitControl(sizeChanged({ ref: 1, cols: 100, rows: 30, primary: false })))
+
+    expect(em.live().cols).toBe(100)
+    expect(em.live().rows).toBe(30)
+  })
+
+  it('detaches on unmount', () => {
+    const { sock, em, show } = mountTerminal((e) => (
+      <Terminal sessionId="s1" createEmulator={e.create} />
+    ))
+    act(() => sock.emitControl(attached({ ref: 5, id: 's1' })))
+
+    act(() => show(null))
+
+    expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 5 }])
+    expect(em.live().disposals).toBe(1)
+  })
+
+  it('retires the session by name when it unmounts inside the attach round-trip', async () => {
+    // There is no ref to detach yet. Without forget, the reattach plan asks
+    // for this session on every reconnect for the life of the tab, and nothing
+    // is watching it.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { sock, sockets, show } = mountTerminal((e) => (
+      <Terminal sessionId="s1" createEmulator={e.create} />
+    ))
+
+    act(() => show(null))
+    act(() => sock.close())
+    await act(() => vi.advanceTimersByTimeAsync(125))
+    act(() => sockets[1]!.open())
+
+    expect(sockets[1]!.ofType('attach')).toEqual([])
+    vi.useRealTimers()
+  })
+
+  it('leaves exactly one attachment behind a StrictMode double-mount', () => {
+    // React runs every mount effect twice in development: mount, clean up,
+    // mount. On an already-open socket that is attach / forget / attach inside
+    // one round-trip, and the daemon answers both. Adopting both leaves the
+    // first ref attached — and primary — with nobody behind it until the
+    // socket drops, and delivers `attached` twice to one view.
+    const { sock, em } = mountTerminal((e) => (
+      <StrictMode>
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      </StrictMode>
+    ))
+
+    expect(em.built).toHaveLength(2)
+    expect(sock.ofType('attach')).toHaveLength(2)
+
+    act(() => {
+      sock.emitControl(attached({ ref: 1, id: 's1', cols: 111, rows: 11 }))
+      sock.emitControl(attached({ ref: 2, id: 's1', cols: 222, rows: 22 }))
+    })
+
+    expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 1 }])
+    // The live view adopted the second reply and only the second: taking both
+    // would leave it sized to whichever arrived last with no way to tell.
+    expect(em.live().cols).toBe(222)
+    expect(em.built[0]!.disposals).toBe(1)
+
+    act(() => sock.emitOutput(2, 'hello'))
+    expect(em.live().text()).toBe('hello')
+  })
+
+  it('reports a reconnect, then clears it when the session comes back', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { sock, sockets } = mountTerminal((e) => (
+      <Terminal sessionId="s1" createEmulator={e.create} />
+    ))
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+    expect(screen.queryByRole('status')).toBeNull()
+
+    act(() => sock.close())
+    expect(screen.getByRole('status').textContent).toContain('Reconnecting')
+
+    await act(() => vi.advanceTimersByTimeAsync(125))
+    act(() => sockets[1]!.open())
+    // Still not live: the socket is up but the attach is a round-trip away,
+    // and the screen on display is whatever was there before the outage.
+    expect(screen.getByRole('status').textContent).toContain('Reconnecting')
+
+    act(() => sockets[1]!.emitControl(attached({ ref: 1, id: 's1' })))
+    expect(screen.queryByRole('status')).toBeNull()
+    vi.useRealTimers()
+  })
+
+  it('reports the process exiting, with its code, once', () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 130 }))
+
+    expect(screen.getByRole('status').textContent).toContain('exited')
+    expect(em.live().text()).toContain('[process exited: 130]')
+  })
+
+  it('ignores an exit for another session', () => {
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+    act(() => sock.emitControl({ type: 'exit', ref: 9, code: 1 }))
+
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('stops asking for a session the daemon does not have', async () => {
+    // not_found carries no session id, so this is only safe while this view is
+    // the one thing with an attach outstanding. Without it the plan asks for a
+    // dead session on every reconnect and the tab spins at Connecting for ever.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { sock, sockets } = mountTerminal((e) => (
+      <Terminal sessionId="ghost" createEmulator={e.create} />
+    ))
+
+    act(() => sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }))
+    expect(screen.getByRole('status').textContent).toContain('gone')
+
+    act(() => sock.close())
+    await act(() => vi.advanceTimersByTimeAsync(125))
+    act(() => sockets[1]!.open())
+
+    expect(sockets[1]!.ofType('attach')).toEqual([])
+    vi.useRealTimers()
+  })
+
+  it('goes on saying the session is gone through a reconnect', async () => {
+    // Nothing is coming back, so walking the pill to "Reconnecting…" would
+    // promise that waiting helps.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { sock, sockets } = mountTerminal((e) => (
+      <Terminal sessionId="ghost" createEmulator={e.create} />
+    ))
+    act(() => sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }))
+
+    act(() => sock.close())
+    await act(() => vi.advanceTimersByTimeAsync(125))
+    act(() => sockets[1]!.open())
+
+    expect(screen.getByRole('status').textContent).toContain('gone')
+    vi.useRealTimers()
+  })
+
+  it('goes on reporting the exit through a reconnect', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { sock, sockets } = mountTerminal((e) => (
+      <Terminal sessionId="s1" createEmulator={e.create} />
+    ))
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 0 }))
+
+    act(() => sock.close())
+    await act(() => vi.advanceTimersByTimeAsync(125))
+    act(() => sockets[1]!.open())
+
+    expect(screen.getByRole('status').textContent).toContain('exited')
+    vi.useRealTimers()
+  })
+
+  it('puts the keyboard into the terminal without waiting for a click', () => {
+    // A session *is* the tab. Having to click a full-bleed black rectangle
+    // before it accepts a keystroke is the kind of thing that reads as broken.
+    const { em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    expect(em.live().focusCalls).toBe(1)
+  })
+
+  it('names the tab after the session, and hands the name back on unmount', () => {
+    const { sock, show } = mountTerminal((e) => (
+      <Terminal sessionId="s1" createEmulator={e.create} />
+    ))
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', title: 'vim README.md' })))
+    expect(document.title).toBe('vim README.md')
+
+    act(() => show(null))
+    expect(document.title).toBe('flue')
+  })
+
+  describe('the sizing policy', () => {
+    it('asks the daemon for the cells its own pane holds, when primary', async () => {
+      const pane = paneOf(800 + GUTTER_PX, 408)
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      // 80x24 rendered at 800x408 puts a cell at 10 x 17.
+      em.live().measured = { width: 800, height: 408 }
+
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24, primary: true })))
+      // The pane holds twice the height, so 48 rows.
+      pane.mockReturnValue({ width: 800 + GUTTER_PX, height: 816 } as DOMRect)
+      act(() => window.dispatchEvent(new Event('resize')))
+
+      await waitFor(() =>
+        expect(sock.ofType('resize')).toContainEqual({
+          type: 'resize',
+          ref: 1,
+          cols: 80,
+          rows: 48,
+          primary: true,
+        }),
+      )
+    })
+
+    it('asks for nothing when the dimensions already fit', async () => {
+      paneOf(800 + GUTTER_PX, 408)
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      em.live().measured = { width: 800, height: 408 }
+
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24, primary: true })))
+      await new Promise((r) => setTimeout(r, 40))
+
+      expect(sock.ofType('resize')).toEqual([])
+    })
+
+    it('scales its surface instead of touching the pty, when not primary', async () => {
+      // The whole point of the policy: a phone at 400px must not drag a
+      // laptop's terminal down to 40 columns.
+      paneOf(400, 400)
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      em.live().measured = { width: 1600, height: 800 }
+
+      act(() =>
+        sock.emitControl(attached({ ref: 1, id: 's1', cols: 160, rows: 47, primary: false })),
+      )
+
+      const surface = document.querySelector<HTMLElement>('[data-flue-surface]')!
+      await waitFor(() => expect(surface.style.scale).toBe('0.25'))
+      expect(surface.style.width).toBe('1600px')
+      expect(surface.style.height).toBe('800px')
+      expect(sock.ofType('resize')).toEqual([])
+    })
+
+    it('gives the surface back to the pane when it is promoted to primary', async () => {
+      // The daemon promotes the most recently active client when the primary
+      // leaves, and says so with a sizeChanged. Nothing else will ever ask for
+      // this client's dimensions, so it has to act on that.
+      paneOf(800 + GUTTER_PX, 408)
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      em.live().measured = { width: 1600, height: 816 }
+
+      act(() =>
+        sock.emitControl(attached({ ref: 1, id: 's1', cols: 160, rows: 48, primary: false })),
+      )
+      const surface = document.querySelector<HTMLElement>('[data-flue-surface]')!
+      await waitFor(() => expect(surface.style.scale).toBe('0.5'))
+
+      act(() =>
+        sock.emitControl(sizeChanged({ ref: 1, cols: 160, rows: 48, primary: true })),
+      )
+
+      await waitFor(() => expect(surface.style.scale).toBe(''))
+      expect(surface.style.width).toBe('')
+      await waitFor(() =>
+        expect(sock.ofType('resize')).toContainEqual({
+          type: 'resize',
+          ref: 1,
+          cols: 80,
+          rows: 24,
+          primary: true,
+        }),
+      )
+    })
+
+    it('asks for nothing at all when nothing has been laid out', async () => {
+      // jsdom, and the first frame in a real browser. A zero-sized measurement
+      // divided into a pane is an Infinity, and the daemon would be asked for
+      // a 65535-column pty.
+      paneOf(800, 400)
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      em.live().measured = null
+
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', primary: true })))
+      await new Promise((r) => setTimeout(r, 40))
+
+      expect(sock.ofType('resize')).toEqual([])
+    })
+  })
+
+  describe('keyboard modes', () => {
+    it('starts in tab mode, so the browser keeps its own shortcuts', () => {
+      mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      expect(document.querySelector('[data-flue-mode]')!.getAttribute('data-flue-mode')).toBe('tab')
+    })
+
+    it('offers the shortcut where there is already chrome to put it on', () => {
+      mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      expect(screen.getByRole('status').textContent).toContain(TERMINAL_SHORTCUT_HINT)
+    })
+
+    it('enters focus mode on the shortcut, and keeps the key out of the pty', async () => {
+      const el = document.createElement('div')
+      const lock = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'keyboard', {
+        value: { lock, unlock: vi.fn() },
+        configurable: true,
+      })
+      Object.defineProperty(document, 'fullscreenElement', { value: el, configurable: true })
+      const request = vi.fn().mockResolvedValue(undefined)
+      HTMLElement.prototype.requestFullscreen = request
+
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, shiftKey: true }),
+        )
+      })
+
+      expect(request).toHaveBeenCalled()
+      expect(lock).toHaveBeenCalled()
+      await waitFor(() =>
+        expect(document.querySelector('[data-flue-mode]')!.getAttribute('data-flue-mode')).toBe(
+          'focus',
+        ),
+      )
+      // The shortcut is the view's, not the shell's. Left to bubble, xterm
+      // would have turned it into a carriage return on the way past.
+      expect(sock.input()).toEqual([])
+      expect(em.live().text()).toBe('')
+
+      Object.defineProperty(navigator, 'keyboard', { value: undefined, configurable: true })
+      Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true })
+    })
+
+    it('leaves an ordinary Enter alone', async () => {
+      const request = vi.fn().mockResolvedValue(undefined)
+      HTMLElement.prototype.requestFullscreen = request
+      mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true }))
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
+      })
+
+      expect(request).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('theming', () => {
+    it('builds the emulator with a palette rather than colouring it afterwards', () => {
+      // A terminal that mounts in xterm's own colours and is repainted a frame
+      // later flashes the wrong background across the whole viewport.
+      const { em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      expect(em.live().themes[0]?.background).toBeTruthy()
+    })
+
+    it('repaints when the OS switches appearance', () => {
+      const listeners: Array<() => void> = []
+      vi.spyOn(globalThis, 'matchMedia').mockImplementation(
+        (query: string) =>
+          ({
+            matches: query.includes('dark'),
+            media: query,
+            addEventListener: (_: string, cb: () => void) => listeners.push(cb),
+            removeEventListener: () => {},
+            addListener: () => {},
+            removeListener: () => {},
+            dispatchEvent: () => false,
+            onchange: null,
+          }) as unknown as MediaQueryList,
+      )
+
+      const { em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      const before = em.live().themes.length
+      act(() => listeners.forEach((cb) => cb()))
+
+      expect(em.live().themes.length).toBeGreaterThan(before)
+    })
+  })
+})

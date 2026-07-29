@@ -10,13 +10,62 @@ export interface Grid {
   lines: string[]
 }
 
+/** A measurement in CSS pixels. */
+export interface PixelSize {
+  width: number
+  height: number
+}
+
+/**
+ * A terminal colour palette.
+ *
+ * Every field is optional: an emulator has defaults for all of them, and a
+ * palette that only re-points the background is a legitimate palette.
+ *
+ * The sixteen ANSI names are the *program's* vocabulary, not flue's. A program
+ * asking for red has asked for red, and rendering it in the app's accent
+ * colour would be flue lying about the output. Only the four surface roles —
+ * background, foreground, cursor and selection — are flue's to choose.
+ */
+export interface TerminalTheme {
+  background?: string
+  foreground?: string
+  cursor?: string
+  cursorAccent?: string
+  selectionBackground?: string
+  selectionInactiveBackground?: string
+
+  black?: string
+  red?: string
+  green?: string
+  yellow?: string
+  blue?: string
+  magenta?: string
+  cyan?: string
+  white?: string
+  brightBlack?: string
+  brightRed?: string
+  brightGreen?: string
+  brightYellow?: string
+  brightBlue?: string
+  brightMagenta?: string
+  brightCyan?: string
+  brightWhite?: string
+}
+
 /**
  * The narrow seam between flue and whatever emulates the terminal.
  *
  * xterm.js implements this today. Keeping it small and free of xterm-specific
  * concepts is what keeps the protocol client and the terminal route testable
  * without a DOM, and is the whole reason this file exists: every part of flue
- * that talks to a terminal talks to these seven methods.
+ * that talks to a terminal talks to these ten methods.
+ *
+ * The last three arrived with the terminal view, and each is here rather than
+ * in the view because the alternative was the view reaching past the seam into
+ * xterm's own DOM and options — which is the one thing this file exists to
+ * prevent. All three are emulator-agnostic: every terminal emulator has a
+ * palette, a focus state, and a rendered size.
  */
 export interface Emulator {
   /**
@@ -55,6 +104,27 @@ export interface Emulator {
   attachTo(el: HTMLElement): void
   /** Release all resources. Safe to call more than once. */
   dispose(): void
+  /**
+   * Re-colour a running terminal.
+   *
+   * Needed because flue follows `prefers-color-scheme` and has no theme
+   * toggle: there is no navigation to rebuild the terminal on when the OS
+   * switches appearance, so the palette has to be replaceable in place.
+   */
+  setTheme(theme: TerminalTheme): void
+  /** Put the keyboard into the terminal. */
+  focus(): void
+  /**
+   * The size of the rendered screen in CSS pixels, or null if nothing has been
+   * laid out.
+   *
+   * This is the *unscaled* size — what the screen would occupy at the current
+   * dimensions with no CSS transform on it — because it is what the sizing
+   * policy divides by. Null rather than a zero box: a caller that divides by
+   * this must be made to handle "not measurable yet", which is every call
+   * under jsdom and the first frame in a browser.
+   */
+  contentSize(): PixelSize | null
   /** Test-only: simulate user input. */
   injectForTest(data: string): void
 }

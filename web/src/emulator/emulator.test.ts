@@ -116,6 +116,40 @@ describe('Emulator interface', () => {
     em.dispose()
   })
 
+  it('reports no measurement before it is mounted', () => {
+    // The sizing policy divides by whatever this returns. A zero-sized answer
+    // dressed up as a real one becomes an Infinity one line later; jsdom lays
+    // nothing out, so that is the answer here even after attachTo.
+    const em = createXtermEmulator({ cols: 20, rows: 4 })
+    expect(em.contentSize()).toBeNull()
+    em.dispose()
+  })
+
+  it('takes a colour palette at build time and again afterwards', () => {
+    // Both matter. The option is what stops a terminal painting one frame in
+    // xterm's own colours before flue's land; setTheme is what lets a running
+    // terminal follow prefers-color-scheme, which has no toggle to rebuild on.
+    const em = createXtermEmulator({
+      cols: 20,
+      rows: 4,
+      theme: { background: '#09090b', foreground: '#f4f4f5' },
+    })
+    expect(() => em.setTheme({ background: '#ffffff', foreground: '#18181b' })).not.toThrow()
+    em.dispose()
+  })
+
+  it('survives focus, setTheme and contentSize after disposal', () => {
+    // All three are called from React effects and from event handlers that can
+    // outlive the view by a frame — a queued animation frame, a media-query
+    // change mid-teardown. xterm throws on a disposed terminal.
+    const em = createXtermEmulator({ cols: 20, rows: 4 })
+    em.dispose()
+
+    expect(() => em.focus()).not.toThrow()
+    expect(() => em.setTheme({ background: '#000000' })).not.toThrow()
+    expect(em.contentSize()).toBeNull()
+  })
+
   it('attaches to an element with no WebGL context available', () => {
     // jsdom has no WebGL, which is the same shape of failure a real browser
     // hits when the GPU process is gone: mounting still has to succeed, on
