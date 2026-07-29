@@ -24,6 +24,7 @@ import (
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
+	"github.com/karnstack/flue/web"
 )
 
 const version = "0.1.0"
@@ -878,12 +879,10 @@ func launchBrowser(url string) error {
 	return fmt.Errorf("cannot open a browser on %s", runtime.GOOS)
 }
 
-// uiHandler is the seam Task 14 replaces with the embedded built SPA. Until
-// then it serves a placeholder so flue open is exercisable end to end.
+// uiHandler is the built app, compiled into this binary. It is a function
+// rather than a package-level value so the embedded filesystem is walked once
+// per daemon rather than once per process — flue open and flue status never
+// serve anything.
 func uiHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<!doctype html><meta charset="utf-8"><title>flue</title>
-<p>flue daemon is running. The web UI lands in a later task.</p>`)
-	})
+	return web.Handler()
 }

@@ -40,6 +40,16 @@
  */
 @source not 'client/**';
 /*
+ * And the Go beside this app. web/embed.go compiles the built output into the
+ * daemon binary so flue ships as one file, and everything under web/ is inside
+ * the perimeter — so its comments are scanned as prose exactly like a .tsx
+ * file's, and one ordinary English word in a sentence about MIME lookup
+ * shipped a rule nothing asked for. No Go file here renders markup, so none of
+ * them has a class to lose; the alternative is rewording Go prose to suit a
+ * CSS scanner, which is the wrong way round.
+ */
+@source not '../**/*.go';
+/*
  * Worth knowing before writing a *comment* in any file still inside the
  * perimeter: Tailwind scans prose exactly as it scans markup, so an ordinary
  * English word that is also a bare utility name compiles a rule. `inline`,
