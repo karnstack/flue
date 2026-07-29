@@ -273,6 +273,8 @@ git commit -m "feat(session): add seq-addressed scrollback ring"
 
 This is the server-side VT seam. Today it recognises only OSC 0 and OSC 2; later `libghostty-vt` replaces it wholesale.
 
+> **The reference implementation below is buggy — see commit `0afcf3f` for the corrected version.** Task review caught two defects in it during execution. First, the ignore path (`stIgnore`/`stIgnoreEsc`) had no bound analogous to `maxTitleLen`, so a single unterminated non-title OSC sequence — a truncated OSC 8 hyperlink, say — wedged the scanner permanently, and it then consumed the terminator of the *next* legitimate title as well. Second, the abandon transitions consumed the byte that triggered them, so an `ESC` arriving mid-sequence was swallowed instead of starting a fresh one. The fix bounds the ignore path and re-dispatches the triggering byte after resetting to ground. The prose requirement above governs: the scanner must always return to a state where a subsequent well-formed sequence still parses.
+
 - [ ] **Step 1: Write the failing test**
 
 `internal/session/title_test.go`:
@@ -505,11 +507,13 @@ git commit -m "feat(session): add streaming OSC 0/2 title scanner"
   - `(*Registry).Reap()` — removes sessions that exited more than `ExitedRetention` ago
   - `(*Session).ID() string`, `.Info() Info`, `.Write(p []byte) error`, `.Resize(cols, rows uint16) error`, `.Signal(sig os.Signal) error`, `.Close() error`
   - `(*Session).Subscribe(fromSeq uint64) *Sub` and `(*Session).Unsubscribe(*Sub)`
-  - `session.Sub{Backlog []byte; StartSeq uint64; Truncated bool; C <-chan []byte; Done <-chan struct{}}`
+  - `session.Sub{Backlog []byte; StartSeq uint64; Truncated bool; C <-chan []byte}` — closing `C` is the only "subscriber is over" signal; there is no separate `Done` channel
   - `session.Info{ID, Title, Cwd string; Cmd []string; State string; ExitCode int; Cols, Rows uint16; LastActive time.Time}`
   - `session.ExitedRetention = 10 * time.Minute`
 
 `Subscribe` is atomic: the returned `Backlog` plus everything subsequently delivered on `C` is exactly the byte stream from `StartSeq` onward, with no gap and no duplication. A subscriber that cannot keep up has its channel closed and is dropped, which surfaces to the client as a disconnect; it then reattaches with its `lastSeq`.
+
+> **Corrected during execution — see the fix commit on this task.** Review found three lifecycle defects in the reference code below. `Subscribe` did not check `s.closed`, so a tab attaching during the 10-minute retention window got a channel nothing would ever close, hanging the Task 6 handler. `Close` could not interrupt the pump's blocked `Read` — creack/pty's master fd is not registered with Go's netpoller on Darwin, and `Setsize` detaches it on Linux — so a shell with a surviving background job leaked the pump goroutine, a zombie, the fd, and the ring permanently. And `Signal`'s comment promised process-group delivery that `Process.Signal` does not provide, since creack/pty sets `Setsid` but never `Setpgid`. Ruling: **signal the process group** via a negated pid, which matches the comment, matches how a terminal behaves, and closes the slave so the pump's `Read` returns.
 
 - [ ] **Step 1: Add the PTY dependency**
 
@@ -3343,6 +3347,10 @@ git commit -m "feat(cli): add serve, open, and status commands"
 - Consumes: nothing from Go.
 - Produces: `cn(...inputs: ClassValue[]): string` from `@/lib/utils`; the `@/*` path alias resolving to `web/src/*`; design tokens declared in `@theme`.
 
+> **Added during execution — PWA support.** The owner asked that the mobile experience read as an app rather than a web page, so this task also ships the installable-app surface: a web app manifest (`display: standalone`, `theme_color` and `background_color` drawn from the zinc/amber tokens below, not hardcoded), maskable icons at the sizes iOS and Android actually use, and the `apple-mobile-web-app-*` meta tags that control the iOS status bar. A service worker holding the app shell belongs with the router in Task 9, where there is something to cache; note that it matters beyond polish, since it is what lets the UI load at all when the daemon is unreachable — the difference between a blank tab and a page that can say "can't reach the daemon".
+>
+> Do not reach for a plugin that generates a service worker with a caching strategy you have not chosen. The app shell is a handful of files and the terminal is a WebSocket; a stale-while-revalidate cache over an API would be actively wrong here.
+
 **Design decisions, fixed here and applied everywhere below:**
 - Neutral is **zinc**. Never `gray-*` or `slate-*`.
 - Accent is **amber**. Used for active nav indicators, focus rings, and the single primary button per screen. Never for body text — amber on dark fails contrast at body sizes.
@@ -3647,6 +3655,7 @@ git commit -m "feat(web): scaffold React, Tailwind v4, and shadcn with flue desi
 - Create: `web/src/routes/sessions.tsx` (placeholder, filled in Task 13)
 - Create: `web/src/routes/terminal.tsx` (placeholder, filled in Task 12)
 - Create: `web/src/main.tsx`
+- Create: `web/src/test-utils.tsx`
 - Test: `web/src/components/nav.test.tsx`
 - Test: `web/src/router.test.tsx`
 
@@ -3660,26 +3669,63 @@ git commit -m "feat(web): scaffold React, Tailwind v4, and shadcn with flue desi
 
 **Layout rationale.** Management routes render inside `AppShell`, which is a sidebar on `lg:` and up and a `Sheet` below it. The terminal route renders bare and full-bleed: a terminal session *is* the tab, so wrapping it in app chrome would contradict the premise of the project.
 
-- [ ] **Step 1: Write the failing nav test**
+- [ ] **Step 1: Write the router test helper and the failing nav test**
+
+`Link` requires a router in context, so component tests that render nav links need one. This helper builds a throwaway router whose routes match the real paths, and is reused by any later component test that renders a `Link`.
+
+`web/src/test-utils.tsx`:
+
+```tsx
+import type { ReactNode } from 'react'
+import { render } from '@testing-library/react'
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  RouterProvider,
+} from '@tanstack/react-router'
+
+/**
+ * Render `ui` inside a minimal router. TanStack's Link throws without a
+ * router in context, and the real routes pull in the whole app, so this
+ * mirrors only the paths the nav links to.
+ */
+export function renderWithRouter(ui: ReactNode, initialPath = '/sessions') {
+  const rootRoute = createRootRoute({ component: () => ui })
+  const paths = ['/', '/sessions', '/devices', '/settings']
+  const routeTree = rootRoute.addChildren(
+    paths.map((path) =>
+      createRoute({ getParentRoute: () => rootRoute, path, component: () => null }),
+    ),
+  )
+  const router = createRouter({
+    routeTree,
+    history: createMemoryHistory({ initialEntries: [initialPath] }),
+  })
+  return render(<RouterProvider router={router as never} />)
+}
+```
 
 `web/src/components/nav.test.tsx`:
 
 ```tsx
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { renderWithRouter } from '@/test-utils'
 import { Nav, NAV_ITEMS } from './nav'
 
 describe('Nav', () => {
   it('renders every nav item', () => {
-    render(<Nav currentPath="/sessions" />)
+    renderWithRouter(<Nav currentPath="/sessions" />)
     for (const item of NAV_ITEMS) {
       expect(screen.getByRole('link', { name: item.label })).toBeTruthy()
     }
   })
 
   it('marks the current route with aria-current', () => {
-    render(<Nav currentPath="/sessions" />)
+    renderWithRouter(<Nav currentPath="/sessions" />)
     const current = screen.getByRole('link', { name: 'Sessions' })
     expect(current.getAttribute('aria-current')).toBe('page')
     expect(screen.getByRole('link', { name: 'Settings' }).getAttribute('aria-current')).toBeNull()
@@ -3688,7 +3734,7 @@ describe('Nav', () => {
   it('never changes font weight between states', () => {
     // Guideline: nav states differ by color and background only. A weight
     // change causes a layout shift and reads as a different element.
-    render(<Nav currentPath="/sessions" />)
+    renderWithRouter(<Nav currentPath="/sessions" />)
     const active = screen.getByRole('link', { name: 'Sessions' })
     const inactive = screen.getByRole('link', { name: 'Settings' })
     const weightClass = /font-(thin|light|normal|medium|semibold|bold|extrabold|black)/
@@ -3699,9 +3745,18 @@ describe('Nav', () => {
 
   it('calls onNavigate when a link is activated, so the mobile sheet can close', async () => {
     const onNavigate = vi.fn()
-    render(<Nav currentPath="/sessions" onNavigate={onNavigate} />)
+    renderWithRouter(<Nav currentPath="/sessions" onNavigate={onNavigate} />)
     await userEvent.click(screen.getByRole('link', { name: 'Settings' }))
     expect(onNavigate).toHaveBeenCalled()
+  })
+
+  it('renders client-side router links, not full-reload anchors', () => {
+    // A plain <a href> would reload the page and drop the WebSocket. This
+    // asserts the anchor is router-managed rather than a raw navigation.
+    renderWithRouter(<Nav currentPath="/sessions" />)
+    const link = screen.getByRole('link', { name: 'Settings' })
+    expect(link.getAttribute('href')).toBe('/settings')
+    expect(link.hasAttribute('data-status')).toBe(true)
   })
 })
 ```
@@ -3748,6 +3803,7 @@ Expected: FAIL — cannot resolve `./nav` or `./router`.
 
 ```tsx
 import type { ComponentType } from 'react'
+import { Link } from '@tanstack/react-router'
 import { CommandLineIcon, DevicePhoneMobileIcon, Cog6ToothIcon } from '@heroicons/react/16/solid'
 import { cn } from '@/lib/utils'
 
@@ -3776,8 +3832,13 @@ export function Nav({ currentPath, onNavigate }: NavProps) {
           const Icon = item.icon
           return (
             <li key={item.to}>
-              <a
-                href={item.to}
+              {/*
+                TanStack Link, never a plain anchor: a full page reload on
+                every nav click would tear down the WebSocket and remount
+                the app, which defeats the point of the SPA.
+              */}
+              <Link
+                to={item.to}
                 aria-current={active ? 'page' : undefined}
                 onClick={onNavigate}
                 className={cn(
@@ -3794,7 +3855,7 @@ export function Nav({ currentPath, onNavigate }: NavProps) {
               >
                 <Icon className="size-4 shrink-0" aria-hidden="true" />
                 {item.label}
-              </a>
+              </Link>
             </li>
           )
         })}
@@ -3916,21 +3977,42 @@ const sessionsRoute = createRoute({
   component: SessionsRoute,
 })
 
+/** Thin placeholder so the nav link resolves. Devices and pairing are a
+ *  later build step; a Link to a route that does not exist is a type error
+ *  and a dead link. */
+function Placeholder({ title, blurb }: { title: string; blurb: string }) {
+  return (
+    <div className="p-4 sm:p-6 lg:p-8">
+      <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
+        {title}
+      </h1>
+      <p className="mt-2 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+        {blurb}
+      </p>
+    </div>
+  )
+}
+
+const devicesRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/devices',
+  component: () => (
+    <Placeholder
+      title="Devices"
+      blurb="Pairing a phone or another laptop arrives once remote transports land."
+    />
+  ),
+})
+
 const settingsRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/settings',
-  component: function Settings() {
-    return (
-      <div className="p-4 sm:p-6 lg:p-8">
-        <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
-          Settings
-        </h1>
-        <p className="mt-2 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
-          Scrollback size, keyboard bindings, and themes arrive with the next build step.
-        </p>
-      </div>
-    )
-  },
+  component: () => (
+    <Placeholder
+      title="Settings"
+      blurb="Scrollback size, keyboard bindings, and themes arrive with the next build step."
+    />
+  ),
 })
 
 const terminalRoute = createRoute({
@@ -3941,7 +4023,7 @@ const terminalRoute = createRoute({
 })
 
 const routeTree = rootRoute.addChildren([
-  shellRoute.addChildren([indexRoute, sessionsRoute, settingsRoute]),
+  shellRoute.addChildren([indexRoute, sessionsRoute, devicesRoute, settingsRoute]),
   terminalRoute,
 ])
 
@@ -3990,11 +4072,11 @@ import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import '@/styles.css'
 import { createFlueRouter } from '@/router'
-import { stripToken } from '@/lib/url'
+import { stripHandoff } from '@/lib/url'
 
 // The daemon has already moved the token into an HttpOnly cookie, so drop
 // it from the URL before it reaches history or a referrer header.
-const cleaned = stripToken(location.href)
+const cleaned = stripHandoff(location.href)
 if (cleaned !== location.href) history.replaceState(null, '', cleaned)
 
 const router = createFlueRouter()
@@ -4010,16 +4092,24 @@ createRoot(document.getElementById('root')!).render(
 
 `web/src/lib/url.ts`:
 
+> **Amended by task 7b.** The URL never carries the session token any more. It
+> carries a one-time handoff token in `h`, which the daemon exchanges for the
+> `flue_token` cookie on first load and immediately invalidates. So the helper
+> strips `h`, not `t` — and the daemon no longer accepts `t` at all, so a helper
+> that stripped `t` would leave the spent `h` in the URL and every reload would
+> 401.
+
 ```ts
 /**
- * Remove the token from a URL. The daemon moves it into an HttpOnly cookie
- * on first load; the app then calls this and replaceState so the secret
- * stops appearing in history and referrers.
+ * Remove the one-time handoff token from a URL. The daemon redeems it on
+ * first load, sets an HttpOnly cookie, and invalidates the token; the app
+ * then calls this and replaceState so a spent secret stops appearing in
+ * history and referrers.
  */
-export function stripToken(url: string): string {
+export function stripHandoff(url: string): string {
   const u = new URL(url)
-  if (!u.searchParams.has('t')) return url
-  u.searchParams.delete('t')
+  if (!u.searchParams.has('h')) return url
+  u.searchParams.delete('h')
   const query = u.searchParams.toString()
   return `${u.origin}${u.pathname}${query ? `?${query}` : ''}`
 }
@@ -4031,21 +4121,21 @@ export function stripToken(url: string): string {
 
 ```ts
 import { describe, expect, it } from 'vitest'
-import { stripToken } from './url'
+import { stripHandoff } from './url'
 
-describe('stripToken', () => {
-  it('removes the token', () => {
-    expect(stripToken('http://127.0.0.1:7717/?t=secret')).toBe('http://127.0.0.1:7717/')
+describe('stripHandoff', () => {
+  it('removes the handoff token', () => {
+    expect(stripHandoff('http://127.0.0.1:7717/?h=secret')).toBe('http://127.0.0.1:7717/')
   })
 
   it('preserves other parameters', () => {
-    expect(stripToken('http://127.0.0.1:7717/?t=secret&cwd=%2Ftmp')).toBe(
+    expect(stripHandoff('http://127.0.0.1:7717/?h=secret&cwd=%2Ftmp')).toBe(
       'http://127.0.0.1:7717/?cwd=%2Ftmp',
     )
   })
 
-  it('leaves a URL without a token untouched', () => {
-    expect(stripToken('http://127.0.0.1:7717/d/local/s/abc')).toBe(
+  it('leaves a URL without a handoff token untouched', () => {
+    expect(stripHandoff('http://127.0.0.1:7717/d/local/s/abc')).toBe(
       'http://127.0.0.1:7717/d/local/s/abc',
     )
   })
@@ -4086,7 +4176,15 @@ git commit -m "feat(web): add app shell, navigation, and TanStack Router routes"
   - `Emulator` with `write(bytes: Uint8Array)`, `resize(cols, rows)`, `snapshot(): Grid`, `onData(cb: (bytes: Uint8Array) => void)`, `attachTo(el: HTMLElement)`, `dispose()`, `injectForTest(data: string)`
   - `createXtermEmulator(opts?: { cols?: number; rows?: number }): Emulator`
 
-The corpus is the point of this task. It runs against xterm.js today and `libghostty-vt` later, which is what turns that swap into a substitution rather than a rewrite.
+> **Amended during execution — the corpus is trimmed.** The owner's read is that libghostty is unlikely ever to land, and that read is sound: `libghostty-vt` ships no renderer, so adopting it means writing a WebGL renderer from scratch to replace a library VS Code ships to millions. The corpus below was justified almost entirely as swap insurance, and without the swap most of it tests **xterm.js** — someone else's library — rather than flue.
+>
+> Keep the `Emulator` interface. It is about thirty lines and earns its keep regardless by keeping the client layer DOM-free and testable.
+>
+> Cut the corpus to cases that exercise flue's own code: grid extraction across wrapped rows, trailing-whitespace trimming, wide characters surviving string extraction, escape sequences not leaking into extracted text, dimensions after resize, and input arriving at `onData` as bytes. Drop the cases that merely re-verify xterm's VT correctness — cursor positioning, erase-in-line, clear-screen, SGR, backspace, tab stops. Roughly halve it. Say in your report which you kept and why, so the trim is a decision on the record rather than attrition.
+>
+> Note also that `snapshot()` currently has no consumer outside these tests. Keep it — reattach may want it — but do not add coverage for it beyond what the trimmed corpus needs.
+
+The corpus that remains runs against xterm.js today and would run against `libghostty-vt` if that swap ever happens, but its job now is guarding flue's integration, not somebody else's parser.
 
 - [ ] **Step 1: Write the VT conformance corpus**
 
@@ -4388,7 +4486,8 @@ git commit -m "feat(web): add Emulator seam, xterm.js implementation, and VT cor
 **Files:**
 - Create: `web/src/client/protocol.ts`
 - Create: `web/src/client/client.ts`
-- Create: `web/src/client/use-flue-client.ts`
+- Create: `web/src/client/provider.tsx`
+- Modify: `web/src/main.tsx` (wrap the router in the provider)
 - Test: `web/src/client/client.test.ts`
 
 **Interfaces:**
@@ -4398,10 +4497,13 @@ git commit -m "feat(web): add Emulator seam, xterm.js implementation, and VT cor
   - `decodeBinary(buf: ArrayBuffer): { type: number; ref: number; payload: Uint8Array }`
   - `FRAME_OUTPUT = 0x00`, `FRAME_INPUT = 0x01`
   - TypeScript types for every control message in `spec/protocol.md`
-  - `class FlueClient` with `connect()`, `close()`, `list()`, `spawn(opts)`, `attach(id, lastSeq)`, `detach(ref)`, `sendInput(ref, bytes)`, `resize(ref, cols, rows, primary)`, `lastSeqFor(ref)`, and the callbacks `onOutput`, `onAttached`, `onExit`, `onSizeChanged`, `onSessions`, `onError`, `onStatus`
-  - `useFlueClient(): FlueClient` — one client per browser tab, created once and closed on unmount
+  - `class FlueClient` with `connect()`, `close()`, `list()`, `spawn(opts)`, `attach(id, lastSeq)`, `detach(ref)`, `sendInput(ref, bytes)`, `resize(ref, cols, rows, primary)`, `lastSeqFor(ref)`
+  - Event registration: `onOutput`, `onAttached`, `onExit`, `onSizeChanged`, `onSessions`, `onError`, `onStatus`. **Each one appends a listener and returns an unsubscribe function.** They must never overwrite a previously registered listener — a silent replace is invisible at the call site and costs an afternoon to find.
+  - `<FlueClientProvider>{children}</FlueClientProvider>` and `useFlueClient(): FlueClient` reading it from context
 
 `FlueClient` takes an injected socket factory so tests need no real server.
+
+**One client per browser tab, not per component.** The client lives in a React context provider mounted above the router, so a single WebSocket serves every route. A per-component client would open a fresh socket on each navigation, and two components rendering at once would open two.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4595,6 +4697,33 @@ describe('FlueClient', () => {
     expect(errs).toEqual(['not_found'])
   })
 
+  it('delivers to every registered listener, never just the last one', () => {
+    // A single-slot callback would silently drop the first listener, which
+    // is invisible at the call site.
+    const { c, sock } = connected()
+    const first: string[] = []
+    const second: string[] = []
+    c.onError((e) => first.push(e.code))
+    c.onError((e) => second.push(e.code))
+
+    sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' })
+
+    expect(first).toEqual(['not_found'])
+    expect(second).toEqual(['not_found'])
+  })
+
+  it('stops delivering after unsubscribe', () => {
+    const { c, sock } = connected()
+    const seen: string[] = []
+    const off = c.onError((e) => seen.push(e.code))
+
+    sock.emitControl({ type: 'error', code: 'first', msg: '' })
+    off()
+    sock.emitControl({ type: 'error', code: 'second', msg: '' })
+
+    expect(seen).toEqual(['first'])
+  })
+
   it('exposes the session list', () => {
     const { c, sock } = connected()
     const seen: string[][] = []
@@ -4729,6 +4858,29 @@ interface Attachment {
 const BACKOFF_BASE_MS = 250
 const BACKOFF_MAX_MS = 10_000
 
+type Listener<T extends unknown[]> = (...args: T) => void
+
+/**
+ * A set of listeners. Registration appends and returns an unsubscribe —
+ * never a single slot that a second registration would silently overwrite,
+ * which is invisible at the call site.
+ */
+class Emitter<T extends unknown[]> {
+  private listeners = new Set<Listener<T>>()
+
+  add(cb: Listener<T>): () => void {
+    this.listeners.add(cb)
+    return () => {
+      this.listeners.delete(cb)
+    }
+  }
+
+  emit(...args: T) {
+    // Copy first: a listener may unsubscribe itself while we iterate.
+    for (const cb of [...this.listeners]) cb(...args)
+  }
+}
+
 /**
  * FlueClient owns the socket, the reconnect loop, and per-attachment seq
  * tracking. It knows nothing about React or the DOM.
@@ -4741,13 +4893,13 @@ export class FlueClient {
   /** Sessions to reattach after a reconnect, keyed by session ID. */
   private wanted = new Map<string, number>()
 
-  private outputCb: (ref: number, bytes: Uint8Array) => void = () => {}
-  private attachedCb: (a: Attached) => void = () => {}
-  private exitCb: (ref: number, code: number) => void = () => {}
-  private sizeCb: (m: SizeChanged) => void = () => {}
-  private sessionsCb: (s: SessionInfo[]) => void = () => {}
-  private errorCb: (e: ErrorMsg) => void = () => {}
-  private statusCb: (s: ConnStatus) => void = () => {}
+  private output = new Emitter<[number, Uint8Array]>()
+  private attached = new Emitter<[Attached]>()
+  private exited = new Emitter<[number, number]>()
+  private sized = new Emitter<[SizeChanged]>()
+  private sessions = new Emitter<[SessionInfo[]]>()
+  private errors = new Emitter<[ErrorMsg]>()
+  private status = new Emitter<[ConnStatus]>()
 
   constructor(
     private url: string,
@@ -4768,13 +4920,15 @@ export class FlueClient {
     },
   ) {}
 
-  onOutput(cb: (ref: number, bytes: Uint8Array) => void) { this.outputCb = cb }
-  onAttached(cb: (a: Attached) => void) { this.attachedCb = cb }
-  onExit(cb: (ref: number, code: number) => void) { this.exitCb = cb }
-  onSizeChanged(cb: (m: SizeChanged) => void) { this.sizeCb = cb }
-  onSessions(cb: (s: SessionInfo[]) => void) { this.sessionsCb = cb }
-  onError(cb: (e: ErrorMsg) => void) { this.errorCb = cb }
-  onStatus(cb: (s: ConnStatus) => void) { this.statusCb = cb }
+  // Every registration appends and returns an unsubscribe. Callers in
+  // React effects must call it on cleanup.
+  onOutput(cb: (ref: number, bytes: Uint8Array) => void) { return this.output.add(cb) }
+  onAttached(cb: (a: Attached) => void) { return this.attached.add(cb) }
+  onExit(cb: (ref: number, code: number) => void) { return this.exited.add(cb) }
+  onSizeChanged(cb: (m: SizeChanged) => void) { return this.sized.add(cb) }
+  onSessions(cb: (s: SessionInfo[]) => void) { return this.sessions.add(cb) }
+  onError(cb: (e: ErrorMsg) => void) { return this.errors.add(cb) }
+  onStatus(cb: (s: ConnStatus) => void) { return this.status.add(cb) }
 
   /** Byte offset this client has consumed for an attachment ref. */
   lastSeqFor(ref: number): number | undefined {
@@ -4783,14 +4937,14 @@ export class FlueClient {
 
   connect() {
     this.stopped = false
-    this.statusCb(this.attempt === 0 ? 'connecting' : 'reconnecting')
+    this.status.emit(this.attempt === 0 ? 'connecting' : 'reconnecting')
 
     const sock = this.factory(this.url)
     this.sock = sock
 
     sock.onopen = () => {
       this.attempt = 0
-      this.statusCb('open')
+      this.status.emit('open')
       this.sendControl({ type: 'hello', ver: '0.1.0', caps: ['binary'] })
       // Reattach everything we had, from where we left off.
       for (const [id, lastSeq] of this.wanted) {
@@ -4802,10 +4956,10 @@ export class FlueClient {
       this.sock = null
       this.attachments.clear()
       if (this.stopped) {
-        this.statusCb('closed')
+        this.status.emit('closed')
         return
       }
-      this.statusCb('reconnecting')
+      this.status.emit('reconnecting')
       const delay = Math.min(BACKOFF_BASE_MS * 2 ** this.attempt, BACKOFF_MAX_MS)
       this.attempt++
       // Full jitter, so many tabs reconnecting do not synchronise.
@@ -4821,7 +4975,7 @@ export class FlueClient {
       if (type !== FRAME_OUTPUT) return
       const a = this.attachments.get(ref)
       if (a) a.lastSeq += payload.length
-      this.outputCb(ref, payload)
+      this.output.emit(ref, payload)
     }
   }
 
@@ -4868,20 +5022,20 @@ export class FlueClient {
         // post-eviction snapshot.
         this.attachments.set(msg.ref, { id: msg.id, lastSeq: msg.seq })
         this.wanted.set(msg.id, msg.seq)
-        this.attachedCb(msg)
+        this.attached.emit(msg)
         break
       }
       case 'sessions':
-        this.sessionsCb(msg.sessions)
+        this.sessions.emit(msg.sessions)
         break
       case 'exit':
-        this.exitCb(msg.ref, msg.code)
+        this.exited.emit(msg.ref, msg.code)
         break
       case 'sizeChanged':
-        this.sizeCb(msg)
+        this.sized.emit(msg)
         break
       case 'error':
-        this.errorCb(msg)
+        this.errors.emit(msg)
         break
       case 'welcome':
         break
@@ -4890,20 +5044,23 @@ export class FlueClient {
 }
 ```
 
-- [ ] **Step 5: Implement the React hook**
+- [ ] **Step 5: Implement the provider and hook**
 
-`web/src/client/use-flue-client.ts`:
+`web/src/client/provider.tsx`:
 
-```ts
-import { useEffect, useRef } from 'react'
+```tsx
+import { createContext, useContext, useEffect, useRef, type ReactNode } from 'react'
 import { FlueClient } from './client'
 
+const FlueClientContext = createContext<FlueClient | null>(null)
+
 /**
- * One client per browser tab. Created on first render and closed on
- * unmount, so a tab close detaches cleanly and the daemon keeps the PTY
- * running.
+ * One client per browser tab, mounted above the router so a single
+ * WebSocket serves every route. A per-component client would open a fresh
+ * socket on every navigation, and two components rendering at once would
+ * open two.
  */
-export function useFlueClient(): FlueClient {
+export function FlueClientProvider({ children }: { children: ReactNode }) {
   const ref = useRef<FlueClient | null>(null)
 
   if (ref.current === null) {
@@ -4914,23 +5071,65 @@ export function useFlueClient(): FlueClient {
   useEffect(() => {
     const client = ref.current!
     client.connect()
+    // Closing on unmount means a tab close detaches cleanly while the
+    // daemon keeps the PTY running.
     return () => client.close()
   }, [])
 
-  return ref.current
+  return <FlueClientContext.Provider value={ref.current}>{children}</FlueClientContext.Provider>
+}
+
+export function useFlueClient(): FlueClient {
+  const client = useContext(FlueClientContext)
+  if (!client) throw new Error('useFlueClient must be used inside FlueClientProvider')
+  return client
 }
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [ ] **Step 6: Mount the provider above the router**
+
+Modify `web/src/main.tsx` so the router renders inside the provider. The whole tab then shares one socket:
+
+```tsx
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { RouterProvider } from '@tanstack/react-router'
+import '@/styles.css'
+import { createFlueRouter } from '@/router'
+import { FlueClientProvider } from '@/client/provider'
+import { stripHandoff } from '@/lib/url'
+
+// The daemon has already moved the token into an HttpOnly cookie, so drop
+// it from the URL before it reaches history or a referrer header.
+const cleaned = stripHandoff(location.href)
+if (cleaned !== location.href) history.replaceState(null, '', cleaned)
+
+const router = createFlueRouter()
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <FlueClientProvider>
+      <RouterProvider router={router} />
+    </FlueClientProvider>
+  </StrictMode>,
+)
+```
+
+- [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `cd web && pnpm test`
-Expected: PASS — framing, golden-file, and all `FlueClient` tests.
+Expected: PASS — framing, golden-file, and all `FlueClient` tests, including the two listener tests.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Type-check**
+
+Run: `cd web && pnpm lint`
+Expected: no TypeScript errors.
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add web/src/client
-git commit -m "feat(web): add protocol client with reconnect, seq tracking, and React hook"
+git add web/src/client web/src/main.tsx
+git commit -m "feat(web): add protocol client with reconnect, seq tracking, and shared provider"
 ```
 
 ---
@@ -5096,7 +5295,7 @@ import { useEffect, useRef, useState } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
 import { createXtermEmulator } from '@/emulator/xterm'
 import type { Emulator } from '@/emulator/types'
-import { useFlueClient } from '@/client/use-flue-client'
+import { useFlueClient } from '@/client/provider'
 import { createKeyboardModes } from '@/lib/keyboard'
 import { cn } from '@/lib/utils'
 
@@ -5153,39 +5352,53 @@ export function Terminal({ sessionId, cwd }: TerminalProps) {
       if (refRef.current !== null) client.sendInput(refRef.current, bytes)
     })
 
-    client.onStatus((s) => {
-      if (s === 'open') setStatus('live')
-      else if (s === 'reconnecting') setStatus('reconnecting')
-    })
+    // Every registration returns an unsubscribe; they are all released on
+    // cleanup, because the client outlives this component now.
+    const offs: Array<() => void> = []
 
-    client.onAttached((a) => {
-      refRef.current = a.ref
-      primaryRef.current = a.primary
-      // A truncated attach means the requested offset had been evicted, so
-      // what follows is a fresh snapshot rather than a continuation.
-      if (a.truncated) emulator.write(encoder.encode('[2J[H'))
-      emulator.resize(a.cols, a.rows)
-      applyScale()
-      document.title = a.title || 'flue'
-      setStatus('live')
-    })
+    offs.push(
+      client.onStatus((s) => {
+        if (s === 'open') setStatus('live')
+        else if (s === 'reconnecting') setStatus('reconnecting')
+      }),
+    )
 
-    client.onOutput((ref, bytes) => {
-      if (ref === refRef.current) emulator.write(bytes)
-    })
+    offs.push(
+      client.onAttached((a) => {
+        refRef.current = a.ref
+        primaryRef.current = a.primary
+        // A truncated attach means the requested offset had been evicted, so
+        // what follows is a fresh snapshot rather than a continuation.
+        if (a.truncated) emulator.write(encoder.encode('[2J[H'))
+        emulator.resize(a.cols, a.rows)
+        applyScale()
+        document.title = a.title || 'flue'
+        setStatus('live')
+      }),
+    )
 
-    client.onSizeChanged((m) => {
-      if (m.ref !== refRef.current) return
-      primaryRef.current = m.primary
-      emulator.resize(m.cols, m.rows)
-      applyScale()
-    })
+    offs.push(
+      client.onOutput((ref, bytes) => {
+        if (ref === refRef.current) emulator.write(bytes)
+      }),
+    )
 
-    client.onExit((ref, code) => {
-      if (ref !== refRef.current) return
-      emulator.write(encoder.encode(`\r\n[90m[process exited: ${code}][0m\r\n`))
-      setStatus('exited')
-    })
+    offs.push(
+      client.onSizeChanged((m) => {
+        if (m.ref !== refRef.current) return
+        primaryRef.current = m.primary
+        emulator.resize(m.cols, m.rows)
+        applyScale()
+      }),
+    )
+
+    offs.push(
+      client.onExit((ref, code) => {
+        if (ref !== refRef.current) return
+        emulator.write(encoder.encode(`\r\n[90m[process exited: ${code}][0m\r\n`))
+        setStatus('exited')
+      }),
+    )
 
     const onResize = () => {
       if (refRef.current === null) return
@@ -5212,6 +5425,7 @@ export function Terminal({ sessionId, cwd }: TerminalProps) {
     else client.spawn({ cwd, cols: 80, rows: 24 })
 
     return () => {
+      for (const off of offs) off()
       window.removeEventListener('resize', onResize)
       window.removeEventListener('keydown', onKey)
       emulator.dispose()
@@ -5459,7 +5673,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { SessionTable } from '@/components/session-table'
-import { useFlueClient } from '@/client/use-flue-client'
+import { useFlueClient } from '@/client/provider'
 import type { SessionInfo } from '@/client/protocol'
 
 export function SessionsRoute() {
@@ -5468,13 +5682,23 @@ export function SessionsRoute() {
   const [sessions, setSessions] = useState<SessionInfo[]>([])
 
   useEffect(() => {
-    client.onSessions(setSessions)
-    client.onAttached((a) => {
+    const offSessions = client.onSessions(setSessions)
+    // Spawning yields an `attached`, which is how a newly created session
+    // becomes a tab.
+    const offAttached = client.onAttached((a) => {
       void navigate({ to: '/d/$deviceId/s/$sessionId', params: { deviceId: 'local', sessionId: a.id } })
     })
+
     client.list()
+    // The protocol has no push for session-list changes, so poll while
+    // this screen is open. Cheap, and it stops on unmount.
     const poll = setInterval(() => client.list(), 3000)
-    return () => clearInterval(poll)
+
+    return () => {
+      clearInterval(poll)
+      offSessions()
+      offAttached()
+    }
   }, [client, navigate])
 
   function open(id: string) {
@@ -5708,7 +5932,7 @@ Verify each of these:
 
 1. A browser tab opens with a working shell in `~/code`.
 2. `ls` and `vim` render correctly; colours and cursor movement work.
-3. The URL is `/d/local/s/<id>` and contains no `t=` parameter.
+3. The URL is `/d/local/s/<id>` and contains neither a `t=` nor an `h=` parameter.
 4. Resizing the window reflows the terminal.
 5. Run `sleep 300`, close the tab, reopen the same URL — the session reattaches with its scrollback, and `sleep` is still running.
 6. Open the same URL in a second tab, type in one, and confirm it mirrors into the other.

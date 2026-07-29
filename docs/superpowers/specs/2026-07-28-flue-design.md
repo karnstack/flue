@@ -509,6 +509,8 @@ window is needed.
 | Unpaired device key | `error{code:"unpaired"}`; the daemon does not reveal whether the device ID exists |
 | Device revoked mid-session | `revoked{reason}` sent, connection closed, key removed — live sessions drop immediately |
 | Pairing token expired or reused | Pairing refused; the daemon leaves pairing mode |
+| Handoff token expired, unknown, or already spent (local) | 401, no cookie, no fallback to any other credential in the URL; run `flue open` again |
+| Mint requested by anything that cannot read the token file (local) | 401 without the session token header, 403 for any browser-shaped request |
 | Invalid or missing token (local) | 401, no upgrade |
 | Disallowed Origin or Host (local) | 403, no upgrade, logged |
 | Unknown tailnet peer | 403, no upgrade, logged with the resolved identity |
@@ -553,15 +555,74 @@ Worker.
 connection. Every attach, pairing, revocation, and rejection is logged with the
 resolved peer identity.
 
-**Local.** A random token is generated at first start and stored `0600` at
-`$XDG_CONFIG_HOME/flue/token`, required on every request and upgrade. The Origin
-must be the daemon's own; the `Host` header must be `127.0.0.1:PORT` or
+**Local.** A random *session token* is generated at first start and stored `0600`
+at `$XDG_CONFIG_HOME/flue/token`, required on every request and upgrade. The
+Origin must be the daemon's own; the `Host` header must be `127.0.0.1:PORT` or
 `localhost:PORT`, which defends against DNS rebinding — an attacker-controlled
-name that resolves to loopback. No wildcard CORS under any condition. The token
-arrives in the URL on first load, where it would leak via history and referrer,
-so it is immediately exchanged for an `HttpOnly; SameSite=Strict` cookie,
-stripped from the URL with `history.replaceState`, and every response sets
-`Referrer-Policy: no-referrer`.
+name that resolves to loopback. No wildcard CORS under any condition. Every
+response sets `Referrer-Policy: no-referrer`.
+
+*The session token never appears in a URL.* A URL handed to `open(1)` or
+`xdg-open(1)` is that process's argv, which any local user can read via
+`/proc/<pid>/cmdline` at Linux's default `hidepid=0` and via `ps(1)` on macOS —
+so putting the permanent credential there would expose it for the life of the
+launch. The daemon does not accept the session token from the query string under
+any parameter name; it is accepted only from the `flue_token` cookie or the
+`X-Flue-Token` request header.
+
+Instead, `flue open` performs a **one-time handoff**:
+
+1. It asks the running daemon to mint a handoff token: `POST /api/handoff`,
+   authenticated by the session token in the `X-Flue-Token` header. Minting is
+   refused to the cookie (a browser attaches it automatically, and `SameSite` is
+   blind to the port, so a co-resident untrusted origin can cause the victim's
+   browser to send it), to the query string, and to any request that carries a
+   `Sec-Fetch-Site` header at all — every browser sends that header and the CLI
+   never does, so requiring its absence limits minting to a local process that
+   can read the token file.
+2. The handoff token — 256 bits from `crypto/rand`, held in memory only — goes in
+   the URL as `?h=<token>`. It lives about ten seconds and is single-use. It is
+   **never written to disk, never logged, and never sent anywhere but the browser
+   being launched**, with exactly two deliberate exceptions, both of which write
+   to the user's own terminal and nowhere else:
+
+   - `flue serve`'s startup banner prints a link carrying one, so that starting
+     the daemon in a terminal still gives a clickable way in. (When `flue open`
+     starts the daemon detached, that banner goes to `/dev/null` and the token is
+     simply wasted.)
+   - `flue open` prints the full URL only when launching the browser *failed*,
+     because otherwise the user has no way in at all.
+
+   Both are acceptable for the same reason: what lands in scrollback is
+   single-use and dead within about ten seconds, so an attacker who scrapes a
+   terminal buffer gets nothing — which is precisely the exposure that made the
+   permanent session token unacceptable in that position. Normal `flue open`
+   prints only the credential-free origin.
+3. The first load exchanges it for the `HttpOnly; SameSite=Strict` `flue_token`
+   cookie. Redemption is a find-and-delete under one lock, so two concurrent
+   presentations yield exactly one success, and a token is removed whether or not
+   it was still valid. The client then strips `h` from the URL with
+   `history.replaceState`.
+4. There is **no fallback**. A handoff token that is unknown, expired or already
+   spent fails the request outright: it does not fall through to the cookie, and
+   the session token is never accepted from the URL as a second chance.
+
+`POST /api/handoff` is the only route on the daemon reachable by a method other
+than GET or HEAD. `OPTIONS` is refused everywhere, so no CORS preflight ever
+succeeds and no browser can issue a cross-origin request carrying the header a
+mint requires. The exchange itself is a state-changing GET admitted under
+`Sec-Fetch-Site: none`, which a redirect can launder — accepted deliberately,
+because a laundered request carrying an unknown token changes nothing, one
+carrying a token the attacker already knows merely gives the victim's browser a
+cookie it is already entitled to (strictly worse for the attacker than spending
+it themselves), and the cookie's value is a constant chosen by the daemon rather
+than anything from the request, so session fixation is impossible.
+
+`flue serve`'s banner prints a handoff link and says, in the banner itself, that
+it works once and expires — so the user meets that fact as a sentence rather than
+as an unexplained 401. If minting fails the daemon still starts and the banner
+degrades to naming the daemon and pointing at `flue open`; it never falls back to
+printing the session token.
 
 **cfrelay.** Two independent layers. The Worker authenticates who may open a
 channel at all, using a device key for the daemon and a scoped secret for
@@ -599,6 +660,11 @@ either is a remote shell.
   expired Access JWT, unpaired device key. Every case must be rejected.
 - **Pairing**: expired token refused, reused token refused, pairing outside
   pairing mode refused, revocation terminates live connections.
+- **Local handoff**: a handoff token works exactly once; a second presentation
+  fails; an expired one fails; two concurrent exchanges yield exactly one
+  success; a failed exchange falls back to nothing; minting requires the session
+  token in a request header and is refused to browsers; and no URL `flue open`
+  produces contains the session token.
 - **Noise handshake vectors** in `testdata/noise/`, executed by both the Go and
   the TypeScript implementations so they cannot drift. Negative tests: a wrong
   static key must fail; a replayed nonce must tear down the connection; a

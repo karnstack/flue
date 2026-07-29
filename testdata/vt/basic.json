@@ -1,0 +1,58 @@
+[
+  {
+    "name": "plain text fills one row and leaves the rest empty",
+    "why": "Baseline for grid extraction: lines has exactly rows entries, and a row nothing was written to is the empty string rather than a run of spaces.",
+    "cols": 20,
+    "rows": 3,
+    "input": "hello",
+    "lines": ["hello", "", ""]
+  },
+  {
+    "name": "extraction walks every row of the live grid in order",
+    "why": "The extraction loop reads rows relative to the buffer's base, so row order and row count both have to survive a write that moves the cursor down.",
+    "cols": 20,
+    "rows": 3,
+    "input": "one\r\ntwo",
+    "lines": ["one", "two", ""]
+  },
+  {
+    "name": "trailing spaces are trimmed even when they were written",
+    "why": "The load-bearing case for the trim. xterm's own translateToString(true) trims only cells that were never written; a cell holding a real space character has content, so it survives and flue has to trim it. Interior spacing must not be touched.",
+    "cols": 20,
+    "rows": 2,
+    "input": "a  b   ",
+    "lines": ["a  b", ""]
+  },
+  {
+    "name": "a non-breaking space is content, not padding",
+    "why": "The trim drops padding, and padding is the space character. A program that ends a line with U+00A0 chose it; trimming every character that merely looks blank would silently edit the program's output.",
+    "cols": 20,
+    "rows": 2,
+    "input": "x\u00a0",
+    "lines": ["x\u00a0", ""]
+  },
+  {
+    "name": "a wrapped row extracts as its own line",
+    "why": "The grid is rows lines of at most cols columns, so text that wrapped is two entries and not one long string. Extraction must not try to rejoin what the emulator wrapped.",
+    "cols": 5,
+    "rows": 3,
+    "input": "abcdefgh",
+    "lines": ["abcde", "fgh", ""]
+  },
+  {
+    "name": "wide characters survive extraction as single characters",
+    "why": "A CJK glyph occupies two cells, the second of which is a zero-width continuation. Extracting cell by cell would double every character or emit stray blanks.",
+    "cols": 10,
+    "rows": 2,
+    "input": "日本語",
+    "lines": ["日本語", ""]
+  },
+  {
+    "name": "escape sequences do not leak into the extracted text",
+    "why": "An OSC title carries text that is addressed to the window, not to the screen. Extraction reads the parsed grid rather than the byte stream, so none of it can appear in a line.",
+    "cols": 20,
+    "rows": 2,
+    "input": "\u001b]0;window title\u0007visible",
+    "lines": ["visible", ""]
+  }
+]
