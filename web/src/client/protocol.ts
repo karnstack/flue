@@ -105,6 +105,12 @@ export interface SpawnMsg {
   cmd?: string[]
   cols: number
   rows: number
+  /**
+   * Correlates a request with the `attached` or `error` that answers it.
+   * Client-chosen and echoed by the daemon; absent when no correlation was
+   * asked for. Mirrors `reqId,omitempty` on the Go side.
+   */
+  reqId?: number
 }
 
 export interface AttachMsg {
@@ -115,6 +121,12 @@ export interface AttachMsg {
    * wants, not of the last one it has.
    */
   lastSeq: number
+  /**
+   * Correlates a request with the `attached` or `error` that answers it.
+   * Client-chosen and echoed by the daemon; absent when no correlation was
+   * asked for. Mirrors `reqId,omitempty` on the Go side.
+   */
+  reqId?: number
 }
 
 export interface DetachMsg {
@@ -188,6 +200,12 @@ export interface Attached {
    */
   truncated: boolean
   primary: boolean
+  /**
+   * Correlates a request with the `attached` or `error` that answers it.
+   * Client-chosen and echoed by the daemon; absent when no correlation was
+   * asked for. Mirrors `reqId,omitempty` on the Go side.
+   */
+  reqId?: number
 }
 
 export interface Exit {
@@ -208,6 +226,12 @@ export interface ErrorMsg {
   type: 'error'
   code: string
   msg: string
+  /**
+   * Correlates a request with the `attached` or `error` that answers it.
+   * Client-chosen and echoed by the daemon; absent when no correlation was
+   * asked for. Mirrors `reqId,omitempty` on the Go side.
+   */
+  reqId?: number
 }
 
 export type ServerMessage = Welcome | Sessions | Attached | Exit | SizeChanged | ErrorMsg

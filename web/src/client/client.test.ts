@@ -195,6 +195,7 @@ describe('control message golden file', () => {
       'exit',
       'sizeChanged',
       'error',
+      'errorForRequest',
     ])
   })
 
@@ -215,12 +216,18 @@ describe('control message golden file', () => {
       cmd: ['zsh', '-l'],
       cols: 120,
       rows: 40,
+      reqId: 6,
     }
     expect(fixture('spawn')).toStrictEqual(want)
   })
 
   it('decodes attach', () => {
-    const want: AttachMsg = { type: 'attach', id: 'a1b2c3d4e5f60718', lastSeq: 4096 }
+    const want: AttachMsg = {
+      type: 'attach',
+      id: 'a1b2c3d4e5f60718',
+      lastSeq: 4096,
+      reqId: 7,
+    }
     expect(fixture('attach')).toStrictEqual(want)
   })
 
@@ -293,6 +300,7 @@ describe('control message golden file', () => {
       seq: 4096,
       truncated: false,
       primary: true,
+      reqId: 7,
     }
     expect(fixture('attached')).toStrictEqual(want)
   })
@@ -329,6 +337,16 @@ describe('control message golden file', () => {
       msg: 'spawn requires an authenticated connection',
     }
     expect(fixture('error')).toStrictEqual(want)
+  })
+
+  it('decodes an error answering a request', () => {
+    const want: ErrorMsg = {
+      type: 'error',
+      code: 'not_found',
+      msg: 'no such session',
+      reqId: 7,
+    }
+    expect(fixture('errorForRequest')).toStrictEqual(want)
   })
 })
 

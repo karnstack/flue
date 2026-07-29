@@ -21,11 +21,16 @@ type Spawn struct {
 	Cmd  []string `json:"cmd,omitempty"`
 	Cols uint16   `json:"cols"`
 	Rows uint16   `json:"rows"`
+	// ReqID correlates this request with the attached or error answering it.
+	// Client-chosen; zero means the client asked for no correlation.
+	ReqID uint64 `json:"reqId,omitempty"`
 }
 
 type Attach struct {
 	ID      string `json:"id"`
 	LastSeq uint64 `json:"lastSeq"`
+	// ReqID correlates this request with the attached or error answering it.
+	ReqID uint64 `json:"reqId,omitempty"`
 }
 
 type Detach struct {
@@ -70,6 +75,8 @@ type Attached struct {
 	Seq       uint64 `json:"seq"`
 	Truncated bool   `json:"truncated"`
 	Primary   bool   `json:"primary"`
+	// ReqID echoes the reqId of the attach or spawn this answers.
+	ReqID uint64 `json:"reqId,omitempty"`
 }
 
 type Exit struct {
@@ -87,6 +94,9 @@ type SizeChanged struct {
 type Error struct {
 	Code string `json:"code"`
 	Msg  string `json:"msg"`
+	// ReqID echoes the reqId of the request this error answers, when it
+	// answers one — not_found and spawn_failed do; a lagged stream does not.
+	ReqID uint64 `json:"reqId,omitempty"`
 }
 
 // typeName maps a message value to its wire discriminator.

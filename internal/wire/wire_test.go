@@ -133,6 +133,51 @@ func TestGoldenControlMessages(t *testing.T) {
 	}
 }
 
+// TestErrorCarriesReqID pins the half FOLLOW-UPS calls mandatory: not_found
+// arrives as an error, so a correlation id on attached alone leaves that
+// consumer a heuristic.
+func TestErrorCarriesReqID(t *testing.T) {
+	b, err := EncodeControl(Error{Code: "not_found", Msg: "no such session", ReqID: 7})
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got["reqId"] != float64(7) {
+		t.Fatalf("reqId = %v, want 7", got["reqId"])
+	}
+
+	// And a zero reqId is absent, not zero: a request that asked for no
+	// correlation is answered exactly as before.
+	b, err = EncodeControl(Error{Code: "lagged", Msg: "fell behind"})
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	got = nil
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, present := got["reqId"]; present {
+		t.Fatalf("zero reqId was encoded: %s", b)
+	}
+}
+
+func TestAttachRoundTripsReqID(t *testing.T) {
+	msg, err := DecodeControl([]byte(`{"type":"attach","id":"abc","lastSeq":42,"reqId":9}`))
+	if err != nil {
+		t.Fatalf("DecodeControl: %v", err)
+	}
+	a, ok := msg.(Attach)
+	if !ok {
+		t.Fatalf("msg is %T, want wire.Attach", msg)
+	}
+	if a.ReqID != 9 {
+		t.Fatalf("ReqID = %d, want 9", a.ReqID)
+	}
+}
+
 // deepEqual recursively compares two any values for equality, handling
 // nested maps and slices. Used by TestGoldenControlMessages to verify
 // round-trip fidelity while tolerating type differences between JSON

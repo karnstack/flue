@@ -25,8 +25,8 @@ Every control message is a JSON object with a `type` discriminator.
 |---|---|
 | `hello` | `ver`, `caps[]` |
 | `list` | — |
-| `spawn` | `cwd`, `cmd[]`, `cols`, `rows` |
-| `attach` | `id`, `lastSeq` |
+| `spawn` | `cwd`, `cmd[]`, `cols`, `rows`, `reqId?` |
+| `attach` | `id`, `lastSeq`, `reqId?` |
 | `detach` | `ref` |
 | `resize` | `ref`, `cols`, `rows`, `primary` |
 | `signal` | `ref`, `sig` |
@@ -38,10 +38,18 @@ Every control message is a JSON object with a `type` discriminator.
 |---|---|
 | `welcome` | `daemonId`, `host`, `ver`, `caps[]` |
 | `sessions` | `sessions[]` |
-| `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `truncated`, `primary` |
+| `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `truncated`, `primary`, `reqId?` |
 | `exit` | `ref`, `code` |
 | `sizeChanged` | `ref`, `cols`, `rows`, `primary` |
-| `error` | `code`, `msg` |
+| `error` | `code`, `msg`, `reqId?` |
+
+## Correlation
+
+`attach` and `spawn` may carry a client-chosen `reqId`. The daemon echoes it
+on the reply that answers the request — the `attached` on success, the
+`error` on failure (`not_found`, `spawn_failed`). A reply without a `reqId`
+answers a request that carried none. Clients match replies by `reqId` rather
+than leaning on arrival order.
 
 ## Sequencing
 
