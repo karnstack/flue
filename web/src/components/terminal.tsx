@@ -271,16 +271,13 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     )
 
     offs.push(
-      client.onError((e) => {
-        // The one error worth acting on here, and the only one this view can
-        // attribute to itself. `not_found` carries no session id — see the
-        // note in FlueClient — so this is sound only while this view has an
-        // attach outstanding and no ref, which on loopback is one round trip.
-        // Without it the plan asks for a dead session on every reconnect for
-        // the life of the tab and the screen never stops saying Connecting.
-        if (e.code !== 'not_found' || ref !== null || over) return
+      client.onSessionGone((id) => {
+        // The client resolved the not_found to its session by reqId and has
+        // already dropped it from the reattach plan — for the mount-time
+        // attach and for a replay after a daemon restart alike. Terminal
+        // states are final: a later reconnect must not walk this back.
+        if (id !== sessionId || over) return
         over = true
-        client.forget(sessionId)
         setPhase('gone')
       }),
     )

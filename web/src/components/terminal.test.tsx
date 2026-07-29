@@ -302,25 +302,26 @@ describe('Terminal', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('stops asking for a session the daemon does not have', async () => {
-    // not_found carries no session id, so this is only safe while this view is
-    // the one thing with an attach outstanding. Without it the plan asks for a
-    // dead session on every reconnect and the tab spins at Connecting for ever.
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    vi.spyOn(Math, 'random').mockReturnValue(0)
-    const { sock, sockets } = mountTerminal((e) => (
-      <Terminal sessionId="ghost" createEmulator={e.create} />
-    ))
+  it('shows gone when the daemon answers its attach with not_found', () => {
+    const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
 
-    act(() => sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }))
+    act(() =>
+      sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 1 }),
+    )
+
     expect(screen.getByRole('status').textContent).toContain('gone')
+  })
 
-    act(() => sock.close())
-    await act(() => vi.advanceTimersByTimeAsync(125))
-    act(() => sockets[1]!.open())
+  it('ignores a not_found that answers someone else’s attach', () => {
+    // Exactness is the point of the reqId: before it, any not_found arriving
+    // while this view held no ref was assumed to be its own.
+    const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
 
-    expect(sockets[1]!.ofType('attach')).toEqual([])
-    vi.useRealTimers()
+    act(() =>
+      sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 99 }),
+    )
+
+    expect(screen.queryByRole('status')?.textContent ?? '').not.toContain('gone')
   })
 
   it('gives up on a session the restarted daemon has never heard of', async () => {
@@ -347,7 +348,12 @@ describe('Terminal', () => {
     ])
 
     act(() =>
-      sockets[1]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }),
+      sockets[1]!.emitControl({
+        type: 'error',
+        code: 'not_found',
+        msg: 'no such session',
+        reqId: 2,
+      }),
     )
     expect(screen.getByRole('status').textContent).toContain('gone')
 
@@ -368,7 +374,9 @@ describe('Terminal', () => {
     const { sock, sockets } = mountTerminal((e) => (
       <Terminal sessionId="ghost" createEmulator={e.create} />
     ))
-    act(() => sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }))
+    act(() =>
+      sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 1 }),
+    )
 
     act(() => sock.close())
     await act(() => vi.advanceTimersByTimeAsync(125))
