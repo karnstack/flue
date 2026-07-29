@@ -545,6 +545,75 @@ describe('FlueClient reconnect', () => {
     expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toEqual([])
   })
 
+  it('reattaches a session it spawned, which it never called attach for', async () => {
+    // The daemon answers spawn with attached and no attach was ever sent, so
+    // the reattach plan can only learn about the session from that reply.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    c.spawn({ cols: 80, rows: 24 })
+    sockets[0]!.emitControl({
+      type: 'attached',
+      ref: 1,
+      id: 'fresh',
+      cols: 80,
+      rows: 24,
+      title: 'zsh',
+      seq: 0,
+      truncated: false,
+      primary: true,
+    })
+    sockets[0]!.emitBinary(FRAME_OUTPUT, 1, '$ ')
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toStrictEqual([
+      { type: 'attach', id: 'fresh', lastSeq: 2 },
+    ])
+    // And the spawn is not replayed, or the reconnect would leave two shells.
+    expect(sockets[1]!.sentControl().filter((m) => m.type === 'spawn')).toEqual([])
+  })
+
+  it('keeps a session in the reattach plan while another ref still holds it', async () => {
+    // Two panes on one session is legal, and the plan is keyed by session ID
+    // rather than by ref. Letting go of one pane must not strand the other.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    c.attach('s1', 0)
+    for (const ref of [1, 2]) {
+      sockets[0]!.emitControl({
+        type: 'attached',
+        ref,
+        id: 's1',
+        cols: 80,
+        rows: 24,
+        title: '',
+        seq: 0,
+        truncated: false,
+        primary: ref === 1,
+      })
+    }
+    sockets[0]!.emitBinary(FRAME_OUTPUT, 1, 'abcd')
+    c.detach(2)
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toStrictEqual([
+      { type: 'attach', id: 's1', lastSeq: 4 },
+    ])
+  })
+
   it('backs off exponentially between reconnect attempts', async () => {
     vi.useFakeTimers()
     // Full jitter multiplies the delay by 0.5..1.0; pinning the low end makes
@@ -650,6 +719,26 @@ describe('FlueClient reconnect', () => {
     c.connect()
     expect(sockets).toHaveLength(2)
     expect(c.status).toBe('connecting')
+  })
+
+  it('connects at once after a close made mid-backoff, on no leftover timer', async () => {
+    vi.useFakeTimers()
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    expect(c.status).toBe('reconnecting')
+
+    c.close()
+    c.connect()
+
+    // A retry left armed across the close would both delay this and, once it
+    // finally fired, open a second socket alongside the live one.
+    expect(sockets).toHaveLength(2)
+    expect(c.status).toBe('connecting')
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(sockets).toHaveLength(2)
   })
 })
 

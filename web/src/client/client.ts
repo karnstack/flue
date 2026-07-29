@@ -384,19 +384,33 @@ export class FlueClient {
     this.pending.push(msg)
   }
 
-  /** Drop the socket and fold each attachment's progress into the plan. */
+  /**
+   * Drop the socket and fold each attachment's progress into the plan.
+   *
+   * Progress is only folded into sessions the plan already lists, never added
+   * back. `wanted` is what this client intends to hold; a session it let go of,
+   * or one the daemon reported as exited, must not be resurrected here by an
+   * attachment that had not been swept up yet.
+   */
   private teardown() {
     const sock = this.sock
     this.sock = null
     this.ready = false
     for (const a of this.attachments.values()) {
-      this.wanted.set(a.id, Math.max(this.wanted.get(a.id) ?? 0, a.lastSeq))
+      const planned = this.wanted.get(a.id)
+      if (planned === undefined) continue
+      this.wanted.set(a.id, Math.max(planned, a.lastSeq))
     }
     this.attachments.clear()
     sock?.close()
   }
 
-  /** Drop `id` from the reattach plan once no ref refers to it any more. */
+  /**
+   * Drop `id` from the reattach plan once no ref refers to it any more.
+   *
+   * The check is not decoration: one session may legitimately be held by two
+   * refs, and letting go of one of them must not strand the other.
+   */
   private forgetIfLastRef(id: string) {
     for (const a of this.attachments.values()) {
       if (a.id === id) return
