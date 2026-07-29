@@ -74,7 +74,10 @@ type Attached struct {
 	Title     string `json:"title"`
 	Seq       uint64 `json:"seq"`
 	Truncated bool   `json:"truncated"`
-	Primary   bool   `json:"primary"`
+	// Head is the offset one past the replayed backlog: bytes below Head are
+	// history, bytes at or after it are live. Head == Seq means no backlog.
+	Head    uint64 `json:"head"`
+	Primary bool   `json:"primary"`
 	// ReqID echoes the reqId of the attach or spawn this answers.
 	ReqID uint64 `json:"reqId,omitempty"`
 }

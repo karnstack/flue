@@ -1735,3 +1735,73 @@ func TestSpawnFailedEchoesReqID(t *testing.T) {
 		return true
 	})
 }
+
+// --- head: where the replayed backlog ends ---
+
+// TestAttachedHeadCoversTheBacklog: attach to a session whose entire output
+// is already in the ring. head must equal seq plus every backlog byte the
+// client is about to receive — the offset at which live output begins.
+func TestAttachedHeadCoversTheBacklog(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sh", "-c", "echo replayed"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+	waitForExit(t, s)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0})
+
+	var att wire.Attached
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok {
+			att = a
+		}
+		return ok
+	})
+
+	var backlog []byte
+	readUntil(t, c, func(msg any, out []byte) bool {
+		_, done := msg.(wire.Exit)
+		if done {
+			backlog = append([]byte(nil), out...)
+		}
+		return done
+	})
+
+	if att.Head != att.Seq+uint64(len(backlog)) {
+		t.Fatalf("Head = %d, want Seq %d + backlog %d", att.Head, att.Seq, len(backlog))
+	}
+	if att.Head == att.Seq {
+		t.Fatal("Head == Seq for a session with output in the ring; the gate would never arm")
+	}
+}
+
+// TestAttachedHeadEqualsSeqOnAFreshSpawn: an empty backlog omits the output
+// frame entirely, which is why gating on "the first output frame" was wrong.
+// head == seq is what lets the client open the gate immediately.
+func TestAttachedHeadEqualsSeqOnAFreshSpawn(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if !ok {
+			return false
+		}
+		if a.Head != a.Seq {
+			t.Fatalf("Head = %d, Seq = %d; want equal on an empty backlog", a.Head, a.Seq)
+		}
+		return true
+	})
+}

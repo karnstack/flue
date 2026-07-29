@@ -199,6 +199,12 @@ export interface Attached {
    * continuation, so the consumer must clear its emulator before writing it.
    */
   truncated: boolean
+  /**
+   * The offset one past the replayed backlog. Bytes below `head` are
+   * history; bytes at or after it are live. `head === seq` means the
+   * backlog is empty and there is nothing to mute.
+   */
+  head: number
   primary: boolean
   /**
    * Correlates a request with the `attached` or `error` that answers it.

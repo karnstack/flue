@@ -79,14 +79,18 @@ export function fakeClient() {
   return { client, sockets, last: () => sockets[sockets.length - 1]! }
 }
 
-/** A complete `attached`, so a caller only names the fields it cares about. */
+/** A complete `attached`, so a caller only names the fields it cares about.
+ *  `head` defaults to `seq` — the fresh-spawn shape, in which nothing is
+ *  muted — so only replay tests say otherwise. */
 export function attached(over: Partial<Attached> & { ref: number; id: string }): Attached {
+  const seq = over.seq ?? 0
   return {
     type: 'attached',
     cols: 80,
     rows: 24,
     title: '',
-    seq: 0,
+    seq,
+    head: seq,
     truncated: false,
     primary: true,
     ...over,

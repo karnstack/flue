@@ -298,6 +298,7 @@ describe('control message golden file', () => {
       rows: 40,
       title: 'zsh',
       seq: 4096,
+      head: 8192,
       truncated: false,
       primary: true,
       reqId: 7,
@@ -314,6 +315,7 @@ describe('control message golden file', () => {
       rows: 40,
       title: 'zsh',
       seq: 99000,
+      head: 99512,
       truncated: true,
       primary: false,
     }
@@ -416,6 +418,7 @@ describe('FlueClient output and sequencing', () => {
       rows: 24,
       title: '',
       seq: 100,
+      head: 100,
       truncated: false,
       primary: true,
     })
@@ -438,6 +441,7 @@ describe('FlueClient output and sequencing', () => {
       rows: 24,
       title: '',
       seq: 5000,
+      head: 5000,
       truncated: true,
       primary: false,
     })
@@ -474,6 +478,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -518,6 +523,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -550,6 +556,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -581,6 +588,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: 'zsh',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -618,6 +626,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -672,6 +681,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -683,6 +693,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: false,
     })
@@ -699,6 +710,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -737,6 +749,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
       reqId: 1,
@@ -778,6 +791,7 @@ describe('FlueClient reconnect', () => {
         rows: 24,
         title: '',
         seq: 0,
+        head: 0,
         truncated: false,
         primary: ref === 1,
         reqId: ref,
@@ -808,6 +822,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -822,6 +837,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -857,6 +873,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
       reqId: 2,
@@ -886,6 +903,7 @@ describe('FlueClient reconnect', () => {
         rows: 24,
         title: '',
         seq: 0,
+        head: 0,
         truncated: false,
         primary: ref === 1,
       })
@@ -1052,6 +1070,7 @@ describe('FlueClient sending', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -1277,6 +1296,7 @@ describe('FlueClient control messages', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: false,
     })
@@ -1374,6 +1394,7 @@ describe('FlueClient correlation', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
       reqId,
@@ -1404,6 +1425,7 @@ describe('FlueClient correlation', () => {
         rows: 24,
         title: '',
         seq: 0,
+        head: 0,
         truncated: false,
         primary: ref === 1,
         reqId,
@@ -1465,6 +1487,7 @@ describe('FlueClient correlation', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
       reqId: 1,
@@ -1492,6 +1515,7 @@ describe('FlueClient correlation', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
       reqId: 1,
@@ -1507,6 +1531,7 @@ describe('FlueClient correlation', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
       reqId: 2,

@@ -386,6 +386,11 @@ func (c *conn) handleControl(msg any) {
 // is echoed on the Attached so the client can match the reply to its request.
 func (c *conn) attachTo(s *session.Session, lastSeq uint64, reqID uint64) {
 	sub := s.Subscribe(lastSeq)
+	// head is where the replayed backlog ends. The scrollback carries the
+	// shell's own DA/DECRQM/OSC-11 probe replies, and the emulator answers
+	// them again on write; the client mutes its input until it has consumed
+	// head bytes so those answers never reach the shell's stdin.
+	head := sub.StartSeq + uint64(len(sub.Backlog))
 
 	c.mu.Lock()
 	c.nextRef++
@@ -405,6 +410,7 @@ func (c *conn) attachTo(s *session.Session, lastSeq uint64, reqID uint64) {
 		Title:     info.Title,
 		Seq:       sub.StartSeq,
 		Truncated: sub.Truncated,
+		Head:      head,
 		Primary:   primary,
 		ReqID:     reqID,
 	})

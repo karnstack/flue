@@ -38,7 +38,7 @@ Every control message is a JSON object with a `type` discriminator.
 |---|---|
 | `welcome` | `daemonId`, `host`, `ver`, `caps[]` |
 | `sessions` | `sessions[]` |
-| `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `truncated`, `primary`, `reqId?` |
+| `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `head`, `truncated`, `primary`, `reqId?` |
 | `exit` | `ref`, `code` |
 | `sizeChanged` | `ref`, `cols`, `rows`, `primary` |
 | `error` | `code`, `msg`, `reqId?` |
@@ -64,6 +64,14 @@ client sends its `lastSeq`.
 
 `seq` in `attached` is always the seq of the first byte the client is about to
 receive.
+
+`head` in `attached` is the offset one past the replayed backlog: every byte
+below `head` is history the ring is about to replay, and every byte at or
+after it is live output. `head == seq` means the backlog is empty (the
+daemon omits the output frame entirely in that case). Clients must not let
+emulator-generated replies to replayed bytes — DA, DECRQM, OSC 11 probe
+responses — reach the daemon: mute input until `head` bytes have been
+consumed.
 
 ## Liveness
 
