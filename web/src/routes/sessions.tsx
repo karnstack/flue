@@ -52,11 +52,24 @@ function connectionNotice(status: ConnStatus): string | null {
  * The session set, and the one place a session is created.
  *
  * Creation lives here rather than in `<Terminal>` because `spawn` carries no
- * key the daemon could deduplicate on. A view that spawned from a mount effect
- * would start two shells on every mount in development, where React runs mount
- * effects twice, and could only ever detach one of them. So a session is only
- * ever started by a click, and the terminal is reached by navigating to a
- * session that already exists.
+ * key the daemon could deduplicate on: a view that fired one on every mount
+ * would start two shells under StrictMode, which mounts everything twice in
+ * development, and could only ever detach one of them. Every session but one
+ * is started by a click for exactly that reason, and the terminal is reached
+ * by navigating to a session that already exists.
+ *
+ * The one exception is the directory `flue open` hands over in `?cwd=`,
+ * sent from this screen's own mount effect by `spawnPendingCwd` — and it
+ * survives the double mount on two separate guards, not one. The URL param
+ * behind `pendingCwd` is consumed on the very first render, so whichever of
+ * the two mounts StrictMode runs second finds the ref already holding the
+ * answer rather than reading the URL again; and `pendingCwd` is cleared the
+ * instant a spawn actually reaches the daemon, on whichever of the two
+ * mounts that turns out to be. The mount that does not get to send one
+ * either finds the ref already emptied by the other, or — cold, with the
+ * socket still connecting — has had its `onStatus` listener removed by
+ * cleanup before the socket ever opens, leaving only the surviving mount's
+ * listener to answer it.
  */
 export function SessionsRoute() {
   const client = useFlueClient()

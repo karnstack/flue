@@ -31,10 +31,12 @@ export function stripHandoff(url: string): string {
 /**
  * Take the one-shot `cwd` that `flue open <path>` put in the URL.
  *
- * Read once and stripped immediately with replaceState, for the same reason
- * a spawn never lives in a mount effect: anything that re-reads the URL — a
- * StrictMode remount, a reload, a bookmark — must not start a second shell.
- * Consuming the parameter is what makes the spawn once-only.
+ * Read once and stripped immediately with replaceState. Unlike an in-memory
+ * ref, a URL parameter survives whatever comes after the first paint — a
+ * reload, a bookmark, a link pasted somewhere else — and each of those would
+ * hand the same directory back out to whoever reads it next. Consuming the
+ * parameter here, rather than merely reading it, is what keeps a second look
+ * at the same URL from asking for a second session.
  */
 export function takeCwd(): string | null {
   const u = new URL(location.href)

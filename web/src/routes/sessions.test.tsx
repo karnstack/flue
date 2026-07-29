@@ -1,3 +1,4 @@
+import { StrictMode } from 'react'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
@@ -43,14 +44,26 @@ function info(over: Partial<SessionInfo> & { id: string }): SessionInfo {
  * The socket is opened *after* the first render on purpose: a screen reached by
  * navigating mounts into a connection that is already established, but the very
  * first paint of the tab does not, and `list` has to survive both.
+ *
+ * `strict` wraps only `SessionsRoute` itself, not the provider around it —
+ * `FlueClientProvider`'s own StrictMode behaviour is provider.test.tsx's to
+ * cover. This isolates the double mount to the one component whose spawn
+ * timing is under test here.
  */
-async function mountSessions({ open = true } = {}) {
+async function mountSessions({ open = true, strict = false } = {}) {
   const { client, sockets } = fakeClient()
+  const routeComponent = strict
+    ? () => (
+        <StrictMode>
+          <SessionsRoute />
+        </StrictMode>
+      )
+    : SessionsRoute
 
   const rootRoute = createRootRoute({ component: () => <Outlet /> })
   const routeTree = rootRoute.addChildren([
     ...['/', '/sessions'].map((path) =>
-      createRoute({ getParentRoute: () => rootRoute, path, component: SessionsRoute }),
+      createRoute({ getParentRoute: () => rootRoute, path, component: routeComponent }),
     ),
     ...['/devices', '/settings', '/d/$deviceId/s/$sessionId'].map((path) =>
       createRoute({ getParentRoute: () => rootRoute, path, component: () => null }),
@@ -456,6 +469,38 @@ describe('SessionsRoute', () => {
     it('spawns nothing when no cwd was handed over', async () => {
       const { sock } = await mountSessions()
       expect(sock.ofType('spawn')).toEqual([])
+    })
+
+    it('never spawns for a screen the user navigated away from before the socket opened', async () => {
+      // The cwd is held on a ref, not sent from a mount effect eagerly — so an
+      // unmount before `onStatus('open')` ever fires must leave nothing armed
+      // to send once the connection this screen no longer owns comes up.
+      history.replaceState(null, '', '/?cwd=%2Ftmp')
+      const { sock, unmount } = await mountSessions({ open: false })
+
+      unmount()
+      act(() => sock.open())
+
+      expect(sock.ofType('spawn')).toEqual([])
+    })
+
+    it('spawns exactly once under a StrictMode double mount, cold', async () => {
+      // The mount effect that carries the cwd spawn double-fires under
+      // StrictMode exactly like every other effect here, so this is the one
+      // place the reasoning in SessionsRoute's docstring is checked rather
+      // than assumed: the URL param is consumed on the first render only, and
+      // whichever of the two mounts survives is the one whose `onStatus`
+      // listener answers `open`.
+      history.replaceState(null, '', '/?cwd=%2FUsers%2Fkarn%2Fproj')
+      const { sock } = await mountSessions({ open: false, strict: true })
+      expect(sock.ofType('spawn')).toEqual([])
+
+      act(() => sock.open())
+
+      expect(sock.ofType('spawn')).toEqual([
+        { type: 'spawn', cwd: '/Users/karn/proj', cols: 80, rows: 24, reqId: 1 },
+      ])
+      expect(location.search).toBe('') // taken on the first render, not the second
     })
   })
 })
