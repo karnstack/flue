@@ -1,6 +1,9 @@
 package service
 
-import "os/exec"
+import (
+	"errors"
+	"os/exec"
+)
 
 // Runner executes one service-manager command and returns its combined
 // output. It exists so the command flows are testable against a fake and so
@@ -32,4 +35,22 @@ type Manager interface {
 	Enable() error
 	Disable() error
 	Status() (Status, error)
+}
+
+// ErrUnsupported reports a platform with no login-service support. flue
+// ships darwin and linux; WSL is linux with, usually, no user manager —
+// which is ErrNoUserManager at Enable time, not this.
+var ErrUnsupported = errors.New("service: no login-service support on this platform")
+
+// ForPlatform picks the implementation for goos. It takes goos as a
+// parameter rather than reading runtime.GOOS so both arms are testable on
+// any host.
+func ForPlatform(goos, exe, home string, uid int, r Runner) (Manager, error) {
+	switch goos {
+	case "darwin":
+		return NewLaunchd(exe, home, uid, r), nil
+	case "linux":
+		return NewSystemd(exe, home, r), nil
+	}
+	return nil, ErrUnsupported
 }
