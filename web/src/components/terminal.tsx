@@ -117,6 +117,13 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     let ref: number | null = null
     let primary = false
     let dims: Dimensions = { cols: 80, rows: 24 }
+    // The replay mute gate, per-attach state: every `attached` re-arms it.
+    // consumed counts this ref's output bytes from seq; input is muted while
+    // consumed < muteUntil, so emulator-generated answers to replayed probe
+    // sequences (DA, DECRQM, OSC 11) never reach the shell's stdin.
+    // head === seq on a fresh spawn opens the gate immediately.
+    let consumed = 0
+    let muteUntil = 0
     // Set once the session can produce nothing further — the process exited,
     // or the daemon has never heard of it. Both are terminal, so a later
     // reconnect must not walk the pill back to "Reconnecting…" and imply that
@@ -191,9 +198,9 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     }
 
     emulator.onData((bytes) => {
-      // No ref, no destination. Inventing one — a `?? 0`, say — would send
-      // keystrokes to whatever attachment happened to hold that number.
-      if (ref !== null) client.sendInput(ref, bytes)
+      // No ref, no destination — and no input while the backlog replays.
+      if (ref === null || consumed < muteUntil) return
+      client.sendInput(ref, bytes)
     })
 
     // Every registration returns an unsubscribe, and all of them are released
@@ -232,6 +239,8 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
         ref = a.ref
         primary = a.primary
         dims = { cols: a.cols, rows: a.rows }
+        consumed = a.seq
+        muteUntil = a.head
         if (a.truncated) emulator.write(RESET)
         emulator.resize(a.cols, a.rows)
         if (a.title) document.title = a.title
@@ -244,7 +253,9 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
 
     offs.push(
       client.onOutput((r, bytes) => {
-        if (r === ref) emulator.write(bytes)
+        if (r !== ref) return
+        consumed += bytes.length
+        emulator.write(bytes)
       }),
     )
 

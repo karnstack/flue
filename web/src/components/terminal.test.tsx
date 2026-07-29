@@ -684,4 +684,91 @@ describe('Terminal', () => {
       expect(em.live().themes.length).toBeGreaterThan(before)
     })
   })
+
+  describe('the replay mute gate', () => {
+    it('opens immediately on a fresh spawn, where head equals seq', () => {
+      // Gating on "the first output frame" would never open here: the
+      // daemon omits that frame entirely when the backlog is empty.
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0 }))) // head defaults to seq
+
+      act(() => em.live().send('ls\r'))
+
+      expect(sock.input()).toEqual([{ ref: 1, text: 'ls\r' }])
+    })
+
+    it('mutes emulator replies while the backlog replays', () => {
+      // The ring holds the shell's own DA/DECRQM/OSC-11 probe replies, and
+      // xterm answers them again as they are written. Reproduced 4/4 before
+      // the gate: reload, reopen, route navigation, second mirror tab.
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 10 })))
+
+      act(() => sock.emitOutput(1, '123456')) // 6 of 10 backlog bytes
+      act(() => em.live().send('\x1b[?1;2c')) // xterm answering a replayed DA probe
+
+      expect(sock.input()).toEqual([])
+
+      act(() => sock.emitOutput(1, '7890')) // backlog complete: consumed == head
+      act(() => em.live().send('ls\r'))
+
+      expect(sock.input()).toEqual([{ ref: 1, text: 'ls\r' }])
+    })
+
+    it('opens at exactly head, not one byte later', () => {
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 4 })))
+      act(() => sock.emitOutput(1, 'abcd'))
+
+      act(() => em.live().send('x'))
+
+      expect(sock.input()).toEqual([{ ref: 1, text: 'x' }])
+    })
+
+    it('re-arms with the attachment after a reconnect mid-backlog', async () => {
+      // The gate is per-attach state, not per-connection: a socket dying
+      // mid-backlog resets it with the next attached, whose head names the
+      // next replay's end.
+      vi.useFakeTimers()
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      const { client, sockets, sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 6 })))
+      act(() => sock.emitOutput(1, 'abc')) // 3 of 6, then the socket dies
+
+      act(() => sock.close())
+      await act(() => vi.advanceTimersByTimeAsync(125))
+      act(() => sockets[1]!.open())
+      // The reattach resumes at 3; the daemon replays 3..8 as backlog.
+      act(() => sockets[1]!.emitControl(attached({ ref: 1, id: 's1', seq: 3, head: 8 })))
+
+      act(() => em.live().send('\x1b]11;rgb:0000/0000/0000\x07')) // OSC 11 reply to a replayed probe
+      expect(sockets[1]!.input()).toEqual([])
+
+      act(() => sockets[1]!.emitOutput(1, 'defgh')) // 3 + 5 = 8 == head
+      act(() => em.live().send('ok'))
+      expect(sockets[1]!.input()).toEqual([{ ref: 1, text: 'ok' }])
+      void client
+    })
+
+    it('mutes a second mirror tab replaying the full ring', () => {
+      // The second tab attaches with lastSeq 0 and receives the whole ring
+      // as backlog — the fourth reproduction of the bug, same gate.
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 2, id: 's1', seq: 0, head: 5, primary: false })))
+      act(() => sock.emitOutput(2, 'ring!'))
+      act(() => em.live().send('live'))
+
+      expect(sock.input()).toEqual([{ ref: 2, text: 'live' }])
+    })
+  })
 })
