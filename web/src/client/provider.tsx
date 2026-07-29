@@ -23,9 +23,15 @@ export interface FlueClientProviderProps {
  * counts as a separate attachment with its own byte offsets.
  */
 export function FlueClientProvider({ children, client }: FlueClientProviderProps) {
+  // Built on the first render that needs one, and not before: an injected
+  // client means no socket URL has to be derived at all, which keeps this
+  // usable anywhere `location` is not what the client should be aimed at.
   const own = useRef<FlueClient | null>(null)
-  if (!client && own.current === null) own.current = new FlueClient(daemonSocketUrl())
-  const active = client ?? own.current!
+  let active = client
+  if (!active) {
+    own.current ??= new FlueClient(daemonSocketUrl())
+    active = own.current
+  }
 
   useEffect(() => {
     active.connect()
