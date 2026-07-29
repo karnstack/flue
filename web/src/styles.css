@@ -14,6 +14,14 @@
 @import 'shadcn/tailwind.css';
 
 /*
+ * Test files are sources like any other, so a class named only in a test is
+ * compiled into the shipped stylesheet. That is dead CSS, and worse, it lets
+ * styles.build.test.ts generate the very rules it asserts on — a guard that
+ * manufactures its own evidence is not a guard.
+ */
+@source not '**/*.test.{ts,tsx}';
+
+/*
  * flue design tokens.
  *
  * Neutral is zinc, never gray or slate. Accent is amber — it carries active
@@ -31,11 +39,21 @@
  */
 
 /*
- * `static` matters. Tailwind v4 emits a @theme variable only when something
- * it can see uses it, so without it --color-accent-bg never reaches the
- * stylesheet at all and --color-accent-fg exists only in its dark-mode
- * override — any raw `var(--color-accent-fg)` would resolve to nothing in
- * the light theme.
+ * `static` is belt-and-braces, not load-bearing today — measure before you
+ * trust either reading.
+ *
+ * Tailwind v4 emits a @theme variable only when something it can see uses
+ * it. As the brief originally had it, with no consumer referencing these two,
+ * that dropped --color-accent-bg from the stylesheet entirely and left
+ * --color-accent-fg present only inside its dark-mode override, so a raw
+ * `var(--color-accent-fg)` resolved to nothing in the light theme. What
+ * actually fixes that is the mapping below: --primary and --ring reference
+ * both tokens, and Tailwind follows those references. With them in place,
+ * building this file with and without `static` gives byte-identical output.
+ *
+ * It is kept so the guarantee does not depend on a consumer existing. Delete
+ * the --primary/--ring mapping and, without `static`, these tokens quietly
+ * stop being emitted again.
  */
 @theme static {
   --font-sans:
