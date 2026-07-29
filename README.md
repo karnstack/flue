@@ -7,7 +7,8 @@
   <a href="docs/superpowers/specs/2026-07-28-flue-design.md">design</a>
 </p>
 
-> Status: design stage. No code yet. The spec is the product right now.
+> Status: local terminal works. `flue enable`, remote transports, and pairing
+> are next.
 
 ## Why
 
