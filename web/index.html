@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" class="h-full antialiased">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>flue</title>
+    <meta name="description" content="Your terminal, as a browser tab." />
+
+    <!--
+      The daemon serves every path under / behind its auth middleware, and a
+      <link rel="manifest"> is fetched with credentials omitted unless the
+      crossorigin attribute says otherwise. Without it the manifest request
+      is a 401 and the app is silently not installable.
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+
+    <!-- Substituted at build time from src/lib/theme.ts; see vite.config.ts. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="%FLUE_THEME_LIGHT%" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="%FLUE_THEME_DARK%" />
+
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="flue" />
+    <!--
+      `default`, not `black-translucent`. Both themes ship, so a translucent
+      bar with fixed white glyphs would be unreadable over the light canvas;
+      `default` lets iOS take the bar's colour from the page underneath and
+      follow prefers-color-scheme with it.
+    -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  </head>
+  <body class="h-full">
+    <div id="root" class="isolate h-full"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

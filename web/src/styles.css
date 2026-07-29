@@ -1,0 +1,160 @@
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+/* `sheet` needs both: tw-animate-css supplies animate-in/animate-out and the
+ * slide-in-from-* keyframes, shadcn/tailwind.css supplies the data-open and
+ * data-closed variants its Radix state attributes are matched with. Neither
+ * is decorative — drop them and the mobile nav panel renders unanimated and
+ * permanently visible. */
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+/*
+ * flue design tokens.
+ *
+ * Neutral is zinc, never gray or slate. Accent is amber — it carries active
+ * nav state, focus rings, and the one primary button per screen, and is
+ * never used for body text, where amber on dark would fail contrast.
+ *
+ * Both themes ship and follow prefers-color-scheme. There is no toggle, and
+ * therefore no `.dark` class: `dark:` resolves through Tailwind's built-in
+ * media-query behaviour. Do not reintroduce
+ * `@custom-variant dark (&:is(.dark *))` — `shadcn init` writes it by
+ * default and it silently disables every `dark:` utility in the tree.
+ *
+ * Terminal colours are a separate concern from chrome colours and are themed
+ * inside the emulator.
+ */
+
+/*
+ * `static` matters. Tailwind v4 emits a @theme variable only when something
+ * it can see uses it, so without it --color-accent-bg never reaches the
+ * stylesheet at all and --color-accent-fg exists only in its dark-mode
+ * override — any raw `var(--color-accent-fg)` would resolve to nothing in
+ * the light theme.
+ */
+@theme static {
+  --font-sans:
+    'InterVariable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono:
+    ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, monospace;
+
+  --color-accent-fg: var(--color-amber-600);
+  --color-accent-bg: var(--color-amber-500);
+}
+
+/*
+ * shadcn's semantic tokens, mapped onto the flue palette rather than kept as
+ * a second, parallel colour system. `inline` is what lets the :root blocks
+ * below re-point them per theme.
+ *
+ * Note the one name that means different things in the two vocabularies:
+ * shadcn's `--accent` is a subtle hover surface (zinc here), while flue's
+ * accent is amber and lives in --color-accent-fg / --color-accent-bg. Amber
+ * reaches shadcn through `--primary` and `--ring`, which is precisely the
+ * "one primary button per screen, plus focus rings" rule.
+ */
+@theme inline {
+  --font-heading: var(--font-sans);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@layer base {
+  :root {
+    /* Surfaces, so a light theme stays a token change rather than a sweep. */
+    --flue-canvas: var(--color-white);
+    --flue-panel: var(--color-white);
+    --flue-line: --alpha(var(--color-zinc-950) / 10%);
+    --flue-muted: var(--color-zinc-500);
+
+    --radius: 0.625rem;
+
+    /*
+     * Custom properties resolve at use, not at declaration, so every token
+     * below that points at a --flue-* surface or at --color-accent-* follows
+     * the dark block automatically and needs no second definition there.
+     */
+    --background: var(--flue-canvas);
+    --foreground: var(--color-zinc-950);
+    --card: var(--flue-panel);
+    --card-foreground: var(--color-zinc-950);
+    --popover: var(--flue-panel);
+    --popover-foreground: var(--color-zinc-950);
+    --primary: var(--color-accent-bg);
+    --primary-foreground: var(--color-zinc-950);
+    --secondary: var(--color-zinc-100);
+    --secondary-foreground: var(--color-zinc-900);
+    --muted: var(--color-zinc-100);
+    --muted-foreground: var(--flue-muted);
+    --accent: var(--color-zinc-100);
+    --accent-foreground: var(--color-zinc-900);
+    --destructive: var(--color-red-600);
+    --border: var(--flue-line);
+    --input: var(--flue-line);
+    --ring: var(--color-accent-fg);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --flue-canvas: var(--color-zinc-950);
+      /* Cards sit slightly lighter than the canvas, never darker. */
+      --flue-panel: var(--color-zinc-900);
+      --flue-line: --alpha(var(--color-white) / 10%);
+      --flue-muted: var(--color-zinc-400);
+      --color-accent-fg: var(--color-amber-400);
+
+      --foreground: var(--color-zinc-50);
+      --card-foreground: var(--color-zinc-50);
+      --popover-foreground: var(--color-zinc-50);
+      --secondary: var(--color-zinc-800);
+      --secondary-foreground: var(--color-zinc-50);
+      --muted: var(--color-zinc-800);
+      --accent: var(--color-zinc-800);
+      --accent-foreground: var(--color-zinc-50);
+      --destructive: var(--color-red-400);
+    }
+  }
+
+  /* shadcn components write `border` and `outline` with no colour and expect
+   * these defaults. */
+  * {
+    border-color: var(--border);
+    outline-color: --alpha(var(--ring) / 50%);
+  }
+
+  body {
+    background-color: var(--flue-canvas);
+    color: var(--foreground);
+  }
+}
+
+/* The terminal fills its pane; xterm manages its own internal scrolling. */
+@utility flue-term-surface {
+  block-size: 100%;
+  inline-size: 100%;
+}

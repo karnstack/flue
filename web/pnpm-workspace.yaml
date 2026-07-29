@@ -1,0 +1,7 @@
+# pnpm 11 refuses to finish an install that silently skipped a package's build
+# script, and it no longer reads the "pnpm" key in package.json — so without
+# this file every `pnpm install`, `pnpm build` and `pnpm test` exits 1 on a
+# clean checkout. esbuild's postinstall only links the platform binary that
+# already arrived as an optional dependency; nothing else here builds.
+allowBuilds:
+  esbuild: true
