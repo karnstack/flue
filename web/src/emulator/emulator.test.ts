@@ -27,9 +27,11 @@ interface Case {
   lines: string[]
 }
 
-// `new URL(literal, import.meta.url)` would be neater and is wrong here:
-// Vite rewrites that form into an asset URL, so it arrives as an http:// URL
-// that fileURLToPath refuses. Splitting the two keeps it a real file path.
+// `__dirname` would also work — vite-node injects it and @types/node types
+// it — but it is a CommonJS global this project has no other use for. What
+// does not work, and is the trap worth naming, is the obvious ESM spelling
+// `new URL(literal, import.meta.url)`: Vite rewrites that form into an asset
+// URL, so it arrives as an http:// URL that fileURLToPath refuses.
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (path: string) => readFileSync(resolve(here, path), 'utf8')
 

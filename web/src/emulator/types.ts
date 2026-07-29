@@ -22,9 +22,14 @@ export interface Emulator {
   /**
    * Feed bytes received from the daemon.
    *
-   * Parsing is asynchronous, so the grid does not reflect the write when this
-   * returns. `done` fires once it does; it is also the hook to apply
+   * Parsing may be asynchronous, so the grid need not reflect the write when
+   * this returns. `done` fires once it does; it is also the hook to apply
    * backpressure with, if the reader ever needs to.
+   *
+   * `done` may fire synchronously, before `write` returns — xterm parses on a
+   * later task, but an implementation that parses immediately is free to call
+   * it re-entrantly, so a caller must not assume `write` has returned by the
+   * time it runs.
    */
   write(bytes: Uint8Array, done?: () => void): void
   /** Change the rendered dimensions. */

@@ -185,6 +185,11 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
-    setupFiles: ['./src/test-setup.ts'],
+    // Under src/testing/ because that is the one directory styles.css
+    // excludes from Tailwind's scan by name. The setup file is not called
+    // `*.test.*`, so anywhere else in src/ it sits inside the scan perimeter
+    // — one `className` away from compiling a test-only class into the
+    // shipped stylesheet, which is the exact hazard the exclusion exists for.
+    setupFiles: ['./src/testing/test-setup.ts'],
   },
 })

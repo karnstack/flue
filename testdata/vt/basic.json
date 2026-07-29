@@ -24,6 +24,14 @@
     "lines": ["a  b", ""]
   },
   {
+    "name": "a non-breaking space is content, not padding",
+    "why": "The trim drops padding, and padding is the space character. A program that ends a line with U+00A0 chose it; trimming every character that merely looks blank would silently edit the program's output.",
+    "cols": 20,
+    "rows": 2,
+    "input": "x\u00a0",
+    "lines": ["x\u00a0", ""]
+  },
+  {
     "name": "a wrapped row extracts as its own line",
     "why": "The grid is rows lines of at most cols columns, so text that wrapped is two entries and not one long string. Extraction must not try to rejoin what the emulator wrapped.",
     "cols": 5,

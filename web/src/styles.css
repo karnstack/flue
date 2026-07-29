@@ -27,6 +27,20 @@
  * put helpers there rather than beside the code they help.
  */
 @source not 'testing/**';
+/*
+ * Worth knowing before writing a comment in any file that is still inside the
+ * perimeter, which is every non-test file under src/ and vite.config.ts:
+ * Tailwind scans prose exactly as it scans markup, so an English word that
+ * happens to be a bare utility name compiles a rule. `inline`, `resize`,
+ * `grid`, `table`, `fixed`, `static`, `visible`, `hidden`, `container` and
+ * `isolate` all read as ordinary words and all emit CSS. Two got in this way
+ * before anyone noticed — a `.resize` from "resize handling" in the vitest
+ * setup file, and a `.inline` from "parses inline" in an interface doc — and
+ * neither was reachable from any markup in the app. Prefer a synonym.
+ *
+ * This file is not itself scanned, so the words above are safe here; that was
+ * measured, not assumed.
+ */
 
 /*
  * flue design tokens.

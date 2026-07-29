@@ -90,13 +90,18 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
  * cells nothing was ever written to. A cell holding a space character has
  * content and survives it, so a line the program padded out with spaces comes
  * back padded.
+ *
+ * It trims the space character and nothing else. `\s` would be the reflex and
+ * is wrong: it also matches U+00A0 and U+3000, which a program that ends a
+ * line with a non-breaking space chose deliberately. Padding is what gets
+ * dropped here, not every character that happens to look blank.
  */
 export function extractGrid(term: Terminal): Grid {
   const buf = term.buffer.active
   const lines: string[] = []
   for (let y = 0; y < term.rows; y++) {
     const line = buf.getLine(buf.baseY + y)
-    lines.push(line ? line.translateToString(true).replace(/\s+$/, '') : '')
+    lines.push(line ? line.translateToString(true).replace(/[ ]+$/, '') : '')
   }
   return { cols: term.cols, rows: term.rows, lines }
 }
