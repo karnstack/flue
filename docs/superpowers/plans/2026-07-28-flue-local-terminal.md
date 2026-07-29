@@ -3347,6 +3347,10 @@ git commit -m "feat(cli): add serve, open, and status commands"
 - Consumes: nothing from Go.
 - Produces: `cn(...inputs: ClassValue[]): string` from `@/lib/utils`; the `@/*` path alias resolving to `web/src/*`; design tokens declared in `@theme`.
 
+> **Added during execution — PWA support.** The owner asked that the mobile experience read as an app rather than a web page, so this task also ships the installable-app surface: a web app manifest (`display: standalone`, `theme_color` and `background_color` drawn from the zinc/amber tokens below, not hardcoded), maskable icons at the sizes iOS and Android actually use, and the `apple-mobile-web-app-*` meta tags that control the iOS status bar. A service worker holding the app shell belongs with the router in Task 9, where there is something to cache; note that it matters beyond polish, since it is what lets the UI load at all when the daemon is unreachable — the difference between a blank tab and a page that can say "can't reach the daemon".
+>
+> Do not reach for a plugin that generates a service worker with a caching strategy you have not chosen. The app shell is a handful of files and the terminal is a WebSocket; a stale-while-revalidate cache over an API would be actively wrong here.
+
 **Design decisions, fixed here and applied everywhere below:**
 - Neutral is **zinc**. Never `gray-*` or `slate-*`.
 - Accent is **amber**. Used for active nav indicators, focus rings, and the single primary button per screen. Never for body text — amber on dark fails contrast at body sizes.
@@ -4172,7 +4176,15 @@ git commit -m "feat(web): add app shell, navigation, and TanStack Router routes"
   - `Emulator` with `write(bytes: Uint8Array)`, `resize(cols, rows)`, `snapshot(): Grid`, `onData(cb: (bytes: Uint8Array) => void)`, `attachTo(el: HTMLElement)`, `dispose()`, `injectForTest(data: string)`
   - `createXtermEmulator(opts?: { cols?: number; rows?: number }): Emulator`
 
-The corpus is the point of this task. It runs against xterm.js today and `libghostty-vt` later, which is what turns that swap into a substitution rather than a rewrite.
+> **Amended during execution — the corpus is trimmed.** The owner's read is that libghostty is unlikely ever to land, and that read is sound: `libghostty-vt` ships no renderer, so adopting it means writing a WebGL renderer from scratch to replace a library VS Code ships to millions. The corpus below was justified almost entirely as swap insurance, and without the swap most of it tests **xterm.js** — someone else's library — rather than flue.
+>
+> Keep the `Emulator` interface. It is about thirty lines and earns its keep regardless by keeping the client layer DOM-free and testable.
+>
+> Cut the corpus to cases that exercise flue's own code: grid extraction across wrapped rows, trailing-whitespace trimming, wide characters surviving string extraction, escape sequences not leaking into extracted text, dimensions after resize, and input arriving at `onData` as bytes. Drop the cases that merely re-verify xterm's VT correctness — cursor positioning, erase-in-line, clear-screen, SGR, backspace, tab stops. Roughly halve it. Say in your report which you kept and why, so the trim is a decision on the record rather than attrition.
+>
+> Note also that `snapshot()` currently has no consumer outside these tests. Keep it — reattach may want it — but do not add coverage for it beyond what the trimmed corpus needs.
+
+The corpus that remains runs against xterm.js today and would run against `libghostty-vt` if that swap ever happens, but its job now is guarding flue's integration, not somebody else's parser.
 
 - [ ] **Step 1: Write the VT conformance corpus**
 
