@@ -28,18 +28,24 @@
  */
 @source not 'testing/**';
 /*
- * Worth knowing before writing a comment in any file that is still inside the
- * perimeter, which is every non-test file under src/ and vite.config.ts:
- * Tailwind scans prose exactly as it scans markup, so an English word that
- * happens to be a bare utility name compiles a rule. `inline`, `resize`,
- * `grid`, `table`, `fixed`, `static`, `visible`, `hidden`, `container` and
- * `isolate` all read as ordinary words and all emit CSS. Two got in this way
- * before anyone noticed — a `.resize` from "resize handling" in the vitest
- * setup file, and a `.inline` from "parses inline" in an interface doc — and
- * neither was reachable from any markup in the app. Prefer a synonym.
+ * Worth knowing before writing a *comment* in any file still inside the
+ * perimeter: Tailwind scans prose exactly as it scans markup, so an ordinary
+ * English word that is also a bare utility name compiles a rule. `inline`,
+ * `resize`, `grid`, `table`, `fixed`, `static`, `visible`, `hidden`,
+ * `container` and `isolate` all read as English and all emit CSS — each of
+ * those ten was checked individually. Three got in that way before anyone
+ * noticed: a `.resize` from "resize handling" in the vitest setup file, a
+ * `.inline` from "parses inline" in an interface doc, and a `.grid` from
+ * "the live grid" in the emulator's docs. None was reachable from any markup
+ * in the app. Prefer a synonym, or capitalise — candidates are lowercase, so
+ * the type name `Grid` is safe where the word is not.
  *
- * This file is not itself scanned, so the words above are safe here; that was
- * measured, not assumed.
+ * The perimeter, measured rather than assumed by putting a probe word in each
+ * place and diffing the build: **everything under web/**, which includes
+ * scripts/*.mjs and public/* as well as src/ and vite.config.ts. Outside it:
+ * the two @source rules above, anything .gitignore excludes (web/dist/,
+ * web/node_modules/), CSS files including this one, and anything above web/ —
+ * testdata/ and the repo README are not scanned.
  */
 
 /*

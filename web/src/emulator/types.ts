@@ -1,11 +1,11 @@
-/** A snapshot of the terminal grid, used by tests and by reattach. */
+/** A snapshot of the terminal screen, used by tests and by reattach. */
 export interface Grid {
   cols: number
   rows: number
   /**
-   * One entry per row of the live grid — always exactly `rows` entries —
-   * with trailing whitespace trimmed. Rows are the screen's rows, not the
-   * viewport's: scrolling back through history does not change a snapshot.
+   * One entry per row — always exactly `rows` entries — with trailing
+   * whitespace trimmed. The rows are the live screen's, not the viewport's:
+   * scrolling back through history does not change a snapshot.
    */
   lines: string[]
 }
@@ -22,8 +22,8 @@ export interface Emulator {
   /**
    * Feed bytes received from the daemon.
    *
-   * Parsing may be asynchronous, so the grid need not reflect the write when
-   * this returns. `done` fires once it does; it is also the hook to apply
+   * Parsing may be asynchronous, so the screen need not reflect the write
+   * when this returns. `done` fires once it does; it is also the hook to apply
    * backpressure with, if the reader ever needs to.
    *
    * `done` may fire synchronously, before `write` returns — xterm parses on a
@@ -34,7 +34,7 @@ export interface Emulator {
   write(bytes: Uint8Array, done?: () => void): void
   /** Change the rendered dimensions. */
   resize(cols: number, rows: number): void
-  /** Capture the current grid. */
+  /** Capture the current screen. */
   snapshot(): Grid
   /**
    * Register a callback for user input, encoded as UTF-8 bytes.

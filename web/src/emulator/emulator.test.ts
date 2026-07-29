@@ -43,9 +43,10 @@ const encode = (s: string) => new TextEncoder().encode(s)
  * Write and wait for the parser to have consumed it.
  *
  * xterm parses on a later task, so a bare `write` followed by `snapshot`
- * reads the grid as it was before the write. The callback is the only
- * deterministic signal that the grid has caught up; sleeping a fixed number
- * of milliseconds instead is a race that happens to pass on a fast machine.
+ * reads the screen as it was before the write. The callback is the signal
+ * that it has caught up. A fixed sleep would in practice also work — 20ms
+ * against a setTimeout(0) parse task essentially always wins — but using a
+ * signal that exists beats approximating it with a duration.
  */
 function settled(em: Emulator, text: string): Promise<void> {
   return new Promise((parsed) => em.write(encode(text), () => parsed()))

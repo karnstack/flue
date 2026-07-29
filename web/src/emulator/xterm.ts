@@ -80,7 +80,7 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
 }
 
 /**
- * Read the live grid out of a terminal.
+ * Read the live screen out of a terminal.
  *
  * Anchored at `baseY`, the top of the screen, rather than at `viewportY`,
  * where the user happens to be looking. The two are equal until there is
