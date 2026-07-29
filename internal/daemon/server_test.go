@@ -21,6 +21,7 @@ import (
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
+	"github.com/karnstack/flue/web"
 )
 
 const tok = "0123456789abcdef"
@@ -28,6 +29,21 @@ const tok = "0123456789abcdef"
 func newTestServer(t *testing.T) (*httptest.Server, *session.Registry) {
 	t.Helper()
 	ts, reg, _ := newTestServerUI(t, http.NotFoundHandler())
+	return ts, reg
+}
+
+// newTestServerShippedUI is newTestServer with the UI the binary actually
+// ships — the embedded Vite build — rather than a stub.
+//
+// It exists because http.NotFoundHandler() is not a neutral stand-in for the
+// UI. It 404s every path no route claimed, which is the answer some of the
+// assertions here are looking for, so a test that injects it can pass without
+// the daemon doing anything at all. web.Handler serves index.html for unknown
+// paths, so it is the handler that can turn "no such endpoint" into 200
+// text/html — and it is the one that ships.
+func newTestServerShippedUI(t *testing.T) (*httptest.Server, *session.Registry) {
+	t.Helper()
+	ts, reg, _ := newTestServerUI(t, web.Handler())
 	return ts, reg
 }
 
@@ -426,8 +442,12 @@ func get(t *testing.T, ts *httptest.Server, path, fetchSite string) *http.Respon
 // correct Host and the flue_token cookie — every check in Task 5 passes. The
 // only durable answer is that no URL, GET-fetchable or otherwise, changes any
 // state: every mutation lives behind an established WebSocket.
+//
+// It runs against the shipped UI. With http.NotFoundHandler() standing in, the
+// absentAPI block below passes because the stub 404s everything, and proves
+// nothing about a binary whose UI answers unknown paths with the app shell.
 func TestNoStateChangeIsReachableByGET(t *testing.T) {
-	ts, reg := newTestServer(t)
+	ts, reg := newTestServerShippedUI(t)
 	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -435,9 +455,11 @@ func TestNoStateChangeIsReachableByGET(t *testing.T) {
 	defer s.Close()
 
 	// No such API endpoint may exist at all: a 2xx would mean something
-	// answered. The assertion is scoped to /api/ on purpose. Task 14 embeds an
-	// SPA that serves index.html for unknown paths, so an unknown URL outside
-	// /api/ will legitimately start answering 200 — asserting otherwise would
+	// answered. The assertion is scoped to /api/ on purpose, and the daemon
+	// reserves that namespace for exactly this reason: everything under it that
+	// no route claimed is refused on the mux, so the SPA fallback never gets to
+	// turn an absent endpoint into 200 text/html. Outside /api/ an unknown URL
+	// legitimately answers with the shell — asserting otherwise there would
 	// leave a trap that fails for a reason unrelated to what this test guards.
 	absentAPI := []string{
 		"/api/spawn",
@@ -454,9 +476,10 @@ func TestNoStateChangeIsReachableByGET(t *testing.T) {
 		}
 	}
 
-	// Whatever these answer — 404 today, the app shell once Task 14 lands —
-	// none of them may change anything. That assertion is independent of what
-	// the UI handler does, which is what makes it the durable one.
+	// Whatever these answer — the app shell for the three outside /api/, a
+	// session listing for the two that carry an ignored query — none of them may
+	// change anything. That assertion is independent of what the UI handler
+	// does, which is what makes it the durable one.
 	outside := []string{
 		"/spawn",
 		"/kill?id=" + s.ID(),

@@ -173,6 +173,32 @@ func (s *Server) Handler() http.Handler {
 	// instead, which accepts the token from a request header and nothing else.
 	mux.HandleFunc(MintPath, s.handleMint)
 	mux.Handle("/api/sessions", s.withAuth(http.HandlerFunc(s.handleSessions)))
+	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
+	// never the app shell.
+	//
+	// Without this the SPA catch-all below answers every /api path no handler
+	// took, so GET /api/spawn, /api/sessions/<id>/kill and
+	// /api/sessions/<id>/resize?cols=1&rows=1 all come back 200 text/html. None
+	// of them does anything, but "no such endpoint exists" is the property
+	// TestNoStateChangeIsReachableByGET measures, and a 2xx from the shell makes
+	// that measurement unreadable: the test can no longer tell an absent
+	// endpoint from a live one.
+	//
+	// It belongs here rather than in web.Handler for two reasons. The routing
+	// table is where the fact lives — package web serves a Vite build and has no
+	// business knowing which prefixes this daemon reserves. And putting it on the
+	// mux makes the invariant independent of the UI handler that gets injected,
+	// which is the whole defect: with a stubbed UI the guarantee held for free
+	// and said nothing about the binary.
+	//
+	// A later task that adds a real route keeps the invariant without touching
+	// this line: ServeMux prefers the more specific pattern, so /api/sessions
+	// and MintPath already win over this subtree, and so would any /api route
+	// registered next to them. Only paths nobody claimed land here.
+	//
+	// Behind withAuth like everything else, so an unauthenticated caller still
+	// gets 401 and cannot map the API surface by reading status codes.
+	mux.Handle("/api/", s.withAuth(http.NotFoundHandler()))
 	mux.Handle("/", s.withAuth(s.ui))
 
 	return securityHeaders(methodPolicy(mux))

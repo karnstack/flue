@@ -198,6 +198,42 @@ func TestEmbeddedUIServesNoDirectoryListing(t *testing.T) {
 	}
 }
 
+// TestEmbeddedUINeverAnswersForTheAPINamespace probes the mounted shape rather
+// than web.Handler on its own, because the guard is on the mux: /api is the
+// daemon's namespace, and the SPA fallback must not be reachable inside it.
+//
+// Every path here is one a redirect-laundered navigation would try. None of
+// them does anything even when the shell answers — but a surface where an
+// invented endpoint replies 200 cannot be asked whether an endpoint exists, and
+// TestNoStateChangeIsReachableByGET asks exactly that.
+func TestEmbeddedUINeverAnswersForTheAPINamespace(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+
+	for _, p := range []string{
+		"/api/spawn",
+		"/api/spawn?cmd=sh",
+		"/api/sessions/abc123/kill",
+		"/api/sessions/abc123/resize?cols=1&rows=1",
+	} {
+		resp := get(t, ts, p, "same-origin")
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", p, resp.StatusCode)
+		}
+		if strings.Contains(string(body), `id="root"`) {
+			t.Errorf("GET %s answered with the app shell", p)
+		}
+	}
+
+	// The positive control: the SPA fallback still has to work everywhere else,
+	// or this guard has been bought by breaking bookmarked session tabs.
+	resp := get(t, ts, "/d/local/s/abc123", "same-origin")
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `id="root"`) {
+		t.Fatalf("GET /d/local/s/abc123 = %d, body %.200q; want the app shell", resp.StatusCode, body)
+	}
+}
+
 // scriptSrc pulls the first <script src="..."> out of the shell.
 func scriptSrc(html string) string {
 	i := strings.Index(html, "<script")
