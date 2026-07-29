@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -10,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 func waitFor(t *testing.T, sub *Sub, want string, timeout time.Duration) []byte {
@@ -372,6 +375,91 @@ func TestSignalReachesChildProcess(t *testing.T) {
 	}
 
 	waitGone(t, childPID, 2*time.Second)
+}
+
+// TestResizeHoldsTheSessionLockAcrossTheIoctl pins the one thing that keeps a
+// window-size change off an unrelated file descriptor.
+//
+// creack/pty reaches the descriptor through os.File.Fd(), which yields the raw
+// number with nothing holding a reference on it — the refcounted alternative in
+// that package is marked "Unused". So if Resize released s.mu before the ioctl,
+// a Close landing in between (a client's `close`, or Registry.Reap on a session
+// a tab is still watching) would close that descriptor and the kernel would
+// hand the number straight back: measured on darwin, the next session's pty
+// master is given the very fd the closed one had. TIOCSWINSZ would then arrive
+// at another session's terminal.
+//
+// The window is a few instructions wide, and racing it directly is not a test:
+// hammering Resize from 64 goroutines against a concurrent Close reproduced it
+// in 3 runs out of 40 at GOMAXPROCS=1 and 0 out of 40 at GOMAXPROCS=4, so an
+// assertion built on it would be green nine times in ten with the bug present.
+// This holds the ioctl open instead, through the same package-variable seam
+// killGroup uses, and asks what the lock is doing while it runs — stated as the
+// behaviour that matters, which is that Close cannot get past it.
+func TestResizeHoldsTheSessionLockAcrossTheIoctl(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	letGo := sync.OnceFunc(func() { close(release) })
+	defer letGo()
+
+	orig := setWinsize
+	setWinsize = func(f *os.File, ws *pty.Winsize) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return orig(f, ws)
+	}
+	t.Cleanup(func() { setWinsize = orig })
+
+	r := NewRegistry(time.Now)
+	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "sleep 5"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	resized := make(chan error, 1)
+	go func() { resized <- s.Resize(100, 40) }()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Resize never reached the ioctl")
+	}
+
+	// The ioctl is now in flight, holding a descriptor by number. Close must
+	// not be able to release that descriptor underneath it.
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close ran to completion while the pty ioctl was still in flight (returned %v); "+
+			"the descriptor it released is the one that ioctl is holding by number, and the kernel "+
+			"hands that number to the next session's master", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	letGo()
+	select {
+	case err := <-resized:
+		if err != nil {
+			t.Errorf("Resize: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Resize never returned")
+	}
+	// And the lock is a pause, not a wedge: Close gets through the moment the
+	// ioctl is done.
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close never returned once the ioctl had finished")
+	}
 }
 
 // killCall is one group signal as seen by the spy. pid is the raw argument,

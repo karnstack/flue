@@ -92,6 +92,7 @@ func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
 		clock:     r.clock,
 		pid:       cmd.Process.Pid,
 		kill:      killGroup,
+		setsize:   setWinsize,
 		sigReq:    make(chan sigRequest),
 		masterEnd: make(chan struct{}, 1),
 		gone:      make(chan struct{}),

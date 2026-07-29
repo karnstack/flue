@@ -94,7 +94,8 @@ type sigRequest struct {
 // The locking rules, in full:
 //
 //   - s.mu guards ring, title, subs, info, exitedAt and closed. It is never
-//     held across a syscall that can block, and callers release it before
+//     held across a syscall that can block — Resize holds it across TIOCSWINSZ,
+//     which cannot, and has to; see Resize — and callers release it before
 //     waiting on the supervisor, which takes s.mu itself when the child
 //     exits. That second rule is a courtesy rather than a correctness
 //     requirement: the supervisor takes s.mu with TryLock and retries rather
@@ -119,6 +120,10 @@ type Session struct {
 	// swapping the package-level killGroup is never racing a supervisor
 	// goroutine that is reading it.
 	kill func(pid int, sig syscall.Signal) error
+
+	// setsize is pty.Setsize, captured per session at spawn for the same
+	// reason as kill. See setWinsize.
+	setsize func(f *os.File, ws *pty.Winsize) error
 
 	// sigReq carries group-signal requests to the supervisor. Nothing else
 	// signals the process group; see supervise for why.
@@ -165,15 +170,30 @@ func (s *Session) Write(p []byte) error {
 }
 
 // Resize changes the PTY window size.
+//
+// s.mu is held across the ioctl, and that is the whole point rather than an
+// oversight. creack/pty's ioctl helper reaches the descriptor through
+// os.File.Fd(), which hands over the raw number with no reference held on it —
+// its refcounted sibling, ioctlNonblock, is marked "Unused" in that package.
+// Write is safe releasing the lock first because os.File.Write *is* refcounted
+// and answers ErrClosed; this is not. Released early, a concurrent Close — a
+// client's `close`, or Registry.Reap on a session a tab is still watching —
+// could close that descriptor between the check above and the ioctl, and the
+// kernel hands the number straight back: measured, the next session's pty
+// master takes it. TIOCSWINSZ would then land on an unrelated descriptor,
+// plausibly another session's terminal.
+//
+// Nothing can deadlock behind this. TIOCSWINSZ cannot block — the kernel
+// writes the winsize and posts SIGWINCH — and the one goroutine that must
+// never wait on s.mu, the supervisor, takes it with TryLock.
 func (s *Session) Resize(cols, rows uint16) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
-		s.mu.Unlock()
 		return ErrSessionClosed
 	}
 	s.info.Cols, s.info.Rows = cols, rows
-	s.mu.Unlock()
-	return pty.Setsize(s.pty, &pty.Winsize{Cols: cols, Rows: rows})
+	return s.setsize(s.pty, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
 // Signal delivers a signal to the session's process group.
@@ -607,3 +627,13 @@ func (s *Session) signalGroup(sig syscall.Signal) error {
 // variable itself and a test that swaps it before spawning is not writing to
 // something a running session is reading.
 var killGroup func(pid int, sig syscall.Signal) error = syscall.Kill
+
+// setWinsize is pty.Setsize, indirected for the same reason as killGroup and
+// with the same discipline — Spawn copies it into each Session, so no goroutine
+// reads the variable itself.
+//
+// It exists so a test can hold the ioctl open and observe what the session lock
+// is doing while it runs. That is the only way to see it: the hazard Resize
+// guards against is a few instructions wide, and measured directly it shows up
+// in roughly three runs in forty even with the scheduler stacked in its favour.
+var setWinsize func(f *os.File, ws *pty.Winsize) error = pty.Setsize
