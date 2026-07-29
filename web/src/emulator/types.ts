@@ -105,7 +105,7 @@ export interface Emulator {
   /** Release all resources. Safe to call more than once. */
   dispose(): void
   /**
-   * Re-colour a running terminal.
+   * Re-colour a terminal that is already on screen.
    *
    * Needed because flue follows `prefers-color-scheme` and has no theme
    * toggle: there is no navigation to rebuild the terminal on when the OS
@@ -119,7 +119,7 @@ export interface Emulator {
    * laid out.
    *
    * This is the *unscaled* size — what the screen would occupy at the current
-   * dimensions with no CSS transform on it — because it is what the sizing
+   * dimensions with nothing scaling it — because it is what the sizing
    * policy divides by. Null rather than a zero box: a caller that divides by
    * this must be made to handle "not measurable yet", which is every call
    * under jsdom and the first frame in a browser.

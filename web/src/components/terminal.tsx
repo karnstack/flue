@@ -167,7 +167,7 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
 
       if (!content) return
       // Someone else owns the dimensions. Lay the surface out at their screen's
-      // true size and shrink the whole thing, rather than reflowing their text.
+      // true size and scale the whole thing down, rather than reflowing text.
       //
       // The gutter goes back on. The scrollbar is drawn at the right-hand edge
       // of the surface, and a surface exactly as wide as the screen puts it on

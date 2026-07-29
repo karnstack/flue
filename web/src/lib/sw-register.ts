@@ -15,19 +15,20 @@ type Registrar = Pick<ServiceWorkerContainer, 'register'>
  * The registrar itself is optional because `navigator.serviceWorker` is
  * undefined outside a secure context and in some private-browsing modes.
  *
- * That word is chosen, not stylistic: the obvious one is also a Tailwind
- * utility name, and Tailwind scans prose exactly as it scans markup, so
- * writing it here shipped six dead `.container` rules into the stylesheet.
- * The parameter below keeps the name because a bare identifier is not a
- * scanner candidate; only the quoted and the prose forms are.
+ * The parameter is named `registrar` for a reason that has nothing to do with
+ * English: the obvious name is also a Tailwind utility name, and Tailwind's
+ * scanner treats `<word>:` in a type annotation as a candidate exactly as it
+ * treats a class attribute. It shipped six dead rules of that name. Measured
+ * with the scanner itself, not reasoned about — see the guard in
+ * styles.build.test.ts, which is what stops the next one.
  */
 export async function registerServiceWorker(
-  container: Registrar | undefined,
+  registrar: Registrar | undefined,
   url = '/sw.js',
 ): Promise<void> {
-  if (!container) return
+  if (!registrar) return
   try {
-    await container.register(url, { scope: '/' })
+    await registrar.register(url, { scope: '/' })
   } catch (err) {
     console.warn('flue: service worker registration failed', err)
   }

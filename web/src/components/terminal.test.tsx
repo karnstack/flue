@@ -31,8 +31,49 @@ function paneOf(width: number, height: number) {
     .mockReturnValue({ width, height, top: 0, left: 0, right: width, bottom: height } as DOMRect)
 }
 
+/**
+ * A ResizeObserver that can be made to fire.
+ *
+ * The global stub in test-setup.ts never invokes its callback, so with it the
+ * component's `observer.observe(pane)` could be deleted outright and every
+ * test would stay green — the layout would still run off the `attached` path.
+ * This makes that wiring load-bearing: `fire()` reaches the component only if
+ * the pane really was observed.
+ *
+ * Install before mounting.
+ */
+function resizeObservers() {
+  const live: Array<{ cb: () => void; targets: Element[] }> = []
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      targets: Element[] = []
+      constructor(readonly cb: () => void) {
+        live.push(this)
+      }
+      observe(el: Element) {
+        this.targets.push(el)
+      }
+      unobserve() {}
+      disconnect() {
+        this.targets = []
+      }
+    },
+  )
+  return {
+    watching: (el: Element) => live.some((o) => o.targets.includes(el)),
+    fire: () => {
+      for (const o of live) if (o.targets.length) o.cb()
+    },
+  }
+}
+
+const pane = () => document.querySelector<HTMLElement>('[data-flue-mode]')!
+const surfaceEl = () => document.querySelector<HTMLElement>('[data-flue-surface]')!
+
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   document.title = 'flue'
 })
 
@@ -338,7 +379,11 @@ describe('Terminal', () => {
 
   describe('the sizing policy', () => {
     it('asks the daemon for the cells its own pane holds, when primary', async () => {
-      const pane = paneOf(800 + GUTTER_PX, 408)
+      // Driven through the ResizeObserver rather than a window event, because
+      // that is the only thing the component listens to — and because firing
+      // it is what proves the pane was observed at all.
+      const observers = resizeObservers()
+      const box = paneOf(800 + GUTTER_PX, 408)
       const { sock, em } = mountTerminal((e) => (
         <Terminal sessionId="s1" createEmulator={e.create} />
       ))
@@ -346,9 +391,11 @@ describe('Terminal', () => {
       em.live().measured = { width: 800, height: 408 }
 
       act(() => sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24, primary: true })))
-      // The pane holds twice the height, so 48 rows.
-      pane.mockReturnValue({ width: 800 + GUTTER_PX, height: 816 } as DOMRect)
-      act(() => window.dispatchEvent(new Event('resize')))
+      expect(observers.watching(pane())).toBe(true)
+
+      // The pane now holds twice the height, so 48 rows.
+      box.mockReturnValue({ width: 800 + GUTTER_PX, height: 816 } as DOMRect)
+      act(() => observers.fire())
 
       await waitFor(() =>
         expect(sock.ofType('resize')).toContainEqual({
@@ -356,6 +403,33 @@ describe('Terminal', () => {
           ref: 1,
           cols: 80,
           rows: 48,
+          primary: true,
+        }),
+      )
+    })
+
+    it('re-fits when only the pane changed, with nothing arriving from the daemon', async () => {
+      // The observer is the sole path here: no attach, no size broadcast, no
+      // navigation. A window that is dragged narrower has to reach the pty.
+      const observers = resizeObservers()
+      const box = paneOf(800 + GUTTER_PX, 408)
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      em.live().measured = { width: 800, height: 408 }
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24, primary: true })))
+      await new Promise((r) => setTimeout(r, 40))
+      expect(sock.ofType('resize')).toEqual([])
+
+      box.mockReturnValue({ width: 400 + GUTTER_PX, height: 408 } as DOMRect)
+      act(() => observers.fire())
+
+      await waitFor(() =>
+        expect(sock.ofType('resize')).toContainEqual({
+          type: 'resize',
+          ref: 1,
+          cols: 40,
+          rows: 24,
           primary: true,
         }),
       )
@@ -451,7 +525,7 @@ describe('Terminal', () => {
   describe('keyboard modes', () => {
     it('starts in tab mode, so the browser keeps its own shortcuts', () => {
       mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
-      expect(document.querySelector('[data-flue-mode]')!.getAttribute('data-flue-mode')).toBe('tab')
+      expect(pane().getAttribute('data-flue-mode')).toBe('tab')
     })
 
     it('offers the shortcut where there is already chrome to put it on', () => {
@@ -459,7 +533,7 @@ describe('Terminal', () => {
       expect(screen.getByRole('status').textContent).toContain(TERMINAL_SHORTCUT_HINT)
     })
 
-    it('enters focus mode on the shortcut, and keeps the key out of the pty', async () => {
+    it('enters focus mode on the shortcut, and takes the key before the terminal sees it', async () => {
       const el = document.createElement('div')
       const lock = vi.fn().mockResolvedValue(undefined)
       Object.defineProperty(navigator, 'keyboard', {
@@ -470,31 +544,54 @@ describe('Terminal', () => {
       const request = vi.fn().mockResolvedValue(undefined)
       HTMLElement.prototype.requestFullscreen = request
 
-      const { sock, em } = mountTerminal((e) => (
-        <Terminal sessionId="s1" createEmulator={e.create} />
-      ))
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
       act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
 
+      // Stands in for xterm's own handler, which lives on a helper textarea
+      // inside the surface. Dispatching at that depth is what makes this
+      // measure anything: a bubble-phase listener on window would run *after*
+      // this one, and the shell would already have received a carriage return.
+      // A fake emulator has no keyboard wiring of its own, so asserting on
+      // what reached the socket would pass either way.
+      const downstream = vi.fn()
+      surfaceEl().addEventListener('keydown', downstream)
+
       await act(async () => {
-        window.dispatchEvent(
-          new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, shiftKey: true }),
+        surfaceEl().dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            ctrlKey: true,
+            shiftKey: true,
+            bubbles: true,
+          }),
         )
       })
 
       expect(request).toHaveBeenCalled()
       expect(lock).toHaveBeenCalled()
-      await waitFor(() =>
-        expect(document.querySelector('[data-flue-mode]')!.getAttribute('data-flue-mode')).toBe(
-          'focus',
-        ),
-      )
-      // The shortcut is the view's, not the shell's. Left to bubble, xterm
-      // would have turned it into a carriage return on the way past.
-      expect(sock.input()).toEqual([])
-      expect(em.live().text()).toBe('')
+      await waitFor(() => expect(pane().getAttribute('data-flue-mode')).toBe('focus'))
+      expect(downstream).not.toHaveBeenCalled()
 
       Object.defineProperty(navigator, 'keyboard', { value: undefined, configurable: true })
       Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true })
+    })
+
+    it('lets every other key through to the terminal', async () => {
+      // The other half of the assertion above: capture-and-stop must apply to
+      // the one shortcut and nothing else, or the terminal receives no input.
+      const downstream = vi.fn()
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+      surfaceEl().addEventListener('keydown', downstream)
+
+      await act(async () => {
+        surfaceEl().dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }))
+        surfaceEl().dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        )
+      })
+
+      expect(downstream).toHaveBeenCalledTimes(2)
     })
 
     it('leaves an ordinary Enter alone', async () => {

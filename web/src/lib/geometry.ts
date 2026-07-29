@@ -72,8 +72,8 @@ export function cellBox(content: Box, dims: Dimensions): Box | null {
 /**
  * How many whole cells of `cell` a pane holds.
  *
- * Floored, never rounded: a partial trailing column is a column the pty
- * believes it has and the user cannot see.
+ * Floored, and never taken to the nearest: a partial trailing column is a
+ * column the pty believes it has and the user cannot see.
  */
 export function cellsThatFit(pane: Box, cell: Box): Dimensions {
   if (!measurable(cell) || !measurable(pane)) return { cols: MIN_COLS, rows: MIN_ROWS }
@@ -86,7 +86,7 @@ export function cellsThatFit(pane: Box, cell: Box): Dimensions {
 /**
  * The factor at which a `content`-sized surface fits inside `pane`.
  *
- * Capped at 1. Magnifying would blur every glyph to fill space the primary's
+ * Capped at 1. Magnifying would smear every glyph to fill space the primary's
  * screen has no text for; leaving that space empty is the honest rendering,
  * and it is also the one that keeps a laptop's view unchanged when a phone
  * joins the same session.

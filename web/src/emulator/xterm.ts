@@ -105,8 +105,8 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       const screen = term.element?.querySelector(SCREEN_SELECTOR)
       if (!(screen instanceof HTMLElement)) return null
       // offsetWidth/offsetHeight rather than getBoundingClientRect, because a
-      // non-primary view carries a CSS transform: the rect would report the
-      // scaled box, and dividing the pane by that converges on nothing.
+      // non-primary view is scaled by CSS: the rect would report the scaled
+      // box, and dividing the pane by that converges on nothing.
       const size = { width: screen.offsetWidth, height: screen.offsetHeight }
       return size.width > 0 && size.height > 0 ? size : null
     },

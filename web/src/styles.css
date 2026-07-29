@@ -44,13 +44,27 @@
  * perimeter: Tailwind scans prose exactly as it scans markup, so an ordinary
  * English word that is also a bare utility name compiles a rule. `inline`,
  * `resize`, `grid`, `table`, `fixed`, `static`, `visible`, `hidden`,
- * `container` and `isolate` all read as English and all emit CSS — each of
- * those ten was checked individually. Three got in that way before anyone
- * noticed: a `.resize` from "resize handling" in the vitest setup file, a
- * `.inline` from "parses inline" in an interface doc, and a `.grid` from
- * "the live grid" in the emulator's docs. None was reachable from any markup
- * in the app. Prefer a synonym, or capitalise — candidates are lowercase, so
- * the type name `Grid` is safe where the word is not.
+ * `container` and `isolate` all read as English and all emit CSS — but so do
+ * `blur`, `shrink`, `transform`, `truncate`, `collapse`, `filter`, `outline`,
+ * `rounded`, `running` and `underline`, and so will the next ten. Prefer a
+ * synonym, or capitalise: candidates are lowercase, so the type name `Grid` is
+ * safe where the word is not.
+ *
+ * **Do not try to keep a list of the words.** Two rounds of this were spent
+ * enumerating them, and the enumeration missed every word the round after it
+ * shipped. Nor can candidacy be reasoned about from the sentence: measured
+ * with the scanner itself, "a CSS transform," with a trailing comma is not a
+ * candidate while "CSS transform:" with a colon is, and "rather than shrink."
+ * with a full stop is not while "shrink the whole thing," is. A type
+ * annotation counts too — `container: Registrar` compiled `.container` from a
+ * parameter name.
+ *
+ * What holds the line is styles.build.test.ts, which reads the compiled
+ * stylesheet, collects every bare single-word rule in the utilities layer, and
+ * fails on any that no class attribute anywhere in the tree asks for. It needs
+ * no list and predicts nothing. If it fails, reword and rebuild — including
+ * whatever comment you write to explain the fix, which is twice now where the
+ * next leak came from.
  *
  * The perimeter, measured rather than assumed by putting a probe word in each
  * place and diffing the build: **everything under web/**, which includes
