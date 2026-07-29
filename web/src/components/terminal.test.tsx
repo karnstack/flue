@@ -793,6 +793,53 @@ describe('Terminal', () => {
       expect(sock.input()).toEqual([{ ref: 1, text: 'ls\r' }])
     })
 
+    it('ignores a stale done from the previous attachment', async () => {
+      // A done callback from a write enqueued under attachment 1 can fire
+      // after attachment 2 has reseeded the counters: the emulator and the
+      // effect survive a reconnect, and nothing recalls a callback already
+      // handed to the parser. Those bytes are accounted for — the reattach's
+      // seq names where they ended — so counting them again would open the
+      // new gate early, mid-backlog. The ref cannot carry the check: the
+      // daemon numbers refs from 1 again on every connection, so the same
+      // value plausibly names both attachments, as it does here.
+      vi.useFakeTimers()
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      const pending: Array<() => void> = []
+      const { sockets, sock, em } = mountTerminal((e) => (
+        <Terminal
+          sessionId="s1"
+          createEmulator={(opts) => {
+            const inner = e.create(opts)
+            const parse = inner.write.bind(inner)
+            inner.write = (bytes, done) => {
+              parse(bytes)
+              if (done) pending.push(done)
+            }
+            return inner
+          }}
+        />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 6 })))
+      act(() => sock.emitOutput(1, 'abc')) // 3 bytes written, done still pending...
+
+      act(() => sock.close()) // ...when the socket dies
+      await act(() => vi.advanceTimersByTimeAsync(125))
+      act(() => sockets[1]!.open())
+      act(() => sockets[1]!.emitControl(attached({ ref: 1, id: 's1', seq: 3, head: 8 })))
+
+      act(() => sockets[1]!.emitOutput(1, 'de')) // 2 of the 5 backlog bytes
+      act(() => pending.splice(0).forEach((done) => done())) // the stale done fires among them
+
+      act(() => em.live().send('\x1b[?1;2c')) // a DA answer to a replayed probe
+      expect(sockets[1]!.input()).toEqual([]) // 3 + 2 < 8: still muted
+
+      act(() => sockets[1]!.emitOutput(1, 'fgh')) // 3 + 5 = 8 == head
+      act(() => pending.splice(0).forEach((done) => done()))
+      act(() => em.live().send('ok'))
+      expect(sockets[1]!.input()).toEqual([{ ref: 1, text: 'ok' }])
+      vi.useRealTimers()
+    })
+
     it('mutes a second mirror tab replaying the full ring', () => {
       // The second tab attaches with lastSeq 0 and receives the whole ring
       // as backlog — the fourth reproduction of the bug, same gate.

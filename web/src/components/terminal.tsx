@@ -127,6 +127,14 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     // the shell's stdin. head === seq on a fresh spawn opens it immediately.
     let consumed = 0
     let muteUntil = 0
+    // The attachment's epoch, stepped with every reseed. Each done callback
+    // below closes over the value it was written under: one enqueued under a
+    // previous attachment can fire after the reseed, and its bytes are
+    // already counted — the reattach's seq names where they ended, so letting
+    // it add them again would open the new gate early. The ref cannot stand
+    // in for this check: the daemon numbers refs from 1 again on every
+    // connection, so the same value plausibly names both attachments.
+    let epoch = 0
     // Set once the session can produce nothing further — the process exited,
     // or the daemon has never heard of it. Both are terminal, so a later
     // reconnect must not walk the pill back to "Reconnecting…" and imply that
@@ -242,6 +250,7 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
         ref = a.ref
         primary = a.primary
         dims = { cols: a.cols, rows: a.rows }
+        epoch++
         consumed = a.seq
         muteUntil = a.head
         if (a.truncated) emulator.write(RESET)
@@ -257,8 +266,9 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     offs.push(
       client.onOutput((r, bytes) => {
         if (r !== ref) return
+        const e = epoch
         emulator.write(bytes, () => {
-          consumed += bytes.length
+          if (e === epoch) consumed += bytes.length
         })
       }),
     )
