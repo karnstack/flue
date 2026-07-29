@@ -756,6 +756,41 @@ describe('Terminal', () => {
       act(() => em.live().send('ok'))
       expect(sockets[1]!.input()).toEqual([{ ref: 1, text: 'ok' }])
       void client
+      vi.useRealTimers()
+    })
+
+    it('holds the gate while a counted frame is still being parsed', () => {
+      // Real xterm parses writes on a later tick and emits its probe answers
+      // *during* that parse, before the write's done callback fires. On
+      // localhost the whole backlog commonly arrives in one frame before the
+      // first parse tick, so a counter advanced at frame arrival would open
+      // the gate with the probe replies still to come. The seam explicitly
+      // permits an asynchronous done, so this fake defers it by hand.
+      const pending: Array<() => void> = []
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal
+          sessionId="s1"
+          createEmulator={(opts) => {
+            const inner = e.create(opts)
+            const parse = inner.write.bind(inner)
+            inner.write = (bytes, done) => {
+              parse(bytes)
+              if (done) pending.push(done)
+            }
+            return inner
+          }}
+        />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 4 })))
+
+      act(() => sock.emitOutput(1, 'abcd')) // the whole backlog, one frame, done pending
+      act(() => em.live().send('\x1b[?1;2c')) // the DA answer, emitted mid-parse
+
+      expect(sock.input()).toEqual([]) // done has not fired, so the gate holds
+
+      act(() => pending.forEach((done) => done())) // the parser catches up
+      act(() => em.live().send('ls\r'))
+      expect(sock.input()).toEqual([{ ref: 1, text: 'ls\r' }])
     })
 
     it('mutes a second mirror tab replaying the full ring', () => {

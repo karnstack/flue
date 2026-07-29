@@ -118,10 +118,13 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     let primary = false
     let dims: Dimensions = { cols: 80, rows: 24 }
     // The replay mute gate, per-attach state: every `attached` re-arms it.
-    // consumed counts this ref's output bytes from seq; input is muted while
-    // consumed < muteUntil, so emulator-generated answers to replayed probe
-    // sequences (DA, DECRQM, OSC 11) never reach the shell's stdin.
-    // head === seq on a fresh spawn opens the gate immediately.
+    // consumed counts this ref's output bytes from seq — advanced in each
+    // write's done callback, not at frame arrival, because xterm parses
+    // asynchronously and emits its probe answers during that parse; a counter
+    // running ahead of the parser would open the gate with the replies still
+    // to come. Input is muted while consumed < muteUntil, so emulator-made
+    // answers to replayed probe sequences (DA, DECRQM, OSC 11) never reach
+    // the shell's stdin. head === seq on a fresh spawn opens it immediately.
     let consumed = 0
     let muteUntil = 0
     // Set once the session can produce nothing further — the process exited,
@@ -254,8 +257,9 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     offs.push(
       client.onOutput((r, bytes) => {
         if (r !== ref) return
-        consumed += bytes.length
-        emulator.write(bytes)
+        emulator.write(bytes, () => {
+          consumed += bytes.length
+        })
       }),
     )
 
