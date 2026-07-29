@@ -2,14 +2,14 @@
 
 :root {
   --bg: #fdfdfc;
-  --ink: #18181b;
+  --ink: #09090b;
   --ink-2: #52525c;
   --hairline: #e4e4e7;
   --rule: #d4d4d8;
   --accent: #fe9a00;
   --term-bg: #09090b;
   --term-fg: #d4d4d8;
-  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --gap-section: clamp(3.5rem, 8vw, 6rem);
 }
@@ -45,9 +45,10 @@ a:hover {
   text-underline-offset: 3px;
 }
 
-/* The one accent mark on the light page. */
+/* Near-black for ≥3:1 non-text contrast on the light ground;
+   amber stays inside the terminal figure. */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--ink);
   outline-offset: 3px;
   border-radius: 2px;
 }
