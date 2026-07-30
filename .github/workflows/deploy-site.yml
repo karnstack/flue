@@ -1,0 +1,56 @@
+# Deploys flue.sh when the site or the installer changes on main.
+#
+# Requires the CLOUDFLARE_API_TOKEN repo secret (Workers Scripts: Edit).
+# The secret is optional: without it the job skips rather than fails —
+# `make site-deploy` from locally-authed wrangler is the baseline path.
+name: deploy-site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "scripts/install.sh"
+      - ".github/workflows/deploy-site.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check for the deploy token
+        id: token
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "CLOUDFLARE_API_TOKEN is not set; skipping the deploy." \
+                 "Local 'make site-deploy' is the baseline."
+          fi
+
+      - name: Test the installer before serving it
+        if: steps.token.outputs.present == 'true'
+        run: bash scripts/install_test.sh
+
+      - name: Stage the installer
+        if: steps.token.outputs.present == 'true'
+        run: |
+          test -f scripts/install.sh || {
+            echo "scripts/install.sh missing — the infra lane creates it" >&2
+            exit 1
+          }
+          cp scripts/install.sh site/public/install.sh
+
+      - name: Deploy
+        if: steps.token.outputs.present == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: site

@@ -113,7 +113,7 @@ describe('Terminal', () => {
     ))
     live = sock
 
-    expect(live.ofType('attach')).toEqual([{ type: 'attach', id: 's1', lastSeq: 0 }])
+    expect(live.ofType('attach')).toEqual([{ type: 'attach', id: 's1', lastSeq: 0, reqId: 1 }])
   })
 
   it('writes the output for its own ref and nobody else’s', () => {
@@ -246,8 +246,8 @@ describe('Terminal', () => {
     expect(sock.ofType('attach')).toHaveLength(2)
 
     act(() => {
-      sock.emitControl(attached({ ref: 1, id: 's1', cols: 111, rows: 11 }))
-      sock.emitControl(attached({ ref: 2, id: 's1', cols: 222, rows: 22 }))
+      sock.emitControl(attached({ ref: 1, id: 's1', cols: 111, rows: 11, reqId: 1 }))
+      sock.emitControl(attached({ ref: 2, id: 's1', cols: 222, rows: 22, reqId: 2 }))
     })
 
     expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 1 }])
@@ -302,25 +302,26 @@ describe('Terminal', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('stops asking for a session the daemon does not have', async () => {
-    // not_found carries no session id, so this is only safe while this view is
-    // the one thing with an attach outstanding. Without it the plan asks for a
-    // dead session on every reconnect and the tab spins at Connecting for ever.
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    vi.spyOn(Math, 'random').mockReturnValue(0)
-    const { sock, sockets } = mountTerminal((e) => (
-      <Terminal sessionId="ghost" createEmulator={e.create} />
-    ))
+  it('shows gone when the daemon answers its attach with not_found', () => {
+    const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
 
-    act(() => sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }))
+    act(() =>
+      sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 1 }),
+    )
+
     expect(screen.getByRole('status').textContent).toContain('gone')
+  })
 
-    act(() => sock.close())
-    await act(() => vi.advanceTimersByTimeAsync(125))
-    act(() => sockets[1]!.open())
+  it('ignores a not_found that answers someone else’s attach', () => {
+    // Exactness is the point of the reqId: before it, any not_found arriving
+    // while this view held no ref was assumed to be its own.
+    const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
 
-    expect(sockets[1]!.ofType('attach')).toEqual([])
-    vi.useRealTimers()
+    act(() =>
+      sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 99 }),
+    )
+
+    expect(screen.queryByRole('status')?.textContent ?? '').not.toContain('gone')
   })
 
   it('gives up on a session the restarted daemon has never heard of', async () => {
@@ -342,10 +343,17 @@ describe('Terminal', () => {
     act(() => sock.close())
     await act(() => vi.advanceTimersByTimeAsync(125))
     act(() => sockets[1]!.open())
-    expect(sockets[1]!.ofType('attach')).toEqual([{ type: 'attach', id: 's1', lastSeq: 0 }])
+    expect(sockets[1]!.ofType('attach')).toEqual([
+      { type: 'attach', id: 's1', lastSeq: 0, reqId: 2 },
+    ])
 
     act(() =>
-      sockets[1]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }),
+      sockets[1]!.emitControl({
+        type: 'error',
+        code: 'not_found',
+        msg: 'no such session',
+        reqId: 2,
+      }),
     )
     expect(screen.getByRole('status').textContent).toContain('gone')
 
@@ -366,7 +374,9 @@ describe('Terminal', () => {
     const { sock, sockets } = mountTerminal((e) => (
       <Terminal sessionId="ghost" createEmulator={e.create} />
     ))
-    act(() => sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }))
+    act(() =>
+      sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 1 }),
+    )
 
     act(() => sock.close())
     await act(() => vi.advanceTimersByTimeAsync(125))
@@ -672,6 +682,175 @@ describe('Terminal', () => {
       act(() => listeners.forEach((cb) => cb()))
 
       expect(em.live().themes.length).toBeGreaterThan(before)
+    })
+  })
+
+  describe('the replay mute gate', () => {
+    it('opens immediately on a fresh spawn, where head equals seq', () => {
+      // Gating on "the first output frame" would never open here: the
+      // daemon omits that frame entirely when the backlog is empty.
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0 }))) // head defaults to seq
+
+      act(() => em.live().send('ls\r'))
+
+      expect(sock.input()).toEqual([{ ref: 1, text: 'ls\r' }])
+    })
+
+    it('mutes emulator replies while the backlog replays', () => {
+      // The ring holds the shell's own DA/DECRQM/OSC-11 probe replies, and
+      // xterm answers them again as they are written. Reproduced 4/4 before
+      // the gate: reload, reopen, route navigation, second mirror tab.
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 10 })))
+
+      act(() => sock.emitOutput(1, '123456')) // 6 of 10 backlog bytes
+      act(() => em.live().send('\x1b[?1;2c')) // xterm answering a replayed DA probe
+
+      expect(sock.input()).toEqual([])
+
+      act(() => sock.emitOutput(1, '7890')) // backlog complete: consumed == head
+      act(() => em.live().send('ls\r'))
+
+      expect(sock.input()).toEqual([{ ref: 1, text: 'ls\r' }])
+    })
+
+    it('opens at exactly head, not one byte later', () => {
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 4 })))
+      act(() => sock.emitOutput(1, 'abcd'))
+
+      act(() => em.live().send('x'))
+
+      expect(sock.input()).toEqual([{ ref: 1, text: 'x' }])
+    })
+
+    it('re-arms with the attachment after a reconnect mid-backlog', async () => {
+      // The gate is per-attach state, not per-connection: a socket dying
+      // mid-backlog resets it with the next attached, whose head names the
+      // next replay's end.
+      vi.useFakeTimers()
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      const { client, sockets, sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 6 })))
+      act(() => sock.emitOutput(1, 'abc')) // 3 of 6, then the socket dies
+
+      act(() => sock.close())
+      await act(() => vi.advanceTimersByTimeAsync(125))
+      act(() => sockets[1]!.open())
+      // The reattach resumes at 3; the daemon replays 3..8 as backlog.
+      act(() => sockets[1]!.emitControl(attached({ ref: 1, id: 's1', seq: 3, head: 8 })))
+
+      act(() => em.live().send('\x1b]11;rgb:0000/0000/0000\x07')) // OSC 11 reply to a replayed probe
+      expect(sockets[1]!.input()).toEqual([])
+
+      act(() => sockets[1]!.emitOutput(1, 'defgh')) // 3 + 5 = 8 == head
+      act(() => em.live().send('ok'))
+      expect(sockets[1]!.input()).toEqual([{ ref: 1, text: 'ok' }])
+      void client
+      vi.useRealTimers()
+    })
+
+    it('holds the gate while a counted frame is still being parsed', () => {
+      // Real xterm parses writes on a later tick and emits its probe answers
+      // *during* that parse, before the write's done callback fires. On
+      // localhost the whole backlog commonly arrives in one frame before the
+      // first parse tick, so a counter advanced at frame arrival would open
+      // the gate with the probe replies still to come. The seam explicitly
+      // permits an asynchronous done, so this fake defers it by hand.
+      const pending: Array<() => void> = []
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal
+          sessionId="s1"
+          createEmulator={(opts) => {
+            const inner = e.create(opts)
+            const parse = inner.write.bind(inner)
+            inner.write = (bytes, done) => {
+              parse(bytes)
+              if (done) pending.push(done)
+            }
+            return inner
+          }}
+        />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 4 })))
+
+      act(() => sock.emitOutput(1, 'abcd')) // the whole backlog, one frame, done pending
+      act(() => em.live().send('\x1b[?1;2c')) // the DA answer, emitted mid-parse
+
+      expect(sock.input()).toEqual([]) // done has not fired, so the gate holds
+
+      act(() => pending.forEach((done) => done())) // the parser catches up
+      act(() => em.live().send('ls\r'))
+      expect(sock.input()).toEqual([{ ref: 1, text: 'ls\r' }])
+    })
+
+    it('ignores a stale done from the previous attachment', async () => {
+      // A done callback from a write enqueued under attachment 1 can fire
+      // after attachment 2 has reseeded the counters: the emulator and the
+      // effect survive a reconnect, and nothing recalls a callback already
+      // handed to the parser. Those bytes are accounted for — the reattach's
+      // seq names where they ended — so counting them again would open the
+      // new gate early, mid-backlog. The ref cannot carry the check: the
+      // daemon numbers refs from 1 again on every connection, so the same
+      // value plausibly names both attachments, as it does here.
+      vi.useFakeTimers()
+      vi.spyOn(Math, 'random').mockReturnValue(0)
+      const pending: Array<() => void> = []
+      const { sockets, sock, em } = mountTerminal((e) => (
+        <Terminal
+          sessionId="s1"
+          createEmulator={(opts) => {
+            const inner = e.create(opts)
+            const parse = inner.write.bind(inner)
+            inner.write = (bytes, done) => {
+              parse(bytes)
+              if (done) pending.push(done)
+            }
+            return inner
+          }}
+        />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 6 })))
+      act(() => sock.emitOutput(1, 'abc')) // 3 bytes written, done still pending...
+
+      act(() => sock.close()) // ...when the socket dies
+      await act(() => vi.advanceTimersByTimeAsync(125))
+      act(() => sockets[1]!.open())
+      act(() => sockets[1]!.emitControl(attached({ ref: 1, id: 's1', seq: 3, head: 8 })))
+
+      act(() => sockets[1]!.emitOutput(1, 'de')) // 2 of the 5 backlog bytes
+      act(() => pending.splice(0).forEach((done) => done())) // the stale done fires among them
+
+      act(() => em.live().send('\x1b[?1;2c')) // a DA answer to a replayed probe
+      expect(sockets[1]!.input()).toEqual([]) // 3 + 2 < 8: still muted
+
+      act(() => sockets[1]!.emitOutput(1, 'fgh')) // 3 + 5 = 8 == head
+      act(() => pending.splice(0).forEach((done) => done()))
+      act(() => em.live().send('ok'))
+      expect(sockets[1]!.input()).toEqual([{ ref: 1, text: 'ok' }])
+      vi.useRealTimers()
+    })
+
+    it('mutes a second mirror tab replaying the full ring', () => {
+      // The second tab attaches with lastSeq 0 and receives the whole ring
+      // as backlog — the fourth reproduction of the bug, same gate.
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 2, id: 's1', seq: 0, head: 5, primary: false })))
+      act(() => sock.emitOutput(2, 'ring!'))
+      act(() => em.live().send('live'))
+
+      expect(sock.input()).toEqual([{ ref: 2, text: 'live' }])
     })
   })
 })

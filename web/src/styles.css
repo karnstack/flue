@@ -129,6 +129,22 @@
 }
 
 /*
+ * The empty state's cursor. steps(1) rather than an eased fade, because a
+ * terminal cursor is either there or it is not — the same timing the landing
+ * page's figure uses. Consumers pair it with `motion-safe:` so a reduced-
+ * motion setting leaves the cursor lit rather than flashing.
+ */
+@theme {
+  --animate-blink: flue-blink 1.2s steps(1) infinite;
+
+  @keyframes flue-blink {
+    50% {
+      opacity: 0;
+    }
+  }
+}
+
+/*
  * shadcn's semantic tokens, mapped onto the flue palette rather than kept as
  * a second, parallel colour system. `inline` is what lets the :root blocks
  * below re-point them per theme.

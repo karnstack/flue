@@ -27,3 +27,23 @@ export function stripHandoff(url: string): string {
   const query = u.searchParams.toString()
   return `${u.origin}${u.pathname}${query ? `?${query}` : ''}${u.hash}`
 }
+
+/**
+ * Take the one-shot `cwd` that `flue open <path>` put in the URL.
+ *
+ * Read once and stripped immediately with replaceState. Unlike an in-memory
+ * ref, a URL parameter survives whatever comes after the first paint — a
+ * reload, a bookmark, a link pasted somewhere else — and each of those would
+ * hand the same directory back out to whoever reads it next. Consuming the
+ * parameter here, rather than merely reading it, is what keeps a second look
+ * at the same URL from asking for a second session.
+ */
+export function takeCwd(): string | null {
+  const u = new URL(location.href)
+  const cwd = u.searchParams.get('cwd')
+  if (cwd === null) return null
+  u.searchParams.delete('cwd')
+  const query = u.searchParams.toString()
+  history.replaceState(null, '', `${u.origin}${u.pathname}${query ? `?${query}` : ''}${u.hash}`)
+  return cwd
+}

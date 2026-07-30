@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Required for the changelog: goreleaser walks the history
+          # between tags.
+          fetch-depth: 0
+
+      # go, node, and pnpm from mise.toml — goreleaser's before hook runs
+      # `make web`, which needs all three.
+      - name: Install the toolchain from mise.toml
+        uses: jdx/mise-action@v4
+
+      - name: Release
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # User-provided repo secret — the one manual setup step. It
+          # authorizes the formula push to karnstack/tap; the default
+          # GITHUB_TOKEN cannot write to another repository.
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}

@@ -117,6 +117,24 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     let ref: number | null = null
     let primary = false
     let dims: Dimensions = { cols: 80, rows: 24 }
+    // The replay mute gate, per-attach state: every `attached` re-arms it.
+    // consumed counts this ref's output bytes from seq — advanced in each
+    // write's done callback, not at frame arrival, because xterm parses
+    // asynchronously and emits its probe answers during that parse; a counter
+    // running ahead of the parser would open the gate with the replies still
+    // to come. Input is muted while consumed < muteUntil, so emulator-made
+    // answers to replayed probe sequences (DA, DECRQM, OSC 11) never reach
+    // the shell's stdin. head === seq on a fresh spawn opens it immediately.
+    let consumed = 0
+    let muteUntil = 0
+    // The attachment's epoch, stepped with every reseed. Each done callback
+    // below closes over the value it was written under: one enqueued under a
+    // previous attachment can fire after the reseed, and its bytes are
+    // already counted — the reattach's seq names where they ended, so letting
+    // it add them again would open the new gate early. The ref cannot stand
+    // in for this check: the daemon numbers refs from 1 again on every
+    // connection, so the same value plausibly names both attachments.
+    let epoch = 0
     // Set once the session can produce nothing further — the process exited,
     // or the daemon has never heard of it. Both are terminal, so a later
     // reconnect must not walk the pill back to "Reconnecting…" and imply that
@@ -191,9 +209,9 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     }
 
     emulator.onData((bytes) => {
-      // No ref, no destination. Inventing one — a `?? 0`, say — would send
-      // keystrokes to whatever attachment happened to hold that number.
-      if (ref !== null) client.sendInput(ref, bytes)
+      // No ref, no destination — and no input while the backlog replays.
+      if (ref === null || consumed < muteUntil) return
+      client.sendInput(ref, bytes)
     })
 
     // Every registration returns an unsubscribe, and all of them are released
@@ -203,15 +221,15 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     offs.push(
       client.onStatus((s) => {
         // A ref belongs to the connection that issued it and to nothing else,
-        // so anything other than `open` retires the one this view holds. Two
-        // things turn on that. The daemon numbers refs from 1 again on every
-        // connection, so a kept ref can come to name a stranger's attachment.
-        // And the `not_found` handler below is only entitled to act while no
-        // ref is held: a daemon that has been restarted answers the replayed
-        // attach with exactly that error, and a ref left over from the
-        // previous connection would swallow it — leaving this view saying
-        // "Reconnecting…" for the life of the tab, with a reload the only way
-        // out.
+        // so anything other than `open` retires the one this view holds. The
+        // daemon numbers refs from 1 again on every connection, so a kept ref
+        // can come to name a stranger's attachment.
+        //
+        // The gone signal below needs none of this as a precondition: the
+        // client correlates `not_found` to a session by reqId and reports
+        // only this route's own attach, replayed after a daemon restart or
+        // not, so there is no separate entitlement to gate on whether a ref
+        // is currently held.
         if (s !== 'open') {
           ref = null
           primary = false
@@ -232,6 +250,9 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
         ref = a.ref
         primary = a.primary
         dims = { cols: a.cols, rows: a.rows }
+        epoch++
+        consumed = a.seq
+        muteUntil = a.head
         if (a.truncated) emulator.write(RESET)
         emulator.resize(a.cols, a.rows)
         if (a.title) document.title = a.title
@@ -244,7 +265,11 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
 
     offs.push(
       client.onOutput((r, bytes) => {
-        if (r === ref) emulator.write(bytes)
+        if (r !== ref) return
+        const e = epoch
+        emulator.write(bytes, () => {
+          if (e === epoch) consumed += bytes.length
+        })
       }),
     )
 
@@ -271,16 +296,13 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     )
 
     offs.push(
-      client.onError((e) => {
-        // The one error worth acting on here, and the only one this view can
-        // attribute to itself. `not_found` carries no session id — see the
-        // note in FlueClient — so this is sound only while this view has an
-        // attach outstanding and no ref, which on loopback is one round trip.
-        // Without it the plan asks for a dead session on every reconnect for
-        // the life of the tab and the screen never stops saying Connecting.
-        if (e.code !== 'not_found' || ref !== null || over) return
+      client.onSessionGone((id) => {
+        // The client resolved the not_found to its session by reqId and has
+        // already dropped it from the reattach plan — for the mount-time
+        // attach and for a replay after a daemon restart alike. Terminal
+        // states are final: a later reconnect must not walk this back.
+        if (id !== sessionId || over) return
         over = true
-        client.forget(sessionId)
         setPhase('gone')
       }),
     )
@@ -351,17 +373,35 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
         className="flue-term-surface absolute top-0 left-0 origin-top-left"
       />
       {phase !== 'live' && (
+        // Dark in both themes, like the pane it floats over usually is; the
+        // translucent ground and backdrop-blur keep it legible over whatever
+        // the screen underneath was showing. The dot is the phase at a
+        // glance: pulsing while an answer is still expected, still once the
+        // state is final and waiting will not change it. Like the dot on a
+        // session row it stays neutral — waiting reads as motion, not
+        // colour, and amber's short list of jobs does not include this pill.
         <div
           role="status"
           className={cn(
-            'absolute top-3 right-3 rounded-md px-2 py-1 text-base/6 font-medium sm:text-sm/6',
-            'bg-zinc-900 text-zinc-300 inset-ring inset-ring-white/10',
+            'absolute top-3 right-3 rounded-lg px-3 py-1.5 text-base/6 font-medium sm:text-sm/6',
+            'bg-zinc-950/80 text-zinc-100 shadow-lg ring-1 ring-white/10 backdrop-blur-sm',
           )}
         >
-          {NOTICE[phase]}
+          <span className="flex items-center gap-x-2">
+            <span
+              aria-hidden="true"
+              className={cn(
+                'size-1.5 shrink-0 rounded-full',
+                phase === 'connecting' || phase === 'reconnecting'
+                  ? 'bg-zinc-300 motion-safe:animate-pulse'
+                  : 'bg-zinc-500',
+              )}
+            />
+            {NOTICE[phase]}
+          </span>
           {phase === 'connecting' && (
-            <span className="mt-0.5 block text-xs/5 font-normal text-zinc-500">
-              {TERMINAL_SHORTCUT_HINT} for focus mode
+            <span className="mt-0.5 block pl-3.5 text-xs/5 font-normal text-zinc-400">
+              <kbd className="font-mono">{TERMINAL_SHORTCUT_HINT}</kbd> for focus mode
             </span>
           )}
         </div>

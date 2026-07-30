@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1428,7 +1429,7 @@ func TestShutdownClosesEstablishedWebSockets(t *testing.T) {
 func TestEnqueueNeverBlocksAndDropsABackloggedClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c := newConn(ctx, cancel, nil, nil)
+	c := newConn(ctx, cancel, nil, nil, "")
 
 	// Fill the outbox with no writer draining it, i.e. a client that has
 	// stopped reading its socket.
@@ -1472,7 +1473,7 @@ func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	newPeer := func() *conn {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		c := newConn(ctx, cancel, nil, srv)
+		c := newConn(ctx, cancel, nil, srv, "")
 		c.attach[1] = &attachment{ref: 1, s: s, sub: s.Subscribe(0), done: make(chan struct{})}
 		srv.claimPrimaryIfUnset(s.ID(), c)
 		return c
@@ -1661,4 +1662,306 @@ func TestMalformedControlMessageIsRejected(t *testing.T) {
 		e, ok := msg.(wire.Error)
 		return ok && e.Code == "bad_message"
 	})
+}
+
+// --- reqId correlation ---
+
+func TestAttachedEchoesReqID(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0, ReqID: 42})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok && a.ReqID != 42 {
+			t.Fatalf("Attached.ReqID = %d, want 42", a.ReqID)
+		}
+		return ok
+	})
+}
+
+func TestSpawnAttachedEchoesReqID(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Spawn{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24, ReqID: 5})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok && a.ReqID != 5 {
+			t.Fatalf("Attached.ReqID = %d, want 5", a.ReqID)
+		}
+		return ok
+	})
+}
+
+// TestNotFoundEchoesReqID is the mandatory error half: not_found arrives as
+// an error, so the field has to ride wire.Error or the fourth consumer stays
+// a heuristic.
+func TestNotFoundEchoesReqID(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: "does-not-exist", ReqID: 7})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		if !ok || e.Code != "not_found" {
+			return false
+		}
+		if e.ReqID != 7 {
+			t.Fatalf("Error.ReqID = %d, want 7", e.ReqID)
+		}
+		return true
+	})
+}
+
+func TestSpawnFailedEchoesReqID(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Spawn{Cwd: "/definitely/not/a/directory", Cmd: []string{"true"}, Cols: 80, Rows: 24, ReqID: 9})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		if !ok || e.Code != "spawn_failed" {
+			return false
+		}
+		if e.ReqID != 9 {
+			t.Fatalf("Error.ReqID = %d, want 9", e.ReqID)
+		}
+		return true
+	})
+}
+
+// --- head: where the replayed backlog ends ---
+
+// TestAttachedHeadCoversTheBacklog: attach to a session whose entire output
+// is already in the ring. head must equal seq plus every backlog byte the
+// client is about to receive — the offset at which live output begins.
+func TestAttachedHeadCoversTheBacklog(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sh", "-c", "echo replayed"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+	waitForExit(t, s)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0})
+
+	var att wire.Attached
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok {
+			att = a
+		}
+		return ok
+	})
+
+	var backlog []byte
+	readUntil(t, c, func(msg any, out []byte) bool {
+		_, done := msg.(wire.Exit)
+		if done {
+			backlog = append([]byte(nil), out...)
+		}
+		return done
+	})
+
+	if att.Head != att.Seq+uint64(len(backlog)) {
+		t.Fatalf("Head = %d, want Seq %d + backlog %d", att.Head, att.Seq, len(backlog))
+	}
+	if att.Head == att.Seq {
+		t.Fatal("Head == Seq for a session with output in the ring; the gate would never arm")
+	}
+}
+
+// TestAttachedHeadEqualsSeqOnAFreshSpawn: an empty backlog omits the output
+// frame entirely, which is why gating on "the first output frame" was wrong.
+// head == seq is what lets the client open the gate immediately.
+func TestAttachedHeadEqualsSeqOnAFreshSpawn(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Attach{ID: s.ID(), LastSeq: 0})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if !ok {
+			return false
+		}
+		if a.Head != a.Seq {
+			t.Fatalf("Head = %d, Seq = %d; want equal on an empty backlog", a.Head, a.Seq)
+		}
+		return true
+	})
+}
+
+// --- the audit log ---
+
+// syncBuffer is a bytes.Buffer safe for the conn goroutines that log from
+// off the test's own goroutine.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func auditServer(t *testing.T) (*httptest.Server, *session.Registry, *syncBuffer) {
+	t.Helper()
+	ts, reg, srv := newTestServerUI(t, http.NotFoundHandler())
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+	return ts, reg, buf
+}
+
+func waitForLog(t *testing.T, buf *syncBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), want) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("log never contained %q; log so far:\n%s", want, buf.String())
+}
+
+// logLineContains reports whether some line of buf that contains marker also
+// contains want — so a record's own fields can be asserted on, rather than
+// the whole log, which may hold other records carrying the same field.
+func logLineContains(buf *syncBuffer, marker, want string) bool {
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, marker) && strings.Contains(line, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAuditLogsARejectedRequest covers the middleware path — the auth
+// decision local.Auth.Middleware makes for every API and UI request.
+func TestAuditLogsARejectedRequest(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	resp, err := http.Get(ts.URL + "/api/sessions")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+
+	waitForLog(t, buf, "auth rejected")
+	waitForLog(t, buf, "path=/api/sessions")
+	if !strings.Contains(buf.String(), "peer=") {
+		t.Fatalf("rejection logged without the resolved peer:\n%s", buf.String())
+	}
+}
+
+func TestAuditLogsARejectedUpgrade(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	if c, _, err := websocket.Dial(context.Background(), url, nil); err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("dial without a token succeeded")
+	}
+
+	waitForLog(t, buf, "auth rejected")
+	waitForLog(t, buf, "path=/ws")
+}
+
+// TestAuditLogsARejectedUpgradeFetchSite covers the fourth auth-decision
+// site: requireSameOriginFetchSite in handleWS, which runs after checkAuth
+// has already passed. A valid token is not enough to reach it — it must be
+// exercised with one, or the rejection would be attributed to checkAuth
+// instead and this branch would go untested.
+func TestAuditLogsARejectedUpgradeFetchSite(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	c, _, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Sec-Fetch-Site": []string{"none"},
+			local.HeaderName: []string{tok},
+		},
+	})
+	if err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("dial with Sec-Fetch-Site: none succeeded")
+	}
+
+	waitForLog(t, buf, "auth rejected")
+	waitForLog(t, buf, "path=/ws")
+	if !strings.Contains(buf.String(), "peer=") {
+		t.Fatalf("rejection logged without the resolved peer:\n%s", buf.String())
+	}
+}
+
+func TestAuditLogsARejectedMint(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	resp, err := http.DefaultClient.Do(mintReq(t, ts, "not-the-token"))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	resp.Body.Close()
+
+	waitForLog(t, buf, "mint rejected")
+}
+
+func TestAuditLogsAttachAndDetach(t *testing.T) {
+	ts, reg, buf := auditServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c, ref := attach(t, ts, s.ID())
+	waitForLog(t, buf, "msg=attach")
+	waitForLog(t, buf, "session="+s.ID())
+	if !logLineContains(buf, "msg=attach", "peer=") {
+		t.Fatalf("attach logged without the resolved peer:\n%s", buf.String())
+	}
+
+	writeControl(t, c, wire.Detach{Ref: ref})
+	waitForLog(t, buf, "msg=detach")
+	if !logLineContains(buf, "msg=detach", "peer=") {
+		t.Fatalf("detach logged without the resolved peer:\n%s", buf.String())
+	}
+}
+
+// TestAuditDoesNotLogAnAcceptedRequest: the audit log names decisions, not
+// traffic — an accepted request is not an event.
+func TestAuditDoesNotLogAnAcceptedRequest(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	resp := get(t, ts, "/api/sessions", "same-origin")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if strings.Contains(buf.String(), "auth rejected") {
+		t.Fatalf("an accepted request was logged as a rejection:\n%s", buf.String())
+	}
 }

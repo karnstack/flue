@@ -1,0 +1,80 @@
+# goreleaser v2 config. Local validation (see the release-infra plan):
+#   goreleaser check                        -> exit 2, brews deprecation only
+#   goreleaser release --snapshot --clean   -> must fully succeed
+version: 2
+
+project_name: flue
+
+before:
+  hooks:
+    # web/dist must exist before any go build: //go:embed all:dist in
+    # web/embed.go does not compile without it. Depend on the Makefile
+    # target, never an inline copy of its steps.
+    - make web
+
+builds:
+  - id: flue
+    main: ./cmd/flue
+    binary: flue
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    # The asset-name contract shared with scripts/install.sh and the site
+    # lane, verbatim: flue_{version}_{os}_{arch}.tar.gz. {{ .Version }} has
+    # no leading v; Os is darwin|linux; Arch is amd64|arm64.
+    name_template: "flue_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^feat(\(.*\))?!?:'
+      order: 0
+    - title: Fixes
+      regexp: '^fix(\(.*\))?!?:'
+      order: 1
+    - title: Docs
+      regexp: '^docs(\(.*\))?!?:'
+      order: 2
+    - title: Other
+      order: 999
+
+# brews is deprecated since goreleaser v2.16 in favor of homebrew_casks, but
+# is not removed until v3 and is used deliberately: the ship spec commits to
+# a Formula/ layout in karnstack/tap. Follow-up before goreleaser v3:
+# migrate to homebrew_casks with a tap_migrations.json in the tap root.
+brews:
+  - name: flue
+    repository:
+      owner: karnstack
+      name: tap
+      # User-provided repo secret — the one manual setup step. The default
+      # GITHUB_TOKEN cannot push to another repository.
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://flue.sh
+    description: "Your terminal, as a browser tab."
+    license: MIT
+    test: |
+      # With no daemon in the brew sandbox, `flue status` prints the stamped
+      # version and "not running". `|| true` makes the assertion about the
+      # output, tolerating any exit status, so the formula test can never
+      # start depending on daemon state inside the sandbox. (Homebrew's
+      # shell_output runs the string through a shell and asserts exit 0 by
+      # default; its second argument pins one exact code, which is the
+      # conventional idiom when the code is deterministic — this one is
+      # deliberately not pinned.)
+      assert_match version.to_s, shell_output("#{bin}/flue status 2>&1 || true")

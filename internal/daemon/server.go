@@ -52,6 +52,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -103,6 +104,9 @@ type Server struct {
 	authMu sync.RWMutex
 	auth   *local.Auth
 
+	logMu sync.RWMutex
+	log   *slog.Logger
+
 	primaryMu sync.Mutex
 	primary   map[string]*conn // session ID -> primary connection
 	// attached is the connections holding each session, in
@@ -125,6 +129,7 @@ func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version strin
 		baseCtx:    baseCtx,
 		baseCancel: baseCancel,
 		auth:       auth,
+		log:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		primary:    map[string]*conn{},
 		attached:   map[string][]*conn{},
 	}
@@ -147,6 +152,20 @@ func (s *Server) currentAuth() *local.Auth {
 	s.authMu.RLock()
 	defer s.authMu.RUnlock()
 	return s.auth
+}
+
+// SetLogger swaps the audit logger. The default writes to stderr, which
+// launchd and systemd already capture; tests substitute a buffer.
+func (s *Server) SetLogger(l *slog.Logger) {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	s.log = l
+}
+
+func (s *Server) logger() *slog.Logger {
+	s.logMu.RLock()
+	defer s.logMu.RUnlock()
+	return s.log
 }
 
 func (s *Server) checkAuth(r *http.Request) error {
@@ -261,8 +280,28 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			http.Error(w, ErrNoAuth.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		a.Middleware(next).ServeHTTP(w, r)
+		// The middleware answers 401/403 itself, so the audit hook watches
+		// the status it wrote rather than re-deciding anything. The peer is
+		// the resolved identity the local transport has: the socket address.
+		rec := &statusRecorder{ResponseWriter: w}
+		a.Middleware(next).ServeHTTP(rec, r)
+		if rec.status == http.StatusUnauthorized || rec.status == http.StatusForbidden {
+			s.logger().Warn("auth rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "status", rec.status)
+		}
 	})
+}
+
+// statusRecorder captures the status code a handler wrote. The withAuth
+// routes are plain HTTP (the upgrade lives on /ws, outside it), so no
+// Hijacker passthrough is needed.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 // requireSameOriginFetchSite admits a request only if it does not claim to
@@ -343,6 +382,7 @@ func (s *Server) handleMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.CheckMint(r); err != nil {
+		s.logger().Warn("mint rejected", "peer", r.RemoteAddr, "err", err)
 		writeAuthError(w, err)
 		return
 	}
@@ -363,6 +403,7 @@ func (s *Server) handleMint(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err := s.checkAuth(r); err != nil {
+		s.logger().Warn("auth rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "err", err)
 		writeAuthError(w, err)
 		return
 	}
@@ -384,6 +425,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// the allowlist; and that handshake's Sec-Fetch-Site is "same-site",
 	// which Task 5 already refuses.
 	if err := requireSameOriginFetchSite(r); err != nil {
+		s.logger().Warn("auth rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "err", err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -403,7 +445,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
 
-	c := newConn(ctx, cancel, ws, s)
+	c := newConn(ctx, cancel, ws, s, r.RemoteAddr)
 	c.serve()
 	_ = ws.Close(websocket.StatusNormalClosure, "")
 }

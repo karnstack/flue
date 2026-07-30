@@ -22,12 +22,18 @@ import (
 
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/service"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/web"
 )
 
-const version = "0.1.0"
+// version is stamped at release time by goreleaser via
+// -ldflags "-s -w -X main.version={{.Version}}". A from-source build
+// reports "dev", which is the honest answer: it corresponds to no release.
+// It must stay a package-level var named exactly "version" — the ldflags
+// target is the string "main.version".
+var version = "dev"
 
 const defaultPort = 7717
 
@@ -66,6 +72,10 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "open":
 		err = cmdOpen(os.Args[2:])
+	case "enable":
+		err = cmdEnable()
+	case "disable":
+		err = cmdDisable()
 	case "status":
 		err = cmdStatus()
 	case "-h", "--help", "help":
@@ -80,13 +90,17 @@ func main() {
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `flue — your terminal, as a browser tab
+const usageText = `flue — your terminal, as a browser tab
 
+  flue enable             install the login service, start the daemon, open the UI
+  flue disable            remove the login service
+  flue status             daemon, login service, and session diagnostics
+  flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N]   run the daemon in the foreground
-  flue open [path]        spawn a session and open it in the browser
-  flue status             daemon state and session count
-`)
+`
+
+func usage() {
+	fmt.Fprint(os.Stderr, usageText)
 }
 
 // cmdServe runs the daemon in the foreground until its context is cancelled
@@ -495,9 +509,23 @@ func openURL(port int, handoff, cwd string) string {
 }
 
 func cmdStatus() error {
+	return statusTo(os.Stdout)
+}
+
+// statusTo writes the status report. The first line is always the version —
+// "dev" from source, the release version when stamped — because status is
+// the CLI's only diagnostics surface and there is deliberately no version
+// subcommand to put it on. The writer is the seam — same pattern as
+// loadToken and openBrowser — so the test reads the report without
+// capturing os.Stdout.
+func statusTo(w io.Writer) error {
+	fmt.Fprintf(w, "version:  %s\n", version)
+	if mgr, err := newServiceManager(); err == nil {
+		fmt.Fprintln(w, serviceLine(mgr))
+	}
 	recorded, _, ok := daemon.ReadRuntimeRecord()
 	if !ok {
-		fmt.Println("daemon: not running")
+		fmt.Fprintln(w, "daemon:   not running")
 		return nil
 	}
 	// A record naming a process that is gone, or one this user cannot signal,
@@ -505,7 +533,7 @@ func cmdStatus() error {
 	// the daemon it describes is not this user's to talk to.
 	port, ok := ourDaemon()
 	if !ok {
-		fmt.Printf("daemon: not running (stale runtime record for port %d)\n", recorded)
+		fmt.Fprintf(w, "daemon:   not running (stale runtime record for port %d)\n", recorded)
 		return nil
 	}
 	token, err := loadToken()
@@ -518,10 +546,10 @@ func cmdStatus() error {
 		return err
 	}
 
-	fmt.Printf("daemon:   running on 127.0.0.1:%d\n", port)
-	fmt.Printf("sessions: %d\n", len(infos))
+	fmt.Fprintf(w, "daemon:   running on 127.0.0.1:%d\n", port)
+	fmt.Fprintf(w, "sessions: %d\n", len(infos))
 	for _, s := range infos {
-		fmt.Printf("  %s  %-8s %s\n", s.ID, s.State, s.Cwd)
+		fmt.Fprintf(w, "  %s  %-8s %s\n", s.ID, s.State, s.Cwd)
 	}
 	return nil
 }
@@ -885,4 +913,130 @@ func launchBrowser(url string) error {
 // serve anything.
 func uiHandler() http.Handler {
 	return web.Handler()
+}
+
+// enableWait bounds how long enable waits for the service-started daemon to
+// answer. Longer than flue open's startTimeout: launchd/systemd get to fork,
+// exec, and bind before ourDaemon can see anything.
+const enableWait = 10 * time.Second
+
+// newServiceManager builds the platform's service manager. A package
+// variable so tests can substitute a fake — the same seam pattern as
+// spawnDaemon and openBrowser, for the same reason: CI must never touch a
+// real launchd or systemd.
+var newServiceManager = defaultServiceManager
+
+func defaultServiceManager() (service.Manager, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	// Resolved, per the spec: the unit records the binary itself, so a
+	// brew-installed symlink and a hand-built flue both point at themselves.
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	return service.ForPlatform(runtime.GOOS, exe, home, os.Getuid(), service.ExecRunner{})
+}
+
+func cmdEnable() error { return runEnable(os.Stdout, enableWait) }
+
+// runEnable installs the login service, waits for the daemon it starts, and
+// opens the UI — the parent spec's transcript, checkmark by checkmark.
+func runEnable(w io.Writer, wait time.Duration) error {
+	mgr, err := newServiceManager()
+	if err != nil {
+		if errors.Is(err, service.ErrUnsupported) {
+			return fmt.Errorf("%w; run \"flue serve\" to start the daemon manually", err)
+		}
+		return err
+	}
+	if err := mgr.Enable(); err != nil {
+		if errors.Is(err, service.ErrNoUserManager) {
+			return fmt.Errorf("%w; run \"flue serve\" to start the daemon manually", err)
+		}
+		return err
+	}
+	fmt.Fprintf(w, "\n  ✓ login service installed\n")
+
+	port, err := awaitDaemon(wait)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "  ✓ daemon running on 127.0.0.1:%d\n", port)
+
+	token, err := loadToken()
+	if err != nil {
+		return fmt.Errorf("load auth token: %w", err)
+	}
+	handoff, err := mintHandoff(port, token)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "  opening http://127.0.0.1:%d\n", port)
+
+	target := openURL(port, handoff, "")
+	if err := openBrowser(target); err != nil {
+		// Same trade as cmdOpen: the fallback link dies in HandoffTTL and
+		// lands only in the user's own terminal, only when the launch failed.
+		return fmt.Errorf("%w\nopen this within %s to get in:\n%s", err, local.HandoffTTL, target)
+	}
+	return nil
+}
+
+// awaitDaemon polls for a daemon this user owns, the same identity check
+// flue open uses — never a bare "something is listening".
+func awaitDaemon(wait time.Duration) (int, error) {
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		if port, ok := ourDaemon(); ok {
+			return port, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return 0, fmt.Errorf("the login service is installed but no daemon answered within %s; run \"flue status\" to see what it is doing", wait)
+}
+
+func cmdDisable() error { return runDisable(os.Stdout) }
+
+// runDisable removes the login service. Idempotent by spec: disabling when
+// not enabled reports that plainly and exits 0.
+func runDisable(w io.Writer) error {
+	mgr, err := newServiceManager()
+	if err != nil {
+		return err
+	}
+	st, err := mgr.Status()
+	if err != nil {
+		return err
+	}
+	if !st.Installed {
+		fmt.Fprintln(w, "login service is not installed; nothing to do")
+		return nil
+	}
+	if err := mgr.Disable(); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "  ✓ login service removed")
+	return nil
+}
+
+// serviceLine is the login-service line flue status gains.
+func serviceLine(mgr service.Manager) string {
+	st, err := mgr.Status()
+	if err != nil {
+		return fmt.Sprintf("service:  unknown (%v)", err)
+	}
+	switch {
+	case !st.Installed:
+		return "service:  not installed"
+	case st.Running:
+		return "service:  installed, running"
+	default:
+		return "service:  installed, not running"
+	}
 }

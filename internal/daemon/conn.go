@@ -126,6 +126,12 @@ type conn struct {
 	ws  *websocket.Conn
 	srv *Server
 
+	// peer is the resolved identity of the client on the other end of ws —
+	// the socket address for the local transport, and the strongest identity
+	// a purely local transport has. Remote transports substitute their own
+	// resolved identity here later.
+	peer string
+
 	// ctx bounds this connection's life, and cancel ends it. Writes are always
 	// issued under this connection's own context, never under the context of
 	// whichever client caused the write, so one client's disconnect cannot
@@ -140,12 +146,13 @@ type conn struct {
 	attach  map[uint32]*attachment
 }
 
-func newConn(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, srv *Server) *conn {
+func newConn(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, srv *Server, peer string) *conn {
 	return &conn{
 		ctx:    ctx,
 		cancel: cancel,
 		ws:     ws,
 		srv:    srv,
+		peer:   peer,
 		out:    make(chan frame, outboxDepth),
 		attach: map[uint32]*attachment{},
 	}
@@ -207,6 +214,14 @@ func (c *conn) runWriter(done chan<- struct{}) {
 
 func (c *conn) sendError(code, msg string) {
 	_ = c.sendControl(wire.Error{Code: code, Msg: msg})
+}
+
+// sendErrorFor answers a specific request: the error echoes the client's
+// reqId so the reply is matched without leaning on arrival order. A zero
+// reqID marshals to nothing (omitempty), so uncorrelated requests are
+// answered exactly as before.
+func (c *conn) sendErrorFor(reqID uint64, code, msg string) {
+	_ = c.sendControl(wire.Error{ReqID: reqID, Code: code, Msg: msg})
 }
 
 // serve runs the read loop until the socket closes.
@@ -307,18 +322,18 @@ func (c *conn) handleControl(msg any) {
 			Cwd: m.Cwd, Cmd: m.Cmd, Cols: m.Cols, Rows: m.Rows,
 		})
 		if err != nil {
-			c.sendError("spawn_failed", err.Error())
+			c.sendErrorFor(m.ReqID, "spawn_failed", err.Error())
 			return
 		}
-		c.attachTo(s, 0)
+		c.attachTo(s, 0, m.ReqID)
 
 	case wire.Attach:
 		s, ok := c.srv.reg.Get(m.ID)
 		if !ok {
-			c.sendError("not_found", "no such session")
+			c.sendErrorFor(m.ReqID, "not_found", "no such session")
 			return
 		}
-		c.attachTo(s, m.LastSeq)
+		c.attachTo(s, m.LastSeq, m.ReqID)
 
 	case wire.Detach:
 		c.detach(m.Ref)
@@ -374,9 +389,15 @@ func (c *conn) handleControl(msg any) {
 	}
 }
 
-// attachTo subscribes to s from lastSeq and starts streaming output.
-func (c *conn) attachTo(s *session.Session, lastSeq uint64) {
+// attachTo subscribes to s from lastSeq and starts streaming output. reqID
+// is echoed on the Attached so the client can match the reply to its request.
+func (c *conn) attachTo(s *session.Session, lastSeq uint64, reqID uint64) {
 	sub := s.Subscribe(lastSeq)
+	// head is where the replayed backlog ends. The scrollback carries the
+	// shell's own DA/DECRQM/OSC-11 probe replies, and the emulator answers
+	// them again on write; the client mutes its input until it has consumed
+	// head bytes so those answers never reach the shell's stdin.
+	head := sub.StartSeq + uint64(len(sub.Backlog))
 
 	c.mu.Lock()
 	c.nextRef++
@@ -384,6 +405,8 @@ func (c *conn) attachTo(s *session.Session, lastSeq uint64) {
 	a := &attachment{ref: ref, s: s, sub: sub, done: make(chan struct{})}
 	c.attach[ref] = a
 	c.mu.Unlock()
+
+	c.srv.logger().Info("attach", "peer", c.peer, "session", s.ID(), "ref", ref)
 
 	primary := c.srv.claimPrimaryIfUnset(s.ID(), c)
 	info := s.Info()
@@ -396,7 +419,9 @@ func (c *conn) attachTo(s *session.Session, lastSeq uint64) {
 		Title:     info.Title,
 		Seq:       sub.StartSeq,
 		Truncated: sub.Truncated,
+		Head:      head,
 		Primary:   primary,
+		ReqID:     reqID,
 	})
 
 	if len(sub.Backlog) > 0 {
@@ -515,6 +540,7 @@ func (c *conn) detach(ref uint32) {
 	if a == nil {
 		return
 	}
+	c.srv.logger().Info("detach", "peer", c.peer, "session", a.s.ID(), "ref", ref)
 	// Release before unsubscribing, so the stream goroutine sees a detach it
 	// asked for rather than an end of stream it must report.
 	a.release()

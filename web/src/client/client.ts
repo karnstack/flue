@@ -124,10 +124,9 @@ class Emitter<T extends unknown[]> {
  * asked — so the fix is a plan keyed per attachment and a handle returned from
  * `attach`, not a wider map here. Until then: one view per session per tab.
  *
- * That limit is about two views alive at once. Two attaches alive at once is a
- * different thing and is entirely ordinary — StrictMode issues attach, forget
- * and attach inside a single round-trip on every mount in development — which
- * is why `pending` and `refused` count replies rather than name sessions.
+ * Replies are matched to requests by `reqId`, so StrictMode's
+ * attach/forget/attach inside one round-trip settles each reply against the
+ * exact request that asked.
  */
 export class FlueClient {
   private sock: SocketLike | null = null
@@ -153,28 +152,21 @@ export class FlueClient {
    */
   private refOwner = new Map<number, string>()
 
-  /**
-   * Attaches sent for a session whose `attached` has not come back yet.
-   *
-   * Counted, not flagged, because one session can have two attaches on the
-   * wire at once — which is what React's StrictMode produces on every mount in
-   * development. Cleared by `teardown`: replies do not survive their socket.
-   *
-   * One id can leak a count here, and deliberately: an attach answered with
-   * `error{code:"not_found"}` never gets an `attached`, and the error carries
-   * no id to decrement by. Harmless, because session ids are unique — nothing
-   * will ever ask for that id again — and the connection clears it anyway.
-   */
-  private pending = new Map<string, number>()
+  /** The next request id; allocated per sent attach/spawn, never reused. */
+  private nextReqId = 1
 
   /**
-   * Replies to hand straight back rather than adopt. See `forget`.
-   *
-   * Counted against outstanding replies rather than held against the session,
-   * for the reason above: `attach` / `forget` / `attach` inside one round-trip
-   * produces two `attached`, and exactly the first of them belongs to nobody.
+   * Requests on the wire, reqId -> the session asked for (`null` for a
+   * spawn, whose session does not exist yet). Cleared by `teardown`:
+   * replies do not survive their socket.
    */
-  private refused = new Map<string, number>()
+  private pending = new Map<number, string | null>()
+
+  /**
+   * Requests whose reply should be handed straight back rather than adopted
+   * — a view let go before the answer arrived. See `abandon` and `forget`.
+   */
+  private abandoned = new Set<number>()
 
   /** A `list` asked for while the socket was down. See `list`. */
   private listOwed = false
@@ -186,6 +178,7 @@ export class FlueClient {
   private sessionsListeners = new Emitter<[SessionInfo[]]>()
   private errorListeners = new Emitter<[ErrorMsg]>()
   private statusListeners = new Emitter<[ConnStatus]>()
+  private goneListeners = new Emitter<[string]>()
 
   constructor(
     private url: string,
@@ -214,6 +207,17 @@ export class FlueClient {
   }
   onStatus(cb: (s: ConnStatus) => void) {
     return this.statusListeners.add(cb)
+  }
+
+  /**
+   * A session the daemon answered `not_found` for. The client has already
+   * dropped it from the reattach plan; consumers only need to stop showing
+   * it. Fired for the mount-time attach and for a reattach replayed after a
+   * reconnect alike — the client resolves the reqId, so consumers never
+   * have to.
+   */
+  onSessionGone(cb: (id: string) => void) {
+    return this.goneListeners.add(cb)
   }
 
   /**
@@ -271,36 +275,37 @@ export class FlueClient {
   }
 
   /**
-   * Ask for a new session.
-   *
-   * Dropped rather than held when the socket is down: unlike `list` this
-   * starts a process, and one queued behind a ten-second backoff would appear
-   * minutes later at a screen nobody was looking at. Returns whether it went,
-   * so a caller need not infer that from `status`.
+   * Ask for a new session. Returns the reqId the reply will echo, or null
+   * when the socket was down — dropped rather than held, as before: a shell
+   * that appears minutes later at a screen nobody is looking at is worse
+   * than none.
    */
-  spawn(opts: { cwd?: string; cmd?: string[]; cols: number; rows: number }): boolean {
+  spawn(opts: { cwd?: string; cmd?: string[]; cols: number; rows: number }): number | null {
+    if (!this.ready || !this.sock) return null
     const { cols, rows, ...rest } = opts
-    return this.send({ type: 'spawn', ...rest, cols: dimension(cols), rows: dimension(rows) })
+    const reqId = this.nextReqId++
+    this.send({ type: 'spawn', ...rest, cols: dimension(cols), rows: dimension(rows), reqId })
+    this.pending.set(reqId, null)
+    return reqId
   }
 
   /**
    * Attach to a session and keep it attached across reconnects.
    *
    * Recorded before it is sent, so a socket that is not ready yet — or that
-   * drops before `attached` comes back — still replays this on open.
-   *
-   * One entry per session: attaching the same session twice gives two refs on
-   * the live connection but one plan entry, so only one survives a reconnect.
-   * See the class doc.
-   *
-   * A refusal already owed for this session is deliberately *not* cleared
-   * here. It was recorded against a reply that is still on the wire, and that
-   * reply is still nobody's — clearing it is what let a StrictMode remount
-   * adopt both answers and orphan the first ref.
+   * drops before `attached` comes back — still replays this on open. Each
+   * sent attach carries a fresh reqId; the daemon echoes it on the reply.
    */
   attach(id: string, lastSeq = 0) {
     this.wanted.set(id, lastSeq)
-    if (this.send({ type: 'attach', id, lastSeq })) this.count(this.pending, id, 1)
+    this.sendAttach(id, lastSeq)
+  }
+
+  private sendAttach(id: string, lastSeq: number) {
+    if (!this.ready || !this.sock) return
+    const reqId = this.nextReqId++
+    this.send({ type: 'attach', id, lastSeq, reqId })
+    this.pending.set(reqId, id)
   }
 
   /**
@@ -323,31 +328,29 @@ export class FlueClient {
   }
 
   /**
-   * Stop trying to reattach a session, without naming a ref. Final.
-   *
-   * The escape hatch for a view that never got one — an `attach` answered with
-   * `error{code:"not_found"}` leaves nothing to `detach`, and the error itself
-   * carries no id to match it to. Without this the plan would ask for that
-   * session on every reconnect, forever.
-   *
-   * "Final" is the part that takes work. Clearing the plan is not enough,
-   * because an `attached` for this session may already be on the wire: a view
-   * that unmounts inside the attach round-trip would have the reply re-seed
-   * the plan behind it and leave exactly the abandoned attachment this exists
-   * to prevent. So each reply still outstanding is refused, and a reply that
-   * lands afterwards is detached rather than adopted.
-   *
-   * Refusals are counted against replies that exist, never against the session
-   * as such. A forget with nothing in flight refuses nothing: otherwise a view
-   * that had already been answered would poison the next attach for that id,
-   * and a terminal that silently never attaches has no error to show.
+   * Disown one in-flight request. Its reply, when it arrives, is handed
+   * straight back (`detach`) and adopted by nobody — the exact mechanism
+   * that used to be a per-session refusal count, now naming the one reply
+   * it means. A reqId that is not in flight abandons nothing.
+   */
+  abandon(reqId: number) {
+    if (!this.pending.delete(reqId)) return
+    this.abandoned.add(reqId)
+  }
+
+  /**
+   * Stop trying to reattach a session, without naming a ref. Final: the
+   * plan entry goes, and every in-flight request for the session is
+   * abandoned, so a reply already on the wire cannot re-seed the plan.
    */
   forget(id: string) {
     this.wanted.delete(id)
-    const outstanding = this.pending.get(id) ?? 0
-    if (outstanding === 0) return
-    this.pending.delete(id)
-    this.count(this.refused, id, outstanding)
+    for (const [reqId, sid] of this.pending) {
+      if (sid === id) {
+        this.pending.delete(reqId)
+        this.abandoned.add(reqId)
+      }
+    }
   }
 
   sendInput(ref: number, bytes: Uint8Array) {
@@ -404,9 +407,7 @@ export class FlueClient {
       this.setStatus('open')
 
       this.send({ type: 'hello', ver: PROTOCOL_VERSION, caps: [...CAPS] })
-      for (const [id, lastSeq] of this.wanted) {
-        if (this.send({ type: 'attach', id, lastSeq })) this.count(this.pending, id, 1)
-      }
+      for (const [id, lastSeq] of this.wanted) this.sendAttach(id, lastSeq)
       if (this.listOwed) {
         this.listOwed = false
         this.send({ type: 'list' })
@@ -464,16 +465,15 @@ export class FlueClient {
   private handleControl(msg: ServerMessage) {
     switch (msg.type) {
       case 'attached': {
-        this.count(this.pending, msg.id, -1)
-        if ((this.refused.get(msg.id) ?? 0) > 0) {
-          // Asked for, then let go of before the answer arrived. Hand the ref
-          // straight back rather than adopting an attachment nobody is behind.
-          // One reply per refusal, so a second attach issued in the meantime
-          // — a StrictMode remount — is answered normally.
-          this.count(this.refused, msg.id, -1)
+        if (msg.reqId !== undefined && this.abandoned.delete(msg.reqId)) {
+          // Asked for, then let go of before the answer arrived. Hand the
+          // ref straight back rather than adopting an attachment nobody is
+          // behind. Named by reqId, so a second attach issued in the
+          // meantime — a StrictMode remount — is answered normally.
           this.send({ type: 'detach', ref: msg.ref })
           break
         }
+        if (msg.reqId !== undefined) this.pending.delete(msg.reqId)
         // seq is the offset of the first byte about to arrive, so it is the
         // right starting point whether this is a delta or a post-eviction
         // snapshot. `truncated` is passed through untouched; deciding to clear
@@ -522,9 +522,21 @@ export class FlueClient {
         this.sizeListeners.emit(msg)
         break
 
-      case 'error':
+      case 'error': {
+        if (msg.reqId !== undefined) {
+          this.abandoned.delete(msg.reqId)
+          const sid = this.pending.get(msg.reqId)
+          this.pending.delete(msg.reqId)
+          if (msg.code === 'not_found' && typeof sid === 'string') {
+            // The daemon does not know the session, so the plan must stop
+            // asking for it — on this connection and every next one.
+            this.wanted.delete(sid)
+            this.goneListeners.emit(sid)
+          }
+        }
         this.errorListeners.emit(msg)
         break
+      }
 
       case 'welcome':
         break
@@ -574,19 +586,10 @@ export class FlueClient {
     // refOwner is deliberately left alone: it is what lets a view that unmounts
     // during the outage still name the session its ref stood for.
     this.attachments.clear()
-    // Both of these count replies that are on the wire, and this socket is the
-    // wire. Carrying either into the next connection would refuse, or expect,
-    // an answer to a question nobody there was asked.
+    // Both name replies that were on the wire, and this socket was the wire.
     this.pending.clear()
-    this.refused.clear()
+    this.abandoned.clear()
     sock?.close()
-  }
-
-  /** Add to a counter, dropping the key once it reaches zero. */
-  private count(on: Map<string, number>, id: string, by: number) {
-    const next = (on.get(id) ?? 0) + by
-    if (next <= 0) on.delete(id)
-    else on.set(id, next)
   }
 
   private scheduleRetry() {

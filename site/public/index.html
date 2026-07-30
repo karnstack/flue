@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>flue — your terminal, as a browser tab</title>
+  <meta name="description" content="Your terminal, as a browser tab. Reachable from any device you own.">
+  <meta property="og:title" content="flue — your terminal, as a browser tab" />
+  <meta property="og:description" content="Reachable from any device you own. Open source, one static binary, no hosted service." />
+  <meta property="og:url" content="https://flue.sh/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="https://flue.sh/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <span class="wordmark">flue</span>
+    <a href="https://github.com/karnstack/flue">GitHub</a>
+  </header>
+  <main>
+    <section id="hero">
+      <h1>Your terminal, as a browser tab.</h1>
+      <p class="subline">Reachable from any device you own.</p>
+      <div class="install">
+        <pre><code id="install-cmd">curl -fsSL https://flue.sh/install.sh | sh</code></pre>
+        <button id="copy-install" type="button" hidden>copy</button>
+      </div>
+      <p class="alt">or <code>brew install karnstack/tap/flue</code></p>
+      <p class="platforms">macOS · Linux · WSL — one static binary, MIT.</p>
+    </section>
+
+    <section id="why">
+      <h2>Why</h2>
+      <p>Two apps get used all day: a terminal and a browser. The cost is switching between them. Browsers have tab groups, tab search, splits, session restore, and URL addressing. Terminals have none of it and cannot join in.</p>
+      <p>flue makes a terminal session a browser tab, so it inherits all of that for free — and makes the same live session reachable from a phone, an iPad, or another laptop.</p>
+    </section>
+
+    <section id="shape">
+      <h2>The shape of it</h2>
+      <p>A small Go daemon owns the PTYs and their scrollback. A web app renders them. Closing the tab detaches; the build keeps running. Reattach and it replays what you missed. Attach from two devices and they mirror live — typing on the phone shows up in the laptop's browser, and the phone's 40 columns don't shrink the laptop.</p>
+      <p>One static binary. No Node, no Python, no toolchain, ever. The CLI is four commands — enable, disable, status, open — and everything after them happens in the browser.</p>
+      <figure class="terminal" role="img"
+        aria-label="A terminal session: flue enable installs the login service, starts the daemon on 127.0.0.1:7717, and opens the UI.">
+        <pre><span class="prompt">$</span> flue enable
+
+  ✓ login service installed
+  ✓ daemon running on 127.0.0.1:7717
+  opening http://127.0.0.1:7717
+
+<span class="prompt">$</span> <span class="cursor"></span></pre>
+      </figure>
+    </section>
+
+    <section id="remote">
+      <h2>Reaching it from elsewhere</h2>
+      <p>Remote access is opt-in and provider-agnostic — designed, not yet built. flue will have no preferred option; the UI will order providers by what you already have installed.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">provider</th>
+              <th scope="col">what it needs</th>
+              <th scope="col">intermediary</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>local</td>
+              <td>nothing, always on</td>
+              <td>none</td>
+            </tr>
+            <tr>
+              <td>Tailscale</td>
+              <td>Tailscale on each device</td>
+              <td>none, often direct peer-to-peer</td>
+            </tr>
+            <tr>
+              <td>Cloudflare</td>
+              <td>a Cloudflare account, free tier is enough</td>
+              <td>your own Worker, ciphertext only</td>
+            </tr>
+            <tr>
+              <td>Cloudflare + your domain</td>
+              <td>a domain on Cloudflare</td>
+              <td>Cloudflare</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Anything that passes through an intermediary is end-to-end encrypted by default — Noise IK, with the daemon's key pinned at pairing — so a relay forwards ciphertext and can never read your shell.</p>
+    </section>
+
+    <section id="principle">
+      <h2>There is no hosted service.</h2>
+      <p>No flue account, no flue server, no billing. Every remote path runs on infrastructure you own. flue.sh is docs and downloads, never part of the data path.</p>
+    </section>
+  </main>
+  <footer>
+    <p>MIT · © 2026 karnstack</p>
+    <a href="https://github.com/karnstack/flue">GitHub</a>
+  </footer>
+  <script>
+    // Progressive enhancement: the install command is plain selectable text
+    // without JS; this only reveals a copy button.
+    (function () {
+      var btn = document.getElementById('copy-install')
+      var cmd = document.getElementById('install-cmd')
+      if (!btn || !cmd || !navigator.clipboard) return
+      btn.hidden = false
+      btn.addEventListener('click', function () {
+        navigator.clipboard.writeText(cmd.textContent.trim()).then(function () {
+          btn.textContent = 'copied'
+          setTimeout(function () { btn.textContent = 'copy' }, 1500)
+        })
+      })
+    })()
+  </script>
+</body>
+</html>

@@ -195,6 +195,7 @@ describe('control message golden file', () => {
       'exit',
       'sizeChanged',
       'error',
+      'errorForRequest',
     ])
   })
 
@@ -215,12 +216,18 @@ describe('control message golden file', () => {
       cmd: ['zsh', '-l'],
       cols: 120,
       rows: 40,
+      reqId: 6,
     }
     expect(fixture('spawn')).toStrictEqual(want)
   })
 
   it('decodes attach', () => {
-    const want: AttachMsg = { type: 'attach', id: 'a1b2c3d4e5f60718', lastSeq: 4096 }
+    const want: AttachMsg = {
+      type: 'attach',
+      id: 'a1b2c3d4e5f60718',
+      lastSeq: 4096,
+      reqId: 7,
+    }
     expect(fixture('attach')).toStrictEqual(want)
   })
 
@@ -291,8 +298,10 @@ describe('control message golden file', () => {
       rows: 40,
       title: 'zsh',
       seq: 4096,
+      head: 8192,
       truncated: false,
       primary: true,
+      reqId: 7,
     }
     expect(fixture('attached')).toStrictEqual(want)
   })
@@ -306,6 +315,7 @@ describe('control message golden file', () => {
       rows: 40,
       title: 'zsh',
       seq: 99000,
+      head: 99512,
       truncated: true,
       primary: false,
     }
@@ -329,6 +339,16 @@ describe('control message golden file', () => {
       msg: 'spawn requires an authenticated connection',
     }
     expect(fixture('error')).toStrictEqual(want)
+  })
+
+  it('decodes an error answering a request', () => {
+    const want: ErrorMsg = {
+      type: 'error',
+      code: 'not_found',
+      msg: 'no such session',
+      reqId: 7,
+    }
+    expect(fixture('errorForRequest')).toStrictEqual(want)
   })
 })
 
@@ -398,6 +418,7 @@ describe('FlueClient output and sequencing', () => {
       rows: 24,
       title: '',
       seq: 100,
+      head: 100,
       truncated: false,
       primary: true,
     })
@@ -420,6 +441,7 @@ describe('FlueClient output and sequencing', () => {
       rows: 24,
       title: '',
       seq: 5000,
+      head: 5000,
       truncated: true,
       primary: false,
     })
@@ -456,6 +478,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -470,7 +493,7 @@ describe('FlueClient reconnect', () => {
     sockets[1]!.open()
 
     const attach = sockets[1]!.sentControl().find((m) => m.type === 'attach')
-    expect(attach).toStrictEqual({ type: 'attach', id: 's1', lastSeq: 5 })
+    expect(attach).toStrictEqual({ type: 'attach', id: 's1', lastSeq: 5, reqId: 2 })
   })
 
   it('sends attach exactly once when it is issued before the socket opens', () => {
@@ -480,7 +503,7 @@ describe('FlueClient reconnect', () => {
     sockets[0]!.open()
 
     expect(sockets[0]!.sentControl().filter((m) => m.type === 'attach')).toStrictEqual([
-      { type: 'attach', id: 's1', lastSeq: 12 },
+      { type: 'attach', id: 's1', lastSeq: 12, reqId: 1 },
     ])
   })
 
@@ -500,6 +523,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -532,6 +556,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -563,6 +588,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: 'zsh',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -573,7 +599,7 @@ describe('FlueClient reconnect', () => {
     sockets[1]!.open()
 
     expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toStrictEqual([
-      { type: 'attach', id: 'fresh', lastSeq: 2 },
+      { type: 'attach', id: 'fresh', lastSeq: 2, reqId: 2 },
     ])
     // And the spawn is not replayed, or the reconnect would leave two shells.
     expect(sockets[1]!.sentControl().filter((m) => m.type === 'spawn')).toEqual([])
@@ -600,6 +626,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -623,7 +650,7 @@ describe('FlueClient reconnect', () => {
     c.connect()
     sockets[0]!.open()
     c.attach('gone', 0)
-    sockets[0]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' })
+    sockets[0]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 1 })
     c.forget('gone')
 
     sockets[0]!.close()
@@ -654,6 +681,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -665,6 +693,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: false,
     })
@@ -681,6 +710,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -692,7 +722,7 @@ describe('FlueClient reconnect', () => {
     await vi.advanceTimersByTimeAsync(250)
     sockets[2]!.open()
     expect(sockets[2]!.sentControl().filter((m) => m.type === 'attach')).toStrictEqual([
-      { type: 'attach', id: 's2', lastSeq: 0 },
+      { type: 'attach', id: 's2', lastSeq: 0, reqId: 4 },
     ])
   })
 
@@ -719,8 +749,10 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
+      reqId: 1,
     })
 
     // Adopted by nobody, and handed straight back.
@@ -759,8 +791,10 @@ describe('FlueClient reconnect', () => {
         rows: 24,
         title: '',
         seq: 0,
+        head: 0,
         truncated: false,
         primary: ref === 1,
+        reqId: ref,
       })
     }
 
@@ -788,6 +822,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -802,6 +837,7 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -837,8 +873,10 @@ describe('FlueClient reconnect', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
+      reqId: 2,
     })
 
     expect(seen).toEqual([1])
@@ -865,6 +903,7 @@ describe('FlueClient reconnect', () => {
         rows: 24,
         title: '',
         seq: 0,
+        head: 0,
         truncated: false,
         primary: ref === 1,
       })
@@ -878,7 +917,7 @@ describe('FlueClient reconnect', () => {
     sockets[1]!.open()
 
     expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toStrictEqual([
-      { type: 'attach', id: 's1', lastSeq: 4 },
+      { type: 'attach', id: 's1', lastSeq: 4, reqId: 3 },
     ])
   })
 
@@ -1031,6 +1070,7 @@ describe('FlueClient sending', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: true,
     })
@@ -1113,7 +1153,7 @@ describe('FlueClient sending', () => {
 
     expect(sock.sentControl().slice(1)).toStrictEqual([
       { type: 'resize', ref: 1, cols: 80, rows: 24, primary: true },
-      { type: 'spawn', cols: 1, rows: 65535 },
+      { type: 'spawn', cols: 1, rows: 65535, reqId: 1 },
     ])
   })
 
@@ -1159,9 +1199,9 @@ describe('FlueClient sending', () => {
   it('reports whether a spawn went, so the caller need not infer it', () => {
     const { c, sockets } = harness()
     c.connect()
-    expect(c.spawn({ cols: 80, rows: 24 })).toBe(false)
+    expect(c.spawn({ cols: 80, rows: 24 })).toBeNull()
     sockets[0]!.open()
-    expect(c.spawn({ cols: 80, rows: 24 })).toBe(true)
+    expect(c.spawn({ cols: 80, rows: 24 })).toBe(1)
   })
 
   it('drops rather than holds a spawn issued while the socket is down', async () => {
@@ -1203,7 +1243,7 @@ describe('FlueClient sending', () => {
 
     expect(sock.sentControl().slice(1)).toStrictEqual([
       { type: 'list' },
-      { type: 'spawn', cwd: '/tmp', cmd: ['zsh', '-l'], cols: 120, rows: 40 },
+      { type: 'spawn', cwd: '/tmp', cmd: ['zsh', '-l'], cols: 120, rows: 40, reqId: 1 },
       { type: 'resize', ref: 3, cols: 200, rows: 50, primary: true },
       { type: 'signal', ref: 3, sig: 'SIGINT' },
       { type: 'close', ref: 3 },
@@ -1256,6 +1296,7 @@ describe('FlueClient control messages', () => {
       rows: 24,
       title: '',
       seq: 0,
+      head: 0,
       truncated: false,
       primary: false,
     })
@@ -1316,6 +1357,187 @@ describe('FlueClient control messages', () => {
     c.onError((e) => errs.push(e.code))
     sock.emitControl({ type: 'error', code: 'lagged', msg: 'fell behind' })
     expect(errs).toEqual(['lagged'])
+  })
+})
+
+describe('FlueClient correlation', () => {
+  it('numbers attach and spawn requests in send order', () => {
+    const { c, sock } = connected()
+    c.attach('s1', 0)
+    const reqId = c.spawn({ cols: 80, rows: 24 })
+
+    expect(sock.sentControl().slice(1)).toStrictEqual([
+      { type: 'attach', id: 's1', lastSeq: 0, reqId: 1 },
+      { type: 'spawn', cols: 80, rows: 24, reqId: 2 },
+    ])
+    expect(reqId).toBe(2)
+  })
+
+  it('returns null for a spawn the socket could not carry', () => {
+    const { c } = harness()
+    c.connect()
+    expect(c.spawn({ cols: 80, rows: 24 })).toBeNull()
+  })
+
+  it('hands back an abandoned reply and adopts nothing', () => {
+    const { c, sock } = connected()
+    const seen: number[] = []
+    c.onAttached((a) => seen.push(a.ref))
+
+    const reqId = c.spawn({ cols: 80, rows: 24 })!
+    c.abandon(reqId)
+    sock.emitControl({
+      type: 'attached',
+      ref: 5,
+      id: 'orphan',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      head: 0,
+      truncated: false,
+      primary: true,
+      reqId,
+    })
+
+    expect(seen).toEqual([])
+    expect(c.lastSeqFor(5)).toBeUndefined()
+    expect(sock.sentControl()).toContainEqual({ type: 'detach', ref: 5 })
+  })
+
+  it('abandons once: a second reply for the session is adopted normally', () => {
+    const { c, sock } = connected()
+    const seen: number[] = []
+    c.onAttached((a) => seen.push(a.ref))
+
+    c.attach('s1', 0) // reqId 1
+    c.forget('s1') // abandons reqId 1
+    c.attach('s1', 0) // reqId 2
+    for (const [ref, reqId] of [
+      [1, 1],
+      [2, 2],
+    ] as const) {
+      sock.emitControl({
+        type: 'attached',
+        ref,
+        id: 's1',
+        cols: 80,
+        rows: 24,
+        title: '',
+        seq: 0,
+        head: 0,
+        truncated: false,
+        primary: ref === 1,
+        reqId,
+      })
+    }
+
+    expect(seen).toEqual([2])
+    expect(sock.sentControl()).toContainEqual({ type: 'detach', ref: 1 })
+    expect(sock.sentControl()).not.toContainEqual({ type: 'detach', ref: 2 })
+  })
+
+  it('announces a session the daemon does not know, by id', () => {
+    const { c, sock } = connected()
+    const gone: string[] = []
+    c.onSessionGone((id) => gone.push(id))
+
+    c.attach('dead', 0) // reqId 1
+    sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 1 })
+
+    expect(gone).toEqual(['dead'])
+  })
+
+  it('drops a not_found session from the plan without a forget', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    c.attach('dead', 0) // reqId 1
+    sockets[0]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 1 })
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().filter((m) => m.type === 'attach')).toEqual([])
+  })
+
+  it('announces not_found for a reattach replayed after a reconnect', async () => {
+    // A daemon restart forgets every session; the replayed attach carries a
+    // reqId nothing in the tab holds, so the client itself has to resolve it
+    // back to the session. This is the case the old ref-is-null heuristic in
+    // the terminal could not cover exactly.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+    const gone: string[] = []
+    c.onSessionGone((id) => gone.push(id))
+
+    c.connect()
+    sockets[0]!.open()
+    c.attach('s1', 0) // reqId 1
+    sockets[0]!.emitControl({
+      type: 'attached',
+      ref: 1,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      head: 0,
+      truncated: false,
+      primary: true,
+      reqId: 1,
+    })
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open() // the plan replays attach with reqId 2
+    sockets[1]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 2 })
+
+    expect(gone).toEqual(['s1'])
+  })
+
+  it('does not abandon a request that was already answered', () => {
+    const { c, sock } = connected()
+    const seen: number[] = []
+    c.onAttached((a) => seen.push(a.ref))
+
+    c.attach('s1', 0) // reqId 1
+    sock.emitControl({
+      type: 'attached',
+      ref: 1,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      head: 0,
+      truncated: false,
+      primary: true,
+      reqId: 1,
+    })
+    c.forget('s1') // nothing in flight: must arm nothing
+
+    c.attach('s1', 0) // reqId 2
+    sock.emitControl({
+      type: 'attached',
+      ref: 2,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      head: 0,
+      truncated: false,
+      primary: true,
+      reqId: 2,
+    })
+
+    expect(seen).toEqual([1, 2])
   })
 })
 

@@ -1,3 +1,4 @@
+import { StrictMode } from 'react'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
@@ -43,14 +44,26 @@ function info(over: Partial<SessionInfo> & { id: string }): SessionInfo {
  * The socket is opened *after* the first render on purpose: a screen reached by
  * navigating mounts into a connection that is already established, but the very
  * first paint of the tab does not, and `list` has to survive both.
+ *
+ * `strict` wraps only `SessionsRoute` itself, not the provider around it —
+ * `FlueClientProvider`'s own StrictMode behaviour is provider.test.tsx's to
+ * cover. This isolates the double mount to the one component whose spawn
+ * timing is under test here.
  */
-async function mountSessions({ open = true } = {}) {
+async function mountSessions({ open = true, strict = false } = {}) {
   const { client, sockets } = fakeClient()
+  const routeComponent = strict
+    ? () => (
+        <StrictMode>
+          <SessionsRoute />
+        </StrictMode>
+      )
+    : SessionsRoute
 
   const rootRoute = createRootRoute({ component: () => <Outlet /> })
   const routeTree = rootRoute.addChildren([
     ...['/', '/sessions'].map((path) =>
-      createRoute({ getParentRoute: () => rootRoute, path, component: SessionsRoute }),
+      createRoute({ getParentRoute: () => rootRoute, path, component: routeComponent }),
     ),
     ...['/devices', '/settings', '/d/$deviceId/s/$sessionId'].map((path) =>
       createRoute({ getParentRoute: () => rootRoute, path, component: () => null }),
@@ -163,7 +176,7 @@ describe('SessionsRoute', () => {
 
     await userEvent.click(newSession())
 
-    expect(sock.ofType('spawn')).toEqual([{ type: 'spawn', cols: 80, rows: 24 }])
+    expect(sock.ofType('spawn')).toEqual([{ type: 'spawn', cols: 80, rows: 24, reqId: 1 }])
   })
 
   it('hands back the attachment the daemon gave it, then opens the new session', async () => {
@@ -174,7 +187,7 @@ describe('SessionsRoute', () => {
     const { sock, router } = await mountSessions()
     await userEvent.click(newSession())
 
-    act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1' })))
+    act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1', reqId: 1 })))
 
     expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 4 }])
     await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh1'))
@@ -196,7 +209,7 @@ describe('SessionsRoute', () => {
     const { sock, router } = await mountSessions()
     await userEvent.click(newSession())
 
-    act(() => sock.emitControl(attached({ ref: 1, id: 'mine' })))
+    act(() => sock.emitControl(attached({ ref: 1, id: 'mine', reqId: 1 })))
     act(() => sock.emitControl(attached({ ref: 2, id: 'not-mine' })))
 
     expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 1 }])
@@ -218,7 +231,7 @@ describe('SessionsRoute', () => {
   it('lets the user try again once a spawn has been answered', async () => {
     const { sock } = await mountSessions()
     await userEvent.click(newSession())
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope' }))
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 1 }))
 
     await userEvent.click(newSession())
 
@@ -235,7 +248,7 @@ describe('SessionsRoute', () => {
 
     await goTo('/settings')
     expect(onScreen()).toBe(false)
-    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan' })))
+    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan', reqId: 1 })))
 
     expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 7 }])
   })
@@ -249,7 +262,7 @@ describe('SessionsRoute', () => {
     const { sock, sockets, goTo } = await mountSessions()
     await userEvent.click(newSession())
     await goTo('/settings')
-    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan' })))
+    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan', reqId: 1 })))
 
     act(() => sock.close())
     await act(() => vi.advanceTimersByTimeAsync(125))
@@ -271,7 +284,7 @@ describe('SessionsRoute', () => {
     await userEvent.click(newSession())
     await goTo('/settings')
 
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'fork: retry' }))
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'fork: retry', reqId: 1 }))
     act(() => sock.emitControl(attached({ ref: 1, id: 'a-terminal' })))
 
     expect(sock.ofType('detach')).toEqual([])
@@ -307,10 +320,10 @@ describe('SessionsRoute', () => {
     await goTo('/sessions')
     await userEvent.click(newSession())
 
-    act(() => sock.emitControl(attached({ ref: 1, id: 'first' })))
+    act(() => sock.emitControl(attached({ ref: 1, id: 'first', reqId: 1 })))
     expect(router.state.location.pathname).toBe('/sessions')
 
-    act(() => sock.emitControl(attached({ ref: 2, id: 'second' })))
+    act(() => sock.emitControl(attached({ ref: 2, id: 'second', reqId: 2 })))
 
     expect(sock.ofType('detach')).toEqual([
       { type: 'detach', ref: 1 },
@@ -324,7 +337,12 @@ describe('SessionsRoute', () => {
     await userEvent.click(newSession())
 
     act(() =>
-      sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'chdir /nope: no such file' }),
+      sock.emitControl({
+        type: 'error',
+        code: 'spawn_failed',
+        msg: 'chdir /nope: no such file',
+        reqId: 1,
+      }),
     )
 
     expect(screen.getByRole('status').textContent).toContain('chdir /nope')
@@ -347,12 +365,25 @@ describe('SessionsRoute', () => {
     // stayed on the books, the next reattach to land would be mistaken for it.
     const { sock, router } = await mountSessions()
     await userEvent.click(newSession())
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope' }))
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 1 }))
 
     act(() => sock.emitControl(attached({ ref: 6, id: 'unrelated' })))
 
     expect(sock.ofType('detach')).toEqual([])
     expect(router.state.location.pathname).toBe('/sessions')
+  })
+
+  it('ignores a spawn_failed that answers someone else’s request', async () => {
+    // reqId is the whole point: an error naming another request must not
+    // write off this screen's debt or show its notice.
+    const { sock, router } = await mountSessions()
+    await userEvent.click(newSession())
+
+    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 99 }))
+    expect(screen.getByRole('status').textContent).not.toContain('nope')
+
+    act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1', reqId: 1 })))
+    await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh1'))
   })
 
   it('reports a lost daemon rather than showing an empty screen', async () => {
@@ -405,5 +436,71 @@ describe('SessionsRoute', () => {
 
     expect(filled).toHaveLength(1)
     expect(filled[0]!.textContent).toBe('New session')
+  })
+
+  describe('the cwd flue open hands over', () => {
+    afterEach(() => history.replaceState(null, '', '/'))
+
+    it('spawns a session in that directory and navigates to it', async () => {
+      history.replaceState(null, '', '/?cwd=%2FUsers%2Fkarn%2Fproj')
+      const { sock, router } = await mountSessions()
+
+      expect(sock.ofType('spawn')).toEqual([
+        { type: 'spawn', cwd: '/Users/karn/proj', cols: 80, rows: 24, reqId: 1 },
+      ])
+      expect(location.search).toBe('') // consumed, so a reload spawns nothing
+
+      act(() => sock.emitControl(attached({ ref: 1, id: 'fresh', reqId: 1 })))
+      await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh'))
+    })
+
+    it('holds the spawn until the socket opens', async () => {
+      history.replaceState(null, '', '/?cwd=%2Ftmp')
+      const { sock } = await mountSessions({ open: false })
+      expect(sock.ofType('spawn')).toEqual([])
+
+      act(() => sock.open())
+
+      expect(sock.ofType('spawn')).toEqual([
+        { type: 'spawn', cwd: '/tmp', cols: 80, rows: 24, reqId: 1 },
+      ])
+    })
+
+    it('spawns nothing when no cwd was handed over', async () => {
+      const { sock } = await mountSessions()
+      expect(sock.ofType('spawn')).toEqual([])
+    })
+
+    it('never spawns for a screen the user navigated away from before the socket opened', async () => {
+      // The cwd is held on a ref, not sent from a mount effect eagerly — so an
+      // unmount before `onStatus('open')` ever fires must leave nothing armed
+      // to send once the connection this screen no longer owns comes up.
+      history.replaceState(null, '', '/?cwd=%2Ftmp')
+      const { sock, unmount } = await mountSessions({ open: false })
+
+      unmount()
+      act(() => sock.open())
+
+      expect(sock.ofType('spawn')).toEqual([])
+    })
+
+    it('spawns exactly once under a StrictMode double mount, cold', async () => {
+      // The mount effect that carries the cwd spawn double-fires under
+      // StrictMode exactly like every other effect here, so this is the one
+      // place the reasoning in SessionsRoute's docstring is checked rather
+      // than assumed: the URL param is consumed on the first render only, and
+      // whichever of the two mounts survives is the one whose `onStatus`
+      // listener answers `open`.
+      history.replaceState(null, '', '/?cwd=%2FUsers%2Fkarn%2Fproj')
+      const { sock } = await mountSessions({ open: false, strict: true })
+      expect(sock.ofType('spawn')).toEqual([])
+
+      act(() => sock.open())
+
+      expect(sock.ofType('spawn')).toEqual([
+        { type: 'spawn', cwd: '/Users/karn/proj', cols: 80, rows: 24, reqId: 1 },
+      ])
+      expect(location.search).toBe('') // taken on the first render, not the second
+    })
   })
 })

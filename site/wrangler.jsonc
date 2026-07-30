@@ -1,0 +1,17 @@
+// flue.sh — the landing page plus install.sh, served as Cloudflare Worker
+// static assets. Assets-only: no worker script. install.sh is copied in at
+// deploy time from scripts/install.sh by `make site-deploy`; the copy is
+// gitignored so the installer has one source of truth.
+//
+// www.flue.sh cannot be redirected from an assets-only worker; that is a
+// Cloudflare dashboard Redirect Rule (manual follow-up, see the site plan).
+{
+  "name": "flue-sh",
+  "compatibility_date": "2026-07-30",
+  "assets": {
+    "directory": "./public"
+  },
+  // Cutover (plan Task 5): custom domain flue.sh, workers.dev disabled.
+  "workers_dev": false,
+  "routes": [{ "pattern": "flue.sh", "custom_domain": true }]
+}
