@@ -1848,6 +1848,18 @@ func waitForLog(t *testing.T, buf *syncBuffer, want string) {
 	t.Fatalf("log never contained %q; log so far:\n%s", want, buf.String())
 }
 
+// logLineContains reports whether some line of buf that contains marker also
+// contains want — so a record's own fields can be asserted on, rather than
+// the whole log, which may hold other records carrying the same field.
+func logLineContains(buf *syncBuffer, marker, want string) bool {
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, marker) && strings.Contains(line, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestAuditLogsARejectedRequest covers the middleware path — the auth
 // decision local.Auth.Middleware makes for every API and UI request.
 func TestAuditLogsARejectedRequest(t *testing.T) {
@@ -1879,6 +1891,33 @@ func TestAuditLogsARejectedUpgrade(t *testing.T) {
 	waitForLog(t, buf, "path=/ws")
 }
 
+// TestAuditLogsARejectedUpgradeFetchSite covers the fourth auth-decision
+// site: requireSameOriginFetchSite in handleWS, which runs after checkAuth
+// has already passed. A valid token is not enough to reach it — it must be
+// exercised with one, or the rejection would be attributed to checkAuth
+// instead and this branch would go untested.
+func TestAuditLogsARejectedUpgradeFetchSite(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	c, _, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Sec-Fetch-Site": []string{"none"},
+			local.HeaderName: []string{tok},
+		},
+	})
+	if err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("dial with Sec-Fetch-Site: none succeeded")
+	}
+
+	waitForLog(t, buf, "auth rejected")
+	waitForLog(t, buf, "path=/ws")
+	if !strings.Contains(buf.String(), "peer=") {
+		t.Fatalf("rejection logged without the resolved peer:\n%s", buf.String())
+	}
+}
+
 func TestAuditLogsARejectedMint(t *testing.T) {
 	ts, _, buf := auditServer(t)
 
@@ -1902,9 +1941,15 @@ func TestAuditLogsAttachAndDetach(t *testing.T) {
 	c, ref := attach(t, ts, s.ID())
 	waitForLog(t, buf, "msg=attach")
 	waitForLog(t, buf, "session="+s.ID())
+	if !logLineContains(buf, "msg=attach", "peer=") {
+		t.Fatalf("attach logged without the resolved peer:\n%s", buf.String())
+	}
 
 	writeControl(t, c, wire.Detach{Ref: ref})
 	waitForLog(t, buf, "msg=detach")
+	if !logLineContains(buf, "msg=detach", "peer=") {
+		t.Fatalf("detach logged without the resolved peer:\n%s", buf.String())
+	}
 }
 
 // TestAuditDoesNotLogAnAcceptedRequest: the audit log names decisions, not

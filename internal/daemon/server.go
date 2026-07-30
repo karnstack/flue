@@ -425,6 +425,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// the allowlist; and that handshake's Sec-Fetch-Site is "same-site",
 	// which Task 5 already refuses.
 	if err := requireSameOriginFetchSite(r); err != nil {
+		s.logger().Warn("auth rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "err", err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
