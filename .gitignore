@@ -6,6 +6,8 @@ flued
 /flue
 # Where `make build` puts it.
 /bin/
+# goreleaser writes snapshot and release output here.
+/dist/
 .DS_Store
 .superpowers/
 # Deploy-time copy of scripts/install.sh; `make site-deploy` stages it.
