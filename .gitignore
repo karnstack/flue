@@ -12,3 +12,5 @@ flued
 .superpowers/
 # Deploy-time copy of scripts/install.sh; `make site-deploy` stages it.
 /site/public/install.sh
+# Wrangler's local cache from site deploys.
+/site/.wrangler/
