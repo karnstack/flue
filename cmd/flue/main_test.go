@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1114,5 +1115,30 @@ func TestAcquireStartLockTimesOutWhenHeld(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("acquireStartLock error = %q, want it to mention timing out", err.Error())
+	}
+}
+
+// --- status ---
+
+// TestStatusReportsTheStampedVersion pins the contract the release pipeline
+// and the brew formula test depend on: the first line of flue status is the
+// version, and an unstamped from-source build reports "dev". goreleaser
+// stamps main.version via -ldflags at release time; if this variable is
+// renamed or the line dropped, the formula's assert_match goes with it.
+func TestStatusReportsTheStampedVersion(t *testing.T) {
+	// An empty config dir means no runtime record: the "not running" branch,
+	// which must still open with the version line.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var buf bytes.Buffer
+	if err := statusTo(&buf); err != nil {
+		t.Fatalf("statusTo: %v", err)
+	}
+	out := buf.String()
+	if !strings.HasPrefix(out, "version:  dev\n") {
+		t.Fatalf("status output does not open with the version line:\n%s", out)
+	}
+	if !strings.Contains(out, "daemon:   not running") {
+		t.Fatalf("status output is missing the daemon line:\n%s", out)
 	}
 }

@@ -28,7 +28,12 @@ import (
 	"github.com/karnstack/flue/web"
 )
 
-const version = "0.1.0"
+// version is stamped at release time by goreleaser via
+// -ldflags "-s -w -X main.version={{.Version}}". A from-source build
+// reports "dev", which is the honest answer: it corresponds to no release.
+// It must stay a package-level var named exactly "version" — the ldflags
+// target is the string "main.version".
+var version = "dev"
 
 const defaultPort = 7717
 
@@ -504,12 +509,23 @@ func openURL(port int, handoff, cwd string) string {
 }
 
 func cmdStatus() error {
+	return statusTo(os.Stdout)
+}
+
+// statusTo writes the status report. The first line is always the version —
+// "dev" from source, the release version when stamped — because status is
+// the CLI's only diagnostics surface and there is deliberately no version
+// subcommand to put it on. The writer is the seam — same pattern as
+// loadToken and openBrowser — so the test reads the report without
+// capturing os.Stdout.
+func statusTo(w io.Writer) error {
+	fmt.Fprintf(w, "version:  %s\n", version)
 	if mgr, err := newServiceManager(); err == nil {
-		fmt.Println(serviceLine(mgr))
+		fmt.Fprintln(w, serviceLine(mgr))
 	}
 	recorded, _, ok := daemon.ReadRuntimeRecord()
 	if !ok {
-		fmt.Println("daemon: not running")
+		fmt.Fprintln(w, "daemon:   not running")
 		return nil
 	}
 	// A record naming a process that is gone, or one this user cannot signal,
@@ -517,7 +533,7 @@ func cmdStatus() error {
 	// the daemon it describes is not this user's to talk to.
 	port, ok := ourDaemon()
 	if !ok {
-		fmt.Printf("daemon: not running (stale runtime record for port %d)\n", recorded)
+		fmt.Fprintf(w, "daemon:   not running (stale runtime record for port %d)\n", recorded)
 		return nil
 	}
 	token, err := loadToken()
@@ -530,10 +546,10 @@ func cmdStatus() error {
 		return err
 	}
 
-	fmt.Printf("daemon:   running on 127.0.0.1:%d\n", port)
-	fmt.Printf("sessions: %d\n", len(infos))
+	fmt.Fprintf(w, "daemon:   running on 127.0.0.1:%d\n", port)
+	fmt.Fprintf(w, "sessions: %d\n", len(infos))
 	for _, s := range infos {
-		fmt.Printf("  %s  %-8s %s\n", s.ID, s.State, s.Cwd)
+		fmt.Fprintf(w, "  %s  %-8s %s\n", s.ID, s.State, s.Cwd)
 	}
 	return nil
 }
