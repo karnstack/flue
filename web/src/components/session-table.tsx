@@ -100,7 +100,7 @@ export function SessionTable({ sessions, onOpen }: SessionTableProps) {
       <div className="flex flex-col items-center py-12 text-center sm:py-16">
         <div className="w-full max-w-xs rounded-xl bg-zinc-950 px-4 py-3 text-left shadow-md shadow-zinc-950/10 ring-1 ring-white/10 dark:bg-zinc-900 dark:shadow-none">
           <p className="font-mono text-sm/6 text-zinc-300">
-            <span className="text-zinc-500">$</span> flue open
+            <span className="text-zinc-400">$</span> flue open
             <span
               aria-hidden="true"
               className="ml-2 inline-block h-[1.1em] w-[0.6em] align-text-bottom bg-amber-400 motion-safe:animate-blink"
@@ -180,7 +180,7 @@ export function SessionTable({ sessions, onOpen }: SessionTableProps) {
                     variant="ghost"
                     size="sm"
                     aria-label={`Open ${s.cwd}`}
-                    className="text-zinc-500 group-hover:text-zinc-950 dark:text-zinc-400 dark:group-hover:text-white"
+                    className="text-zinc-500 group-hover:text-foreground dark:text-zinc-400"
                     onClick={() => onOpen(s.id)}
                   >
                     Open

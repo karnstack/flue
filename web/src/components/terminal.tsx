@@ -377,9 +377,9 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
         // translucent ground and backdrop-blur keep it legible over whatever
         // the screen underneath was showing. The dot is the phase at a
         // glance: pulsing while an answer is still expected, still once the
-        // state is final and waiting will not change it. Amber is right for
-        // the two waiting states — on this screen there is no nav and no
-        // primary button, so the pill is the accent's one moment.
+        // state is final and waiting will not change it. Like the dot on a
+        // session row it stays neutral — waiting reads as motion, not
+        // colour, and amber's short list of jobs does not include this pill.
         <div
           role="status"
           className={cn(
@@ -393,7 +393,7 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
               className={cn(
                 'size-1.5 shrink-0 rounded-full',
                 phase === 'connecting' || phase === 'reconnecting'
-                  ? 'bg-amber-400 motion-safe:animate-pulse'
+                  ? 'bg-zinc-300 motion-safe:animate-pulse'
                   : 'bg-zinc-500',
               )}
             />
