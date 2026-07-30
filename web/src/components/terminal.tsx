@@ -373,17 +373,35 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
         className="flue-term-surface absolute top-0 left-0 origin-top-left"
       />
       {phase !== 'live' && (
+        // Dark in both themes, like the pane it floats over usually is; the
+        // translucent ground and backdrop-blur keep it legible over whatever
+        // the screen underneath was showing. The dot is the phase at a
+        // glance: pulsing while an answer is still expected, still once the
+        // state is final and waiting will not change it. Amber is right for
+        // the two waiting states — on this screen there is no nav and no
+        // primary button, so the pill is the accent's one moment.
         <div
           role="status"
           className={cn(
-            'absolute top-3 right-3 rounded-md px-2 py-1 text-base/6 font-medium sm:text-sm/6',
-            'bg-zinc-900 text-zinc-300 inset-ring inset-ring-white/10',
+            'absolute top-3 right-3 rounded-lg px-3 py-1.5 text-base/6 font-medium sm:text-sm/6',
+            'bg-zinc-950/80 text-zinc-100 shadow-lg ring-1 ring-white/10 backdrop-blur-sm',
           )}
         >
-          {NOTICE[phase]}
+          <span className="flex items-center gap-x-2">
+            <span
+              aria-hidden="true"
+              className={cn(
+                'size-1.5 shrink-0 rounded-full',
+                phase === 'connecting' || phase === 'reconnecting'
+                  ? 'bg-amber-400 motion-safe:animate-pulse'
+                  : 'bg-zinc-500',
+              )}
+            />
+            {NOTICE[phase]}
+          </span>
           {phase === 'connecting' && (
-            <span className="mt-0.5 block text-xs/5 font-normal text-zinc-500">
-              {TERMINAL_SHORTCUT_HINT} for focus mode
+            <span className="mt-0.5 block pl-3.5 text-xs/5 font-normal text-zinc-400">
+              <kbd className="font-mono">{TERMINAL_SHORTCUT_HINT}</kbd> for focus mode
             </span>
           )}
         </div>

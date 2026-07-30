@@ -1,5 +1,5 @@
 /**
- * Generate flue's PWA icon set.
+ * Generate flue's PWA icon set and its OG card.
  *
  * Run with `pnpm icons`. The outputs are committed, so a clean checkout
  * builds without running this; regenerate only when the mark or the tokens
@@ -168,6 +168,76 @@ function encodePng(width, height, rgba) {
   ])
 }
 
+/**
+ * The OG card: the mark centred on a full-bleed dark field, 1200x630 — the
+ * same card site/scripts/generate-og.mjs draws for flue.sh, so a link to the
+ * app and a link to the site wear one face.
+ *
+ * @param {number} width
+ * @param {number} height
+ * @param {number} mark The mark's square, in canvas pixels.
+ */
+function renderCard(width, height, mark) {
+  const SS = 4 // samples per axis
+  const originX = (width - mark) / 2
+  const originY = (height - mark) / 2
+
+  // The mark's reach in canvas pixels, padded by the round caps' half stroke
+  // plus a pixel of smoothed edge. Outside this box every pixel is plain
+  // field, written without sampling.
+  const xs = SEGMENTS.flatMap(([ax, , bx]) => [ax, bx])
+  const ys = SEGMENTS.flatMap(([, ay, , by]) => [ay, by])
+  const pad = (STROKE / 2) * mark + 1
+  const minX = Math.floor(originX + Math.min(...xs) * mark - pad)
+  const maxX = Math.ceil(originX + Math.max(...xs) * mark + pad)
+  const minY = Math.floor(originY + Math.min(...ys) * mark - pad)
+  const maxY = Math.ceil(originY + Math.max(...ys) * mark + pad)
+
+  const rgba = Buffer.alloc(width * height * 4)
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4
+
+      if (x < minX || x > maxX || y < minY || y > maxY) {
+        rgba[i] = canvas[0]
+        rgba[i + 1] = canvas[1]
+        rgba[i + 2] = canvas[2]
+        rgba[i + 3] = 255
+        continue
+      }
+
+      let sr = 0
+      let sg = 0
+      let sb = 0
+
+      for (let sy = 0; sy < SS; sy++) {
+        for (let sx = 0; sx < SS; sx++) {
+          const u = (x + (sx + 0.5) / SS - originX) / mark
+          const v = (y + (sy + 0.5) / SS - originY) / mark
+
+          let d = Infinity
+          for (const [ax, ay, bx, by] of SEGMENTS) {
+            d = Math.min(d, sdSegment(u, v, ax, ay, bx, by))
+          }
+          const colour = d <= STROKE / 2 ? accent : canvas
+
+          sr += colour[0]
+          sg += colour[1]
+          sb += colour[2]
+        }
+      }
+
+      rgba[i] = Math.round(sr / (SS * SS))
+      rgba[i + 1] = Math.round(sg / (SS * SS))
+      rgba[i + 2] = Math.round(sb / (SS * SS))
+      rgba[i + 3] = 255
+    }
+  }
+
+  return encodePng(width, height, rgba)
+}
+
 function svg() {
   const p = (n) => +(n * 100).toFixed(2)
   const [c0, c1, c2] = SEGMENTS
@@ -191,6 +261,7 @@ const targets = [
   ['icons/apple-touch-icon.png', render(180, 'full')],
   ['favicon-32.png', render(32, 'rounded')],
   ['favicon.svg', Buffer.from(svg(), 'utf8')],
+  ['og.png', renderCard(1200, 630, 360)],
 ]
 
 mkdirSync(join(OUT, 'icons'), { recursive: true })

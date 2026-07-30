@@ -1,3 +1,5 @@
+import { ArrowRightIcon } from '@heroicons/react/16/solid'
+
 import type { SessionInfo } from '@/client/protocol'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -73,7 +75,7 @@ function StateCell({ session }: { session: SessionInfo }) {
  * a utility to describe the problem.
  */
 const HEAD_CELL =
-  'py-2 text-base/6 font-medium whitespace-nowrap text-zinc-950 sm:text-sm/6 dark:text-white'
+  'py-2 font-mono text-xs/6 font-medium tracking-wide whitespace-nowrap text-zinc-500 dark:text-zinc-400'
 const BODY_CELL = 'py-2.5 text-base/6 sm:text-sm/6'
 
 /**
@@ -87,11 +89,31 @@ const BODY_CELL = 'py-2.5 text-base/6 sm:text-sm/6'
  */
 export function SessionTable({ sessions, onOpen }: SessionTableProps) {
   if (sessions.length === 0) {
+    /*
+     * The empty state quotes the landing page's terminal figure: a dark card
+     * carrying the one command that matters, ending in the emulator's own
+     * amber cursor. The card keeps its dark ground in both themes, exactly
+     * as a terminal does — in the light theme it is the landing's figure, in
+     * the dark one it sits a step above the canvas, as panels here do.
+     */
     return (
-      <p className="max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
-        No sessions yet. Run <code className="font-mono">flue open</code> in a directory, or start
-        one here.
-      </p>
+      <div className="flex flex-col items-center py-12 text-center sm:py-16">
+        <div className="w-full max-w-xs rounded-xl bg-zinc-950 px-4 py-3 text-left shadow-md shadow-zinc-950/10 ring-1 ring-white/10 dark:bg-zinc-900 dark:shadow-none">
+          <p className="font-mono text-sm/6 text-zinc-300">
+            <span className="text-zinc-500">$</span> flue open
+            <span
+              aria-hidden="true"
+              className="ml-2 inline-block h-[1.1em] w-[0.6em] align-text-bottom bg-amber-400 motion-safe:animate-blink"
+            />
+          </p>
+        </div>
+        <p className="mt-6 text-base/6 font-medium text-zinc-950 dark:text-white">
+          No sessions yet
+        </p>
+        <p className="mt-1 max-w-[40ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+          Run <code className="font-mono">flue open</code> in a directory, or start one here.
+        </p>
+      </div>
     )
   }
 
@@ -122,8 +144,17 @@ export function SessionTable({ sessions, onOpen }: SessionTableProps) {
           </thead>
           <tbody>
             {ordered(sessions).map((s) => (
-              <tr key={s.id} className="border-b border-zinc-950/5 dark:border-white/5">
-                <td className={cn(BODY_CELL, 'pr-3 text-zinc-950 dark:text-white')}>{s.cwd}</td>
+              // The hover surface is the same token the nav's items use, so
+              // "the pointer is here" reads identically everywhere. The row
+              // itself is not a control — Open is — but on a wide screen the
+              // wash is what ties a directory to its button.
+              <tr
+                key={s.id}
+                className="group border-b border-zinc-950/5 transition-colors hover:bg-zinc-950/5 dark:border-white/5 dark:hover:bg-white/5"
+              >
+                <td className={cn(BODY_CELL, 'pr-3 font-mono text-zinc-950 dark:text-white')}>
+                  {s.cwd}
+                </td>
                 <td className={cn(BODY_CELL, 'px-3 font-mono text-zinc-600 dark:text-zinc-400')}>
                   {s.cmd.join(' ')}
                 </td>
@@ -138,14 +169,26 @@ export function SessionTable({ sessions, onOpen }: SessionTableProps) {
                     without this a screen reader announces the same control as
                     many times as there are sessions, with nothing to tell them
                     apart.
+
+                    Quiet until the row is under the pointer, then at full
+                    contrast — ten boxed buttons in a column would be the
+                    loudest thing on the screen, and the affordance only needs
+                    to be certain for the row the reader is actually on.
+                    Keyboard focus keeps its own indicator at any time.
                   */}
                   <Button
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
                     aria-label={`Open ${s.cwd}`}
+                    className="text-zinc-500 group-hover:text-zinc-950 dark:text-zinc-400 dark:group-hover:text-white"
                     onClick={() => onOpen(s.id)}
                   >
                     Open
+                    <ArrowRightIcon
+                      data-icon="inline-end"
+                      aria-hidden="true"
+                      className="transition-transform group-hover/button:translate-x-0.5"
+                    />
                   </Button>
                 </td>
               </tr>
