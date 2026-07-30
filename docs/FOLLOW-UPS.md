@@ -3,61 +3,73 @@
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size.
 
-## 1. `reqId` on `attached` and `error`
+## Done
 
-Four places currently lean on "one connection answers in order", because a reply
-names no request: the client's `owed` counter, the sessions route's `refuseNext`,
-that route's own counter, and the terminal's `not_found` heuristic.
+Shipped on this branch. Kept here rather than deleted, so the review that found
+them still reads.
 
-Ordering is genuinely guaranteed today — the daemon handles frames serially on one
-read loop and everything leaves through a single FIFO outbox — so none of the four
-is reachable-wrong. They are fragile rather than broken.
+### 1. `reqId` on `attached` and `error`
 
-A correlation id collapses all four into one correct mechanism. **It must go on
-`wire.Error` as well as `wire.Attached`**: `not_found` is delivered as an error, so
-a field on `attached` alone leaves the fourth site a heuristic.
+Four places leaned on "one connection answers in order", because a reply named no
+request: the client's `owed` counter, the sessions route's `refuseNext`, that
+route's own counter, and the terminal's `not_found` heuristic. Ordering was
+genuinely guaranteed — the daemon handles frames serially on one read loop and
+everything leaves through a single FIFO outbox — so none of the four was
+reachable-wrong. They were fragile rather than broken.
 
-Do this before anything else grows a second consumer of `attach`.
+**Done** — a `reqId` now rides `wire.Attach`, `wire.Spawn`, `wire.Attached`, and
+`wire.Error` alike (the last mattered: `not_found` is delivered as an error, so a
+field on `attached` alone would have left that fourth site a heuristic). The
+daemon echoes it on the reply that answers the request; the client settles attach
+and spawn replies by `reqId`, not arrival order. The sessions route's `owed`
+counter and `refuseNext`, and the terminal's `not_found` heuristic, are retired.
 
-## 2. Device-query reinjection on a fresh attach
+### 2. Device-query reinjection on a fresh attach
 
-Every mount attaches with `lastSeq = 0` and replays the whole ring. That scrollback
-contains the shell's own DA / DECRQM / OSC 11 probe replies, and xterm answers them
-again — into the shell's stdin. Reproduced 4/4. It fires on reload, reopen, route
-navigation, and the second mirroring tab. A socket *reconnect* is unaffected, since
-the client advances its plan to `max(planned, lastSeq)` on teardown.
+Every mount attached with `lastSeq = 0` and replayed the whole ring. That
+scrollback contains the shell's own DA / DECRQM / OSC 11 probe replies, and xterm
+answered them again — into the shell's stdin. Reproduced 4/4: reload, reopen,
+route navigation, and the second mirroring tab. A socket *reconnect* was
+unaffected, since the client advances its plan to `max(planned, lastSeq)` on
+teardown.
 
-Fix: a `head` field on `attached`, computed as `sub.StartSeq + len(sub.Backlog)`
-from two adjacent lines in `conn.go`. The client mutes `onData` until it has
-consumed that many bytes.
+**Done** — `attached` now carries a `head` field, computed as `sub.StartSeq +
+len(sub.Backlog)` in `conn.go`. The client mutes `onData` until it has consumed
+that many bytes, advancing the count when the parser finishes rather than when
+the frame arrives, and guarding the counter with the attachment's epoch. Landed
+in one commit with the wire fixture, the TypeScript types, and
+`spec/protocol.md`.
 
-`head` beats gating on "the first output frame after `attached`", because the
-daemon omits that frame entirely when the backlog is empty — the gate would never
-open on a fresh spawn. With `head`, `head === seq` opens it immediately.
+### 3. Docs that were not true
 
-Land it in one commit with the wire fixture, the TypeScript types, and
-`spec/protocol.md`: the Go round-trip test compares decoded maps, so an untagged
-new field fails it.
+- ~~`README.md` Setup says `flue enable`. The CLI knows `serve`, `open`, `status`,
+  `help` — `flue enable` exits 2.~~ **Done** — `flue enable` and `flue disable`
+  are real subcommands now; `enable` installs the login service, starts the
+  daemon, and opens the UI.
+- ~~`usage()` says `flue open` spawns a session. It builds a URL and opens
+  `/`.~~ **Done** — `flue open <path>` spawns a session in that directory; the
+  claim and the behaviour match.
+- ~~`flue open <path>` puts `?cwd=` in that URL and nothing reads it, so it lands
+  on an empty session list rather than a shell in that directory.~~ **Done** —
+  the web app reads `?cwd=` on mount and spawns the session there.
+- ~~The spec's adapter table describes local auth as "token file + Origin +
+  Host".~~ **Done** — the table names all four checks and calls out
+  `Sec-Fetch-Site` as the one doing the real work against a co-resident loopback
+  origin.
 
-## 3. Docs that are not true
-
-- `README.md` Setup says `flue enable`. The CLI knows `serve`, `open`, `status`,
-  `help` — `flue enable` exits 2.
-- `usage()` says `flue open` spawns a session. It builds a URL and opens `/`.
-- `flue open <path>` puts `?cwd=` in that URL and nothing reads it, so it lands on
-  an empty session list rather than a shell in that directory.
-- The spec's adapter table describes local auth as "token file + Origin + Host".
-  There are four checks, and `Sec-Fetch-Site` is the one doing the real work
-  against a co-resident loopback origin.
-
-## 4. The spec requires an audit log that does not exist
+### 4. The spec requires an audit log that does not exist
 
 The security section lists "every attach, pairing, revocation, and rejection is
 logged with the resolved peer identity" under "the controls below are
-requirements". There is no logging anywhere in `internal/` — not one call site.
+requirements", and there was no logging anywhere in `internal/` — not one call
+site.
 
-Either implement minimal auth-failure and attach logging, or strike the
-requirement. Do not ship a security spec asserting a control the binary lacks.
+**Done** — `internal/daemon` now logs, via `slog`, every attach, detach, auth
+rejection, and mint rejection, each with the peer. That includes the
+`Sec-Fetch-Site` rejection on the websocket upgrade, which runs after
+`checkAuth` has already accepted the token and was a fourth auth-decision site
+the first pass missed. Pairing and revocation log nothing because they have no
+code yet — remote access is still designed, not built.
 
 ## 5. `loginShell` before the login-service task
 
