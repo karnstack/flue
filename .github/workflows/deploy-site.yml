@@ -20,7 +20,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Check for the deploy token
         id: token
@@ -34,6 +34,10 @@ jobs:
             echo "CLOUDFLARE_API_TOKEN is not set; skipping the deploy." \
                  "Local 'make site-deploy' is the baseline."
           fi
+
+      - name: Test the installer before serving it
+        if: steps.token.outputs.present == 'true'
+        run: bash scripts/install_test.sh
 
       - name: Stage the installer
         if: steps.token.outputs.present == 'true'
