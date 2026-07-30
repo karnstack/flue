@@ -126,6 +126,12 @@ type conn struct {
 	ws  *websocket.Conn
 	srv *Server
 
+	// peer is the resolved identity of the client on the other end of ws —
+	// the socket address for the local transport, and the strongest identity
+	// a purely local transport has. Remote transports substitute their own
+	// resolved identity here later.
+	peer string
+
 	// ctx bounds this connection's life, and cancel ends it. Writes are always
 	// issued under this connection's own context, never under the context of
 	// whichever client caused the write, so one client's disconnect cannot
@@ -140,12 +146,13 @@ type conn struct {
 	attach  map[uint32]*attachment
 }
 
-func newConn(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, srv *Server) *conn {
+func newConn(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, srv *Server, peer string) *conn {
 	return &conn{
 		ctx:    ctx,
 		cancel: cancel,
 		ws:     ws,
 		srv:    srv,
+		peer:   peer,
 		out:    make(chan frame, outboxDepth),
 		attach: map[uint32]*attachment{},
 	}
@@ -399,6 +406,8 @@ func (c *conn) attachTo(s *session.Session, lastSeq uint64, reqID uint64) {
 	c.attach[ref] = a
 	c.mu.Unlock()
 
+	c.srv.logger().Info("attach", "peer", c.peer, "session", s.ID(), "ref", ref)
+
 	primary := c.srv.claimPrimaryIfUnset(s.ID(), c)
 	info := s.Info()
 
@@ -531,6 +540,7 @@ func (c *conn) detach(ref uint32) {
 	if a == nil {
 		return
 	}
+	c.srv.logger().Info("detach", "peer", c.peer, "session", a.s.ID(), "ref", ref)
 	// Release before unsubscribing, so the stream goroutine sees a detach it
 	// asked for rather than an end of stream it must report.
 	a.release()

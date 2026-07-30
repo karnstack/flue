@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1428,7 +1429,7 @@ func TestShutdownClosesEstablishedWebSockets(t *testing.T) {
 func TestEnqueueNeverBlocksAndDropsABackloggedClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c := newConn(ctx, cancel, nil, nil)
+	c := newConn(ctx, cancel, nil, nil, "")
 
 	// Fill the outbox with no writer draining it, i.e. a client that has
 	// stopped reading its socket.
@@ -1472,7 +1473,7 @@ func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	newPeer := func() *conn {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		c := newConn(ctx, cancel, nil, srv)
+		c := newConn(ctx, cancel, nil, srv, "")
 		c.attach[1] = &attachment{ref: 1, s: s, sub: s.Subscribe(0), done: make(chan struct{})}
 		srv.claimPrimaryIfUnset(s.ID(), c)
 		return c
@@ -1804,4 +1805,118 @@ func TestAttachedHeadEqualsSeqOnAFreshSpawn(t *testing.T) {
 		}
 		return true
 	})
+}
+
+// --- the audit log ---
+
+// syncBuffer is a bytes.Buffer safe for the conn goroutines that log from
+// off the test's own goroutine.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func auditServer(t *testing.T) (*httptest.Server, *session.Registry, *syncBuffer) {
+	t.Helper()
+	ts, reg, srv := newTestServerUI(t, http.NotFoundHandler())
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+	return ts, reg, buf
+}
+
+func waitForLog(t *testing.T, buf *syncBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), want) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("log never contained %q; log so far:\n%s", want, buf.String())
+}
+
+// TestAuditLogsARejectedRequest covers the middleware path — the auth
+// decision local.Auth.Middleware makes for every API and UI request.
+func TestAuditLogsARejectedRequest(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	resp, err := http.Get(ts.URL + "/api/sessions")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+
+	waitForLog(t, buf, "auth rejected")
+	waitForLog(t, buf, "path=/api/sessions")
+	if !strings.Contains(buf.String(), "peer=") {
+		t.Fatalf("rejection logged without the resolved peer:\n%s", buf.String())
+	}
+}
+
+func TestAuditLogsARejectedUpgrade(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	if c, _, err := websocket.Dial(context.Background(), url, nil); err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("dial without a token succeeded")
+	}
+
+	waitForLog(t, buf, "auth rejected")
+	waitForLog(t, buf, "path=/ws")
+}
+
+func TestAuditLogsARejectedMint(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	resp, err := http.DefaultClient.Do(mintReq(t, ts, "not-the-token"))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	resp.Body.Close()
+
+	waitForLog(t, buf, "mint rejected")
+}
+
+func TestAuditLogsAttachAndDetach(t *testing.T) {
+	ts, reg, buf := auditServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c, ref := attach(t, ts, s.ID())
+	waitForLog(t, buf, "msg=attach")
+	waitForLog(t, buf, "session="+s.ID())
+
+	writeControl(t, c, wire.Detach{Ref: ref})
+	waitForLog(t, buf, "msg=detach")
+}
+
+// TestAuditDoesNotLogAnAcceptedRequest: the audit log names decisions, not
+// traffic — an accepted request is not an event.
+func TestAuditDoesNotLogAnAcceptedRequest(t *testing.T) {
+	ts, _, buf := auditServer(t)
+
+	resp := get(t, ts, "/api/sessions", "same-origin")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if strings.Contains(buf.String(), "auth rejected") {
+		t.Fatalf("an accepted request was logged as a rejection:\n%s", buf.String())
+	}
 }
