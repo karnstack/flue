@@ -102,6 +102,29 @@ rc=$?
 assert_eq "x86_64 dry-run exits 0" 0 "$rc"
 assert_contains "x86_64 becomes amd64 in the asset name" "flue_0.1.0_linux_amd64.tar.gz" "$out"
 
+# --- a checksum mismatch aborts before any install action --------------------
+# --dry-run returns before verify_checksum ever runs, so this drives it
+# directly: a real archive file plus a checksums.txt that names the wrong
+# sha256 for it, same as a tampered or corrupted download would produce.
+ctmp=$(mktemp -d)
+trap 'rm -rf "$tmp" "$ctmp"' EXIT
+printf 'not the real archive bytes' >"${ctmp}/flue_0.1.0_darwin_arm64.tar.gz"
+printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  flue_0.1.0_darwin_arm64.tar.gz\n' \
+  >"${ctmp}/checksums.txt"
+
+out=$(bash -c '
+  FLUE_INSTALL_SOURCED=1
+  . ./install.sh
+  tmp="$1"
+  asset="flue_0.1.0_darwin_arm64.tar.gz"
+  OS=darwin
+  verify_checksum
+' _ "$ctmp" 2>&1)
+rc=$?
+assert_eq "checksum mismatch exits 1" 1 "$rc"
+assert_contains "checksum mismatch names the failure" "sha256 mismatch for flue_0.1.0_darwin_arm64.tar.gz" "$out"
+assert_contains "checksum mismatch aborts before install" "aborting before install" "$out"
+
 echo
 if [ "$failures" -gt 0 ]; then
   echo "$failures failure(s)"
