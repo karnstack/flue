@@ -36,3 +36,14 @@ jobs:
 
       - name: Test
         run: make test
+
+      # ubuntu-latest images ship shellcheck; apt keeps it deterministic
+      # either way.
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Shellcheck the install script
+        run: shellcheck scripts/install.sh scripts/install_test.sh
+
+      - name: Install-script tests
+        run: bash scripts/install_test.sh
