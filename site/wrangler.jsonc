@@ -11,8 +11,7 @@
   "assets": {
     "directory": "./public"
   },
-  // Preview stage: serve from flue-sh.<account>.workers.dev until verified.
-  // Cutover (plan Task 5) sets "workers_dev": false and uncomments routes.
-  "workers_dev": true
-  // "routes": [{ "pattern": "flue.sh", "custom_domain": true }]
+  // Cutover (plan Task 5): custom domain flue.sh, workers.dev disabled.
+  "workers_dev": false,
+  "routes": [{ "pattern": "flue.sh", "custom_domain": true }]
 }
