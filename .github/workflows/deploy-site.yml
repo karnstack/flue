@@ -55,3 +55,8 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           workingDirectory: site
+          # The action's bundled default predates wrangler v4 and cannot read
+          # an assets-only config ("Missing entry-point"). Pin the major that
+          # site/wrangler.jsonc is written for — the same one make site-deploy
+          # runs via pnpm dlx wrangler@4.
+          wranglerVersion: "4"
