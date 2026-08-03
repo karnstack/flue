@@ -1,8 +1,19 @@
 name: release
 
+# Two ways in, one pipeline. Pushing a v* tag releases that tag. The manual
+# dispatch takes a version, creates the tag on main's head in-run, and
+# releases it — the tag still exists afterwards, because goreleaser derives
+# the version, the changelog range, and the GitHub Release from the tag
+# itself. (The in-run tag push uses GITHUB_TOKEN, which deliberately does
+# not re-trigger the tag event — the same run carries on to goreleaser.)
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. v0.1.0"
+        required: true
 
 permissions:
   contents: write
@@ -16,6 +27,20 @@ jobs:
           # Required for the changelog: goreleaser walks the history
           # between tags.
           fetch-depth: 0
+
+      - name: Create the tag for a dispatched release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          case "$VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "version must look like v0.1.0, got: $VERSION" >&2; exit 1 ;;
+          esac
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "$VERSION"
 
       # go, node, and pnpm from mise.toml — goreleaser's before hook runs
       # `make web`, which needs all three.
