@@ -6,6 +6,7 @@
 name: deploy-site
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
