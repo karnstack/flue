@@ -11,9 +11,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to release, e.g. v0.1.0"
-        required: true
+      bump:
+        description: "Which part of the version to bump"
+        type: choice
+        default: patch
+        options: [patch, minor, major]
 
 permissions:
   contents: write
@@ -28,19 +30,27 @@ jobs:
           # between tags.
           fetch-depth: 0
 
-      - name: Create the tag for a dispatched release
+      - name: Tag the next ${{ inputs.bump }} version
         if: github.event_name == 'workflow_dispatch'
         env:
-          VERSION: ${{ inputs.version }}
+          BUMP: ${{ inputs.bump }}
         run: |
-          case "$VERSION" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "version must look like v0.1.0, got: $VERSION" >&2; exit 1 ;;
+          # The next version comes from the latest existing v* tag. With no
+          # tags yet, the base is v0.0.0 — so the first minor-bump release
+          # is v0.1.0.
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          latest=${latest:-v0.0.0}
+          IFS=. read -r major minor patch <<< "${latest#v}"
+          case "$BUMP" in
+            major) version="v$((major + 1)).0.0" ;;
+            minor) version="v${major}.$((minor + 1)).0" ;;
+            patch) version="v${major}.${minor}.$((patch + 1))" ;;
           esac
+          echo "releasing ${version} (latest was ${latest})" | tee -a "$GITHUB_STEP_SUMMARY"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" -m "$VERSION"
-          git push origin "$VERSION"
+          git tag -a "$version" -m "$version"
+          git push origin "$version"
 
       # go, node, and pnpm from mise.toml — goreleaser's before hook runs
       # `make web`, which needs all three.
