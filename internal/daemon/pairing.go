@@ -291,10 +291,10 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 	s.logger().Info("device paired",
 		"peer", r.RemoteAddr, "device", dev.ID, "label", dev.Label)
 
-	// Task 9 adds the connection registry, and with it the fresh deviceList
-	// every attached client should receive here. There is no all-connections
-	// broadcast on Server yet — attached is keyed by session — and inventing
-	// half of one now would leave two mechanisms to reconcile.
+	// The device was registered on an HTTP request the user's other screen
+	// never sees, so the screen has to be told. Broadcast before the response
+	// is written: the pairing device is not the one waiting for this.
+	s.broadcastDeviceList()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

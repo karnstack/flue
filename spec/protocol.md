@@ -46,7 +46,7 @@ Every control message is a JSON object with a `type` discriminator.
 | `exit` | `ref`, `code` | the session's process ended |
 | `sizeChanged` | `ref`, `cols`, `rows`, `primary` | the PTY's dimensions changed |
 | `error` | `code`, `msg`, `reqId?` | a request failed, or a stream did |
-| `deviceList` | `devices[]` | answers `devices`, and follows a `revoke` |
+| `deviceList` | `devices[]` | answers `devices`, and is broadcast after a pairing or a `revoke` |
 | `pairing` | `token`, `url`, `daemonPub`, `expiresAt` | answers `pairStart` |
 | `revoked` | `reason` | this device was unpaired; the connection is about to close |
 
@@ -62,9 +62,11 @@ URL on this origin for the second device to open. The token lives **two
 minutes** and is **single-use**: `POST /api/pair` spends it and registers the
 device, and `pairCancel` — or the deadline, or a completed pairing — ends
 pairing mode. The daemon holds at most one outstanding token, so a second
-`pairStart` supersedes the first. `revoke` unpairs a device: the requester
-gets a fresh `deviceList`, and the revoked device's own connections get
-`revoked` and are then closed.
+`pairStart` supersedes the first. `revoke` unpairs a device: the revoked
+device's own connections get `revoked` and are then closed, and every
+connection still open — the requester's included — is handed a fresh
+`deviceList`. A completed pairing broadcasts the same, since it lands on an
+HTTP request no connected client can see.
 
 The token is 256 bits of randomness encoded as **URL-safe base64, unpadded**
 (RFC 4648 §5, no `=`). `pairing.url` splices it into `?t=` with no escaping, so

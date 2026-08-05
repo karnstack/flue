@@ -105,6 +105,18 @@ func (a *attachment) released() bool {
 type frame struct {
 	typ websocket.MessageType
 	b   []byte
+
+	// last marks the final frame this connection will ever send: the writer
+	// tears the connection down once it has been written.
+	//
+	// The teardown rides the queue rather than running beside it because the
+	// two orderings are not equivalent. Cancelling the context next to the
+	// enqueue races the frame it is meant to follow — runWriter's select would
+	// be free to take ctx.Done() instead, and the write it did attempt would
+	// carry an already-cancelled context — so "tell the device it was revoked,
+	// then close it" would deliver the close and drop the reason. Queued, the
+	// order is the order.
+	last bool
 }
 
 // conn is the per-WebSocket state machine.
@@ -131,6 +143,16 @@ type conn struct {
 	// a purely local transport has. Remote transports substitute their own
 	// resolved identity here later.
 	peer string
+
+	// device is the paired device this connection authenticated as, or "" for
+	// a connection that carries no device identity at all — which is every
+	// loopback connection, since the session token names a machine's user
+	// rather than a paired device.
+	//
+	// It is written and read only under Server.connMu, by the connection
+	// registry: the field exists so a closing connection can find its own
+	// bucket, and nothing else consults it.
+	device string
 
 	// origin is the absolute origin this connection's upgrade arrived on, and
 	// the only thing pairing can honestly build a URL from: the second device
@@ -171,11 +193,25 @@ func (c *conn) sendControl(msg any) error {
 	if err != nil {
 		return err
 	}
-	return c.enqueue(frame{websocket.MessageText, b})
+	return c.enqueue(frame{typ: websocket.MessageText, b: b})
+}
+
+// sendFinal queues msg as the last thing this connection will say, and ends
+// the connection once it has gone out. It is how a client is told why it is
+// being disconnected rather than simply finding itself disconnected.
+func (c *conn) sendFinal(msg any) error {
+	b, err := wire.EncodeControl(msg)
+	if err != nil {
+		// The connection is meant to end either way: a frame that cannot be
+		// encoded must not leave it open.
+		c.fail()
+		return err
+	}
+	return c.enqueue(frame{typ: websocket.MessageText, b: b, last: true})
 }
 
 func (c *conn) sendBinary(typ byte, ref uint32, payload []byte) error {
-	return c.enqueue(frame{websocket.MessageBinary, wire.EncodeBinary(typ, ref, payload)})
+	return c.enqueue(frame{typ: websocket.MessageBinary, b: wire.EncodeBinary(typ, ref, payload)})
 }
 
 // enqueue hands a frame to the writer without ever blocking.
@@ -210,7 +246,10 @@ func (c *conn) runWriter(done chan<- struct{}) {
 			ctx, cancel := context.WithTimeout(c.ctx, writeTimeout)
 			err := c.ws.Write(ctx, f.typ, f.b)
 			cancel()
-			if err != nil {
+			if err != nil || f.last {
+				// A final frame ends the connection here, on the one goroutine
+				// that writes to the socket, so nothing queued behind it can
+				// follow the goodbye it was supposed to conclude.
 				c.fail()
 				return
 			}
@@ -392,6 +431,17 @@ func (c *conn) handleControl(msg any) {
 		}
 		_ = a.s.Close()
 
+	case wire.Devices:
+		list, err := c.srv.deviceList()
+		if err != nil {
+			c.sendError("devices_unavailable", err.Error())
+			return
+		}
+		_ = c.sendControl(list)
+
+	case wire.Revoke:
+		c.revokeDevice(m.DeviceID)
+
 	case wire.PairStart:
 		// Reachable only from here, which is the concrete meaning of "pairing
 		// is entered from an already-trusted UI": this connection has already
@@ -421,6 +471,61 @@ func (c *conn) handleControl(msg any) {
 	default:
 		c.sendError("bad_message", "unexpected message from client")
 	}
+}
+
+// revokeDevice unpairs a device and disconnects whatever is still holding its
+// credential.
+//
+// The order is the design. The registry is written first, so the device is
+// unpaired before anything is told it was: a daemon that closed the sockets and
+// then failed to write would have announced a revocation it did not perform.
+// The device's own connections are ended next, because an entry removed from a
+// registry nothing consults again is not a revocation — the socket already
+// established is the access. Only then is the new list broadcast, so what every
+// remaining client is handed is the state that is already true.
+//
+// Every outcome is logged. "A device was unpaired and its sessions cut" and
+// "someone asked to unpair something that was not there" are both events an
+// operator reading stderr needs to be able to find.
+func (c *conn) revokeDevice(id string) {
+	if !validDeviceID(id) {
+		// Answered as unknown because it is: no device can hold an identity of
+		// that shape. The id itself is deliberately not logged — only its size
+		// — since this is the branch a client reaches with a megabyte of its
+		// own choosing.
+		c.srv.logger().Warn("revoke refused",
+			"peer", c.peer, "reason", "malformed device id", "len", len(id))
+		c.sendError("unknown_device", "no such device")
+		return
+	}
+
+	dev, ok, err := c.srv.removeDevice(id)
+	switch {
+	case errors.Is(err, errNoDeviceRegistry):
+		c.srv.logger().Warn("revoke refused",
+			"peer", c.peer, "device", id, "reason", "no device registry")
+		c.sendError("devices_unavailable", err.Error())
+		return
+	case err != nil:
+		c.srv.logger().Warn("revoke refused",
+			"peer", c.peer, "device", id, "reason", "the registry could not be written", "err", err)
+		c.sendError("revoke_failed", err.Error())
+		return
+	case !ok:
+		// Answered rather than ignored: a devices screen acting on a row that
+		// is already gone has to learn that, and every client that can reach
+		// this op is already authenticated, so the answer tells an attacker
+		// nothing they could not read from the list itself.
+		c.srv.logger().Warn("revoke refused",
+			"peer", c.peer, "device", id, "reason", "unknown device")
+		c.sendError("unknown_device", "no such device")
+		return
+	}
+
+	closed := c.srv.disconnectDevice(dev.ID, "revoked")
+	c.srv.logger().Info("device revoked",
+		"peer", c.peer, "device", dev.ID, "label", dev.Label, "connections", closed)
+	c.srv.broadcastDeviceList()
 }
 
 // attachTo subscribes to s from lastSeq and starts streaming output. reqID

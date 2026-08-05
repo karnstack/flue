@@ -139,6 +139,27 @@ type Server struct {
 	logMu sync.RWMutex
 	log   *slog.Logger
 
+	// connMu guards both connection registries below.
+	//
+	// It is deliberately not primaryMu. That lock is taken on every keystroke —
+	// touch runs on the input path — and a device broadcast has no business
+	// queueing behind it, nor it behind a broadcast.
+	connMu sync.Mutex
+	// conns is every established connection, in the order they were accepted.
+	// It is what the device-list broadcast walks: attached is keyed by session,
+	// and the devices screen is not attached to anything.
+	conns []*conn
+	// deviceConns is the live connections belonging to each paired device.
+	//
+	// It is empty today by construction rather than by accident: no loopback
+	// connection has a device identity to be keyed by, and registerDeviceConn
+	// is the only way in. Its first members arrive with the relay transport,
+	// which learns the device from the Noise handshake's static key. The
+	// revocation path is built against this map now, and tested through that
+	// seam, so the transport that populates it does not also have to ship the
+	// disconnect behaviour untested.
+	deviceConns map[string][]*conn
+
 	primaryMu sync.Mutex
 	primary   map[string]*conn // session ID -> primary connection
 	// attached is the connections holding each session, in
@@ -163,8 +184,10 @@ func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version strin
 		baseCancel: baseCancel,
 		auth:       auth,
 		log:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		primary:    map[string]*conn{},
-		attached:   map[string][]*conn{},
+
+		deviceConns: map[string][]*conn{},
+		primary:     map[string]*conn{},
+		attached:    map[string][]*conn{},
 	}
 }
 
@@ -499,6 +522,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	c := newConn(ctx, cancel, ws, s, r.RemoteAddr, requestOrigin(r))
+	// Registered before it is served and forgotten however it ends, so the
+	// broadcast set is exactly the set of connections that can be written to.
+	s.addConn(c)
+	defer s.removeConn(c)
+
 	c.serve()
 	_ = ws.Close(websocket.StatusNormalClosure, "")
 }
@@ -580,6 +608,180 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 		return nil
 	}
 	return err
+}
+
+// --- the connection registry ---
+
+// addConn records an established connection. Every connection enters here and
+// leaves through removeConn, so "every live client" is a fact the server holds
+// rather than one a broadcast has to reconstruct.
+func (s *Server) addConn(c *conn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.conns = append(s.conns, c)
+}
+
+// removeConn forgets a connection that has ended, including its device bucket.
+// It tolerates a connection that is already gone, because disconnectDevice
+// removes the connections it is closing straight away rather than waiting for
+// each one to unwind.
+func (s *Server) removeConn(c *conn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.conns = dropConn(s.conns, c)
+	if c.device == "" {
+		return
+	}
+	if rest := dropConn(s.deviceConns[c.device], c); len(rest) > 0 {
+		s.deviceConns[c.device] = rest
+	} else {
+		delete(s.deviceConns, c.device)
+	}
+}
+
+// registerDeviceConn records that c is authenticated as deviceID, so revoking
+// that device reaches it.
+//
+// Nothing on the local transport calls this, and nothing on it should: the
+// session token is a machine-local credential, not a device identity, so a
+// loopback connection has no bucket and revoking a device can never close the
+// user's own terminal. The relay transport calls it once per connection, with
+// the device its Noise handshake resolved.
+func (s *Server) registerDeviceConn(deviceID string, c *conn) {
+	if c == nil || deviceID == "" {
+		return
+	}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	c.device = deviceID
+	s.deviceConns[deviceID] = append(s.deviceConns[deviceID], c)
+}
+
+// allConns snapshots the live connections.
+//
+// The snapshot is the point. Sending under connMu would hold it across
+// conn.enqueue, which drops a backlogged peer by cancelling its context — and
+// that peer's own goroutine takes connMu on its way out. Nothing deadlocks
+// today only because the cancel is asynchronous, which is far too fine a
+// distinction to rest a shell-spawning daemon on. Copy, unlock, then send.
+func (s *Server) allConns() []*conn {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return append([]*conn(nil), s.conns...)
+}
+
+func dropConn(list []*conn, c *conn) []*conn {
+	for i, other := range list {
+		if other == c {
+			return append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
+}
+
+// --- devices and revocation ---
+
+// errNoDeviceRegistry is the answer for a daemon constructed without an
+// identity: it has no paired devices to list and none to revoke, and says so
+// rather than reporting an empty registry it does not have.
+var errNoDeviceRegistry = errors.New("daemon: this daemon has no device registry")
+
+// deviceList reads the registry into the shape the wire carries: unix seconds
+// rather than the registry's time.Time, and never the device's public key.
+func (s *Server) deviceList() (wire.DeviceList, error) {
+	if s.identity.Devices == nil {
+		return wire.DeviceList{}, errNoDeviceRegistry
+	}
+	paired, err := s.identity.Devices.List()
+	if err != nil {
+		return wire.DeviceList{}, err
+	}
+	infos := make([]wire.DeviceInfo, 0, len(paired))
+	for _, d := range paired {
+		infos = append(infos, wire.DeviceInfo{
+			ID:       d.ID,
+			Label:    d.Label,
+			PairedAt: d.PairedAt.Unix(),
+			LastSeen: d.LastSeen.Unix(),
+		})
+	}
+	return wire.DeviceList{Devices: infos}, nil
+}
+
+// deviceIDLen is the width of the identity crypto.DeviceID derives: twelve
+// characters of lowercase hex. It is repeated here rather than imported
+// because what this file needs is a bound on a client-supplied string, and a
+// bound that moved with the deriver would stop being one.
+const deviceIDLen = 12
+
+// validDeviceID reports whether id has the shape a device identity can have.
+//
+// The check exists for the audit log rather than for the registry, which would
+// refuse anything else by simply not finding it. A revoke carries a
+// client-chosen string straight into a log line, and a client may send up to
+// readLimit of it — a megabyte of attacker-chosen text per message, in the one
+// file whoever is investigating an incident has to be able to read. Bounded
+// before it is written, not after.
+func validDeviceID(id string) bool {
+	if len(id) != deviceIDLen {
+		return false
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// removeDevice unpairs a device, reporting whether there was one to unpair.
+func (s *Server) removeDevice(id string) (crypto.Device, bool, error) {
+	if s.identity.Devices == nil {
+		return crypto.Device{}, false, errNoDeviceRegistry
+	}
+	return s.identity.Devices.Remove(id)
+}
+
+// disconnectDevice tells every connection belonging to deviceID why it is
+// ending and ends it, returning how many there were.
+//
+// The connections are dropped from both registries in the same critical
+// section that snapshots them, so the broadcast that follows a revocation
+// reaches everyone still connected and nobody who was just cut off. They are
+// closed by the writer once the reason has been written; the frame is the last
+// one each of those sockets will carry, so anything queued behind it — the
+// broadcast included, had they still been registered — is never sent.
+func (s *Server) disconnectDevice(deviceID, reason string) int {
+	s.connMu.Lock()
+	doomed := s.deviceConns[deviceID]
+	delete(s.deviceConns, deviceID)
+	for _, c := range doomed {
+		s.conns = dropConn(s.conns, c)
+	}
+	s.connMu.Unlock()
+
+	for _, c := range doomed {
+		_ = c.sendFinal(wire.Revoked{Reason: reason})
+	}
+	return len(doomed)
+}
+
+// broadcastDeviceList hands the current registry to every live connection.
+//
+// It is a push rather than an invalidation because the list is what a client
+// acts on: a devices screen that learns of a revocation only when it next asks
+// is a screen offering a revoke button for a device that is already gone.
+func (s *Server) broadcastDeviceList() {
+	list, err := s.deviceList()
+	if err != nil {
+		// Nothing to broadcast and nobody to answer — this is not a client's
+		// request — so the failure goes to the log rather than to a socket.
+		s.logger().Error("could not read the device registry", "err", err)
+		return
+	}
+	for _, c := range s.allConns() {
+		_ = c.sendControl(list)
+	}
 }
 
 // --- primary bookkeeping ---

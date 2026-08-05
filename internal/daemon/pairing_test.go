@@ -570,6 +570,22 @@ func TestPairStartAnswersPairing(t *testing.T) {
 	if n := len(devices(t, srv)); n != 1 {
 		t.Fatalf("device count = %d, want 1", n)
 	}
+
+	// The pairing lands on an HTTP request the client that started the ceremony
+	// never sees. It is watching this socket, so the new device has to arrive on
+	// it — a devices screen that only refreshes when asked shows the user a list
+	// that is wrong at precisely the moment they were looking at it.
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		l, ok := msg.(wire.DeviceList)
+		if !ok {
+			return false
+		}
+		want := crypto.DeviceID(deviceKey(0x2a))
+		if len(l.Devices) != 1 || l.Devices[0].ID != want {
+			t.Fatalf("broadcast deviceList = %+v, want the device just paired (%s)", l.Devices, want)
+		}
+		return true
+	})
 }
 
 func TestPairCancelInvalidatesTheToken(t *testing.T) {

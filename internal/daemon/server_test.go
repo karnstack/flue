@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
@@ -1438,13 +1439,13 @@ func TestEnqueueNeverBlocksAndDropsABackloggedClient(t *testing.T) {
 	// Fill the outbox with no writer draining it, i.e. a client that has
 	// stopped reading its socket.
 	for i := 0; i < outboxDepth; i++ {
-		if err := c.enqueue(frame{websocket.MessageText, []byte("x")}); err != nil {
+		if err := c.enqueue(frame{typ: websocket.MessageText, b: []byte("x")}); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
 		}
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- c.enqueue(frame{websocket.MessageText, []byte("overflow")}) }()
+	go func() { done <- c.enqueue(frame{typ: websocket.MessageText, b: []byte("overflow")}) }()
 
 	select {
 	case err := <-done:
@@ -1486,7 +1487,7 @@ func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	wedged := newPeer()
 	healthy := newPeer()
 	for i := 0; i < outboxDepth; i++ {
-		if err := wedged.enqueue(frame{websocket.MessageText, []byte("x")}); err != nil {
+		if err := wedged.enqueue(frame{typ: websocket.MessageText, b: []byte("x")}); err != nil {
 			t.Fatalf("filling the wedged peer: %v", err)
 		}
 	}
@@ -2004,5 +2005,279 @@ func TestAuditDoesNotLogAnAcceptedRequest(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "auth rejected") {
 		t.Fatalf("an accepted request was logged as a rejection:\n%s", buf.String())
+	}
+}
+
+// --- devices and revocation ---
+
+// addDevice pairs a device straight into the registry. The ceremony that
+// normally puts one there is pairing_test's business; what these tests need is
+// the state it leaves behind.
+func addDevice(t *testing.T, srv *Server, label string, fill byte) crypto.Device {
+	t.Helper()
+	d, err := srv.identity.Devices.Add(label, deviceKey(fill))
+	if err != nil {
+		t.Fatalf("Add(%q): %v", label, err)
+	}
+	return d
+}
+
+// serverConns waits until the daemon holds n live connections and returns them
+// in the order it accepted them.
+//
+// The wait is what makes the order usable: websocket.Dial returns as soon as
+// the handshake completes, which can be before handleWS has registered the
+// connection, so a test that dialled and looked immediately would sometimes
+// find nothing.
+func serverConns(t *testing.T, srv *Server, n int) []*conn {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conns := srv.allConns()
+		if len(conns) == n {
+			return conns
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon holds %d live connections, want %d", len(conns), n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestDevicesAnswersTheRegistry(t *testing.T) {
+	ts, srv := newPairServer(t)
+	phone := addDevice(t, srv, "phone", 0x2a)
+	laptop := addDevice(t, srv, "laptop", 0x3b)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Devices{})
+
+	var got wire.DeviceList
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		l, ok := msg.(wire.DeviceList)
+		if ok {
+			got = l
+		}
+		return ok
+	})
+
+	if len(got.Devices) != 2 {
+		t.Fatalf("deviceList carried %d devices, want 2: %+v", len(got.Devices), got.Devices)
+	}
+	byID := map[string]wire.DeviceInfo{}
+	for _, d := range got.Devices {
+		byID[d.ID] = d
+	}
+	for _, want := range []crypto.Device{phone, laptop} {
+		info, ok := byID[want.ID]
+		if !ok {
+			t.Fatalf("deviceList has no entry for %s (%s): %+v", want.Label, want.ID, got.Devices)
+		}
+		if info.Label != want.Label {
+			t.Errorf("label = %q, want %q", info.Label, want.Label)
+		}
+		// The registry keeps time.Time and the wire carries unix seconds; a
+		// conversion that never happened would ship a zero or an RFC 3339
+		// string, and both are silently useless to the client.
+		if info.PairedAt != want.PairedAt.Unix() {
+			t.Errorf("pairedAt = %d, want the unix seconds %d", info.PairedAt, want.PairedAt.Unix())
+		}
+		if info.LastSeen != want.LastSeen.Unix() {
+			t.Errorf("lastSeen = %d, want the unix seconds %d", info.LastSeen, want.LastSeen.Unix())
+		}
+	}
+}
+
+// TestDevicesOnAnEmptyRegistryAnswersAnEmptyList pins the normalisation at the
+// one call site that reaches it: no devices paired is the state a client
+// reaches on a fresh daemon, and it must arrive as [] rather than null.
+func TestDevicesOnAnEmptyRegistryAnswersAnEmptyList(t *testing.T) {
+	ts, _ := newPairServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Devices{})
+
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		l, ok := msg.(wire.DeviceList)
+		if !ok {
+			return false
+		}
+		if len(l.Devices) != 0 {
+			t.Fatalf("deviceList = %+v, want no devices", l.Devices)
+		}
+		if l.Devices == nil {
+			t.Fatal("devices decoded to nil, so the daemon sent null; every client that ranges over the field would throw")
+		}
+		return true
+	})
+}
+
+// TestRevokeUnknownDeviceIsRefused: a revoke naming nothing must remove
+// nothing, and must say so rather than answering with a list that looks like a
+// success.
+//
+// The malformed cases answer identically because they are identically unknown —
+// no device can hold an identity of that shape — and the oversized one is the
+// reason the shape is checked at all: an id a client chose reaches the audit
+// log, and a client may send a megabyte of it.
+func TestRevokeUnknownDeviceIsRefused(t *testing.T) {
+	for name, id := range map[string]string{
+		"well-formed but absent": "ffffffffffff",
+		"empty":                  "",
+		"too short":              "ff",
+		"not hex":                "zzzzzzzzzzzz",
+		"uppercase":              "FFFFFFFFFFFF",
+		"enormous":               strings.Repeat("a", 1<<16),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts, srv := newPairServer(t)
+			buf := &syncBuffer{}
+			srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+			phone := addDevice(t, srv, "phone", 0x2a)
+
+			c := dial(t, ts)
+			writeControl(t, c, wire.Hello{Ver: "test"})
+			writeControl(t, c, wire.Revoke{DeviceID: id})
+
+			readUntil(t, c, func(msg any, _ []byte) bool {
+				e, ok := msg.(wire.Error)
+				if !ok {
+					return false
+				}
+				if e.Code != "unknown_device" {
+					t.Fatalf("error code = %q, want %q", e.Code, "unknown_device")
+				}
+				return true
+			})
+
+			list := devices(t, srv)
+			if len(list) != 1 || list[0].ID != phone.ID {
+				t.Fatalf("registry = %+v after a refused revoke, want just the phone", list)
+			}
+			waitForLog(t, buf, "revoke refused")
+			// Whatever the client sent, the log stays readable.
+			if len(buf.String()) > 4<<10 {
+				t.Errorf("a single refused revoke wrote %d bytes of audit log", len(buf.String()))
+			}
+		})
+	}
+}
+
+// TestRevokeClosesTheDeviceConnectionsAndUpdatesTheRest is the whole
+// revocation: the entry goes, the sockets that were authenticated as it are
+// told why and then ended, and everyone still connected is handed the list
+// that is now true.
+//
+// The device's identity is supplied through registerDeviceConn because no
+// loopback connection has one — a local client presents the session token,
+// which is not a device — so the map revocation walks has no members until the
+// relay transport arrives. The seam is what lets the behaviour be built and
+// pinned now rather than shipped untested alongside that transport.
+func TestRevokeClosesTheDeviceConnectionsAndUpdatesTheRest(t *testing.T) {
+	ts, srv := newPairServer(t)
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+
+	phone := addDevice(t, srv, "phone", 0x2a)
+	laptop := addDevice(t, srv, "laptop", 0x3b)
+
+	device := dial(t, ts)
+	writeControl(t, device, wire.Hello{Ver: "test"})
+	readUntil(t, device, func(msg any, _ []byte) bool { _, ok := msg.(wire.Welcome); return ok })
+	srv.registerDeviceConn(phone.ID, serverConns(t, srv, 1)[0])
+
+	ui := dial(t, ts)
+	writeControl(t, ui, wire.Hello{Ver: "test"})
+	readUntil(t, ui, func(msg any, _ []byte) bool { _, ok := msg.(wire.Welcome); return ok })
+
+	writeControl(t, ui, wire.Revoke{DeviceID: phone.ID})
+
+	readUntil(t, device, func(msg any, _ []byte) bool {
+		r, ok := msg.(wire.Revoked)
+		if ok && r.Reason != "revoked" {
+			t.Fatalf("revoked reason = %q, want %q", r.Reason, "revoked")
+		}
+		return ok
+	})
+
+	// And then the socket goes, without the client writing anything: a device
+	// that keeps its connection after revocation keeps its shells.
+	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rcancel()
+	for {
+		if _, _, err := device.Read(rctx); err != nil {
+			if rctx.Err() != nil {
+				t.Fatal("the revoked device's connection outlived its revocation")
+			}
+			break
+		}
+	}
+
+	readUntil(t, ui, func(msg any, _ []byte) bool {
+		l, ok := msg.(wire.DeviceList)
+		if !ok {
+			return false
+		}
+		if len(l.Devices) != 1 || l.Devices[0].ID != laptop.ID {
+			t.Fatalf("deviceList = %+v, want just the laptop %s", l.Devices, laptop.ID)
+		}
+		return true
+	})
+
+	list := devices(t, srv)
+	if len(list) != 1 || list[0].ID != laptop.ID {
+		t.Fatalf("registry = %+v after the revoke, want just the laptop", list)
+	}
+
+	waitForLog(t, buf, "device revoked")
+	if !logLineContains(buf, "device revoked", "device="+phone.ID) {
+		t.Errorf("the revocation was logged without the device it removed:\n%s", buf.String())
+	}
+	if !logLineContains(buf, "device revoked", "peer=") {
+		t.Errorf("the revocation was logged without the peer that asked for it:\n%s", buf.String())
+	}
+}
+
+// TestDeviceListBroadcastDoesNotWaitOnABackloggedPeer is the outbox discipline
+// applied to the new all-connections walk: telling every client the device list
+// changed must not put the revoking client — or the pairing HTTP handler — at
+// the mercy of a peer that stopped reading its socket.
+func TestDeviceListBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
+	srv := New(session.NewRegistry(time.Now), nil, nil, "test",
+		Identity{Devices: crypto.NewDeviceStore(t.TempDir())})
+
+	newPeer := func() *conn {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		c := newConn(ctx, cancel, nil, srv, "", "")
+		srv.addConn(c)
+		return c
+	}
+
+	wedged := newPeer()
+	healthy := newPeer()
+	for i := 0; i < outboxDepth; i++ {
+		if err := wedged.enqueue(frame{typ: websocket.MessageText, b: []byte("x")}); err != nil {
+			t.Fatalf("filling the wedged peer: %v", err)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() { srv.broadcastDeviceList(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcastDeviceList waited on a peer that had stopped reading")
+	}
+
+	if wedged.ctx.Err() == nil {
+		t.Error("the wedged peer was not dropped")
+	}
+	select {
+	case <-healthy.out:
+	default:
+		t.Error("the healthy peer was not sent the device list")
 	}
 }
