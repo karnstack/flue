@@ -1952,6 +1952,43 @@ func TestAuditLogsAttachAndDetach(t *testing.T) {
 	}
 }
 
+// TestAuditLogsAMissingAuthenticator: ErrNoAuth is the daemon's own fault,
+// not the peer's — every site that can answer 503 for it says so under one
+// message, and none of them dresses it up as a peer rejection.
+func TestAuditLogsAMissingAuthenticator(t *testing.T) {
+	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+	srv.SetAuth(nil)
+
+	resp, err := http.Get(ts.URL + "/api/sessions")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+
+	resp, err = http.DefaultClient.Do(mintReq(t, ts, tok))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	resp.Body.Close()
+
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	if c, _, err := websocket.Dial(context.Background(), url, nil); err == nil {
+		c.Close(websocket.StatusNormalClosure, "")
+		t.Fatal("dial with no authenticator succeeded")
+	}
+
+	for _, path := range []string{"/api/sessions", MintPath, "/ws"} {
+		if !logLineContains(buf, "no authenticator configured", "path="+path) {
+			t.Fatalf("no record for %s:\n%s", path, buf.String())
+		}
+	}
+	if strings.Contains(buf.String(), "auth rejected") {
+		t.Fatalf("a daemon fault was logged as a peer rejection:\n%s", buf.String())
+	}
+}
+
 // TestAuditDoesNotLogAnAcceptedRequest: the audit log names decisions, not
 // traffic — an accepted request is not an event.
 func TestAuditDoesNotLogAnAcceptedRequest(t *testing.T) {

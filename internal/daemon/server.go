@@ -168,6 +168,18 @@ func (s *Server) logger() *slog.Logger {
 	return s.log
 }
 
+// logAuthFailure records an auth decision that refused a request, with the
+// same fields at every site. A missing authenticator is the daemon's own
+// fault rather than the peer's, so it gets its own message at Error level;
+// everything else is the audit trail's ordinary "auth rejected".
+func (s *Server) logAuthFailure(r *http.Request, err error) {
+	if errors.Is(err, ErrNoAuth) {
+		s.logger().Error("no authenticator configured", "peer", r.RemoteAddr, "path", r.URL.Path)
+		return
+	}
+	s.logger().Warn("auth rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "err", err)
+}
+
 func (s *Server) checkAuth(r *http.Request) error {
 	a := s.currentAuth()
 	if a == nil {
@@ -277,6 +289,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a := s.currentAuth()
 		if a == nil {
+			s.logAuthFailure(r, ErrNoAuth)
 			http.Error(w, ErrNoAuth.Error(), http.StatusServiceUnavailable)
 			return
 		}
@@ -378,11 +391,12 @@ func (s *Server) handleMint(w http.ResponseWriter, r *http.Request) {
 
 	a := s.currentAuth()
 	if a == nil {
+		s.logAuthFailure(r, ErrNoAuth)
 		http.Error(w, ErrNoAuth.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	if err := a.CheckMint(r); err != nil {
-		s.logger().Warn("mint rejected", "peer", r.RemoteAddr, "err", err)
+		s.logger().Warn("mint rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "err", err)
 		writeAuthError(w, err)
 		return
 	}
@@ -403,7 +417,7 @@ func (s *Server) handleMint(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err := s.checkAuth(r); err != nil {
-		s.logger().Warn("auth rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "err", err)
+		s.logAuthFailure(r, err)
 		writeAuthError(w, err)
 		return
 	}
@@ -425,7 +439,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// the allowlist; and that handshake's Sec-Fetch-Site is "same-site",
 	// which Task 5 already refuses.
 	if err := requireSameOriginFetchSite(r); err != nil {
-		s.logger().Warn("auth rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "err", err)
+		s.logAuthFailure(r, err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
