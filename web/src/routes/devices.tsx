@@ -119,6 +119,20 @@ function DeviceRows({
   onArm: (id: string | null) => void
   onRevoke: (id: string) => void
 }) {
+  /**
+   * The armed row's Confirm, focused as it appears.
+   *
+   * The swap replaces the very control the reader just activated, so without
+   * this the focus falls to the document body: a keyboard user gets no
+   * announcement, no indicator, and no way back to a question they cannot tell
+   * was asked short of tabbing from the top of the page. One ref serves every
+   * row because only one row is ever armed.
+   */
+  const confirm = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    if (armed !== null) confirm.current?.focus()
+  }, [armed])
+
   if (devices.length === 0) {
     return (
       <div className="flex flex-col items-center py-12 text-center sm:py-16">
@@ -187,6 +201,7 @@ function DeviceRows({
                         this is the click that actually cuts the device off.
                       */}
                       <Button
+                        ref={confirm}
                         variant="ghost"
                         size="sm"
                         disabled={!connected}
@@ -214,6 +229,14 @@ function DeviceRows({
                       the warning only has to be certain for the row the reader
                       is actually on. Keyboard focus keeps its own indicator.
 
+                      Both hover states are named, and the plain one is not
+                      redundant: the ghost variant carries `hover:text-foreground`,
+                      which twMerge keeps against a `group-hover:` utility because
+                      the modifiers differ and which the sheet emits later at
+                      equal specificity. Without the pair, the pointer landing on
+                      this button would take the red *off* it — the opposite of
+                      what the row is saying.
+
                       Held shut while the socket is down, because `revoke` is
                       dropped rather than held there — a click that quietly did
                       nothing would leave the reader believing a device had been
@@ -224,7 +247,10 @@ function DeviceRows({
                       size="sm"
                       disabled={!connected}
                       aria-label={`Revoke ${d.label}`}
-                      className={cn(ROW_BUTTON, 'group-hover:text-destructive')}
+                      className={cn(
+                        ROW_BUTTON,
+                        'group-hover:text-destructive hover:text-destructive',
+                      )}
                       onClick={() => onArm(d.id)}
                     >
                       Revoke
@@ -253,10 +279,12 @@ function DeviceRows({
 function PairingWindow({
   pairing,
   left,
+  connected,
   onCancel,
 }: {
   pairing: Pairing
   left: number
+  connected: boolean
   onCancel: () => void
 }) {
   const code = useRef<HTMLCanvasElement | null>(null)
@@ -305,7 +333,16 @@ function PairingWindow({
           It works once, and lasts two minutes —{' '}
           <span className="tabular-nums">{remaining(left)}</span> left.
         </p>
-        <Button variant="outline" size="sm" onClick={onCancel}>
+        {/*
+          Shut while the connection is down, like every other control here that
+          sends. `pairCancel` is dropped rather than held, and this is the one
+          place where accepting the click and losing it would be worse than
+          refusing it: the card would come down while the daemon's window ran on
+          for the rest of its two minutes, retiring a QR code from the screen
+          without retiring the token behind it. It is still cancellable the
+          moment the connection is back, and the deadline closes it either way.
+        */}
+        <Button variant="outline" size="sm" disabled={!connected} onClick={onCancel}>
           Cancel
         </Button>
       </div>
@@ -511,7 +548,9 @@ export function DevicesRoute() {
         </Button>
       </div>
 
-      {pairing !== null && <PairingWindow pairing={pairing} left={left} onCancel={cancel} />}
+      {pairing !== null && (
+        <PairingWindow pairing={pairing} left={left} connected={connected} onCancel={cancel} />
+      )}
 
       {devices !== null && (
         <DeviceRows

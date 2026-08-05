@@ -162,6 +162,34 @@ describe('DevicesRoute', () => {
     expect(sock.ofType('revoke')).toEqual([{ type: 'revoke', deviceId: 'aa11bb22cc33' }])
   })
 
+  it('moves focus to the confirmation it just put in place', async () => {
+    // The swap replaces the control that was activated. Left alone, focus
+    // falls to the body — so a keyboard user is given no indicator, no
+    // announcement, and no way to reach a question they cannot tell was asked.
+    const { sock } = await mountDevices()
+    listed(sock, [device({ id: 'aa11bb22cc33', label: 'iPhone' })])
+
+    await userEvent.click(screen.getByRole('button', { name: /Revoke iPhone/i }))
+
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Confirm revoking iPhone' }),
+    )
+  })
+
+  it('reddens the revoke under the pointer, not only under the row', async () => {
+    // The ghost variant carries `hover:text-foreground`, and a `group-hover:`
+    // utility does not displace it: the modifiers differ, so twMerge keeps
+    // both and the sheet emits the plain one later at equal specificity. The
+    // pointer landing on the button would then take the red back off it.
+    const { sock } = await mountDevices()
+    listed(sock, [device({ id: 'aa11bb22cc33', label: 'iPhone' })])
+
+    const classes = screen.getByRole('button', { name: /Revoke iPhone/i }).className
+
+    expect(classes).toContain('hover:text-destructive')
+    expect(classes).not.toContain('hover:text-foreground')
+  })
+
   it('backs out of a revoke that was not confirmed', async () => {
     const { sock } = await mountDevices()
     listed(sock, [device({ id: 'aa11bb22cc33', label: 'iPhone' })])
@@ -260,6 +288,22 @@ describe('DevicesRoute', () => {
 
     expect(sock.ofType('pairCancel')).toEqual([{ type: 'pairCancel' }])
     expect(screen.queryByText('http://127.0.0.1:7717/pair?t=zK3tokenzK3')).toBeNull()
+  })
+
+  it('will not retire a code it cannot retire the token behind', async () => {
+    // `pairCancel` is dropped while the socket is down. Taking the click
+    // anyway would clear the card while the daemon's window ran on for the
+    // rest of its two minutes — a QR taken off the screen without the token
+    // behind it being taken back.
+    const { sock } = await mountDevices()
+    await userEvent.click(pairButton())
+    offered(sock)
+
+    act(() => sock.close())
+
+    expect(screen.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled')).toBe(true)
+    expect(sock.ofType('pairCancel')).toEqual([])
+    expect(screen.getByText('http://127.0.0.1:7717/pair?t=zK3tokenzK3')).toBeTruthy()
   })
 
   it('confirms the pairing when a device that was not there arrives', async () => {
