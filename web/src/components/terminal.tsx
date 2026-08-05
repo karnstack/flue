@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { useFlueClient } from '@/client/provider'
+import { ExitOverlay } from '@/components/exit-overlay'
 import { DARK_SCHEME_QUERY, prefersDark, terminalPalette } from '@/emulator/palette'
 import type { Emulator } from '@/emulator/types'
 import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
@@ -33,6 +34,13 @@ export interface TerminalProps {
    * Build the emulator. The seam tests reach for; nothing in the app passes it.
    */
   createEmulator?: (opts: XtermOptions) => Emulator
+  /**
+   * Called with the new session's id once a Restart's spawn has attached.
+   * The route supplies navigation; the component never touches the router.
+   */
+  onRestarted?: (sessionId: string) => void
+  /** Called after Close has closed the dead session; navigate away here. */
+  onClosed?: () => void
 }
 
 /** Named so the test and the markup cannot drift apart. */
@@ -89,9 +97,15 @@ const EXIT_NOTICE = (code: number) =>
  * session in one tab would survive until the first reconnect and then both sit
  * on one ref. Do not build one.
  */
-export function Terminal({ sessionId, createEmulator = createXtermEmulator }: TerminalProps) {
+export function Terminal({
+  sessionId,
+  createEmulator = createXtermEmulator,
+  onRestarted,
+  onClosed,
+}: TerminalProps) {
   const client = useFlueClient()
   const paneRef = useRef<HTMLDivElement>(null)
+  const innerRef = useRef<HTMLDivElement>(null)
   const surfaceRef = useRef<HTMLDivElement>(null)
   // Seeded from the client rather than assumed, because onStatus reports only
   // changes: a view mounted into a connection that is already up would
@@ -100,11 +114,26 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     client.status === 'reconnecting' ? 'reconnecting' : 'connecting',
   )
   const [mode, setMode] = useState<KeyboardMode>('tab')
+  const [exitCode, setExitCode] = useState<number | null>(null)
+  // This session's directory, for Restart and the new-session link. From the
+  // session list, because `attached` does not carry it.
+  const [cwd, setCwd] = useState<string | null>(null)
+  // The effect's handle for the overlay's Restart. The spawn bookkeeping is
+  // effect-local, so the action is built inside the effect and reached from
+  // render through this ref. Close needs no daemon action at all: the exit
+  // already retired the ref on both ends, and an exited session reaps itself
+  // after ExitedRetention — Close just leaves.
+  const actionsRef = useRef<{ restart: (dir: string | null) => void } | null>(null)
+  // The latest onRestarted, readable from inside the effect without putting
+  // a prop identity in its dependency array.
+  const restartedRef = useRef(onRestarted)
+  restartedRef.current = onRestarted
 
   useEffect(() => {
     const pane = paneRef.current
+    const inner = innerRef.current
     const surface = surfaceRef.current
-    if (!pane || !surface) return
+    if (!pane || !inner || !surface) return
 
     const palette = terminalPalette(prefersDark())
     const emulator = createEmulator({ cols: 80, rows: 24, theme: palette })
@@ -140,11 +169,16 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     // reconnect must not walk the pill back to "Reconnecting…" and imply that
     // waiting will help.
     let over = false
+    // The reqId of a Restart's spawn, unanswered. Doubles as the click guard:
+    // one restart in flight at a time, per mount.
+    let restartReq: number | null = null
     let frame = 0
     const priorTitle = document.title
 
     const paneBox = (): Box => {
-      const box = pane.getBoundingClientRect()
+      // The inner box, not the pane: the pane carries the padding that gives
+      // the terminal its margin, and cells are fit to what is inside it.
+      const box = inner.getBoundingClientRect()
       return { width: box.width, height: box.height }
     }
 
@@ -245,6 +279,16 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
 
     offs.push(
       client.onAttached((a) => {
+        if (restartReq !== null && a.reqId === restartReq) {
+          // The Restart's own spawn. Hand the new ref straight back — the
+          // route this navigates to attaches for itself — and go. The dead
+          // session needs nothing: the exit already retired its ref on both
+          // ends, and the daemon reaps it after ExitedRetention.
+          restartReq = null
+          client.detach(a.ref)
+          restartedRef.current?.(a.id)
+          return
+        }
         // One client serves the whole tab, so every listener sees every reply.
         if (a.id !== sessionId) return
         ref = a.ref
@@ -291,7 +335,15 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
         if (r !== ref) return
         over = true
         emulator.write(EXIT_NOTICE(code))
+        setExitCode(code)
         setPhase('exited')
+      }),
+    )
+
+    offs.push(
+      client.onSessions((list) => {
+        const own = list.find((s) => s.id === sessionId)
+        if (own) setCwd(own.cwd)
       }),
     )
 
@@ -326,7 +378,7 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     // scanner candidate that compiles a stray rule of the same name into the
     // shipped stylesheet. See the note at the top of src/styles.css.
     const observer = new ResizeObserver(schedule)
-    observer.observe(pane)
+    observer.observe(inner)
 
     const media = globalThis.matchMedia?.(DARK_SCHEME_QUERY)
     const onScheme = () => {
@@ -338,9 +390,23 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     }
     media?.addEventListener?.('change', onScheme)
 
+    actionsRef.current = {
+      // Click-driven only, for the same StrictMode reason session creation
+      // lives on the sessions screen: a spawn fired from a mount effect runs
+      // twice and can only ever detach one of its shells.
+      restart: (dir) => {
+        if (restartReq !== null) return
+        const reqId = client.spawn({ cwd: dir ?? undefined, cols: dims.cols, rows: dims.rows })
+        if (reqId !== null) restartReq = reqId
+      },
+    }
+
     client.attach(sessionId, 0)
+    // For the cwd: `attached` does not carry it, the session list does.
+    client.list()
 
     return () => {
+      actionsRef.current = null
       for (const off of offs) off()
       window.removeEventListener('keydown', onKey, true)
       observer.disconnect()
@@ -358,6 +424,9 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
     }
   }, [client, sessionId, createEmulator])
 
+  const handleRestart = () => actionsRef.current?.restart(cwd)
+  const handleClose = () => onClosed?.()
+
   return (
     <div
       ref={paneRef}
@@ -367,44 +436,86 @@ export function Terminal({ sessionId, createEmulator = createXtermEmulator }: Te
       // and they have to agree with that palette or the pane flashes.
       className="relative h-full w-full overflow-hidden bg-white dark:bg-zinc-950"
     >
+      {/*
+        The inset is the terminal's margin, like any terminal app's: the pane
+        behind it carries the terminal palette's background, so the padding
+        reads as the terminal's own breathing room, not a frame. Cells are
+        fit to this box (see paneBox), never to the pane.
+      */}
       <div
-        ref={surfaceRef}
-        data-flue-surface=""
-        className="flue-term-surface absolute top-0 left-0 origin-top-left"
-      />
-      {phase !== 'live' && (
-        // Dark in both themes, like the pane it floats over usually is; the
-        // translucent ground and backdrop-blur keep it legible over whatever
-        // the screen underneath was showing. The dot is the phase at a
-        // glance: pulsing while an answer is still expected, still once the
-        // state is final and waiting will not change it. Like the dot on a
-        // session row it stays neutral — waiting reads as motion, not
-        // colour, and amber's short list of jobs does not include this pill.
+        ref={innerRef}
+        data-flue-inset=""
+        className={cn(
+          'absolute inset-3 transition-opacity',
+          phase === 'exited' && 'opacity-60',
+        )}
+      >
         <div
-          role="status"
+          ref={surfaceRef}
+          data-flue-surface=""
+          className="flue-term-surface absolute top-0 left-0 origin-top-left"
+        />
+      </div>
+      {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
+          loses to them — the controls must win the stack or the scrollbar
+          eats their clicks. */}
+      <div className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
+        {/*
+          A real link, so a middle or cmd click behaves browser-natively. It
+          opens in a new tab by default so this session stays put; the root
+          route spawns into ?cwd= on mount and navigates itself.
+        */}
+        <a
+          href={cwd ? `/?cwd=${encodeURIComponent(cwd)}` : '/'}
+          target="_blank"
+          rel="noopener"
+          title="New session here"
           className={cn(
-            'absolute top-3 right-3 rounded-lg px-3 py-1.5 text-base/6 font-medium sm:text-sm/6',
-            'bg-zinc-950/80 text-zinc-100 shadow-lg ring-1 ring-white/10 backdrop-blur-sm',
+            'rounded-lg px-2.5 py-1.5 text-base/6 font-medium sm:text-sm/6',
+            'bg-zinc-950/80 text-zinc-400 shadow-lg ring-1 ring-white/10 backdrop-blur-sm',
+            'transition-colors hover:text-zinc-100',
           )}
         >
-          <span className="flex items-center gap-x-2">
-            <span
-              aria-hidden="true"
-              className={cn(
-                'size-1.5 shrink-0 rounded-full',
-                phase === 'connecting' || phase === 'reconnecting'
-                  ? 'bg-zinc-300 motion-safe:animate-pulse'
-                  : 'bg-zinc-500',
-              )}
-            />
-            {NOTICE[phase]}
-          </span>
-          {phase === 'connecting' && (
-            <span className="mt-0.5 block pl-3.5 text-xs/5 font-normal text-zinc-400">
-              <kbd className="font-mono">{TERMINAL_SHORTCUT_HINT}</kbd> for focus mode
+          <span aria-hidden="true">+</span>
+          <span className="sr-only">New session in this directory</span>
+        </a>
+        {phase !== 'live' && (
+          // Dark in both themes, like the pane it floats over usually is; the
+          // translucent ground and backdrop-blur keep it legible over whatever
+          // the screen underneath was showing. The dot is the phase at a
+          // glance: pulsing while an answer is still expected, still once the
+          // state is final and waiting will not change it. Like the dot on a
+          // session row it stays neutral — waiting reads as motion, not
+          // colour, and amber's short list of jobs does not include this pill.
+          <div
+            role="status"
+            className={cn(
+              'rounded-lg px-3 py-1.5 text-base/6 font-medium sm:text-sm/6',
+              'bg-zinc-950/80 text-zinc-100 shadow-lg ring-1 ring-white/10 backdrop-blur-sm',
+            )}
+          >
+            <span className="flex items-center gap-x-2">
+              <span
+                aria-hidden="true"
+                className={cn(
+                  'size-1.5 shrink-0 rounded-full',
+                  phase === 'connecting' || phase === 'reconnecting'
+                    ? 'bg-zinc-300 motion-safe:animate-pulse'
+                    : 'bg-zinc-500',
+                )}
+              />
+              {NOTICE[phase]}
             </span>
-          )}
-        </div>
+            {phase === 'connecting' && (
+              <span className="mt-0.5 block pl-3.5 text-xs/5 font-normal text-zinc-400">
+                <kbd className="font-mono">{TERMINAL_SHORTCUT_HINT}</kbd> for focus mode
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+      {phase === 'exited' && exitCode !== null && (
+        <ExitOverlay code={exitCode} onRestart={handleRestart} onClose={handleClose} />
       )}
     </div>
   )

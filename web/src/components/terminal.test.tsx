@@ -1,8 +1,9 @@
 import { StrictMode, type ReactNode } from 'react'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FlueClientProvider } from '@/client/provider'
+import type { SessionInfo } from '@/client/protocol'
 import { GUTTER_PX } from '@/lib/geometry'
 import { createFakeEmulator, type FakeEmulator } from '@/testing/emulator'
 import { attached, fakeClient, sizeChanged, type FakeSocket } from '@/testing/socket'
@@ -69,6 +70,7 @@ function resizeObservers() {
 }
 
 const pane = () => document.querySelector<HTMLElement>('[data-flue-mode]')!
+const inset = () => document.querySelector<HTMLElement>('[data-flue-inset]')!
 const surfaceEl = () => document.querySelector<HTMLElement>('[data-flue-surface]')!
 
 afterEach(() => {
@@ -436,7 +438,9 @@ describe('Terminal', () => {
       em.live().measured = { width: 800, height: 408 }
 
       act(() => sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24, primary: true })))
-      expect(observers.watching(pane())).toBe(true)
+      // The observed element is the inset box, not the pane: the pane carries
+      // the terminal's margin and cells are fit to what sits inside it.
+      expect(observers.watching(inset())).toBe(true)
 
       // The pane now holds twice the height, so 48 rows.
       box.mockReturnValue({ width: 800 + GUTTER_PX, height: 816 } as DOMRect)
@@ -852,5 +856,107 @@ describe('Terminal', () => {
 
       expect(sock.input()).toEqual([{ ref: 2, text: 'live' }])
     })
+  })
+})
+
+/** A complete SessionInfo, so a caller only names what it cares about. */
+function session(over: Partial<SessionInfo> = {}): SessionInfo {
+  return {
+    id: 's1',
+    title: '',
+    cwd: '/home/karn/code',
+    cmd: [],
+    state: 'running',
+    exitCode: 0,
+    cols: 80,
+    rows: 24,
+    lastActive: '2026-08-05T00:00:00Z',
+    ...over,
+  }
+}
+
+describe('the exit overlay', () => {
+  it('appears when the shell exits, naming the code', () => {
+    const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 130 }))
+
+    const card = screen.getByRole('alertdialog')
+    expect(card.getAttribute('aria-label')).toBe('shell exited (130)')
+    expect(card.textContent).toContain('(130)')
+  })
+
+  it('dims the terminal but leaves it in the tree, scrollback intact', () => {
+    const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+    expect(inset().className).not.toContain('opacity-60')
+
+    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 0 }))
+    expect(inset().className).toContain('opacity-60')
+    // The wrapper must not eat events meant for the scrollback under it.
+    expect(screen.getByRole('alertdialog').parentElement!.className).toContain('pointer-events-none')
+  })
+
+  it('Restart spawns in the dead session’s directory, closes it, and hands over', () => {
+    const onRestarted = vi.fn()
+    const { sock } = mountTerminal((em) => (
+      <Terminal sessionId="s1" createEmulator={em.create} onRestarted={onRestarted} />
+    ))
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+    act(() => sock.emitControl({ type: 'sessions', sessions: [session()] }))
+    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 0 }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart' }))
+    const spawns = sock.ofType('spawn')
+    expect(spawns).toHaveLength(1)
+    expect(spawns[0]).toMatchObject({ cwd: '/home/karn/code', cols: 80, rows: 24 })
+
+    // A second click while the first is unanswered must not start a second
+    // shell.
+    fireEvent.click(screen.getByRole('button', { name: 'Restart' }))
+    expect(sock.ofType('spawn')).toHaveLength(1)
+
+    const reqId = spawns[0]!.reqId as number
+    act(() => sock.emitControl(attached({ ref: 9, id: 's2', reqId })))
+
+    // The new ref goes straight back — the next route attaches for itself.
+    // Nothing is sent for the dead session: the exit already retired its ref
+    // on both ends, and the daemon reaps it after ExitedRetention.
+    expect(sock.ofType('detach')).toContainEqual({ type: 'detach', ref: 9 })
+    expect(onRestarted).toHaveBeenCalledWith('s2')
+  })
+
+  it('Close just leaves — the daemon reaps an exited session on its own', () => {
+    const onClosed = vi.fn()
+    const { sock } = mountTerminal((em) => (
+      <Terminal sessionId="s1" createEmulator={em.create} onClosed={onClosed} />
+    ))
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 1 }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(sock.ofType('close')).toHaveLength(0)
+    expect(onClosed).toHaveBeenCalled()
+  })
+})
+
+describe('the new-session link', () => {
+  it('carries the session’s directory and opens a new tab', () => {
+    const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
+
+    // Asked for on mount: the list is where the cwd comes from.
+    expect(sock.ofType('list')).toHaveLength(1)
+
+    act(() =>
+      sock.emitControl({ type: 'sessions', sessions: [session({ cwd: '/tmp/with space' })] }),
+    )
+
+    const link = screen.getByRole('link', { name: 'New session in this directory' })
+    expect(link.getAttribute('href')).toBe(`/?cwd=${encodeURIComponent('/tmp/with space')}`)
+    expect(link.getAttribute('target')).toBe('_blank')
   })
 })

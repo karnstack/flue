@@ -1,4 +1,4 @@
-import { useParams } from '@tanstack/react-router'
+import { useNavigate, useParams } from '@tanstack/react-router'
 
 import { Terminal } from '@/components/terminal'
 
@@ -22,9 +22,24 @@ import { Terminal } from '@/components/terminal'
  */
 export function TerminalRoute() {
   const { sessionId } = useParams({ from: '/d/$deviceId/s/$sessionId' })
+  const navigate = useNavigate()
   // Keyed by session, so navigating between two sessions builds a new
   // terminal rather than feeding one emulator two sessions' scrollback. The
   // effect's dependency array would do this too; the key makes the state
   // React holds — the phase pill, the keyboard mode — reset with it.
-  return <Terminal key={sessionId} sessionId={sessionId} />
+  return (
+    <Terminal
+      key={sessionId}
+      sessionId={sessionId}
+      // replace, both ways: the dead session's URL is not worth a Back stop.
+      onRestarted={(id) =>
+        void navigate({
+          to: '/d/$deviceId/s/$sessionId',
+          params: { deviceId: 'local', sessionId: id },
+          replace: true,
+        })
+      }
+      onClosed={() => void navigate({ to: '/', replace: true })}
+    />
+  )
 }

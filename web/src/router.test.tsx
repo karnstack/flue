@@ -95,7 +95,12 @@ describe('createFlueRouter', () => {
     expect(screen.queryByRole('complementary')).toBeNull()
     expect(screen.queryByRole('banner')).toBeNull()
     expect(screen.queryByRole('navigation')).toBeNull()
-    expect(screen.queryAllByRole('link')).toHaveLength(0)
+    // The one link is the terminal's own new-session control — part of the
+    // terminal, not chrome around it. Anything beyond it is chrome creeping
+    // back in.
+    const links = screen.queryAllByRole('link')
+    expect(links).toHaveLength(1)
+    expect(links[0]!.textContent).toContain('New session')
   })
 
   it('hands the session id from the path to the terminal', async () => {
