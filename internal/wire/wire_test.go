@@ -233,6 +233,43 @@ func TestControlRoundTripsDeviceAndPairingMessages(t *testing.T) {
 	}
 }
 
+// TestDeviceListEncodesEmptyAsArray enforces the invariant the fixture's
+// deviceListEmpty case only illustrates: a daemon with nothing paired sends
+// [], never null. `devices` is not optional, and the TypeScript side declares
+// it `DeviceInfo[]`, so a nil slice reaching the wire would throw in every
+// consumer that maps over the list — with the whole fixture suite still green,
+// because a fixture pins what is written down, not what a caller may build.
+func TestDeviceListEncodesEmptyAsArray(t *testing.T) {
+	b, err := EncodeControl(DeviceList{})
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if string(fields["devices"]) != "[]" {
+		t.Fatalf("devices = %s, want []", fields["devices"])
+	}
+
+	// And it survives the trip back: a client decoding an empty list holds an
+	// empty slice, not a nil one, so ranging over it is safe on both sides.
+	msg, err := DecodeControl(b)
+	if err != nil {
+		t.Fatalf("DecodeControl: %v", err)
+	}
+	dl, ok := msg.(DeviceList)
+	if !ok {
+		t.Fatalf("msg is %T, want wire.DeviceList", msg)
+	}
+	if dl.Devices == nil {
+		t.Fatal("decoded Devices is nil, want an empty slice")
+	}
+	if len(dl.Devices) != 0 {
+		t.Fatalf("decoded Devices has %d entries, want 0", len(dl.Devices))
+	}
+}
+
 // deepEqual recursively compares two any values for equality, handling
 // nested maps and slices. Used by TestGoldenControlMessages to verify
 // round-trip fidelity while tolerating type differences between JSON

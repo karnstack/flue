@@ -409,8 +409,10 @@ describe('control message golden file', () => {
 
   it('decodes an empty deviceList as [], not null', () => {
     // `devices` is not omitempty on the Go side, and a daemon with nothing
-    // paired must send `[]`: a nil slice would marshal to null and every
-    // consumer that maps over the list would throw.
+    // paired sends `[]`: a nil slice would marshal to null and every consumer
+    // that maps over the list would throw. This case pins the shape; what
+    // enforces it for values a producer builds rather than writes down is
+    // `DeviceList.MarshalJSON`, covered by TestDeviceListEncodesEmptyAsArray.
     const want: DeviceList = { type: 'deviceList', devices: [] }
     expect(fixture('deviceListEmpty')).toStrictEqual(want)
   })

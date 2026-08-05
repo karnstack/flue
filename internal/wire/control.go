@@ -132,6 +132,23 @@ type DeviceList struct {
 	Devices []DeviceInfo `json:"devices"`
 }
 
+// MarshalJSON writes an empty list as [] rather than null.
+//
+// A nil slice marshals to null by default, and "no devices are paired" is the
+// one state a caller reaches by building the zero value — precisely the path
+// that would ship null. The field is not optional and the client declares it
+// `DeviceInfo[]`, so null would throw in every consumer that ranges over it.
+// Normalising here rather than at each call site means no producer can get it
+// wrong.
+func (d DeviceList) MarshalJSON() ([]byte, error) {
+	// The alias sheds this method, so json.Marshal below does not recurse.
+	type alias DeviceList
+	if d.Devices == nil {
+		d.Devices = []DeviceInfo{}
+	}
+	return json.Marshal(alias(d))
+}
+
 // Pairing answers pairStart with the credentials the second device needs.
 type Pairing struct {
 	Token string `json:"token"`
