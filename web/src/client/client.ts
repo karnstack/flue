@@ -7,7 +7,9 @@ import {
   PROTOCOL_VERSION,
   type Attached,
   type ClientMessage,
+  type DeviceInfo,
   type ErrorMsg,
+  type Pairing,
   type ServerMessage,
   type SessionInfo,
   type SizeChanged,
@@ -171,6 +173,9 @@ export class FlueClient {
   /** A `list` asked for while the socket was down. See `list`. */
   private listOwed = false
 
+  /** A `devices` asked for while the socket was down. See `listDevices`. */
+  private devicesOwed = false
+
   private outputListeners = new Emitter<[number, Uint8Array]>()
   private attachedListeners = new Emitter<[Attached]>()
   private exitListeners = new Emitter<[number, number]>()
@@ -179,6 +184,9 @@ export class FlueClient {
   private errorListeners = new Emitter<[ErrorMsg]>()
   private statusListeners = new Emitter<[ConnStatus]>()
   private goneListeners = new Emitter<[string]>()
+  private deviceListeners = new Emitter<[DeviceInfo[]]>()
+  private pairingListeners = new Emitter<[Pairing]>()
+  private revokedListeners = new Emitter<[string]>()
 
   constructor(
     private url: string,
@@ -221,6 +229,41 @@ export class FlueClient {
   }
 
   /**
+   * The paired devices, as of the daemon's last word on them.
+   *
+   * Answers a `listDevices`, and also arrives unasked: the daemon broadcasts
+   * the new list to every remaining connection after a pairing or a revoke,
+   * including ones it happened on behalf of. Nothing here tells the two apart,
+   * so a screen that renders whatever it was last handed is always current.
+   */
+  onDeviceList(cb: (devices: DeviceInfo[]) => void) {
+    return this.deviceListeners.add(cb)
+  }
+
+  /**
+   * A pairing window the daemon has opened, answering `startPairing`. Handed
+   * on whole: the second device needs the token, the URL, and the daemon's
+   * public key, and the screen showing it needs the deadline.
+   */
+  onPairing(cb: (p: Pairing) => void) {
+    return this.pairingListeners.add(cb)
+  }
+
+  /**
+   * This device has been unpaired, and the connection is about to end.
+   *
+   * The daemon sends this immediately before it closes, so it always arrives
+   * ahead of the status change — which is the point of it: without the reason,
+   * a revoked device shows an ordinary blink and then reconnects forever
+   * against a registry that no longer holds its key. What to do about it is
+   * the consumer's: this client keeps its usual recovery, and a consumer that
+   * wants the retries to stop calls `close` from here.
+   */
+  onRevoked(cb: (reason: string) => void) {
+    return this.revokedListeners.add(cb)
+  }
+
+  /**
    * The current connection state.
    *
    * `onStatus` only reports changes, so anything mounting mid-connection would
@@ -258,6 +301,7 @@ export class FlueClient {
     this.clearRetry()
     this.attempt = 0
     this.listOwed = false
+    this.devicesOwed = false
     this.teardown()
     this.setStatus('closed')
   }
@@ -272,6 +316,53 @@ export class FlueClient {
    */
   list() {
     if (!this.send({ type: 'list' })) this.listOwed = true
+  }
+
+  /**
+   * Ask for the paired-device list.
+   *
+   * Held while the socket is down for the same reasons `list` is, and one
+   * more: a `deviceList` is otherwise only pushed when a pairing or a revoke
+   * happens, so a request dropped on a cold mount leaves that screen empty
+   * until somebody changes something, which may be never.
+   */
+  listDevices() {
+    if (!this.send({ type: 'devices' })) this.devicesOwed = true
+  }
+
+  /**
+   * Unpair a device.
+   *
+   * Dropped rather than held while the socket is down: replayed after an
+   * outage this could unpair a device that had been paired again in the
+   * meantime. There is no reply to correlate — the daemon answers by
+   * broadcasting the new `deviceList` to every connection left, which reaches
+   * `onDeviceList` like any other.
+   */
+  revokeDevice(deviceId: string) {
+    this.send({ type: 'revoke', deviceId })
+  }
+
+  /**
+   * Open a pairing window, answered by `pairing`.
+   *
+   * Dropped while the socket is down, as `spawn` is: the token is good for two
+   * minutes, so one that surfaced from behind a ten-second backoff would show
+   * an expiring token at a screen that had long since moved on.
+   */
+  startPairing() {
+    this.send({ type: 'pairStart' })
+  }
+
+  /**
+   * Close the pairing window, invalidating any outstanding token.
+   *
+   * Dropped while the socket is down, and safely so: the daemon leaves pairing
+   * mode on the deadline as well as on this, so a cancel the outage swallowed
+   * costs at most the rest of that two-minute window.
+   */
+  cancelPairing() {
+    this.send({ type: 'pairCancel' })
   }
 
   /**
@@ -412,6 +503,10 @@ export class FlueClient {
         this.listOwed = false
         this.send({ type: 'list' })
       }
+      if (this.devicesOwed) {
+        this.devicesOwed = false
+        this.send({ type: 'devices' })
+      }
     }
 
     sock.onclose = () => {
@@ -537,6 +632,22 @@ export class FlueClient {
         this.errorListeners.emit(msg)
         break
       }
+
+      case 'deviceList':
+        this.deviceListeners.emit(msg.devices)
+        break
+
+      case 'pairing':
+        this.pairingListeners.emit(msg)
+        break
+
+      case 'revoked':
+        // Delivered here and nowhere else. The daemon writes this frame ahead
+        // of the goodbye on the same queue, so the reason reaches consumers
+        // before `onclose` announces the outage — anything deferred past this
+        // point would arrive after the client had already begun reconnecting.
+        this.revokedListeners.emit(msg.reason)
+        break
 
       case 'welcome':
         break
