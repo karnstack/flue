@@ -1,7 +1,8 @@
 # Follow-ups
 
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
-roughly by value, not by size.
+roughly by value, not by size. Items 7–9 are the same exercise for the
+crypto+pairing milestone.
 
 ## Done
 
@@ -68,8 +69,10 @@ site.
 rejection, and mint rejection, each with the peer. That includes the
 `Sec-Fetch-Site` rejection on the websocket upgrade, which runs after
 `checkAuth` has already accepted the token and was a fourth auth-decision site
-the first pass missed. Pairing and revocation log nothing because they have no
-code yet — remote access is still designed, not built.
+the first pass missed. Pairing and revocation logged nothing at the time because
+they had no code yet; the crypto+pairing milestone below closed that half —
+`pairing.go` and `conn.go` now log every pair, every refusal, and every
+revocation with the device.
 
 ### 5. `loginShell` before the login-service task
 
@@ -109,6 +112,103 @@ terminal see a login shell under the login service too.
 - `connect-src` allows `ws://127.0.0.1:*` and `ws://localhost:*`. `'self'` covers
   the daemon's own socket; the wildcard ports would let an injected script reach
   every loopback service. Defence in depth only, given `script-src 'self'`.
+
+## Crypto and pairing
+
+Carried out of the crypto+pairing milestone (Noise IK, the device registry, the
+local pairing ceremony, the Devices screen and `/pair`). Part 2 is the relay —
+`cfrelay` — and most of what follows is aimed at the moment it lands.
+
+### 7. Scope deliberately left out
+
+- **The typed-phrase fallback (`warm-otter-4821`) is part 2.** It needs a
+  wordlist shared by both implementations, and — unlike the QR — it cannot carry
+  the daemon's 32-byte static key, so its trust model is a separate design
+  conversation rather than a missing function. Over `local` the copyable pair URL
+  covers the same need, which is why deferring it costs nothing yet.
+- **The device-conn registry has no local members.** `registerDeviceConn`
+  (`internal/daemon/server.go:778`) and `s.deviceConns` are built and tested, but
+  a loopback connection authenticates by session token and never acquires a
+  device identity, so nothing keys a conn by device until `cfrelay` is the thing
+  opening them. Revocation closes zero live connections today; the tests reach
+  `registerDeviceConn` directly to prove the mechanism.
+- **Any authenticated connection may revoke, by design.** The spec draws no
+  privileged split — pairing *is* the boundary, and a device that got through it
+  is trusted to unpair others. Reviewed and ruled on rather than overlooked.
+
+### 8. Worth a second look before or during part 2
+
+- `registerDeviceConn` has two latent races (`internal/daemon/server.go:778`): a
+  connection that flaps can leave its predecessor's entry behind, and a revoke
+  landing mid-handshake is undone by the registration that follows it. Neither is
+  reachable while nothing calls it — `cfrelay` is its first caller, so the
+  "still in `s.conns`" guard wants to exist before that does. `dropConn`
+  (`server.go:801`) also leaves a stale `*conn` in the backing array's tail.
+- Store errors reach clients verbatim: `err.Error()` on `devices_unavailable` and
+  `revoke_failed` (`internal/daemon/conn.go:437,507,512`) carries the
+  `devices.json` path, which discloses `$HOME` and the username to any paired
+  device. It matches what the rest of the file already does; sanitize the whole
+  set at once rather than one call site.
+- `wire.Sessions` marshals a nil slice as `null` while the TypeScript type says
+  `SessionInfo[]` (`internal/wire/control.go:80`). Exactly the gap this branch
+  closed for `DeviceList` with a `MarshalJSON` (`control.go:143`) — it pre-dates
+  the branch, and was left rather than widened mid-milestone.
+- `exemptStaticPath` returns true for a bare `/assets`
+  (`internal/daemon/server.go:431`), which the doc comment two lines above says
+  it does not. Unreachable today because the mux 307s the bare directory first,
+  so this is defence in depth — but it is the depth the comment promises.
+  `strings.HasPrefix(p, uiAssetPrefix)` closes it.
+- `/pair` marks the window `spent: true` on refusals that never reached the
+  redeem step — a 503, or a provenance 403 (`web/src/routes/pair.tsx:219-239`).
+  The token is still good and the UI says otherwise. Nothing writes an audit line
+  for a provenance 403 at an exempt path, either.
+- `loadIdentity` failing is fatal to `serve` (`cmd/flue/main.go:170`). Degrading
+  to an empty `Identity` — pairing off, shells still up — is the friendlier shape
+  for a keystore that got chmod'd wrong.
+- A revoked device retries forever when the close carries no reason: `sendFinal`
+  drops the `revoked` frame on the `errConnBacklogged` path
+  (`internal/daemon/conn.go:231`), leaving a bare close the client reconnects
+  from. Only reachable once a device holds a real connection — part 2.
+- Any local process can burn an open pairing window by guessing wrong once. That
+  is the intended shape of burn-on-wrong-guess and it is bounded by the two-minute
+  TTL, but it is worth knowing before the ceremony is driven from anywhere else.
+
+### 9. Smaller carried items
+
+- `go.mod` still marks `github.com/flynn/noise` `// indirect` though
+  `internal/crypto` imports it directly. `go mod tidy` fixes exactly that, and
+  also adds three unrelated `go.sum` lines — left for a dedicated cleanup rather
+  than smuggled in behind a docs commit.
+- The CreateTemp+rename pattern named twice in item 6 is now five copies —
+  `internal/crypto/keys.go:72`, `internal/crypto/devices.go:62`,
+  `internal/config/paths.go:85`, `internal/daemon/discover.go:47`,
+  `internal/session/snapshot.go:117`. The dedupe was not done inline.
+- `internal/crypto/handshake_test.go` is not gofmt-clean (inherited from the task
+  brief), and its wrong-pinned-key case spends a fixed five seconds waiting out a
+  context where it could signal off the responder's error.
+  `internal/crypto/vectors_test.go:64`'s `capture` struct is dead.
+- Test gaps noted and not filled: the corrupt-`devices.json` path
+  (`internal/crypto/devices.go`); the same-bytes refusal test covers one of three
+  refusal shapes and no headers (`internal/daemon/pairing_test.go`); the
+  revoked-conn test discards frames after the revoke, so it cannot catch a
+  `deviceList` leaking to a revoked device (`internal/daemon/server_test.go`);
+  the client's clear-on-flush only pins the first reconnect; and the Devices
+  screen has no case for Confirm-while-disconnected, `pairing_unavailable`
+  clearing the window, or the Paired column.
+- Log wording: `internal/daemon/pairing.go:136` calls the first probe of an
+  expired-but-unswept window "wrong token against an open window". The third doc
+  bullet on `withProvenance` (`internal/daemon/server.go`) now holds only for
+  exempt paths.
+- `testdata/wire/control.json` spells `deviceId` as sixteen hex characters;
+  `crypto.DeviceID` yields twelve and `deviceIDLen`
+  (`internal/daemon/server.go:843`) enforces twelve. `spec/protocol.md` is silent
+  on the format either way, and its line 122 — "one example of every control
+  message" — is now stale, since three types carry two cases.
+- `secondsLeft` is unclamped (`web/src/routes/devices.tsx:68`), so clock skew can
+  paint one negative frame before the window closes. The armed row's
+  Confirm/Cancel are `h-7` with `gap-x-1`, the smallest touch target in the app,
+  on the one irreversible action. Relative last-seen is frozen between pushes —
+  no interval tick.
 
 ## Things worth knowing before touching this code
 
