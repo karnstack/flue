@@ -1,0 +1,28 @@
+{
+  "protocol": "Noise_IK_25519_ChaChaPoly_SHA256",
+  "initiatorStaticPriv": "eeb8018a418c7baa11d09080d32dbf5585ed4cd6ac7173f191d56faa549d27aa",
+  "initiatorStaticPub": "07c49831ace851c4c861ad4fa8bc850e18c6128731bdf5631076920bc1e89411",
+  "responderStaticPriv": "f8cf66818e3ca7684be962dae330e59496ea79172703dcc7c28403be3bb93d38",
+  "responderStaticPub": "3d49879bbff7c36b094d55dea6e1dc4095ffa8b80ecf578fdeab82905cbe5264",
+  "initiatorEphemeralPriv": "5b2b914d878bebf3a3ec6963845493b5cbfb7bf5301913dc2a9b1f1231f75d9e",
+  "responderEphemeralPriv": "26ed0d6b19cb381c8539fec74451409482967797e732b9c1a83d319ece1d3ab1",
+  "msg1": "7aa6099ce801ab46076749db6a77e2f90b3f2c35209c8154a7bff1af5179ae224874140da11f5e15535c9c8089837e81ee177e3ec6e517b300974e967963579d6c57c00bfec57a32d4eec862f94e20d29b9118f3b2b679649c3e8ffefb0fee6b",
+  "msg2": "4801aff0ca8541e9e8164469cbb2df576575cde958f048d5e4ff431e4c2de116a640a1076ab6236669c2e7ae60703812",
+  "transport": [
+    {
+      "dir": "i2r",
+      "plaintext": "68656c6c6f206461656d6f6e",
+      "ciphertext": "2adcd61521379c1e5c1d5ba4b4e0d47d33bed85a6291ea1c91954d64"
+    },
+    {
+      "dir": "r2i",
+      "plaintext": "68656c6c6f2062726f77736572",
+      "ciphertext": "8b8933ece3142387fcaa13d8640348f595e85e77ab3a1988a2796cae21"
+    },
+    {
+      "dir": "i2r",
+      "plaintext": "",
+      "ciphertext": "44d055608856577705078fa7225e5cf7"
+    }
+  ]
+}
