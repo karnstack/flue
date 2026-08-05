@@ -945,9 +945,9 @@ describe('the exit overlay', () => {
   })
 })
 
-describe('the session theme', () => {
-  it('mounts with the theme the session chose before', () => {
-    localStorage.setItem('flue:theme:s1', 'dracula')
+describe('the terminal theme', () => {
+  it('mounts with the stored global choice', () => {
+    localStorage.setItem('flue:theme', 'dracula')
     const { em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
 
     // The stored preset is the emulator's very first theme — applied at
@@ -955,11 +955,26 @@ describe('the session theme', () => {
     expect(em.live().themes[0]?.background).toBe('#282a36')
   })
 
-  it('mounts with flue’s own palette when the session never chose', () => {
+  it('mounts with flue’s own palette when nothing was chosen', () => {
     const { em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
     // The harness's matchMedia reports light, so flue's light pair — the
     // point is that it is flue's own palette, not a preset's.
     expect(em.live().themes[0]?.background).toBe('#ffffff')
+  })
+
+  it('follows a choice made in another tab', () => {
+    const { em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    // The storage event fires only in tabs that did not make the change —
+    // exactly the ones that have to catch up.
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'flue:theme', newValue: 'nord' }),
+      )
+    })
+
+    const themes = em.live().themes
+    expect(themes[themes.length - 1]?.background).toBe('#2e3440')
   })
 })
 

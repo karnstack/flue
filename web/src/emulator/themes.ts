@@ -150,3 +150,49 @@ export function resolveTheme(id: string, dark: boolean): TerminalTheme {
   const preset = THEME_PRESETS.find((p) => p.id === id)
   return preset ? preset.theme : terminalPalette(dark)
 }
+
+/**
+ * What the terminal's floating controls wear under a theme.
+ *
+ * Derived from the theme's own two surface colours rather than designed per
+ * preset: a chip is the terminal's background lifted to translucency with
+ * the foreground for text, so the control strip always reads as part of the
+ * terminal it floats over — Dracula's chips are Dracula, Solarized Light's
+ * are light. Alpha does the rest of the work everywhere, so the values hold
+ * on any palette without per-theme tuning.
+ */
+export interface ControlColors {
+  /** The chip's ground: the theme background at 85%. */
+  bg: string
+  /** Full-strength text — the theme foreground. */
+  fg: string
+  /** Resting text and quiet dots. */
+  dim: string
+  /** Hairline borders. */
+  ring: string
+  /** Hover and highlight wash. */
+  wash: string
+}
+
+export function controlColors(theme: TerminalTheme): ControlColors {
+  const bg = theme.background ?? '#09090b'
+  const fg = theme.foreground ?? '#e4e4e7'
+  return {
+    bg: alpha(bg, 0.85),
+    fg,
+    dim: alpha(fg, 0.65),
+    ring: alpha(fg, 0.18),
+    wash: alpha(fg, 0.1),
+  }
+}
+
+/** #rgb or #rrggbb to rgba(). Anything else comes back unchanged — better a
+ *  fully opaque chip than a CSS parse error that drops the declaration. */
+function alpha(color: string, a: number): string {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color)
+  if (!m) return color
+  let hex = m[1]!
+  if (hex.length === 3) hex = [...hex].map((c) => c + c).join('')
+  const n = parseInt(hex, 16)
+  return `rgba(${(n >> 16) & 0xff}, ${(n >> 8) & 0xff}, ${n & 0xff}, ${a})`
+}

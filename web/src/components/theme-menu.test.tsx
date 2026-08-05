@@ -8,7 +8,7 @@ describe('ThemeMenu', () => {
   it('lists System plus every preset and reports a choice', async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
-    render(<ThemeMenu value="system" onChange={onChange} />)
+    render(<ThemeMenu value="system" dark={true} onChange={onChange} />)
 
     await user.click(screen.getByRole('button', { name: 'Terminal theme' }))
 
@@ -23,7 +23,7 @@ describe('ThemeMenu', () => {
 
   it('marks the current choice checked', async () => {
     const user = userEvent.setup()
-    render(<ThemeMenu value="nord" onChange={() => {}} />)
+    render(<ThemeMenu value="nord" dark={true} onChange={() => {}} />)
 
     await user.click(screen.getByRole('button', { name: 'Terminal theme' }))
 

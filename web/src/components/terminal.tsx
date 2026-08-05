@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { PlusIcon } from 'lucide-react'
 
 import { useFlueClient } from '@/client/provider'
 import { ExitOverlay } from '@/components/exit-overlay'
 import { ThemeMenu } from '@/components/theme-menu'
 import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
-import { resolveTheme } from '@/emulator/themes'
+import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
 import type { Emulator } from '@/emulator/types'
 import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
-import { loadSessionTheme, saveSessionTheme } from '@/lib/session-theme'
+import { loadThemePref, saveThemePref, THEME_PREF_KEY } from '@/lib/theme-pref'
 import {
   cellBox,
   cellsThatFit,
@@ -122,13 +122,18 @@ export function Terminal({
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
   const [cwd, setCwd] = useState<string | null>(null)
-  // The session's theme choice, read once per mount and mirrored into a ref
-  // so the effect can resolve it without carrying the state in its
-  // dependency array — a theme change must restyle the live emulator, never
-  // rebuild it, because rebuilding drops the scrollback.
-  const [themeId, setThemeId] = useState(() => loadSessionTheme(sessionId))
+  // The theme choice — global, every session wears it — read once per mount
+  // and mirrored into a ref so the effect can resolve it without carrying
+  // the state in its dependency array: a theme change must restyle the live
+  // emulator, never rebuild it, because rebuilding drops the scrollback.
+  const [themeId, setThemeId] = useState(loadThemePref)
   const themeIdRef = useRef(themeId)
   themeIdRef.current = themeId
+  // The OS scheme, in state as well as in the effect's media listener: the
+  // floating controls are rendered, not painted imperatively, and their
+  // colours follow the resolved theme — which under System changes with the
+  // scheme.
+  const [dark, setDark] = useState(prefersDark)
   // The effect's handles for the floating controls. The spawn bookkeeping
   // and the emulator are effect-local, so the actions that need them are
   // built inside the effect and reached from render through this ref. Close
@@ -404,6 +409,7 @@ export function Terminal({
       // The pane shows through wherever a scaled surface does not reach, so it
       // has to follow the terminal's background and not the app's.
       pane.style.backgroundColor = next.background ?? ''
+      setDark(media?.matches ?? true)
     }
     media?.addEventListener?.('change', onScheme)
 
@@ -423,6 +429,19 @@ export function Terminal({
       },
     }
 
+    // Another tab choosing a theme lands here: the preference is global, and
+    // a change should sweep every open terminal, not just the one clicked.
+    // The storage event only ever fires in *other* tabs; the clicking tab
+    // goes through handleTheme. A null key is storage.clear() — back to
+    // system either way.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== THEME_PREF_KEY) return
+      const id = e.newValue ?? THEME_SYSTEM
+      setThemeId(id)
+      actionsRef.current?.applyTheme(id)
+    }
+    window.addEventListener('storage', onStorage)
+
     client.attach(sessionId, 0)
     // For the cwd: `attached` does not carry it, the session list does.
     client.list()
@@ -430,6 +449,7 @@ export function Terminal({
     return () => {
       actionsRef.current = null
       for (const off of offs) off()
+      window.removeEventListener('storage', onStorage)
       window.removeEventListener('keydown', onKey, true)
       observer.disconnect()
       media?.removeEventListener?.('change', onScheme)
@@ -450,17 +470,32 @@ export function Terminal({
   const handleClose = () => onClosed?.()
   const handleTheme = (id: string) => {
     setThemeId(id)
-    saveSessionTheme(sessionId, id)
+    saveThemePref(id)
     actionsRef.current?.applyTheme(id)
   }
+
+  // What the floating controls wear: the resolved theme's own surfaces,
+  // handed down as CSS variables so every chip — and the exit overlay —
+  // matches the terminal it floats over.
+  const controls = controlColors(resolveTheme(themeId, dark))
+  const chipStyle = {
+    '--chip-bg': controls.bg,
+    '--chip-fg': controls.fg,
+    '--chip-dim': controls.dim,
+    '--chip-ring': controls.ring,
+    '--chip-wash': controls.wash,
+  } as CSSProperties
 
   return (
     <div
       ref={paneRef}
       data-flue-mode={mode}
+      style={chipStyle}
       // The background follows the terminal palette, which the effect sets in
       // JS the moment it runs. These two are what the very first paint uses,
-      // and they have to agree with that palette or the pane flashes.
+      // and they have to agree with that palette or the pane flashes. The
+      // style carries only the --chip-* variables, so React never touches
+      // the backgroundColor the effect owns.
       className="relative h-full w-full overflow-hidden bg-white dark:bg-zinc-950"
     >
       {/*
@@ -487,7 +522,7 @@ export function Terminal({
           loses to them — the controls must win the stack or the scrollbar
           eats their clicks. */}
       <div className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
-        <ThemeMenu value={themeId} onChange={handleTheme} />
+        <ThemeMenu value={themeId} dark={dark} onChange={handleTheme} />
         {/*
           A real link, so a middle or cmd click behaves browser-natively. It
           opens in a new tab by default so this session stays put; the root
@@ -502,8 +537,8 @@ export function Terminal({
           // so the cluster reads as one control strip, not two heights.
           className={cn(
             'rounded-lg px-2.5 py-1.5',
-            'bg-zinc-950/80 text-zinc-400 shadow-lg ring-1 ring-white/10 backdrop-blur-sm',
-            'transition-colors hover:text-zinc-100',
+            'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
+            'transition-colors hover:text-(--chip-fg)',
           )}
         >
           <PlusIcon aria-hidden="true" className="size-4" />
@@ -521,7 +556,7 @@ export function Terminal({
             role="status"
             className={cn(
               'rounded-lg px-3 py-1.5 text-base/6 font-medium sm:text-sm/6',
-              'bg-zinc-950/80 text-zinc-100 shadow-lg ring-1 ring-white/10 backdrop-blur-sm',
+              'bg-(--chip-bg) text-(--chip-fg) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             )}
           >
             <span className="flex items-center gap-x-2">
@@ -530,14 +565,14 @@ export function Terminal({
                 className={cn(
                   'size-1.5 shrink-0 rounded-full',
                   phase === 'connecting' || phase === 'reconnecting'
-                    ? 'bg-zinc-300 motion-safe:animate-pulse'
-                    : 'bg-zinc-500',
+                    ? 'bg-(--chip-fg) motion-safe:animate-pulse'
+                    : 'bg-(--chip-dim)',
                 )}
               />
               {NOTICE[phase]}
             </span>
             {phase === 'connecting' && (
-              <span className="mt-0.5 block pl-3.5 text-xs/5 font-normal text-zinc-400">
+              <span className="mt-0.5 block pl-3.5 text-xs/5 font-normal text-(--chip-dim)">
                 <kbd className="font-mono">{TERMINAL_SHORTCUT_HINT}</kbd> for focus mode
               </span>
             )}
