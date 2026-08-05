@@ -11,9 +11,10 @@ every remote path runs on infrastructure the user owns." This document
 deliberately reverses that stance for the remote story:
 
 **flue becomes a SaaS first, with self-hosting as a sideline — the dub.co model.**
-The product is flue.sh: sign up, install the daemon, your machines appear, pay a
-few dollars a month, reach any of them from a browser tab anywhere. Self-hosting
-stays possible because the code is open source, but it is second-class: you
+The product is flue.sh: request an invite, install the daemon, your machines
+appear, reach any of them from a browser tab anywhere. It is **invite-only during
+early access — no billing yet.** Self-hosting stays possible because the code is
+open source, with a documented self-hosting page, but it is second-class: you
 deploy the same Cloudflare Worker to your own account and support yourself.
 
 The remote transport is **Cloudflare only, and compulsory.** The original
@@ -54,6 +55,10 @@ merged** (Noise IK handshake both sides, device keystore, `/api/pair`, the
   read you.
 - **Provider choice.** No Tailscale, no `cloudflared` tunnel, no pluggable
   backends. Cloudflare Workers relay, full stop.
+- **Billing.** Invite-only during early access — no payments, plans, or metering.
+  Pricing (if any) is a later decision, informed by the cost measurement below.
+- **Third-party / OAuth identity.** Email-only auth to start. GitHub/Google login
+  or a managed auth provider (Clerk-like) come later.
 - **Multi-user collaboration / sharing a session with other people.** Same
   non-goal as the original.
 
@@ -178,8 +183,12 @@ a later phase.
 
 Beyond the relay, the hosted product adds:
 
-- **Accounts / identity.** Email login. A user record owns a set of enrolled
-  daemons.
+- **Accounts / identity.** **Email-only auth** for now (magic link or emailed
+  code) — no passwords. A user record owns a set of enrolled daemons. GitHub/Google
+  or a managed auth provider (Clerk-like) are a later addition, not day one.
+- **Invites.** Access is gated by invite during early access — an invite list or
+  codes, no payments and no open signup. Billing and public signup are a later
+  decision (see Cost).
 - **Device directory.** The list of a user's daemons and their live sessions,
   with labels and last-seen. Stored server-side (metadata, never content). This
   is the "one login, all your machines" surface.
@@ -188,9 +197,9 @@ Beyond the relay, the hosted product adds:
   rather than the QR-per-device pairing of the local build. The daemon's static
   **public** key is registered to the account, so any browser the user logs into
   can pin it. (QR pairing remains for the self-host / no-account path.)
-- **Billing.** ~$5/mo, Stripe. Fair-use limits tied to the cost model below.
 - **Abuse controls + ToS.** A shell relay is dual-use; we need per-account rate
-  limits, a kill switch, and terms. See Open Items.
+  limits, a kill switch, and terms — from day one, independent of billing. See
+  Open Items.
 
 ### Self-host (the sideline)
 
@@ -203,9 +212,10 @@ second-class only in that you operate and support it yourself.
 
 ### Onboarding UX
 
-- **SaaS:** sign up → `flue enable` prints a device-authorization code → confirm
-  in the web UI → the machine appears in your directory → open a session in a
-  tab. The relay is baked in; there is no Cloudflare setup for the SaaS user.
+- **SaaS:** sign in (invite-only, email) → `flue enable` prints a
+  device-authorization code → confirm in the web UI → the machine appears in your
+  directory → open a session in a tab. The relay is baked in; there is no
+  Cloudflare setup for the SaaS user.
 - **Self-host:** a guided flow to paste a scoped Cloudflare API token, watch flue
   deploy the Worker step by step, then the token is discarded.
 - **Fix the loopback-QR bug:** the Devices "Pair device" affordance must be gated
@@ -232,10 +242,12 @@ front-end is built, not a guess we launch on.
   `tail -f` on a firehose) pins a DO active and floods invocations. Per-session
   output rate caps / fair-use are required so one user cannot eat a month of
   margin.
-- **Gate:** verify *current* Cloudflare Workers/DO list pricing, then measure real
-  DO duration and request counts from actual daily use (dog-fooding the self-host
-  relay) before committing to $5/mo. Only then decide the price and the fair-use
-  ceilings.
+- **Gate:** invite-only early access bounds the user count and keeps early cost
+  small and self-funded — exactly the window to measure. Verify *current*
+  Cloudflare Workers/DO list pricing and capture real DO duration/request counts
+  from actual daily use (dog-fooding the self-host relay, then invited users). The
+  pricing/billing decision, if any, follows that data. Fair-use ceilings still
+  ship from day one to cap the runaway-session vector.
 
 ## Implementation phasing
 
@@ -250,16 +262,20 @@ One design, decomposed into sequenced implementation plans (each its own
   hash + PWA, and the honest-MITM FAQ. **Ends with a working self-host relay you
   can reach your own machine through** — and it is the exact substrate the SaaS
   sits on. This is also the cost-measurement vehicle.
-- **Plan 2 — flue.sh SaaS.** Accounts/email login, the device directory,
-  account-based enrollment (device-authorization flow), the multi-tenant Worker
-  auth front-end, Stripe billing, per-account rate limits, abuse kill switch, and
-  ToS. Built on Plan 1's substrate; the relay core is untouched.
-- **Later — native apps.** macOS/iOS as the hardened, no-need-to-trust-our-servers
-  tier, dropping into the pinning seam Plan 1 leaves.
+- **Plan 2 — flue.sh SaaS (invite-only).** Email-only auth (magic link or code),
+  an invite gate, the device directory, account-based enrollment
+  (device-authorization flow), the multi-tenant Worker auth front-end, per-account
+  rate limits, an abuse kill switch, and ToS. **No billing and no open signup.**
+  Built on Plan 1's substrate; the relay core is untouched.
+- **Later — OAuth/managed auth, billing, native apps.** GitHub/Google or a
+  Clerk-like provider; pricing/billing once the cost data justifies it; and
+  macOS/iOS as the hardened, no-need-to-trust-our-servers tier, dropping into the
+  pinning seam Plan 1 leaves.
 
 "SaaS-ready from day one" means Plan 1 builds every seam the SaaS needs (channel
 auth, daemon-to-relay auth config, the pinning seam) so Plan 2 adds a front-end
-rather than a rewrite. It does **not** mean Plan 1 ships accounts and billing.
+rather than a rewrite. It does **not** mean Plan 1 ships accounts, invites, or
+billing.
 
 ## Testing
 
@@ -282,7 +298,8 @@ rather than a rewrite. It does **not** mean Plan 1 ships accounts and billing.
 ## Open items to resolve during implementation
 
 1. **Exact Cloudflare Workers/DO pricing** (verify current list prices) and the
-   measured per-session cost — the go/no-go for the SaaS price and fair-use caps.
+   measured per-session cost during invite-only early access — informs the
+   fair-use caps now and any future pricing/billing decision.
 2. **Hibernation semantics under load** — confirm a hibernating DO resumes
    cleanly mid-stream and that the daemon's outbound socket survives it.
 3. **Cloudflare API token permissions** for self-host deploy (minimum set for
