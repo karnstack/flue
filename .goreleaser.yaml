@@ -1,5 +1,5 @@
 # goreleaser v2 config. Local validation (see the release-infra plan):
-#   goreleaser check                        -> exit 2, brews deprecation only
+#   goreleaser check                        -> must pass clean
 #   goreleaser release --snapshot --clean   -> must fully succeed
 version: 2
 
@@ -52,11 +52,14 @@ changelog:
     - title: Other
       order: 999
 
-# brews is deprecated since goreleaser v2.16 in favor of homebrew_casks, but
-# is not removed until v3 and is used deliberately: the ship spec commits to
-# a Formula/ layout in karnstack/tap. Follow-up before goreleaser v3:
-# migrate to homebrew_casks with a tap_migrations.json in the tap root.
-brews:
+# A cask, not a formula: goreleaser deprecated `brews` in v2.16 (removed in
+# v3) because casks are Homebrew's own path for prebuilt binaries. The
+# rendered cask carries on_linux stanzas as well — Homebrew installs binary
+# casks on Linux since 4.5 — and `brew install karnstack/tap/flue` resolves
+# it by name, so the advertised install command is unchanged. install.sh
+# remains the no-Homebrew path. No tap_migrations.json is needed in the
+# tap: no formula was ever published.
+homebrew_casks:
   - name: flue
     repository:
       owner: karnstack
@@ -64,17 +67,15 @@ brews:
       # User-provided repo secret — the one manual setup step. The default
       # GITHUB_TOKEN cannot push to another repository.
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: https://flue.sh
     description: "Your terminal, as a browser tab."
-    license: MIT
-    test: |
-      # With no daemon in the brew sandbox, `flue status` prints the stamped
-      # version and "not running". `|| true` makes the assertion about the
-      # output, tolerating any exit status, so the formula test can never
-      # start depending on daemon state inside the sandbox. (Homebrew's
-      # shell_output runs the string through a shell and asserts exit 0 by
-      # default; its second argument pins one exact code, which is the
-      # conventional idiom when the code is deterministic — this one is
-      # deliberately not pinned.)
-      assert_match version.to_s, shell_output("#{bin}/flue status 2>&1 || true")
+    # The release binaries are unsigned and unnotarized, so Gatekeeper
+    # quarantines what the cask installs and macOS refuses to run it. This
+    # is the hook goreleaser's own docs prescribe until signing lands.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/flue"]
+          end

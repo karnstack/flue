@@ -71,11 +71,16 @@ rejection, and mint rejection, each with the peer. That includes the
 the first pass missed. Pairing and revocation log nothing because they have no
 code yet — remote access is still designed, not built.
 
-## 5. `loginShell` before the login-service task
+### 5. `loginShell` before the login-service task
 
-`registry.go`'s "passwd entry" fallback is a `HomeDir != ""` guard around a
-hardcoded `/bin/zsh`, so a bash or fish user gets zsh. It only runs when `$SHELL`
-is unset — which is exactly the launchd and systemd path the README advertises.
+`registry.go`'s "passwd entry" fallback was a `HomeDir != ""` guard around a
+hardcoded `/bin/zsh`, so a bash or fish user got zsh. It only ran when `$SHELL`
+was unset — which is exactly the launchd and systemd path the README advertises.
+
+**Done** — the fallback now reads the real user database (`dscl` on macOS,
+`getent` elsewhere) and refuses empty or relative entries. Sessions also get
+`SHELL=` filled in when the daemon itself has none, so programs inside the
+terminal see a login shell under the login service too.
 
 ## 6. Smaller carried items
 
