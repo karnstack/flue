@@ -138,6 +138,19 @@ local pairing ceremony, the Devices screen and `/pair`). Part 2 is the relay —
 
 ### 8. Worth a second look before or during part 2
 
+- **The pairing pin is only as trustworthy as the code that reads it.** The QR now
+  carries the daemon's static key (`?k=`, `internal/daemon/conn.go`), and `/pair`
+  pins that key and rejects a `POST /api/pair` answer whose `daemonPub` differs
+  (`web/src/routes/pair.tsx`) — which closes the TOFU hole against anyone who can
+  see the POST but not the page bundle. It does **not** close a malicious relay
+  that serves `/pair` itself: that relay ships the JS that reads `k`, so it can
+  pin its own key and the check is a no-op against it. `conn.go` builds the URL
+  from `c.origin`, which follows whatever origin the relay presents once `cfrelay`
+  lands. Part 2 must keep the pairing page out of relay control — point the QR at
+  the daemon's own origin (relay carries only the tunnel, never the `/pair` HTML),
+  ship a native/installed pairing client, or integrity-pin the bundle by something
+  the relay cannot rewrite. Until one of those exists, the `k`-in-QR work is a
+  necessary prerequisite, not a finished defence.
 - `registerDeviceConn` has two latent races (`internal/daemon/server.go:778`): a
   connection that flaps can leave its predecessor's entry behind, and a revoke
   landing mid-handshake is undone by the registration that follows it. Neither is
