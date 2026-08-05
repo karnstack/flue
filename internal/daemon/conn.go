@@ -8,7 +8,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/coder/websocket"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/wire"
 )
@@ -101,10 +100,12 @@ func (a *attachment) released() bool {
 	}
 }
 
-// frame is one queued WebSocket message.
+// frame is one queued message.
 type frame struct {
-	typ websocket.MessageType
-	b   []byte
+	// text says which half of the protocol this frame belongs to: control
+	// JSON, or a binary data frame.
+	text bool
+	b    []byte
 
 	// last marks the final frame this connection will ever send: the writer
 	// tears the connection down once it has been written.
@@ -119,7 +120,8 @@ type frame struct {
 	last bool
 }
 
-// conn is the per-WebSocket state machine.
+// conn is the per-connection state machine, over whatever transport delivered
+// the client: it speaks to a MessageConn and knows nothing else about it.
 //
 // Frames destined for this socket are produced by three different goroutines —
 // this connection's read loop, its attachments' stream goroutines, and *other*
@@ -135,13 +137,13 @@ type frame struct {
 // that long before its own timeout even begins. The queue removes the wait
 // entirely rather than shortening it.
 type conn struct {
-	ws  *websocket.Conn
+	mc  MessageConn
 	srv *Server
 
-	// peer is the resolved identity of the client on the other end of ws —
+	// peer is the resolved identity of the client on the other end of mc —
 	// the socket address for the local transport, and the strongest identity
-	// a purely local transport has. Remote transports substitute their own
-	// resolved identity here later.
+	// a purely local transport has. Remote transports resolve their own
+	// identity before ServeConn and pass it in on ConnMeta.
 	peer string
 
 	// device is the paired device this connection authenticated as, or "" for
@@ -175,11 +177,11 @@ type conn struct {
 	attach  map[uint32]*attachment
 }
 
-func newConn(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, srv *Server, peer, origin string) *conn {
+func newConn(ctx context.Context, cancel context.CancelFunc, mc MessageConn, srv *Server, peer, origin string) *conn {
 	return &conn{
 		ctx:    ctx,
 		cancel: cancel,
-		ws:     ws,
+		mc:     mc,
 		srv:    srv,
 		peer:   peer,
 		origin: origin,
@@ -193,7 +195,7 @@ func (c *conn) sendControl(msg any) error {
 	if err != nil {
 		return err
 	}
-	return c.enqueue(frame{typ: websocket.MessageText, b: b})
+	return c.enqueue(frame{text: true, b: b})
 }
 
 // sendFinal queues msg as the last thing this connection will say, and ends
@@ -207,11 +209,11 @@ func (c *conn) sendFinal(msg any) error {
 		c.fail()
 		return err
 	}
-	return c.enqueue(frame{typ: websocket.MessageText, b: b, last: true})
+	return c.enqueue(frame{text: true, b: b, last: true})
 }
 
 func (c *conn) sendBinary(typ byte, ref uint32, payload []byte) error {
-	return c.enqueue(frame{typ: websocket.MessageBinary, b: wire.EncodeBinary(typ, ref, payload)})
+	return c.enqueue(frame{text: false, b: wire.EncodeBinary(typ, ref, payload)})
 }
 
 // enqueue hands a frame to the writer without ever blocking.
@@ -244,7 +246,7 @@ func (c *conn) runWriter(done chan<- struct{}) {
 		select {
 		case f := <-c.out:
 			ctx, cancel := context.WithTimeout(c.ctx, writeTimeout)
-			err := c.ws.Write(ctx, f.typ, f.b)
+			err := c.mc.Write(ctx, f.text, f.b)
 			cancel()
 			if err != nil || f.last {
 				// A final frame ends the connection here, on the one goroutine
@@ -291,11 +293,11 @@ func (c *conn) serve() {
 	})
 
 	for {
-		typ, data, err := c.ws.Read(c.ctx)
+		text, data, err := c.mc.Read(c.ctx)
 		if err != nil {
 			return
 		}
-		if typ == websocket.MessageBinary {
+		if !text {
 			c.handleBinary(data)
 			continue
 		}

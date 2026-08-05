@@ -134,7 +134,7 @@ type Server struct {
 	// pairing.go.
 	pairing pairingState
 
-	// baseCtx is the parent of every WebSocket connection's context, and
+	// baseCtx is the parent of every served connection's context, and
 	// baseCancel is how shutdown reaches them.
 	//
 	// It cannot be the request context. net/http stops tracking a connection
@@ -204,7 +204,7 @@ func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version strin
 	}
 }
 
-// Shutdown closes every established WebSocket connection. ListenAndServe calls
+// Shutdown closes every established connection. ListenAndServe calls
 // it when its context is cancelled; it is exported so an embedder driving
 // Handler directly can reach the same teardown.
 func (s *Server) Shutdown() { s.baseCancel() }
@@ -643,20 +643,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ws.SetReadLimit(readLimit)
+	// The backstop, not the close: ServeConn closes the connection through
+	// MessageConn, which for this transport is the close handshake. This runs
+	// after it, and matters only when that handshake could not complete.
 	defer ws.CloseNow()
 
-	// Parented to the server, not to the request: see Server.baseCtx.
-	ctx, cancel := context.WithCancel(s.baseCtx)
-	defer cancel()
-
-	c := newConn(ctx, cancel, ws, s, r.RemoteAddr, requestOrigin(r))
-	// Registered before it is served and forgotten however it ends, so the
-	// broadcast set is exactly the set of connections that can be written to.
-	s.addConn(c)
-	defer s.removeConn(c)
-
-	c.serve()
-	_ = ws.Close(websocket.StatusNormalClosure, "")
+	// Authentication is done; everything past here is transport-independent.
+	// The loopback transport carries no device identity — the session token
+	// names a machine's user, not a paired device — so DeviceID stays empty.
+	s.ServeConn(r.Context(), wsMessageConn{ws}, ConnMeta{
+		Peer:   r.RemoteAddr,
+		Origin: requestOrigin(r),
+	})
 }
 
 // requestOrigin is the absolute origin this request arrived on, which is the

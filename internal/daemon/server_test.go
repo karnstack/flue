@@ -1660,13 +1660,13 @@ func TestEnqueueNeverBlocksAndDropsABackloggedClient(t *testing.T) {
 	// Fill the outbox with no writer draining it, i.e. a client that has
 	// stopped reading its socket.
 	for i := 0; i < outboxDepth; i++ {
-		if err := c.enqueue(frame{typ: websocket.MessageText, b: []byte("x")}); err != nil {
+		if err := c.enqueue(frame{text: true, b: []byte("x")}); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
 		}
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- c.enqueue(frame{typ: websocket.MessageText, b: []byte("overflow")}) }()
+	go func() { done <- c.enqueue(frame{text: true, b: []byte("overflow")}) }()
 
 	select {
 	case err := <-done:
@@ -1708,7 +1708,7 @@ func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	wedged := newPeer()
 	healthy := newPeer()
 	for i := 0; i < outboxDepth; i++ {
-		if err := wedged.enqueue(frame{typ: websocket.MessageText, b: []byte("x")}); err != nil {
+		if err := wedged.enqueue(frame{text: true, b: []byte("x")}); err != nil {
 			t.Fatalf("filling the wedged peer: %v", err)
 		}
 	}
@@ -2479,7 +2479,7 @@ func TestDeviceListBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	wedged := newPeer()
 	healthy := newPeer()
 	for i := 0; i < outboxDepth; i++ {
-		if err := wedged.enqueue(frame{typ: websocket.MessageText, b: []byte("x")}); err != nil {
+		if err := wedged.enqueue(frame{text: true, b: []byte("x")}); err != nil {
 			t.Fatalf("filling the wedged peer: %v", err)
 		}
 	}
