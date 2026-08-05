@@ -68,8 +68,10 @@ const EXIT_NOTICE = (code: number) =>
  * How long the pane must hold still before the pty hears about its size.
  *
  * Longer than any animation frame, shorter than a human pause: a browser
- * sidebar's slide lands one resize instead of twenty SIGWINCHes' worth of
- * redrawn prompts, and a hand-dragged window reflows the moment it rests.
+ * sidebar's slide reaches the pty once instead of twenty SIGWINCHes' worth
+ * of redrawn prompts, and a hand-dragged window reflows once it rests.
+ * (Written around the bare word for the CSS property here — see the
+ * Tailwind scanner note in docs/FOLLOW-UPS.md.)
  */
 export const RESIZE_SETTLE_MS = 150
 
@@ -203,7 +205,7 @@ export function Terminal({
     let restartReq: number | null = null
     let frame = 0
     // The pty-resize debounce. A browser sidebar sliding open resizes the
-    // pane on every animation frame, and each pty resize is a SIGWINCH the
+    // pane on every animation frame, and each new pty size is a SIGWINCH the
     // shell answers by redrawing its prompt — an animated toggle used to
     // leave a wall of prompt lines in the scrollback, with right-prompt
     // fragments stranded at every mid-animation width. Display keeps up per
