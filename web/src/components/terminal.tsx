@@ -325,6 +325,9 @@ export function Terminal({
         if (s !== 'open') {
           ref = null
           primary = false
+          // No role, no voice: a client that answered device queries while
+          // unattached would race the reattach's own answer arbitration.
+          emulator.answerQueries(false)
         }
         // `open` is deliberately not `live`. The socket being up says nothing
         // about this session: the attach is still a round-trip away, and the
@@ -351,6 +354,10 @@ export function Terminal({
         if (a.id !== sessionId) return
         ref = a.ref
         primary = a.primary
+        // The primary is the one client that answers device queries; a
+        // mirror answering too is how a program that asked once hears back
+        // once per tab, the extras landing at the prompt as garbage.
+        emulator.answerQueries(a.primary)
         dims = { cols: a.cols, rows: a.rows }
         epoch++
         consumed = a.seq
@@ -380,8 +387,10 @@ export function Terminal({
         if (m.ref !== ref) return
         // This is also how promotion arrives: the daemon hands ownership to the
         // most recently active client when a primary leaves and says so here.
-        // Nothing else will ever ask this client for its dimensions.
+        // Nothing else will ever ask this client for its dimensions. The
+        // answering role travels with the promotion.
         primary = m.primary
+        emulator.answerQueries(m.primary)
         dims = { cols: m.cols, rows: m.rows }
         emulator.resize(m.cols, m.rows)
         schedule()

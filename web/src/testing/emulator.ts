@@ -14,6 +14,8 @@ export interface FakeEmulator extends Emulator {
   readonly cols: number
   readonly rows: number
   readonly themes: TerminalTheme[]
+  /** Every answerQueries() call, in order. Last one is the live setting. */
+  readonly queryAnswers: boolean[]
   readonly mountedOn: HTMLElement | null
   readonly disposals: number
   readonly focusCalls: number
@@ -38,10 +40,12 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
   const listeners: Array<(bytes: Uint8Array) => void> = []
   const written: string[] = []
   const themes: TerminalTheme[] = []
+  const queryAnswers: boolean[] = []
 
   const self: FakeEmulator = {
     written,
     themes,
+    queryAnswers,
     cols: opts.cols ?? 80,
     rows: opts.rows ?? 24,
     mountedOn: null,
@@ -86,6 +90,10 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
 
     setTheme(theme: TerminalTheme) {
       themes.push(theme)
+    },
+
+    answerQueries(on: boolean) {
+      queryAnswers.push(on)
     },
 
     focus() {

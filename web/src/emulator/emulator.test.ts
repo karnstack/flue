@@ -253,3 +253,46 @@ describe('openTerminalLink', () => {
     vi.unstubAllGlobals()
   })
 })
+
+describe('device-query suppression', () => {
+  const bytes = (s: string) => new TextEncoder().encode(s)
+
+  it('is silent by default and answers once told it is primary', async () => {
+    const em = createXtermEmulator({ cols: 10, rows: 4 })
+    const out: string[] = []
+    em.onData((b) => out.push(new TextDecoder().decode(b)))
+
+    // A mirror must not answer DA — the primary's answer already went.
+    await new Promise<void>((r) => em.write(bytes('\x1b[c'), r))
+    await new Promise<void>((r) => em.write(bytes('\x1b[6n'), r))
+    expect(out).toEqual([])
+
+    em.answerQueries(true)
+    await new Promise<void>((r) => em.write(bytes('\x1b[c'), r))
+    expect(out.join('')).toMatch(/\x1b\[\?/)
+    em.dispose()
+  })
+
+  it('swallows a colour question while silent, without muting the terminal', async () => {
+    const em = createXtermEmulator({ cols: 10, rows: 4 })
+    const out: string[] = []
+    em.onData((b) => out.push(new TextDecoder().decode(b)))
+
+    // A colour *set* passes through even while silent — a mirror that
+    // dropped it would drift from the primary's screen. The "?" form is the
+    // query that used to land at the prompt as "11;rgb:2828/2a2a/3636" once
+    // per extra tab.
+    await new Promise<void>((r) => em.write(bytes('\x1b]11;#282a36\x07'), r))
+    await new Promise<void>((r) => em.write(bytes('\x1b]11;?\x07'), r))
+    expect(out).toEqual([])
+
+    // The positive control is DA rather than the colour query itself:
+    // headless xterm answers DA but ties its colour reports to an opened
+    // renderer, so "no reply above" must be shown to be the handler's doing
+    // and not a muted terminal.
+    em.answerQueries(true)
+    await new Promise<void>((r) => em.write(bytes('\x1b[c'), r))
+    expect(out.join('')).toMatch(/\x1b\[\?/)
+    em.dispose()
+  })
+})

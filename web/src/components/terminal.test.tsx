@@ -970,6 +970,19 @@ describe('the exit overlay', () => {
   })
 })
 
+describe('device-query answering', () => {
+  it('follows the primary role, and only the primary answers', () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', primary: false })))
+    expect(em.live().queryAnswers).toEqual([false])
+
+    // Promotion arrives over sizeChanged; the answering role travels with it.
+    act(() => sock.emitControl(sizeChanged({ ref: 1, primary: true })))
+    expect(em.live().queryAnswers).toEqual([false, true])
+  })
+})
+
 describe('the terminal theme', () => {
   it('mounts with the stored global choice', () => {
     localStorage.setItem('flue:theme', 'dracula')

@@ -67,6 +67,46 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
   const encoder = new TextEncoder()
   let disposed = false
 
+  // Device-query suppression for mirrors. The session's byte stream is
+  // broadcast to every attached client, each of which is a full emulator
+  // that would answer DA, DSR, DECRQM, OSC colour queries and XTGETTCAP by
+  // itself — so a program that asked once would hear back once per open
+  // tab, and every reply past the first arrives at the shell prompt as
+  // garbage ("11;rgb:…", "…R"). Exactly one client may answer: the primary.
+  //
+  // xterm has no switch for this, but registered parser handlers run ahead
+  // of the built-ins and a `true` swallows the sequence. Every handler
+  // below answers "handled" exactly when this emulator must stay silent,
+  // and defers to the built-in when it is allowed to speak. Off until the
+  // daemon says who is primary — a mirror that answered during the attach
+  // round-trip would be the bug again.
+  let answers = false
+  const silent = () => !answers
+
+  // CSI queries: DA1/DA2, DSR 5n/6n and DECXCPR, DECRQM (ANSI and DEC),
+  // DECREQTPARM, XTVERSION, and the window-report family of `t`.
+  const csi = [
+    { final: 'c' },
+    { prefix: '>', final: 'c' },
+    { final: 'n' },
+    { prefix: '?', final: 'n' },
+    { intermediates: '$', final: 'p' },
+    { prefix: '?', intermediates: '$', final: 'p' },
+    { final: 'x' },
+    { prefix: '>', final: 'q' },
+    { final: 't' },
+  ]
+  for (const id of csi) term.parser.registerCsiHandler(id, silent)
+  // DCS queries: XTGETTCAP and DECRQSS.
+  term.parser.registerDcsHandler({ intermediates: '+', final: 'q' }, silent)
+  term.parser.registerDcsHandler({ intermediates: '$', final: 'q' }, silent)
+  // OSC 10/11/12 ask with a literal "?" and set with a colour. Only the
+  // question is swallowed: a mirror must still apply a colour a program
+  // sets, or its screen drifts from the primary's.
+  for (const ident of [10, 11, 12]) {
+    term.parser.registerOscHandler(ident, (data) => (data === '?' ? silent() : false))
+  }
+
   return {
     write(bytes: Uint8Array, done?: () => void) {
       term.write(bytes, done)
@@ -110,6 +150,10 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
     focus() {
       if (disposed) return
       term.focus()
+    },
+
+    answerQueries(on: boolean) {
+      answers = on
     },
 
     contentSize(): PixelSize | null {

@@ -125,6 +125,17 @@ export interface Emulator {
    * under jsdom and the first frame in a browser.
    */
   contentSize(): PixelSize | null
+  /**
+   * Whether this emulator answers device queries — DA, DSR/CPR, DECRQM,
+   * OSC color queries, XTGETTCAP — arriving in the output stream.
+   *
+   * Exactly one client attached to a session may answer: the stream is
+   * broadcast to every mirror, each holds a full emulator, and a program
+   * that asked once would otherwise be answered once per tab — the extras
+   * land at the shell prompt as garbage. The view flips this with the
+   * primary role. Off by default until the daemon says who is primary.
+   */
+  answerQueries(on: boolean): void
   /** Test-only: simulate user input. */
   injectForTest(data: string): void
 }
