@@ -18,12 +18,12 @@ build: web
 	go build -o bin/flue ./cmd/flue
 
 # The developer loop: `make run` in one terminal, `make web-dev` in another.
-# `go run` needs web/dist like any other Go build — the web prerequisite
-# guarantees it. Iterating on Go only? `go run ./cmd/flue serve` directly
-# skips the web rebuild once dist exists.
+# The dev tag swaps the embedded UI for a redirect to Vite (web/dev.go), so
+# no web build happens and web/dist need not exist — hot reload owns the
+# frontend. A production-like run is `make build && bin/flue serve`.
 
-run: web
-	go run ./cmd/flue serve
+run:
+	go run -tags dev ./cmd/flue serve
 
 web-dev:
 	cd web && pnpm install --frozen-lockfile && pnpm dev
@@ -38,6 +38,9 @@ test-web:
 
 lint: web
 	go vet ./...
+	# The dev-tagged build (make run) has no CI job of its own; vetting it
+	# here is what keeps web/dev.go from drifting out of compilability.
+	go vet -tags dev ./...
 	cd web && pnpm lint
 
 clean:

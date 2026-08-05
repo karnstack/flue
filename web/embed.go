@@ -1,8 +1,11 @@
+//go:build !dev
+
 // Package web serves the built flue UI from the daemon binary, so there is
 // no runtime dependency on Node or on any files beside the executable.
 //
 // The directory this package lives in is also the web app's source tree. The
-// only Go file here is this one; everything else is Vite's input and output.
+// Go files here are this one and its `dev`-tagged counterpart; everything
+// else is Vite's input and output.
 package web
 
 import (
