@@ -1200,6 +1200,7 @@ func TestNothingBeyondThePairingPageIsExemptFromTheToken(t *testing.T) {
 		PairPagePath + "/",         // registered without a trailing slash...
 		PairPagePath + "/anything", // ...so nothing under it is exempt either
 		"/pairing",                 // nor is a path that merely begins with it
+		uiAssetPrefix,              // the asset directory names no file
 		"/api/sessions",
 		"/manifest.webmanifest",
 		"/sw.js",
@@ -1215,6 +1216,72 @@ func TestNothingBeyondThePairingPageIsExemptFromTheToken(t *testing.T) {
 	if _, _, err := websocket.Dial(context.Background(),
 		"ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", nil); err == nil {
 		t.Error("upgrade without a token succeeded, want failure")
+	}
+}
+
+// getAnonRaw is getAnon with the request target left exactly as spelled, so a
+// percent-encoded path reaches the daemon percent-encoded.
+//
+// net/url keeps the raw form in URL.RawPath and RequestURI writes that, and the
+// assertion below is what makes sure of it. A client that quietly normalised
+// the target would send /sw.js, which is refused for an entirely different
+// reason — and every case in the traversal test would pass while measuring
+// nothing.
+func getAnonRaw(t *testing.T, ts *httptest.Server, target string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, ts.URL+target, nil)
+	if err != nil {
+		t.Fatalf("NewRequest %s: %v", target, err)
+	}
+	if got := req.URL.RequestURI(); got != target {
+		t.Fatalf("request target = %q, want %q on the wire as spelled", got, target)
+	}
+	req.Header.Set("Sec-Fetch-Site", "none")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do %s: %v", target, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestTheAssetExemptionCannotBeSpelledOutOfItsOwnPrefix is a regression rather
+// than a hypothetical: every target here answered 200 before exemptStaticPath
+// existed, while its plain spelling answered 401.
+//
+// http.ServeMux unescapes each segment of the target after cleaning the escaped
+// form, so %2e%2e never trips the redirect that would normalise it, still
+// matches the /assets/ subtree, and arrives at the UI handler as ".." — which
+// path.Clean then walks back out of the prefix. The prefix was never the
+// boundary; the check on the resolved path is.
+func TestTheAssetExemptionCannotBeSpelledOutOfItsOwnPrefix(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+
+	for _, target := range []string{
+		"/assets/",                            // the directory itself: names no file, and the file server answers it with the shell
+		"/assets/%2e%2e/sw.js",                // the service worker, which is 401 spelled plainly
+		"/assets/..%2fsw.js",                  // the same, with the separator encoded instead
+		"/assets/%2e%2e/manifest.webmanifest", // any other root file
+		"/assets/%2e%2e/%2e%2e/etc/passwd",    // and out of the build entirely, which answers with the shell
+		"/assets/%2e%2e/",
+		"/pair/%2e%2e/sw.js",
+	} {
+		resp := getAnonRaw(t, ts, target)
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET %s without a token = %d, want 401 (body %.80q)", target, resp.StatusCode, body)
+		}
+	}
+
+	// The positive control: the exemption still serves what it is for, or this
+	// test is satisfied by a daemon that refuses every asset.
+	shell, err := io.ReadAll(get(t, ts, "/", "same-origin").Body)
+	if err != nil {
+		t.Fatalf("read shell: %v", err)
+	}
+	src := scriptSrc(string(shell))
+	if resp := getAnonRaw(t, ts, src); resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s without a token = %d, want 200", src, resp.StatusCode)
 	}
 }
 

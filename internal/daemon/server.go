@@ -45,10 +45,13 @@
 //     first presentation whether or not it was right. See pairing.go.
 //   - The page that makes that POST cannot authenticate either, so the two
 //     GETs which serve it — PairPagePath and uiAssetPrefix — are exempt from
-//     the token as well. They are the narrowest thing that could be: two static
-//     reads out of the embedded build, refused unless the request's provenance
-//     is this daemon's own, and covering no path that answers with anything but
-//     the app shell or a file Vite emitted. See withProvenance.
+//     the token as well. What the exemption covers is decided by
+//     exemptStaticPath rather than by the routing patterns, which are coarser
+//     than they look: http.ServeMux unescapes each segment after cleaning the
+//     escaped target, so a percent-encoded traversal matches the asset subtree
+//     and resolves outside it. A path that is not already its own cleaned form
+//     is refused, and everything the exemption does not cover is answered by
+//     withAuth as though it were absent. See withProvenance.
 //   - The upgrade — the one GET that leads to state changes — refuses
 //     Sec-Fetch-Site: none outright. See handleWS for why that costs a real
 //     client nothing.
@@ -71,7 +74,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -290,11 +295,13 @@ func (s *Server) Handler() http.Handler {
 	// to get — so serving the shell only to a credential it cannot have makes
 	// the QR code answer 401 and the ceremony unstartable.
 	//
-	// The exemption is two static reads wide. PairPagePath is registered
-	// without a trailing slash, so ServeMux matches it exactly and /pair/x
-	// falls through to the authenticated catch-all below; uiAssetPrefix is a
-	// subtree, but one whose every member is a file Vite emitted and whose
-	// non-members are 404s rather than the shell.
+	// These two patterns say where such a request is routed, and nothing more.
+	// What it is allowed to ask for is decided by exemptStaticPath inside
+	// withProvenance, because a ServeMux pattern is not the boundary it looks
+	// like: the mux unescapes each segment after cleaning the escaped target, so
+	// /assets/%2e%2e/sw.js matches this subtree with r.URL.Path already reading
+	// /assets/../sw.js. Anything routed here that the exemption does not cover
+	// is handed to withAuth, exactly as though these two lines were absent.
 	mux.Handle(PairPagePath, s.withProvenance(s.ui))
 	mux.Handle(uiAssetPrefix, s.withProvenance(s.ui))
 	mux.Handle("/api/sessions", s.withAuth(http.HandlerFunc(s.handleSessions)))
@@ -399,32 +406,76 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	})
 }
 
-// withProvenance serves next to a caller that presents no credential at all,
-// once the request has proved it came from somewhere this daemon accepts.
+// exemptStaticPath reports whether p is one of the two static reads the pairing
+// ceremony needs before any credential exists: the pairing page itself, or a
+// file out of the build's content-hashed asset directory.
 //
-// It is withAuth with the token check removed and nothing else, and it is used
-// on exactly the two paths the pairing ceremony needs before a token exists.
-// The provenance half is the transport's own — the same CheckProvenance
+// It is a predicate over the path rather than a routing pattern because the
+// routing pattern is not the boundary it appears to be. http.ServeMux unescapes
+// each segment of the request target *after* cleaning the escaped form, so
+// /assets/%2e%2e/sw.js never trips the redirect that would normalise it, still
+// matches the /assets/ subtree, and arrives with r.URL.Path already reading
+// /assets/../sw.js — which web.Handler cleans to sw.js and serves. The pattern
+// says where a request was routed; only this says what it asked for.
+//
+// Two rules, both in the denial direction, which is the same argument
+// methodPolicy makes about a POST that only differs by normalisation:
+//
+//   - The path must already be its own cleaned form. A target that means
+//     something other than what it spells is refused rather than normalised, so
+//     there is no gap between the path this reads and the path the UI handler
+//     resolves. Nothing the build emits is spelled any other way.
+//   - What is left must be PairPagePath exactly, or inside uiAssetPrefix. The
+//     directory itself is not: it names no file, and http.FileServer would
+//     answer it with the app shell.
+func exemptStaticPath(p string) bool {
+	if p != path.Clean(p) {
+		return false
+	}
+	return p == PairPagePath || strings.HasPrefix(p+"/", uiAssetPrefix)
+}
+
+// withProvenance serves next to a caller that presents no credential at all,
+// once the request has proved both that it asked for something the exemption
+// covers and that it came from somewhere this daemon accepts.
+//
+// It is withAuth with the token check removed and nothing else, and it is
+// reachable only for the paths the pairing ceremony needs before a token
+// exists. The provenance half is the transport's own — the same CheckProvenance
 // handlePair runs, for the same reason — so a cross-origin page cannot pull the
 // app shell out of this daemon, and the Host allowlist still answers DNS
 // rebinding.
 //
-// Two rules keep it from widening. Only GET and HEAD are served: methodPolicy
-// already refuses everything else on these paths, and repeating the check here
-// means the rule survives this handler being mounted somewhere the middleware
-// does not wrap. And the handoff exchange in local.Auth.Middleware is
-// deliberately not reached, so no request to an unauthenticated path can spend
-// a live handoff token — a page that never needed a credential must not be able
-// to burn the one flue open is carrying.
+// Three rules keep it from widening:
+//
+//   - Anything outside exemptStaticPath is answered by withAuth, exactly as it
+//     would have been had this handler never been mounted. Not a bespoke
+//     refusal: a 401 identical to every other authenticated path's is also the
+//     answer that tells a prober nothing about which spellings are exempt.
+//   - Only GET and HEAD are served. methodPolicy already refuses everything
+//     else on these paths, and repeating the check here means the rule survives
+//     this handler being mounted somewhere the middleware does not wrap.
+//   - The handoff exchange in local.Auth.Middleware is deliberately not
+//     reached, so no request to an unauthenticated path can spend a live
+//     handoff token — a page that never needed a credential must not be able to
+//     burn the one flue open is carrying.
 //
 // Nothing here logs. A file the build emitted, served to whoever asked for it,
 // is not an authentication event, and an audit trail that records every asset
 // fetch is one nobody reads.
 func (s *Server) withProvenance(next http.Handler) http.Handler {
+	// Built once rather than per request: withAuth reads the authenticator
+	// inside its own handler, so it already survives SetAuth.
+	authenticated := s.withAuth(next)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !exemptStaticPath(r.URL.Path) {
+			authenticated.ServeHTTP(w, r)
 			return
 		}
 		a := s.currentAuth()
