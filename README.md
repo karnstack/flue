@@ -96,6 +96,39 @@ make build     # builds the web UI, embeds it, produces bin/flue
 make test
 ```
 
+## Developing
+
+The daemon embeds the web build (`//go:embed` in `web/embed.go`), so nothing
+on the Go side — not even `go vet` — compiles until `web/dist` exists. The
+Makefile encodes that ordering; let it do the sequencing:
+
+```sh
+make build       # web UI first, then the binary
+bin/flue serve   # run the daemon in the foreground; prints a one-time UI URL
+```
+
+`make test` runs both suites (Go and Vitest), `make lint` is `go vet` plus a
+TypeScript typecheck. Use pnpm, never npm — the web workspace pins it.
+
+For frontend work, run Vite against a real daemon:
+
+```sh
+bin/flue serve       # terminal 1: the daemon on 127.0.0.1:7717
+cd web && pnpm dev   # terminal 2: Vite on 127.0.0.1:5173
+```
+
+Open the one-time URL `flue serve` printed once — that sets the auth cookie —
+then develop at `http://127.0.0.1:5173`. Vite proxies `/api` and `/ws` to the
+daemon and rewrites the Origin so its checks pass; the cookie rides along
+because cookies ignore the port. Stick to `127.0.0.1`, not `localhost`: the
+cookie is set for that host exactly.
+
+Layout, briefly: `cmd/flue` is the CLI, `internal/daemon` the HTTP/WebSocket
+server, `internal/session` the PTYs and scrollback, `internal/service` the
+launchd/systemd integration, `web/` the React app, `site/` the flue.sh page,
+and `docs/FOLLOW-UPS.md` the known rough edges — worth reading before
+touching the code.
+
 ## License
 
 [MIT](LICENSE)
