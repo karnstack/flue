@@ -4,10 +4,11 @@
 //
 // # Endpoint policy
 //
-// The GET surface is read-only. There are four routes — the app shell, a JSON
-// session listing, the WebSocket upgrade, and the handoff mint — and no GET
-// among them changes any state. Spawning, signalling, resizing and closing a
-// session are reachable only over an established WebSocket.
+// The GET surface is read-only. There are five routes — the app shell, a JSON
+// session listing, the WebSocket upgrade, the handoff mint, and the pairing
+// POST — and no GET among them changes any state; the last two answer nothing
+// but a POST. Spawning, signalling, resizing and closing a session are
+// reachable only over an established WebSocket.
 //
 // That is a security constraint rather than a stylistic one. Task 5's
 // authenticator accepts Sec-Fetch-Site: none, because that is what a typed URL
@@ -22,18 +23,24 @@
 // response, and the same trick through window.open or an iframe is
 // page-initiated, arrives as "same-site", and is already rejected.
 //
-// So the defence is structural, in four parts:
+// So the defence is structural, in five parts:
 //
-//   - Only GET and HEAD are routed, with exactly one allowlisted exception:
-//     POST to MintPath. Anything else is 405 before it reaches a handler, which
-//     also means no CORS preflight ever succeeds, since OPTIONS is refused
-//     everywhere.
+//   - Only GET and HEAD are routed, with exactly two allowlisted exceptions:
+//     POST to MintPath and POST to PairPath. Anything else is 405 before it
+//     reaches a handler, which also means no CORS preflight ever succeeds,
+//     since OPTIONS is refused everywhere.
 //   - The privileged operation — minting a handoff token, which converts "I can
 //     read the token file" into "here is a fresh credential" — is that POST, and
 //     it authenticates on a request header rather than the cookie. Neither a
 //     laundered navigation (which is a GET) nor any browser (which cannot set a
 //     custom header cross-origin without a preflight that always 405s) can
 //     reach it.
+//   - The other POST, PairPath, is the one endpoint that does not authenticate
+//     on the session token at all, because the device it enrols holds none yet.
+//     It is bounded instead: it does nothing unless the user has opened a
+//     pairing window from an already-trusted UI, it refuses anything that is
+//     not same-origin before comparing the token, and the window closes on the
+//     first presentation whether or not it was right. See pairing.go.
 //   - The upgrade — the one GET that leads to state changes — refuses
 //     Sec-Fetch-Site: none outright. See handleWS for why that costs a real
 //     client nothing.
@@ -61,6 +68,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/flynn/noise"
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
@@ -82,12 +91,35 @@ var (
 	ErrFetchSite = errors.New("daemon: this endpoint requires a same-origin request")
 )
 
+// Identity is the daemon's cryptographic identity: the static keypair every
+// paired device knows it by, and the registry of the devices that have been
+// paired to it.
+//
+// It is one parameter rather than two because the halves are useless apart —
+// a key with nowhere to record who holds it, or a registry of devices paired
+// to no key — and because the zero value then has an unambiguous meaning: a
+// daemon that cannot pair. Tests and any embedder without a config directory
+// construct exactly that, and pairing refuses rather than half-running.
+type Identity struct {
+	Key     noise.DHKey
+	Devices *crypto.DeviceStore
+}
+
 // Server serves the flue API and the embedded UI on loopback.
 type Server struct {
 	reg      *session.Registry
 	ui       http.Handler
 	version  string
 	hostname string
+
+	// identity is fixed at construction: it is read from the config directory
+	// once, by whoever starts the daemon, and a running daemon never changes
+	// the key its paired devices know it by.
+	identity Identity
+
+	// pairing is the one open pairing window, if any. Its own lock; see
+	// pairing.go.
+	pairing pairingState
 
 	// baseCtx is the parent of every WebSocket connection's context, and
 	// baseCancel is how shutdown reaches them.
@@ -115,7 +147,7 @@ type Server struct {
 	attached map[string][]*conn
 }
 
-func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version string) *Server {
+func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version string, identity Identity) *Server {
 	host, _ := os.Hostname()
 	if ui == nil {
 		ui = http.NotFoundHandler()
@@ -126,6 +158,7 @@ func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version strin
 		ui:         ui,
 		version:    version,
 		hostname:   host,
+		identity:   identity,
 		baseCtx:    baseCtx,
 		baseCancel: baseCancel,
 		auth:       auth,
@@ -203,6 +236,11 @@ func (s *Server) Handler() http.Handler {
 	// process that can read the token file. handleMint runs local.Auth.CheckMint
 	// instead, which accepts the token from a request header and nothing else.
 	mux.HandleFunc(MintPath, s.handleMint)
+	// Also not behind withAuth, and for the opposite reason: the device posting
+	// here holds no session token yet, and the pairing token is the credential.
+	// handlePair runs the provenance half of the transport's checks itself and
+	// then spends the token; see pairing.go for why that is the whole ceremony.
+	mux.HandleFunc(PairPath, s.handlePair)
 	mux.Handle("/api/sessions", s.withAuth(http.HandlerFunc(s.handleSessions)))
 	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
 	// never the app shell.
@@ -235,13 +273,14 @@ func (s *Server) Handler() http.Handler {
 	return securityHeaders(methodPolicy(mux))
 }
 
-// methodPolicy rejects everything but GET and HEAD, plus POST to MintPath.
+// methodPolicy rejects everything but GET and HEAD, plus POST to the two paths
+// that are allowed to receive one: MintPath and PairPath.
 //
 // This is what makes "no mutating endpoint reachable by GET" an invariant of
 // the surface rather than a property of today's handlers: a later task cannot
 // add a mutating route, or accept a method-overriding parameter, without
 // editing this allowlist first. It also means no CORS preflight ever succeeds,
-// since OPTIONS is refused on every path including MintPath — which is what
+// since OPTIONS is refused on every path including these two — which is what
 // stops a browser from ever issuing a cross-origin request carrying the
 // X-Flue-Token header a mint requires.
 //
@@ -252,12 +291,12 @@ func (s *Server) Handler() http.Handler {
 // check believed it was not reaching. Denial is the failure direction.
 func methodPolicy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		isMint := r.URL.Path == MintPath
+		postable := r.URL.Path == MintPath || r.URL.Path == PairPath
 		allowed := r.Method == http.MethodGet || r.Method == http.MethodHead ||
-			(isMint && r.Method == http.MethodPost)
+			(postable && r.Method == http.MethodPost)
 		if !allowed {
 			allow := "GET, HEAD"
-			if isMint {
+			if postable {
 				allow = "POST"
 			}
 			w.Header().Set("Allow", allow)
@@ -459,9 +498,27 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
 
-	c := newConn(ctx, cancel, ws, s, r.RemoteAddr)
+	c := newConn(ctx, cancel, ws, s, r.RemoteAddr, requestOrigin(r))
 	c.serve()
 	_ = ws.Close(websocket.StatusNormalClosure, "")
+}
+
+// requestOrigin is the absolute origin this request arrived on, which is the
+// origin the pairing URL has to name: the second device opens that URL, so it
+// must be the address this daemon is actually reachable at rather than one
+// composed from a configured port.
+//
+// The Origin header is preferred when present and the Host is the fallback,
+// which is what a non-browser client leaves us. Neither is trusted blind: this
+// only ever runs after local.Auth.Check has admitted the request, and that
+// refuses a Host outside the allowlist, a repeated Origin, and an Origin that
+// is not one of this daemon's own. The scheme is http because loopback is the
+// only thing this transport ever binds.
+func requestOrigin(r *http.Request) string {
+	if o := r.Header.Get("Origin"); o != "" {
+		return o
+	}
+	return "http://" + r.Host
 }
 
 // listenAddr is the only address this daemon ever binds. Binding 0.0.0.0

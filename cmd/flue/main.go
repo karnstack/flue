@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/karnstack/flue/internal/config"
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/service"
 	"github.com/karnstack/flue/internal/session"
@@ -166,7 +167,11 @@ func cmdServe(args []string) error {
 	// authentication ceremony: this is the process that read the token file, so
 	// it is by construction the principal CheckMint exists to identify.
 	auth := local.NewAuth(token, *port)
-	srv := daemon.New(reg, auth, uiHandler(), version)
+	identity, err := loadIdentity()
+	if err != nil {
+		return err
+	}
+	srv := daemon.New(reg, auth, uiHandler(), version, identity)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -221,6 +226,29 @@ func cmdServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "flue: could not save sessions for revival: %v\n", err)
 	}
 	return servedErr
+}
+
+// loadIdentity reads the daemon's static keypair and its paired-device
+// registry out of the config directory, creating the key on first run.
+//
+// Threaded the same way as the auth token: read here, once, by the process
+// that is about to serve, and handed to the daemon at construction — the
+// daemon never reaches into the config directory itself. Failures are fatal
+// rather than degraded. A daemon that could not load its static key would come
+// up unable to prove it is the daemon its already-paired devices trust, and
+// starting anyway would present the user with a working-looking flue whose
+// pairing silently does nothing; crypto.LoadOrCreateStaticKey refuses to
+// regenerate over a key it cannot parse for the same reason.
+func loadIdentity() (daemon.Identity, error) {
+	dir, err := config.Dir()
+	if err != nil {
+		return daemon.Identity{}, fmt.Errorf("locate the config directory: %w", err)
+	}
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		return daemon.Identity{}, fmt.Errorf("load the daemon static key: %w", err)
+	}
+	return daemon.Identity{Key: key, Devices: crypto.NewDeviceStore(dir)}, nil
 }
 
 // snapshotsDir is where shutdown snapshots live between daemons. An empty

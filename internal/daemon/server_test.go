@@ -54,7 +54,7 @@ func newTestServerShippedUI(t *testing.T) (*httptest.Server, *session.Registry) 
 func newTestServerUI(t *testing.T, ui http.Handler) (*httptest.Server, *session.Registry, *Server) {
 	t.Helper()
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, nil, ui, "test")
+	srv := New(reg, nil, ui, "test", Identity{})
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -551,20 +551,20 @@ func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
 }
 
 // TestOnlySafeMethodsAreRouted pins the invariant the test above depends on:
-// flue's HTTP surface is read-only apart from one explicitly allowlisted mint
-// path, so a mutation cannot be bolted onto it by a later task without this
-// failing first.
+// flue's HTTP surface is read-only apart from two explicitly allowlisted POST
+// paths — the mint and the pairing ceremony — so a mutation cannot be bolted
+// onto it by a later task without this failing first.
 //
-// OPTIONS is in the list for every path including the mint path, and that is
+// OPTIONS is in the list for every path including those two, and that is
 // load-bearing rather than tidy: a CORS preflight that never succeeds is what
 // stops a browser from ever sending a cross-origin request carrying the
 // X-Flue-Token header that authenticates a mint.
 func TestOnlySafeMethodsAreRouted(t *testing.T) {
 	ts, _ := newTestServer(t)
-	for _, path := range []string{"/", "/api/sessions", "/ws", MintPath} {
+	for _, path := range []string{"/", "/api/sessions", "/ws", MintPath, PairPath} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
-			if path == MintPath && method == http.MethodPost {
-				continue // the one allowlisted exception; see TestPOSTIsRoutedOnlyToTheMintPath
+			if (path == MintPath || path == PairPath) && method == http.MethodPost {
+				continue // the allowlisted exceptions; see TestPOSTIsRoutedOnlyToTheMintPath
 			}
 			req, err := http.NewRequest(method, ts.URL+path, nil)
 			if err != nil {
@@ -583,10 +583,10 @@ func TestOnlySafeMethodsAreRouted(t *testing.T) {
 	}
 }
 
-// TestPOSTIsRoutedOnlyToTheMintPath pins the width of the exception. A POST to
-// any other path — including one that only differs by path normalisation, which
-// http.ServeMux would clean before matching — must be refused before it reaches
-// a handler.
+// TestPOSTIsRoutedOnlyToTheMintPath pins the width of the exception, which is
+// exactly two paths wide: MintPath and PairPath. A POST to any other path —
+// including one that only differs by path normalisation, which http.ServeMux
+// would clean before matching — must be refused before it reaches a handler.
 func TestPOSTIsRoutedOnlyToTheMintPath(t *testing.T) {
 	ts, _ := newTestServer(t)
 	for _, path := range []string{
@@ -597,6 +597,10 @@ func TestPOSTIsRoutedOnlyToTheMintPath(t *testing.T) {
 		"/api/handoff/x",
 		"/api/./handoff",
 		"//api/handoff",
+		"/api/pair/",
+		"/api/pair/x",
+		"/api/./pair",
+		"//api/pair",
 		"/api/spawn",
 	} {
 		req, err := http.NewRequest(http.MethodPost, ts.URL+path, nil)
@@ -610,7 +614,7 @@ func TestPOSTIsRoutedOnlyToTheMintPath(t *testing.T) {
 		}
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
-			t.Errorf("POST %s = 200; only %s may answer a POST", path, MintPath)
+			t.Errorf("POST %s = 200; only %s and %s may answer a POST", path, MintPath, PairPath)
 		}
 	}
 }
@@ -872,7 +876,7 @@ func TestConcurrentHandoffExchangesYieldExactlyOneSuccess(t *testing.T) {
 // immediately, so a token that turns up later has no business working.
 func TestExpiredHandoffIsRefusedOverHTTP(t *testing.T) {
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, nil, http.NotFoundHandler(), "test")
+	srv := New(reg, nil, http.NotFoundHandler(), "test", Identity{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	t.Cleanup(srv.Shutdown)
@@ -1185,7 +1189,7 @@ func TestCloseSessionReportsExit(t *testing.T) {
 // permission.
 func TestServerWithoutAuthFailsClosed(t *testing.T) {
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, nil, http.NotFoundHandler(), "test")
+	srv := New(reg, nil, http.NotFoundHandler(), "test", Identity{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1250,7 +1254,7 @@ func TestListenAndServeBindsLoopbackOnly(t *testing.T) {
 	probe.Close()
 
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test")
+	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test", Identity{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1294,7 +1298,7 @@ func TestEndToEndOverRealListener(t *testing.T) {
 	probe.Close()
 
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test")
+	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test", Identity{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1364,7 +1368,7 @@ func TestShutdownClosesEstablishedWebSockets(t *testing.T) {
 	probe.Close()
 
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test")
+	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test", Identity{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1429,7 +1433,7 @@ func TestShutdownClosesEstablishedWebSockets(t *testing.T) {
 func TestEnqueueNeverBlocksAndDropsABackloggedClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c := newConn(ctx, cancel, nil, nil, "")
+	c := newConn(ctx, cancel, nil, nil, "", "")
 
 	// Fill the outbox with no writer draining it, i.e. a client that has
 	// stopped reading its socket.
@@ -1468,12 +1472,12 @@ func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 	defer s.Close()
-	srv := New(reg, nil, nil, "test")
+	srv := New(reg, nil, nil, "test", Identity{})
 
 	newPeer := func() *conn {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		c := newConn(ctx, cancel, nil, srv, "")
+		c := newConn(ctx, cancel, nil, srv, "", "")
 		c.attach[1] = &attachment{ref: 1, s: s, sub: s.Subscribe(0), done: make(chan struct{})}
 		srv.claimPrimaryIfUnset(s.ID(), c)
 		return c

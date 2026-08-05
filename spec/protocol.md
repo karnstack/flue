@@ -66,11 +66,20 @@ pairing mode. The daemon holds at most one outstanding token, so a second
 gets a fresh `deviceList`, and the revoked device's own connections get
 `revoked` and are then closed.
 
+The token is 256 bits of randomness encoded as **URL-safe base64, unpadded**
+(RFC 4648 §5, no `=`). `pairing.url` splices it into `?t=` with no escaping, so
+the encoding has to survive a URL as itself.
+
 `POST /api/pair` is the one part of the ceremony that is not a WebSocket
 message: the new device posts the token and its own public key there, and the
-pairing token — not the session token — is the credential. Its request and
-response shapes, and the refusals that go with them, are specified alongside
-the daemon's pairing mode.
+pairing token — not the session token — is the credential. The request is JSON
+`{token, publicKey, label}`, where `publicKey` is the device's 32-byte Noise
+static key in **standard** base64; the answer is `200 {deviceId, daemonPub}`,
+`daemonPub` likewise standard base64. Every refusal — no window open, wrong
+token, expired token, an origin other than the daemon's own, a malformed key —
+is the same `403` with the same body, so the endpoint says nothing about
+whether a token ever existed. A presented token closes the window whether or
+not it was the right one.
 
 ## Correlation
 

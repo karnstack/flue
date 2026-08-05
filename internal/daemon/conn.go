@@ -132,6 +132,13 @@ type conn struct {
 	// resolved identity here later.
 	peer string
 
+	// origin is the absolute origin this connection's upgrade arrived on, and
+	// the only thing pairing can honestly build a URL from: the second device
+	// has to open an address this daemon is really reachable at. It is carried
+	// on the connection rather than recomputed because the request is gone by
+	// the time a pairStart arrives.
+	origin string
+
 	// ctx bounds this connection's life, and cancel ends it. Writes are always
 	// issued under this connection's own context, never under the context of
 	// whichever client caused the write, so one client's disconnect cannot
@@ -146,13 +153,14 @@ type conn struct {
 	attach  map[uint32]*attachment
 }
 
-func newConn(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, srv *Server, peer string) *conn {
+func newConn(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, srv *Server, peer, origin string) *conn {
 	return &conn{
 		ctx:    ctx,
 		cancel: cancel,
 		ws:     ws,
 		srv:    srv,
 		peer:   peer,
+		origin: origin,
 		out:    make(chan frame, outboxDepth),
 		attach: map[uint32]*attachment{},
 	}
@@ -383,6 +391,32 @@ func (c *conn) handleControl(msg any) {
 			return
 		}
 		_ = a.s.Close()
+
+	case wire.PairStart:
+		// Reachable only from here, which is the concrete meaning of "pairing
+		// is entered from an already-trusted UI": this connection has already
+		// presented the session token to get its upgrade, so opening a window
+		// is something only a client that was already inside can do.
+		if !c.srv.pairingReady() {
+			c.sendError("pairing_unavailable", "this daemon has no pairing identity")
+			return
+		}
+		token, expires := c.srv.pairing.start(time.Now())
+		c.srv.logger().Info("pairing started", "peer", c.peer, "expiresAt", expires.Unix())
+		// The token is unpadded URL-safe base64 precisely so it can be spliced
+		// in raw here; see pairingState.start.
+		_ = c.sendControl(wire.Pairing{
+			Token:     token,
+			URL:       c.origin + "/pair?t=" + token,
+			DaemonPub: c.srv.daemonPub(),
+			ExpiresAt: expires.Unix(),
+		})
+
+	case wire.PairCancel:
+		// No reply: the window is closed either way, and a client that never
+		// opened one is not owed an error for saying so.
+		c.srv.pairing.cancel()
+		c.srv.logger().Info("pairing cancelled", "peer", c.peer)
 
 	default:
 		c.sendError("bad_message", "unexpected message from client")
