@@ -4,11 +4,13 @@
 //
 // # Endpoint policy
 //
-// The GET surface is read-only. There are five routes — the app shell, a JSON
-// session listing, the WebSocket upgrade, the handoff mint, and the pairing
-// POST — and no GET among them changes any state; the last two answer nothing
-// but a POST. Spawning, signalling, resizing and closing a session are
-// reachable only over an established WebSocket.
+// The GET surface is read-only. The routes are the app shell, a JSON session
+// listing, the WebSocket upgrade, the handoff mint, the pairing POST, and the
+// two static reads the pairing page needs before it holds any credential — the
+// shell at PairPagePath and the build output under uiAssetPrefix. No GET among
+// them changes any state; the mint and the pairing POST answer nothing but a
+// POST. Spawning, signalling, resizing and closing a session are reachable only
+// over an established WebSocket.
 //
 // That is a security constraint rather than a stylistic one. Task 5's
 // authenticator accepts Sec-Fetch-Site: none, because that is what a typed URL
@@ -41,6 +43,12 @@
 //     pairing window from an already-trusted UI, it refuses anything that is
 //     not same-origin before comparing the token, and the window closes on the
 //     first presentation whether or not it was right. See pairing.go.
+//   - The page that makes that POST cannot authenticate either, so the two
+//     GETs which serve it — PairPagePath and uiAssetPrefix — are exempt from
+//     the token as well. They are the narrowest thing that could be: two static
+//     reads out of the embedded build, refused unless the request's provenance
+//     is this daemon's own, and covering no path that answers with anything but
+//     the app shell or a file Vite emitted. See withProvenance.
 //   - The upgrade — the one GET that leads to state changes — refuses
 //     Sec-Fetch-Site: none outright. See handleWS for why that costs a real
 //     client nothing.
@@ -250,6 +258,18 @@ func (s *Server) checkAuth(r *http.Request) error {
 // opener's argv, which any local user can read.
 const MintPath = "/api/handoff"
 
+// uiAssetPrefix is the subtree Vite emits its content-hashed build output
+// into — the module the app shell names in its one <script src>, and the
+// stylesheet beside it. It is the second half of "the pairing page loads": a
+// shell served without its bundle is a blank document.
+//
+// Unexported, and a prefix rather than a list, because the filenames carry a
+// content hash and change on every build; what is stable is the directory. A
+// name inside it that the build did not emit is a 404 from the UI handler, not
+// the shell — see web.Handler, which refuses to answer this prefix with
+// anything but a real file.
+const uiAssetPrefix = "/assets/"
+
 // Handler returns the full HTTP handler: UI, JSON API, WebSocket, and mint.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -264,6 +284,19 @@ func (s *Server) Handler() http.Handler {
 	// handlePair runs the provenance half of the transport's checks itself and
 	// then spends the token; see pairing.go for why that is the whole ceremony.
 	mux.HandleFunc(PairPath, s.handlePair)
+	// The page that posts there, and the bundle that page is nothing without.
+	// Outside withAuth for the same reason PairPath is: the device that opens
+	// the pairing URL holds no session token — that is what it is being paired
+	// to get — so serving the shell only to a credential it cannot have makes
+	// the QR code answer 401 and the ceremony unstartable.
+	//
+	// The exemption is two static reads wide. PairPagePath is registered
+	// without a trailing slash, so ServeMux matches it exactly and /pair/x
+	// falls through to the authenticated catch-all below; uiAssetPrefix is a
+	// subtree, but one whose every member is a file Vite emitted and whose
+	// non-members are 404s rather than the shell.
+	mux.Handle(PairPagePath, s.withProvenance(s.ui))
+	mux.Handle(uiAssetPrefix, s.withProvenance(s.ui))
 	mux.Handle("/api/sessions", s.withAuth(http.HandlerFunc(s.handleSessions)))
 	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
 	// never the app shell.
@@ -363,6 +396,50 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		if rec.status == http.StatusUnauthorized || rec.status == http.StatusForbidden {
 			s.logger().Warn("auth rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "status", rec.status)
 		}
+	})
+}
+
+// withProvenance serves next to a caller that presents no credential at all,
+// once the request has proved it came from somewhere this daemon accepts.
+//
+// It is withAuth with the token check removed and nothing else, and it is used
+// on exactly the two paths the pairing ceremony needs before a token exists.
+// The provenance half is the transport's own — the same CheckProvenance
+// handlePair runs, for the same reason — so a cross-origin page cannot pull the
+// app shell out of this daemon, and the Host allowlist still answers DNS
+// rebinding.
+//
+// Two rules keep it from widening. Only GET and HEAD are served: methodPolicy
+// already refuses everything else on these paths, and repeating the check here
+// means the rule survives this handler being mounted somewhere the middleware
+// does not wrap. And the handoff exchange in local.Auth.Middleware is
+// deliberately not reached, so no request to an unauthenticated path can spend
+// a live handoff token — a page that never needed a credential must not be able
+// to burn the one flue open is carrying.
+//
+// Nothing here logs. A file the build emitted, served to whoever asked for it,
+// is not an authentication event, and an audit trail that records every asset
+// fetch is one nobody reads.
+func (s *Server) withProvenance(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		a := s.currentAuth()
+		if a == nil {
+			// The one condition here that is the daemon's own fault rather
+			// than the caller's, and the one it keeps its Error line for.
+			s.logAuthFailure(r, ErrNoAuth)
+			http.Error(w, ErrNoAuth.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if err := a.CheckProvenance(r); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

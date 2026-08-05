@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -562,7 +563,10 @@ func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
 // X-Flue-Token header that authenticates a mint.
 func TestOnlySafeMethodsAreRouted(t *testing.T) {
 	ts, _ := newTestServer(t)
-	for _, path := range []string{"/", "/api/sessions", "/ws", MintPath, PairPath} {
+	// PairPagePath and uiAssetPrefix are in the list because they are the two
+	// paths served without a session token: an exemption from the credential
+	// must not become an exemption from the method policy as well.
+	for _, path := range []string{"/", "/api/sessions", "/ws", MintPath, PairPath, PairPagePath, uiAssetPrefix} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
 			if (path == MintPath || path == PairPath) && method == http.MethodPost {
 				continue // the allowlisted exceptions; see TestPOSTIsRoutedOnlyToTheMintPath
@@ -1102,6 +1106,156 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("Access-Control-Allow-Origin = %q, want none", got)
+	}
+}
+
+// --- the pairing page, served to a device that holds no token ---
+
+// getAnon issues the GET the device being paired makes: no cookie, no header,
+// nothing this daemon ever issued. A scanned QR code is a user-initiated
+// navigation, so it arrives with Sec-Fetch-Site: none; whatever that document
+// then asks for arrives same-origin.
+func getAnon(t *testing.T, ts *httptest.Server, path, fetchSite string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if fetchSite != "" {
+		req.Header.Set("Sec-Fetch-Site", fetchSite)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do %s: %v", path, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestPairPageIsServedWithoutASessionToken is the whole reason the exemption
+// exists. The device that opens the pairing URL has nothing to authenticate
+// with — acquiring a credential is what it is doing — so a 401 here is a
+// ceremony that can never start, and the QR code is a link to an error page.
+//
+// It runs against the shipped UI: with a stub in place the assertion would
+// measure the stub's answer rather than the app shell the binary serves.
+func TestPairPageIsServedWithoutASessionToken(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+
+	for _, p := range []string{PairPagePath, PairPagePath + "?t=" + strings.Repeat("A", 43)} {
+		resp := getAnon(t, ts, p, "none")
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s without a token = %d, want 200", p, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Errorf("GET %s Content-Type = %q, want text/html", p, ct)
+		}
+		if !strings.Contains(string(body), `id="root"`) {
+			t.Errorf("GET %s served %.200q, want the app shell", p, body)
+		}
+	}
+}
+
+// TestPairPageAssetsAreServedWithoutASessionToken is the other half of "the
+// page loads": a shell without the module it names is a blank document, and
+// the device fetching that module still has no token.
+//
+// The asset is read out of the shell rather than named here. Its filename
+// carries a content hash and changes on every build, so the stable reference is
+// the one the document itself makes.
+func TestPairPageAssetsAreServedWithoutASessionToken(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+
+	shell, err := io.ReadAll(get(t, ts, "/", "same-origin").Body)
+	if err != nil {
+		t.Fatalf("read shell: %v", err)
+	}
+	src := scriptSrc(string(shell))
+	if !strings.HasPrefix(src, uiAssetPrefix) {
+		t.Fatalf("script src = %q, want a path under %s", src, uiAssetPrefix)
+	}
+
+	resp := getAnon(t, ts, src, "same-origin")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s without a token = %d, want 200", src, resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "javascript") {
+		t.Errorf("Content-Type for %s = %q, want JavaScript", src, ct)
+	}
+}
+
+// TestNothingBeyondThePairingPageIsExemptFromTheToken measures the width of the
+// exemption rather than its existence. Every path here answered 401 without a
+// session token before the pairing page was carved out and must still, because
+// "the shell is public at /pair" and "the shell is public" are very different
+// daemons.
+func TestNothingBeyondThePairingPageIsExemptFromTheToken(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+
+	for _, p := range []string{
+		"/",                        // the app shell everywhere else
+		"/sessions",                // another client-side route
+		"/devices",                 // the screen a pairing is started from
+		PairPagePath + "/",         // registered without a trailing slash...
+		PairPagePath + "/anything", // ...so nothing under it is exempt either
+		"/pairing",                 // nor is a path that merely begins with it
+		"/api/sessions",
+		"/manifest.webmanifest",
+		"/sw.js",
+	} {
+		resp := getAnon(t, ts, p, "none")
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET %s without a token = %d, want 401", p, resp.StatusCode)
+		}
+	}
+
+	// The upgrade is the one GET that leads to every state change flue has.
+	// Nothing about serving a static page may reach it.
+	if _, _, err := websocket.Dial(context.Background(),
+		"ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", nil); err == nil {
+		t.Error("upgrade without a token succeeded, want failure")
+	}
+}
+
+// TestThePairingPageCannotSpendAHandoffToken pins what the exemption skips as
+// well as what it allows.
+//
+// withProvenance does not run the transport's middleware, so the handoff
+// exchange never happens on these paths. That is deliberate: a navigation to
+// /pair?h=… is one any page can cause, and it must neither burn the one-time
+// credential flue open is carrying nor be answered with a session cookie for
+// asking. A page that needs no credential must not be able to spend one.
+func TestThePairingPageCannotSpendAHandoffToken(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+	h := mint(t, ts)
+
+	resp := getAnon(t, ts, PairPagePath+"?"+local.HandoffParam+"="+h, "none")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET the pairing page carrying a handoff token = %d, want 200", resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == local.CookieName {
+			t.Fatalf("the pairing page set %s; it authenticates nobody", local.CookieName)
+		}
+	}
+
+	// Still unspent, so the browser flue open opened gets the cookie it was
+	// sent for. Without this the test passes on a daemon that simply refuses
+	// every handoff.
+	exchange := getAnon(t, ts, "/?"+local.HandoffParam+"="+h, "none")
+	if exchange.StatusCode != http.StatusOK {
+		t.Fatalf("first load with the same handoff token = %d, want 200", exchange.StatusCode)
+	}
+	var cookie *http.Cookie
+	for _, c := range exchange.Cookies() {
+		if c.Name == local.CookieName {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatalf("the handoff token was spent by the pairing page: no %s cookie on the exchange",
+			local.CookieName)
 	}
 }
 

@@ -457,7 +457,7 @@ func (c *conn) handleControl(msg any) {
 		// in raw here; see pairingState.start.
 		_ = c.sendControl(wire.Pairing{
 			Token:     token,
-			URL:       c.origin + "/pair?t=" + token,
+			URL:       c.origin + PairPagePath + "?t=" + token,
 			DaemonPub: c.srv.daemonPub(),
 			ExpiresAt: expires.Unix(),
 		})

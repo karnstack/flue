@@ -32,6 +32,18 @@ import (
 //     reach the comparison.
 const PairPath = "/api/pair"
 
+// PairPagePath is the client-side route that makes that POST: the app shell,
+// served to a device that has nothing to authenticate with, carrying the token
+// in ?t=. It is the path the QR code names — see conn.go, which builds that URL
+// from this constant so the page the daemon serves without a session token and
+// the page it sends the second device to cannot drift apart.
+//
+// Serving it needs no token for the same reason the POST does not: the device
+// holds none. It is still refused unless the request's provenance is this
+// daemon's own, and it answers with the app shell and nothing else. See
+// Server.withProvenance.
+const PairPagePath = "/pair"
+
 // PairingTTL is how long a pairing window stays open.
 //
 // Two minutes is the span of the ceremony itself: pick up the second device,
