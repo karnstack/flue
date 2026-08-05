@@ -31,11 +31,11 @@ jobs:
           restore-keys: |
             pnpm-store-${{ runner.os }}-
 
-      - name: Lint
-        run: make lint
-
-      - name: Test
-        run: make test
+      # One make invocation, not one per step: `web` is a phony prerequisite
+      # of both `lint` and `test`, and a single invocation runs it once where
+      # two separate steps built the frontend twice.
+      - name: Lint and test
+        run: make lint test
 
       # ubuntu-latest images ship shellcheck; apt keeps it deterministic
       # either way.
