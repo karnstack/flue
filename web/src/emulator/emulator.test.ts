@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Terminal } from '@xterm/xterm'
-import { describe, expect, it } from 'vitest'
-import { createXtermEmulator, extractGrid, loadWebglRenderer, TERMINAL_FONT_FAMILY } from './xterm'
+import { describe, expect, it, vi } from 'vitest'
+import { createXtermEmulator, extractGrid, loadWebglRenderer, openTerminalLink, TERMINAL_FONT_FAMILY } from './xterm'
 import type { Emulator } from './types'
 
 /**
@@ -225,5 +225,31 @@ describe('terminal typography', () => {
     // The token is written across two lines in the stylesheet.
     const collapse = (s: string) => s.replace(/\s+/g, ' ').trim()
     expect(collapse(token![1]!)).toBe(collapse(TERMINAL_FONT_FAMILY))
+  })
+})
+
+describe('openTerminalLink', () => {
+  it('opens http(s) in a new tab with no opener handle', () => {
+    const open = vi.fn()
+    vi.stubGlobal('open', open)
+    openTerminalLink('https://flue.sh/docs')
+    openTerminalLink('http://127.0.0.1:8080/')
+    expect(open).toHaveBeenNthCalledWith(1, 'https://flue.sh/docs', '_blank', 'noopener')
+    expect(open).toHaveBeenNthCalledWith(2, 'http://127.0.0.1:8080/', '_blank', 'noopener')
+    vi.unstubAllGlobals()
+  })
+
+  it('refuses every other scheme — terminal output is untrusted input', () => {
+    const open = vi.fn()
+    vi.stubGlobal('open', open)
+    // An OSC 8 sequence chooses the URI, and anything the shell prints can
+    // be one; these must never reach window.open.
+    openTerminalLink('javascript:alert(1)')
+    openTerminalLink('file:///etc/passwd')
+    openTerminalLink('data:text/html,<script>1</script>')
+    openTerminalLink('vscode://open')
+    openTerminalLink('HTTPS//not-a-scheme')
+    expect(open).not.toHaveBeenCalled()
+    vi.unstubAllGlobals()
   })
 })

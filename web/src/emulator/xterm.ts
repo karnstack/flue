@@ -1,4 +1,5 @@
 import { Terminal } from '@xterm/xterm'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import type { Emulator, Grid, PixelSize, TerminalTheme } from './types'
 
 export interface XtermOptions {
@@ -50,7 +51,18 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
     scrollback: 10_000,
     fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: 13,
+    // OSC 8 hyperlinks — `ls --hyperlink`, modern CLIs. xterm parses them in
+    // core but activates nothing without a handler. The scheme check lives in
+    // openTerminalLink: an escape sequence chooses the URI, so a shell script
+    // printing one must not be able to hand the browser javascript: or file:.
+    linkHandler: {
+      activate: (_event, uri) => openTerminalLink(uri),
+    },
   })
+  // Plain-text URLs in output, the other way a link appears in a terminal.
+  // The addon's matcher only produces http(s) URIs; the handler still goes
+  // through the same guard so there is exactly one place that opens links.
+  term.loadAddon(new WebLinksAddon((_event, uri) => openTerminalLink(uri)))
 
   const encoder = new TextEncoder()
   let disposed = false
@@ -115,6 +127,20 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       term.input(data, true)
     },
   }
+}
+
+/**
+ * Open a link the terminal's output produced.
+ *
+ * http and https only. Terminal output is untrusted input: anything the
+ * shell prints — including what a remote program or a curled page echoes —
+ * can be an OSC 8 sequence, and `javascript:` or `file:` handed to
+ * window.open runs in this origin or reads disk. `noopener` for the same
+ * reason: the opened page must get no handle back to the app.
+ */
+export function openTerminalLink(uri: string): void {
+  if (!/^https?:\/\//i.test(uri)) return
+  window.open(uri, '_blank', 'noopener')
 }
 
 /**
