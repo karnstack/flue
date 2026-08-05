@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,20 +29,88 @@ func NewRegistry(clock func() time.Time) *Registry {
 	return &Registry{clock: clock, sessions: map[string]*Session{}}
 }
 
-// loginShell returns the user's shell, preferring $SHELL and falling back to
-// the passwd entry, then to /bin/sh.
+// loginShell returns the user's shell: $SHELL when set, otherwise the user
+// database, otherwise /bin/sh.
+//
+// The database fallback matters because $SHELL is absent in exactly the
+// environment the README advertises: a daemon started by launchd or a
+// systemd user manager gets no login-session environment, so this is the
+// path a service-started daemon takes for every session.
 func loginShell() string {
 	if sh := os.Getenv("SHELL"); sh != "" {
 		return sh
 	}
-	if u, err := user.Current(); err == nil {
-		if u.HomeDir != "" {
-			if _, err := os.Stat("/bin/zsh"); err == nil {
-				return "/bin/zsh"
-			}
-		}
+	if sh := passwdShell(runtime.GOOS); sh != "" {
+		return sh
 	}
 	return "/bin/sh"
+}
+
+// passwdShell asks the platform's user database for the current user's login
+// shell. os/user carries no shell field, so the lookup shells out: dscl on
+// macOS, where accounts live in Directory Services rather than /etc/passwd,
+// and getent elsewhere, which resolves through NSS and so agrees with
+// whatever nsswitch.conf says a user is.
+func passwdShell(goos string) string {
+	u, err := user.Current()
+	if err != nil {
+		return ""
+	}
+	if goos == "darwin" {
+		out, err := exec.Command("/usr/bin/dscl", ".", "-read", "/Users/"+u.Username, "UserShell").Output()
+		if err != nil {
+			return ""
+		}
+		return shellFromDscl(string(out))
+	}
+	out, err := exec.Command("getent", "passwd", u.Username).Output()
+	if err != nil {
+		return ""
+	}
+	return shellFromPasswd(string(out))
+}
+
+// shellFromDscl extracts the path from dscl's "UserShell: /bin/zsh" output.
+func shellFromDscl(out string) string {
+	_, path, ok := strings.Cut(out, ":")
+	if !ok {
+		return ""
+	}
+	return validShell(strings.TrimSpace(path))
+}
+
+// shellFromPasswd extracts the seventh field of a passwd(5) line.
+func shellFromPasswd(out string) string {
+	line, _, _ := strings.Cut(out, "\n")
+	fields := strings.Split(line, ":")
+	if len(fields) < 7 {
+		return ""
+	}
+	return validShell(strings.TrimSpace(fields[6]))
+}
+
+// validShell refuses what could not be exec'd anyway: passwd permits an
+// empty shell field and a relative path, and either would make Spawn fail
+// in a way that blames the wrong thing.
+func validShell(path string) string {
+	if !strings.HasPrefix(path, "/") {
+		return ""
+	}
+	return path
+}
+
+// sessionEnv is the environment every session starts with: the daemon's
+// own, TERM pinned, and SHELL filled in when the daemon itself has none —
+// a service-started daemon has no $SHELL, and without this every program in
+// the session that consults it would come up empty.
+func sessionEnv(environ []string, shell string) []string {
+	env := append(append([]string(nil), environ...), "TERM=xterm-256color")
+	for _, kv := range environ {
+		if strings.HasPrefix(kv, "SHELL=") {
+			return env
+		}
+	}
+	return append(env, "SHELL="+shell)
 }
 
 func newID() string {
@@ -53,14 +123,15 @@ func newID() string {
 // login shell, inheriting the environment: flue is a terminal, and a
 // sanitised environment would defeat the purpose.
 func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
+	shell := loginShell()
 	argv := opts.Cmd
 	if len(argv) == 0 {
-		argv = []string{loginShell(), "-l"}
+		argv = []string{shell, "-l"}
 	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = opts.Cwd
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = sessionEnv(os.Environ(), shell)
 
 	cols, rows := opts.Cols, opts.Rows
 	if cols == 0 {
