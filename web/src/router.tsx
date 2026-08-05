@@ -7,6 +7,7 @@ import {
 } from '@tanstack/react-router'
 import { AppShell } from '@/components/app-shell'
 import { DevicesRoute } from '@/routes/devices'
+import { PairRoute } from '@/routes/pair'
 import { SessionsRoute } from '@/routes/sessions'
 import { TerminalRoute } from '@/routes/terminal'
 
@@ -95,9 +96,33 @@ const terminalRoute = createRoute({
   component: TerminalRoute,
 })
 
+/**
+ * The pairing page, beside the terminal and outside the shell for a related
+ * reason: a device that reaches this route is not paired yet, and sidebar links
+ * to sessions it cannot open would be chrome promising what the visitor does
+ * not have. It is also the one route the daemon serves without a session token
+ * — see `withProvenance` in internal/daemon/server.go — so the less of the app
+ * it renders, the better.
+ */
+const pairRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/pair',
+  /**
+   * `t` is the pairing token the QR code carries. Narrowed to a non-empty
+   * string or nothing at all, so a link that arrives with `?t` repeated (which
+   * parses to an array) or with an empty value lands on the page's explainer
+   * rather than posting something token-shaped at the daemon and spending the
+   * user's window on it.
+   */
+  validateSearch: (search: Record<string, unknown>): { t?: string } =>
+    typeof search.t === 'string' && search.t !== '' ? { t: search.t } : {},
+  component: PairRoute,
+})
+
 const routeTree = rootRoute.addChildren([
   shellRoute.addChildren([indexRoute, sessionsRoute, devicesRoute, settingsRoute]),
   terminalRoute,
+  pairRoute,
 ])
 
 export function createFlueRouter() {

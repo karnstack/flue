@@ -74,6 +74,39 @@ describe('createFlueRouter', () => {
     expect(ids.some((id) => id.includes('shell'))).toBe(false)
   })
 
+  it('renders the pairing page outside the app shell', () => {
+    // The device on this route is not paired yet, so a sidebar of links to
+    // sessions it cannot open would be chrome promising what it does not have.
+    // It is also the one route the daemon serves without a session token.
+    const ids = routeIds('/pair')
+    expect(ids).toContain('/pair')
+    expect(ids.some((id) => id.includes('shell'))).toBe(false)
+  })
+
+  it('gives the pairing page nothing when the token is not one', async () => {
+    // A link carrying ?t twice parses to an array, and an array is not a
+    // token. The route's validateSearch says so, but a route's search is its
+    // parent's merged with its own and the root route has no schema — so what
+    // reaches the page is the raw parse, and the page is what has to refuse it.
+    // The explainer is the evidence it did: with a token it renders a form.
+    await renderAt('/pair?t=first&t=second')
+    expect(screen.getByRole('heading', { name: 'Nothing to pair with yet' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
+  })
+
+  it('renders the pairing page with no app chrome around it either', async () => {
+    // As with the terminal, the route tree proves the shape and this proves
+    // the consequence. Without a token the page explains itself and asks the
+    // daemon for nothing, so no client provider is needed here — which is the
+    // point: the device reading it has no session token to open one with.
+    await renderAt('/pair')
+
+    expect(screen.getByRole('heading', { name: 'Nothing to pair with yet' })).toBeTruthy()
+    expect(screen.queryByRole('navigation')).toBeNull()
+    expect(document.querySelector('[data-slot="sidebar"]')).toBeNull()
+    expect(screen.queryAllByRole('link')).toHaveLength(0)
+  })
+
   it('wraps a management route in the app shell when it renders', async () => {
     await renderAt('/sessions')
     // The shell's chrome, by its landmarks: the nav inside the sidebar, and

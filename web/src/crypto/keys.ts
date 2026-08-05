@@ -15,7 +15,20 @@ export interface DeviceKey {
 
 const DB_NAME = 'flue'
 const STORE = 'keys'
-const RECORD = 'device-static'
+const DEVICE_RECORD = 'device-static'
+
+/**
+ * Where the daemon's static public key is pinned, once pairing has handed one
+ * over.
+ *
+ * Same store as the device's own key, because the two are one fact: this
+ * browser is paired to that daemon. A key here is what the Noise IK initiator
+ * will be given as the responder's static — the pattern authenticates the
+ * daemon by proving it holds the private half — so a record that could be
+ * replaced silently would be the whole of the trust decision, made once at
+ * pairing time and never asked about again.
+ */
+const DAEMON_RECORD = 'daemon-static'
 
 const openDb = (factory: IDBFactory) =>
   new Promise<IDBDatabase>((resolve, reject) => {
@@ -35,14 +48,59 @@ const tx = <T>(db: IDBDatabase, mode: IDBTransactionMode, run: (store: IDBObject
 export async function loadOrCreateDeviceKey(factory: IDBFactory = indexedDB): Promise<DeviceKey> {
   const db = await openDb(factory)
   try {
-    const existing = await tx<{ privateKey: Uint8Array } | undefined>(db, 'readonly', (s) => s.get(RECORD))
+    const existing = await tx<{ privateKey: Uint8Array } | undefined>(db, 'readonly', (s) =>
+      s.get(DEVICE_RECORD),
+    )
     if (existing) {
       const privateKey = new Uint8Array(existing.privateKey)
       return { privateKey, publicKey: x25519.getPublicKey(privateKey) }
     }
     const privateKey = crypto.getRandomValues(new Uint8Array(32))
-    await tx(db, 'readwrite', (s) => s.put({ privateKey }, RECORD))
+    await tx(db, 'readwrite', (s) => s.put({ privateKey }, DEVICE_RECORD))
     return { privateKey, publicKey: x25519.getPublicKey(privateKey) }
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * Pin the daemon this browser has just paired with.
+ *
+ * Called once, from the /pair page, with the key the daemon returned over the
+ * one connection the user themselves established by carrying a token across
+ * from an already-trusted screen. That moment is the entire basis of the trust:
+ * from here on the initiator names this key as the responder's static, and a
+ * daemon that cannot prove it holds the private half fails the handshake.
+ *
+ * Overwrites whatever was there, because re-pairing is how a browser is meant
+ * to move to another daemon — and doing that from the pairing ceremony is the
+ * one place a user has said so.
+ */
+export async function savePinnedDaemonKey(
+  publicKey: Uint8Array,
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const db = await openDb(factory)
+  try {
+    await tx(db, 'readwrite', (s) => s.put({ publicKey }, DAEMON_RECORD))
+  } finally {
+    db.close()
+  }
+}
+
+/** The pinned daemon key, or null in a browser that has never paired. */
+export async function loadPinnedDaemonKey(
+  factory: IDBFactory = indexedDB,
+): Promise<Uint8Array | null> {
+  const db = await openDb(factory)
+  try {
+    const existing = await tx<{ publicKey: Uint8Array } | undefined>(db, 'readonly', (s) =>
+      s.get(DAEMON_RECORD),
+    )
+    // Copied out rather than handed back as it was read: the value structured
+    // clone returns is this caller's own, and the next reader deserves the
+    // stored bytes rather than whatever the last one did to theirs.
+    return existing ? new Uint8Array(existing.publicKey) : null
   } finally {
     db.close()
   }
