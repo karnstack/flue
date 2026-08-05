@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import { RouterProvider } from '@tanstack/react-router'
 import { FlueClientProvider } from './client/provider'
@@ -38,6 +38,59 @@ async function renderAt(path: string) {
   return { ...view, client, sockets }
 }
 
+/**
+ * Mount the real router with nothing above it, and record every socket the app
+ * would have opened.
+ *
+ * No client provider from the test: the whole question here is which routes
+ * mount one for themselves, so supplying one would answer it in advance. The
+ * WebSocket constructor is the seam, because that is the only thing a daemon
+ * ever sees.
+ */
+async function renderBare(path: string): Promise<string[]> {
+  const urls: string[] = []
+  class RecordingWebSocket {
+    binaryType = ''
+    onopen: unknown = null
+    onclose: unknown = null
+    onmessage: unknown = null
+    constructor(url: string) {
+      urls.push(url)
+    }
+    send() {}
+    close() {}
+  }
+  vi.stubGlobal('WebSocket', RecordingWebSocket)
+
+  window.history.replaceState(null, '', path)
+  const router = createFlueRouter()
+  await router.load()
+  render(<RouterProvider router={router} />)
+  return urls
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+describe('the daemon socket', () => {
+  it('is not opened on the pairing route', async () => {
+    // The device on this route has no session token — getting one is what the
+    // page is for — so /ws answers 401, the client backs off and retries, and
+    // it does that for as long as the tab is open: a WARN in the daemon's audit
+    // log every few seconds, and a phone radio kept awake for a page that only
+    // ever makes one fetch. The route needs no socket, so it opens none.
+    expect(await renderBare('/pair')).toEqual([])
+  })
+
+  it('is opened on a route that has one to use', async () => {
+    // The other half, so the assertion above cannot pass by the app having
+    // stopped connecting anywhere. Sessions, the terminal and Devices all speak
+    // to the daemon over this socket, and they share exactly one.
+    expect(await renderBare('/sessions')).toEqual(['ws://localhost:3000/ws'])
+  })
+})
+
 describe('createFlueRouter', () => {
   it('matches the sessions route', () => {
     const router = createFlueRouter()
@@ -72,6 +125,39 @@ describe('createFlueRouter', () => {
     const ids = routeIds('/d/local/s/abc123')
     expect(ids).toContain(TERMINAL_ROUTE_ID)
     expect(ids.some((id) => id.includes('shell'))).toBe(false)
+  })
+
+  it('renders the pairing page outside the app shell', () => {
+    // The device on this route is not paired yet, so a sidebar of links to
+    // sessions it cannot open would be chrome promising what it does not have.
+    // It is also the one route the daemon serves without a session token.
+    const ids = routeIds('/pair')
+    expect(ids).toContain('/pair')
+    expect(ids.some((id) => id.includes('shell'))).toBe(false)
+  })
+
+  it('gives the pairing page nothing when the token is not one', async () => {
+    // A link carrying ?t twice parses to an array, and an array is not a
+    // token. The route's validateSearch says so, but a route's search is its
+    // parent's merged with its own and the root route has no schema — so what
+    // reaches the page is the raw parse, and the page is what has to refuse it.
+    // The explainer is the evidence it did: with a token it renders a form.
+    await renderAt('/pair?t=first&t=second')
+    expect(screen.getByRole('heading', { name: 'Nothing to pair with yet' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
+  })
+
+  it('renders the pairing page with no app chrome around it either', async () => {
+    // As with the terminal, the route tree proves the shape and this proves
+    // the consequence. Without a token the page explains itself and asks the
+    // daemon for nothing, so no client provider is needed here — which is the
+    // point: the device reading it has no session token to open one with.
+    await renderAt('/pair')
+
+    expect(screen.getByRole('heading', { name: 'Nothing to pair with yet' })).toBeTruthy()
+    expect(screen.queryByRole('navigation')).toBeNull()
+    expect(document.querySelector('[data-slot="sidebar"]')).toBeNull()
+    expect(screen.queryAllByRole('link')).toHaveLength(0)
   })
 
   it('wraps a management route in the app shell when it renders', async () => {

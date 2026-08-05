@@ -32,7 +32,7 @@ import (
 func newTestDaemon(t *testing.T, token string) int {
 	t.Helper()
 
-	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth(token, 0), uiHandler(), version)
+	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth(token, 0), uiHandler(), version, daemon.Identity{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	t.Cleanup(srv.Shutdown)
@@ -996,7 +996,7 @@ func TestServeBannerFallsBackToTheLinkWhenTheLaunchFails(t *testing.T) {
 // half: the banner's convenience is only real if the link actually logs you in
 // over HTTP, and the security claim is only real if it does so once.
 func TestServeBannerLinkWorksExactlyOnceAgainstARealDaemon(t *testing.T) {
-	srv := daemon.New(session.NewRegistry(time.Now), nil, uiHandler(), version)
+	srv := daemon.New(session.NewRegistry(time.Now), nil, uiHandler(), version, daemon.Identity{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	t.Cleanup(srv.Shutdown)

@@ -21,27 +21,76 @@ Every control message is a JSON object with a `type` discriminator.
 
 ### Client to server
 
-| type | fields |
-|---|---|
-| `hello` | `ver`, `caps[]` |
-| `list` | — |
-| `spawn` | `cwd`, `cmd[]`, `cols`, `rows`, `reqId?` |
-| `attach` | `id`, `lastSeq`, `reqId?` |
-| `detach` | `ref` |
-| `resize` | `ref`, `cols`, `rows`, `primary` |
-| `signal` | `ref`, `sig` |
-| `close` | `ref` |
+| type | fields | meaning |
+|---|---|---|
+| `hello` | `ver`, `caps[]` | open the conversation |
+| `list` | — | list the daemon's sessions |
+| `spawn` | `cwd`, `cmd[]`, `cols`, `rows`, `reqId?` | start a session and attach to it |
+| `attach` | `id`, `lastSeq`, `reqId?` | attach to an existing session |
+| `detach` | `ref` | release an attachment |
+| `resize` | `ref`, `cols`, `rows`, `primary` | report this view's dimensions |
+| `signal` | `ref`, `sig` | send a signal to the session's process |
+| `close` | `ref` | end the session |
+| `devices` | — | list the paired devices |
+| `revoke` | `deviceId` | unpair a device and cut its connections |
+| `pairStart` | — | enter pairing mode |
+| `pairCancel` | — | leave pairing mode, invalidating the token |
 
 ### Server to client
 
-| type | fields |
-|---|---|
-| `welcome` | `daemonId`, `host`, `ver`, `caps[]` |
-| `sessions` | `sessions[]` |
-| `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `head`, `truncated`, `primary`, `reqId?` |
-| `exit` | `ref`, `code` |
-| `sizeChanged` | `ref`, `cols`, `rows`, `primary` |
-| `error` | `code`, `msg`, `reqId?` |
+| type | fields | meaning |
+|---|---|---|
+| `welcome` | `daemonId`, `host`, `ver`, `caps[]` | answers `hello` |
+| `sessions` | `sessions[]` | answers `list`, and follows any change to the set |
+| `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `head`, `truncated`, `primary`, `reqId?` | answers `attach` or `spawn` |
+| `exit` | `ref`, `code` | the session's process ended |
+| `sizeChanged` | `ref`, `cols`, `rows`, `primary` | the PTY's dimensions changed |
+| `error` | `code`, `msg`, `reqId?` | a request failed, or a stream did |
+| `deviceList` | `devices[]` | answers `devices`, and is broadcast after a pairing or a `revoke` |
+| `pairing` | `token`, `url`, `daemonPub`, `expiresAt` | answers `pairStart` |
+| `revoked` | `reason` | this device was unpaired; the connection is about to close |
+
+Each record of `deviceList.devices[]` carries `id`, `label`, `pairedAt` and
+`lastSeen`. Both timestamps are unix **seconds**, not the RFC 3339 strings
+`sessions[]` uses.
+
+## Pairing
+
+`pairStart` puts the daemon into pairing mode and is answered by `pairing`,
+which carries a token, the daemon's static public key, and an absolute `/pair`
+URL on this origin for the second device to open. The token lives **two
+minutes** and is **single-use**: `POST /api/pair` spends it and registers the
+device, and `pairCancel` — or the deadline, or a completed pairing — ends
+pairing mode. The daemon holds at most one outstanding token, so a second
+`pairStart` supersedes the first. `revoke` unpairs a device: the revoked
+device's own connections get `revoked` and are then closed, and every
+connection still open — the requester's included — is handed a fresh
+`deviceList`. A completed pairing broadcasts the same, since it lands on an
+HTTP request no connected client can see.
+
+The token is 256 bits of randomness encoded as **URL-safe base64, unpadded**
+(RFC 4648 §5, no `=`). `pairing.url` splices it into `?t=` with no escaping, so
+the encoding has to survive a URL as itself.
+
+`pairing.url` also carries the daemon's static public key in `?k=`, the same 32
+bytes in the same URL-safe unpadded base64, spliced in the same way. That is the
+pinning: the QR is drawn on a screen the user physically controls and read by a
+camera, so it is the one leg of the ceremony an intermediary cannot reach. The
+device being paired pins the key from `?k=` and requires the `daemonPub` in the
+`200` to equal it, refusing the pairing outright on a mismatch. It never pins the
+answer's key, which would be trust-on-first-use over the channel Noise IK exists
+to protect, and it refuses to pair at all from a link that carries no `k`.
+
+`POST /api/pair` is the one part of the ceremony that is not a WebSocket
+message: the new device posts the token and its own public key there, and the
+pairing token — not the session token — is the credential. The request is JSON
+`{token, publicKey, label}`, where `publicKey` is the device's 32-byte Noise
+static key in **standard** base64; the answer is `200 {deviceId, daemonPub}`,
+`daemonPub` likewise standard base64. Every refusal — no window open, wrong
+token, expired token, an origin other than the daemon's own, a malformed key —
+is the same `403` with the same body, so the endpoint says nothing about
+whether a token ever existed. A presented token closes the window whether or
+not it was the right one.
 
 ## Correlation
 

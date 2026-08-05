@@ -121,6 +121,23 @@ func (a *Auth) Check(r *http.Request) error {
 	return nil
 }
 
+// CheckProvenance reports whether r came from somewhere this daemon accepts —
+// its own Host, its own Origin, and a fetch site that is not another page's —
+// without asking for any credential at all.
+//
+// It exists for the one endpoint whose credential is not the session token:
+// the pairing POST, where the device being enrolled by definition holds
+// nothing this daemon issued yet. That endpoint still has to refuse anything
+// cross-origin before it so much as looks at the pairing token, so it needs
+// exactly this half of Check and no more. Exported so it is the same code,
+// audited once, rather than a second copy in package daemon that could drift
+// from this one.
+//
+// It is never sufficient on its own. A caller that uses this must have some
+// other credential in hand; nothing that authenticates with the session token
+// may call it in place of Check.
+func (a *Auth) CheckProvenance(r *http.Request) error { return a.checkProvenance(r) }
+
 // checkProvenance runs every check that is about where the request came from,
 // as opposed to what credential it carries: Host, Origin and fetch metadata.
 //

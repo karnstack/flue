@@ -4,10 +4,13 @@
 //
 // # Endpoint policy
 //
-// The GET surface is read-only. There are four routes — the app shell, a JSON
-// session listing, the WebSocket upgrade, and the handoff mint — and no GET
-// among them changes any state. Spawning, signalling, resizing and closing a
-// session are reachable only over an established WebSocket.
+// The GET surface is read-only. The routes are the app shell, a JSON session
+// listing, the WebSocket upgrade, the handoff mint, the pairing POST, and the
+// two static reads the pairing page needs before it holds any credential — the
+// shell at PairPagePath and the build output under uiAssetPrefix. No GET among
+// them changes any state; the mint and the pairing POST answer nothing but a
+// POST. Spawning, signalling, resizing and closing a session are reachable only
+// over an established WebSocket.
 //
 // That is a security constraint rather than a stylistic one. Task 5's
 // authenticator accepts Sec-Fetch-Site: none, because that is what a typed URL
@@ -22,18 +25,33 @@
 // response, and the same trick through window.open or an iframe is
 // page-initiated, arrives as "same-site", and is already rejected.
 //
-// So the defence is structural, in four parts:
+// So the defence is structural, in five parts:
 //
-//   - Only GET and HEAD are routed, with exactly one allowlisted exception:
-//     POST to MintPath. Anything else is 405 before it reaches a handler, which
-//     also means no CORS preflight ever succeeds, since OPTIONS is refused
-//     everywhere.
+//   - Only GET and HEAD are routed, with exactly two allowlisted exceptions:
+//     POST to MintPath and POST to PairPath. Anything else is 405 before it
+//     reaches a handler, which also means no CORS preflight ever succeeds,
+//     since OPTIONS is refused everywhere.
 //   - The privileged operation — minting a handoff token, which converts "I can
 //     read the token file" into "here is a fresh credential" — is that POST, and
 //     it authenticates on a request header rather than the cookie. Neither a
 //     laundered navigation (which is a GET) nor any browser (which cannot set a
 //     custom header cross-origin without a preflight that always 405s) can
 //     reach it.
+//   - The other POST, PairPath, is the one endpoint that does not authenticate
+//     on the session token at all, because the device it enrols holds none yet.
+//     It is bounded instead: it does nothing unless the user has opened a
+//     pairing window from an already-trusted UI, it refuses anything that is
+//     not same-origin before comparing the token, and the window closes on the
+//     first presentation whether or not it was right. See pairing.go.
+//   - The page that makes that POST cannot authenticate either, so the two
+//     GETs which serve it — PairPagePath and uiAssetPrefix — are exempt from
+//     the token as well. What the exemption covers is decided by
+//     exemptStaticPath rather than by the routing patterns, which are coarser
+//     than they look: http.ServeMux unescapes each segment after cleaning the
+//     escaped target, so a percent-encoded traversal matches the asset subtree
+//     and resolves outside it. A path that is not already its own cleaned form
+//     is refused, and everything the exemption does not cover is answered by
+//     withAuth as though it were absent. See withProvenance.
 //   - The upgrade — the one GET that leads to state changes — refuses
 //     Sec-Fetch-Site: none outright. See handleWS for why that costs a real
 //     client nothing.
@@ -56,11 +74,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/flynn/noise"
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
@@ -82,12 +104,35 @@ var (
 	ErrFetchSite = errors.New("daemon: this endpoint requires a same-origin request")
 )
 
+// Identity is the daemon's cryptographic identity: the static keypair every
+// paired device knows it by, and the registry of the devices that have been
+// paired to it.
+//
+// It is one parameter rather than two because the halves are useless apart —
+// a key with nowhere to record who holds it, or a registry of devices paired
+// to no key — and because the zero value then has an unambiguous meaning: a
+// daemon that cannot pair. Tests and any embedder without a config directory
+// construct exactly that, and pairing refuses rather than half-running.
+type Identity struct {
+	Key     noise.DHKey
+	Devices *crypto.DeviceStore
+}
+
 // Server serves the flue API and the embedded UI on loopback.
 type Server struct {
 	reg      *session.Registry
 	ui       http.Handler
 	version  string
 	hostname string
+
+	// identity is fixed at construction: it is read from the config directory
+	// once, by whoever starts the daemon, and a running daemon never changes
+	// the key its paired devices know it by.
+	identity Identity
+
+	// pairing is the one open pairing window, if any. Its own lock; see
+	// pairing.go.
+	pairing pairingState
 
 	// baseCtx is the parent of every WebSocket connection's context, and
 	// baseCancel is how shutdown reaches them.
@@ -107,6 +152,27 @@ type Server struct {
 	logMu sync.RWMutex
 	log   *slog.Logger
 
+	// connMu guards both connection registries below.
+	//
+	// It is deliberately not primaryMu. That lock is taken on every keystroke —
+	// touch runs on the input path — and a device broadcast has no business
+	// queueing behind it, nor it behind a broadcast.
+	connMu sync.Mutex
+	// conns is every established connection, in the order they were accepted.
+	// It is what the device-list broadcast walks: attached is keyed by session,
+	// and the devices screen is not attached to anything.
+	conns []*conn
+	// deviceConns is the live connections belonging to each paired device.
+	//
+	// It is empty today by construction rather than by accident: no loopback
+	// connection has a device identity to be keyed by, and registerDeviceConn
+	// is the only way in. Its first members arrive with the relay transport,
+	// which learns the device from the Noise handshake's static key. The
+	// revocation path is built against this map now, and tested through that
+	// seam, so the transport that populates it does not also have to ship the
+	// disconnect behaviour untested.
+	deviceConns map[string][]*conn
+
 	primaryMu sync.Mutex
 	primary   map[string]*conn // session ID -> primary connection
 	// attached is the connections holding each session, in
@@ -115,7 +181,7 @@ type Server struct {
 	attached map[string][]*conn
 }
 
-func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version string) *Server {
+func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version string, identity Identity) *Server {
 	host, _ := os.Hostname()
 	if ui == nil {
 		ui = http.NotFoundHandler()
@@ -126,12 +192,15 @@ func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version strin
 		ui:         ui,
 		version:    version,
 		hostname:   host,
+		identity:   identity,
 		baseCtx:    baseCtx,
 		baseCancel: baseCancel,
 		auth:       auth,
 		log:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		primary:    map[string]*conn{},
-		attached:   map[string][]*conn{},
+
+		deviceConns: map[string][]*conn{},
+		primary:     map[string]*conn{},
+		attached:    map[string][]*conn{},
 	}
 }
 
@@ -194,6 +263,18 @@ func (s *Server) checkAuth(r *http.Request) error {
 // opener's argv, which any local user can read.
 const MintPath = "/api/handoff"
 
+// uiAssetPrefix is the subtree Vite emits its content-hashed build output
+// into — the module the app shell names in its one <script src>, and the
+// stylesheet beside it. It is the second half of "the pairing page loads": a
+// shell served without its bundle is a blank document.
+//
+// Unexported, and a prefix rather than a list, because the filenames carry a
+// content hash and change on every build; what is stable is the directory. A
+// name inside it that the build did not emit is a 404 from the UI handler, not
+// the shell — see web.Handler, which refuses to answer this prefix with
+// anything but a real file.
+const uiAssetPrefix = "/assets/"
+
 // Handler returns the full HTTP handler: UI, JSON API, WebSocket, and mint.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -203,6 +284,26 @@ func (s *Server) Handler() http.Handler {
 	// process that can read the token file. handleMint runs local.Auth.CheckMint
 	// instead, which accepts the token from a request header and nothing else.
 	mux.HandleFunc(MintPath, s.handleMint)
+	// Also not behind withAuth, and for the opposite reason: the device posting
+	// here holds no session token yet, and the pairing token is the credential.
+	// handlePair runs the provenance half of the transport's checks itself and
+	// then spends the token; see pairing.go for why that is the whole ceremony.
+	mux.HandleFunc(PairPath, s.handlePair)
+	// The page that posts there, and the bundle that page is nothing without.
+	// Outside withAuth for the same reason PairPath is: the device that opens
+	// the pairing URL holds no session token — that is what it is being paired
+	// to get — so serving the shell only to a credential it cannot have makes
+	// the QR code answer 401 and the ceremony unstartable.
+	//
+	// These two patterns say where such a request is routed, and nothing more.
+	// What it is allowed to ask for is decided by exemptStaticPath inside
+	// withProvenance, because a ServeMux pattern is not the boundary it looks
+	// like: the mux unescapes each segment after cleaning the escaped target, so
+	// /assets/%2e%2e/sw.js matches this subtree with r.URL.Path already reading
+	// /assets/../sw.js. Anything routed here that the exemption does not cover
+	// is handed to withAuth, exactly as though these two lines were absent.
+	mux.Handle(PairPagePath, s.withProvenance(s.ui))
+	mux.Handle(uiAssetPrefix, s.withProvenance(s.ui))
 	mux.Handle("/api/sessions", s.withAuth(http.HandlerFunc(s.handleSessions)))
 	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
 	// never the app shell.
@@ -235,13 +336,14 @@ func (s *Server) Handler() http.Handler {
 	return securityHeaders(methodPolicy(mux))
 }
 
-// methodPolicy rejects everything but GET and HEAD, plus POST to MintPath.
+// methodPolicy rejects everything but GET and HEAD, plus POST to the two paths
+// that are allowed to receive one: MintPath and PairPath.
 //
 // This is what makes "no mutating endpoint reachable by GET" an invariant of
 // the surface rather than a property of today's handlers: a later task cannot
 // add a mutating route, or accept a method-overriding parameter, without
 // editing this allowlist first. It also means no CORS preflight ever succeeds,
-// since OPTIONS is refused on every path including MintPath — which is what
+// since OPTIONS is refused on every path including these two — which is what
 // stops a browser from ever issuing a cross-origin request carrying the
 // X-Flue-Token header a mint requires.
 //
@@ -252,12 +354,12 @@ func (s *Server) Handler() http.Handler {
 // check believed it was not reaching. Denial is the failure direction.
 func methodPolicy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		isMint := r.URL.Path == MintPath
+		postable := r.URL.Path == MintPath || r.URL.Path == PairPath
 		allowed := r.Method == http.MethodGet || r.Method == http.MethodHead ||
-			(isMint && r.Method == http.MethodPost)
+			(postable && r.Method == http.MethodPost)
 		if !allowed {
 			allow := "GET, HEAD"
-			if isMint {
+			if postable {
 				allow = "POST"
 			}
 			w.Header().Set("Allow", allow)
@@ -301,6 +403,94 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		if rec.status == http.StatusUnauthorized || rec.status == http.StatusForbidden {
 			s.logger().Warn("auth rejected", "peer", r.RemoteAddr, "path", r.URL.Path, "status", rec.status)
 		}
+	})
+}
+
+// exemptStaticPath reports whether p is one of the two static reads the pairing
+// ceremony needs before any credential exists: the pairing page itself, or a
+// file out of the build's content-hashed asset directory.
+//
+// It is a predicate over the path rather than a routing pattern because the
+// routing pattern is not the boundary it appears to be. http.ServeMux unescapes
+// each segment of the request target *after* cleaning the escaped form, so
+// /assets/%2e%2e/sw.js never trips the redirect that would normalise it, still
+// matches the /assets/ subtree, and arrives with r.URL.Path already reading
+// /assets/../sw.js — which web.Handler cleans to sw.js and serves. The pattern
+// says where a request was routed; only this says what it asked for.
+//
+// Two rules, both in the denial direction, which is the same argument
+// methodPolicy makes about a POST that only differs by normalisation:
+//
+//   - The path must already be its own cleaned form. A target that means
+//     something other than what it spells is refused rather than normalised, so
+//     there is no gap between the path this reads and the path the UI handler
+//     resolves. Nothing the build emits is spelled any other way.
+//   - What is left must be PairPagePath exactly, or inside uiAssetPrefix. The
+//     directory itself is not: it names no file, and http.FileServer would
+//     answer it with the app shell.
+func exemptStaticPath(p string) bool {
+	if p != path.Clean(p) {
+		return false
+	}
+	return p == PairPagePath || strings.HasPrefix(p+"/", uiAssetPrefix)
+}
+
+// withProvenance serves next to a caller that presents no credential at all,
+// once the request has proved both that it asked for something the exemption
+// covers and that it came from somewhere this daemon accepts.
+//
+// It is withAuth with the token check removed and nothing else, and it is
+// reachable only for the paths the pairing ceremony needs before a token
+// exists. The provenance half is the transport's own — the same CheckProvenance
+// handlePair runs, for the same reason — so a cross-origin page cannot pull the
+// app shell out of this daemon, and the Host allowlist still answers DNS
+// rebinding.
+//
+// Three rules keep it from widening:
+//
+//   - Anything outside exemptStaticPath is answered by withAuth, exactly as it
+//     would have been had this handler never been mounted. Not a bespoke
+//     refusal: a 401 identical to every other authenticated path's is also the
+//     answer that tells a prober nothing about which spellings are exempt.
+//   - Only GET and HEAD are served. methodPolicy already refuses everything
+//     else on these paths, and repeating the check here means the rule survives
+//     this handler being mounted somewhere the middleware does not wrap.
+//   - The handoff exchange in local.Auth.Middleware is deliberately not
+//     reached, so no request to an unauthenticated path can spend a live
+//     handoff token — a page that never needed a credential must not be able to
+//     burn the one flue open is carrying.
+//
+// Nothing here logs. A file the build emitted, served to whoever asked for it,
+// is not an authentication event, and an audit trail that records every asset
+// fetch is one nobody reads.
+func (s *Server) withProvenance(next http.Handler) http.Handler {
+	// Built once rather than per request: withAuth reads the authenticator
+	// inside its own handler, so it already survives SetAuth.
+	authenticated := s.withAuth(next)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !exemptStaticPath(r.URL.Path) {
+			authenticated.ServeHTTP(w, r)
+			return
+		}
+		a := s.currentAuth()
+		if a == nil {
+			// The one condition here that is the daemon's own fault rather
+			// than the caller's, and the one it keeps its Error line for.
+			s.logAuthFailure(r, ErrNoAuth)
+			http.Error(w, ErrNoAuth.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if err := a.CheckProvenance(r); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -459,9 +649,32 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
 
-	c := newConn(ctx, cancel, ws, s, r.RemoteAddr)
+	c := newConn(ctx, cancel, ws, s, r.RemoteAddr, requestOrigin(r))
+	// Registered before it is served and forgotten however it ends, so the
+	// broadcast set is exactly the set of connections that can be written to.
+	s.addConn(c)
+	defer s.removeConn(c)
+
 	c.serve()
 	_ = ws.Close(websocket.StatusNormalClosure, "")
+}
+
+// requestOrigin is the absolute origin this request arrived on, which is the
+// origin the pairing URL has to name: the second device opens that URL, so it
+// must be the address this daemon is actually reachable at rather than one
+// composed from a configured port.
+//
+// The Origin header is preferred when present and the Host is the fallback,
+// which is what a non-browser client leaves us. Neither is trusted blind: this
+// only ever runs after local.Auth.Check has admitted the request, and that
+// refuses a Host outside the allowlist, a repeated Origin, and an Origin that
+// is not one of this daemon's own. The scheme is http because loopback is the
+// only thing this transport ever binds.
+func requestOrigin(r *http.Request) string {
+	if o := r.Header.Get("Origin"); o != "" {
+		return o
+	}
+	return "http://" + r.Host
 }
 
 // listenAddr is the only address this daemon ever binds. Binding 0.0.0.0
@@ -523,6 +736,180 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 		return nil
 	}
 	return err
+}
+
+// --- the connection registry ---
+
+// addConn records an established connection. Every connection enters here and
+// leaves through removeConn, so "every live client" is a fact the server holds
+// rather than one a broadcast has to reconstruct.
+func (s *Server) addConn(c *conn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.conns = append(s.conns, c)
+}
+
+// removeConn forgets a connection that has ended, including its device bucket.
+// It tolerates a connection that is already gone, because disconnectDevice
+// removes the connections it is closing straight away rather than waiting for
+// each one to unwind.
+func (s *Server) removeConn(c *conn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.conns = dropConn(s.conns, c)
+	if c.device == "" {
+		return
+	}
+	if rest := dropConn(s.deviceConns[c.device], c); len(rest) > 0 {
+		s.deviceConns[c.device] = rest
+	} else {
+		delete(s.deviceConns, c.device)
+	}
+}
+
+// registerDeviceConn records that c is authenticated as deviceID, so revoking
+// that device reaches it.
+//
+// Nothing on the local transport calls this, and nothing on it should: the
+// session token is a machine-local credential, not a device identity, so a
+// loopback connection has no bucket and revoking a device can never close the
+// user's own terminal. The relay transport calls it once per connection, with
+// the device its Noise handshake resolved.
+func (s *Server) registerDeviceConn(deviceID string, c *conn) {
+	if c == nil || deviceID == "" {
+		return
+	}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	c.device = deviceID
+	s.deviceConns[deviceID] = append(s.deviceConns[deviceID], c)
+}
+
+// allConns snapshots the live connections.
+//
+// The snapshot is the point. Sending under connMu would hold it across
+// conn.enqueue, which drops a backlogged peer by cancelling its context — and
+// that peer's own goroutine takes connMu on its way out. Nothing deadlocks
+// today only because the cancel is asynchronous, which is far too fine a
+// distinction to rest a shell-spawning daemon on. Copy, unlock, then send.
+func (s *Server) allConns() []*conn {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return append([]*conn(nil), s.conns...)
+}
+
+func dropConn(list []*conn, c *conn) []*conn {
+	for i, other := range list {
+		if other == c {
+			return append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
+}
+
+// --- devices and revocation ---
+
+// errNoDeviceRegistry is the answer for a daemon constructed without an
+// identity: it has no paired devices to list and none to revoke, and says so
+// rather than reporting an empty registry it does not have.
+var errNoDeviceRegistry = errors.New("daemon: this daemon has no device registry")
+
+// deviceList reads the registry into the shape the wire carries: unix seconds
+// rather than the registry's time.Time, and never the device's public key.
+func (s *Server) deviceList() (wire.DeviceList, error) {
+	if s.identity.Devices == nil {
+		return wire.DeviceList{}, errNoDeviceRegistry
+	}
+	paired, err := s.identity.Devices.List()
+	if err != nil {
+		return wire.DeviceList{}, err
+	}
+	infos := make([]wire.DeviceInfo, 0, len(paired))
+	for _, d := range paired {
+		infos = append(infos, wire.DeviceInfo{
+			ID:       d.ID,
+			Label:    d.Label,
+			PairedAt: d.PairedAt.Unix(),
+			LastSeen: d.LastSeen.Unix(),
+		})
+	}
+	return wire.DeviceList{Devices: infos}, nil
+}
+
+// deviceIDLen is the width of the identity crypto.DeviceID derives: twelve
+// characters of lowercase hex. It is repeated here rather than imported
+// because what this file needs is a bound on a client-supplied string, and a
+// bound that moved with the deriver would stop being one.
+const deviceIDLen = 12
+
+// validDeviceID reports whether id has the shape a device identity can have.
+//
+// The check exists for the audit log rather than for the registry, which would
+// refuse anything else by simply not finding it. A revoke carries a
+// client-chosen string straight into a log line, and a client may send up to
+// readLimit of it — a megabyte of attacker-chosen text per message, in the one
+// file whoever is investigating an incident has to be able to read. Bounded
+// before it is written, not after.
+func validDeviceID(id string) bool {
+	if len(id) != deviceIDLen {
+		return false
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// removeDevice unpairs a device, reporting whether there was one to unpair.
+func (s *Server) removeDevice(id string) (crypto.Device, bool, error) {
+	if s.identity.Devices == nil {
+		return crypto.Device{}, false, errNoDeviceRegistry
+	}
+	return s.identity.Devices.Remove(id)
+}
+
+// disconnectDevice tells every connection belonging to deviceID why it is
+// ending and ends it, returning how many there were.
+//
+// The connections are dropped from both registries in the same critical
+// section that snapshots them, so the broadcast that follows a revocation
+// reaches everyone still connected and nobody who was just cut off. They are
+// closed by the writer once the reason has been written; the frame is the last
+// one each of those sockets will carry, so anything queued behind it — the
+// broadcast included, had they still been registered — is never sent.
+func (s *Server) disconnectDevice(deviceID, reason string) int {
+	s.connMu.Lock()
+	doomed := s.deviceConns[deviceID]
+	delete(s.deviceConns, deviceID)
+	for _, c := range doomed {
+		s.conns = dropConn(s.conns, c)
+	}
+	s.connMu.Unlock()
+
+	for _, c := range doomed {
+		_ = c.sendFinal(wire.Revoked{Reason: reason})
+	}
+	return len(doomed)
+}
+
+// broadcastDeviceList hands the current registry to every live connection.
+//
+// It is a push rather than an invalidation because the list is what a client
+// acts on: a devices screen that learns of a revocation only when it next asks
+// is a screen offering a revoke button for a device that is already gone.
+func (s *Server) broadcastDeviceList() {
+	list, err := s.deviceList()
+	if err != nil {
+		// Nothing to broadcast and nobody to answer — this is not a client's
+		// request — so the failure goes to the log rather than to a socket.
+		s.logger().Error("could not read the device registry", "err", err)
+		return
+	}
+	for _, c := range s.allConns() {
+		_ = c.sendControl(list)
+	}
 }
 
 // --- primary bookkeeping ---

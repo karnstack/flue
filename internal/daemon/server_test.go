@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
@@ -54,7 +56,7 @@ func newTestServerShippedUI(t *testing.T) (*httptest.Server, *session.Registry) 
 func newTestServerUI(t *testing.T, ui http.Handler) (*httptest.Server, *session.Registry, *Server) {
 	t.Helper()
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, nil, ui, "test")
+	srv := New(reg, nil, ui, "test", Identity{})
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -551,20 +553,23 @@ func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
 }
 
 // TestOnlySafeMethodsAreRouted pins the invariant the test above depends on:
-// flue's HTTP surface is read-only apart from one explicitly allowlisted mint
-// path, so a mutation cannot be bolted onto it by a later task without this
-// failing first.
+// flue's HTTP surface is read-only apart from two explicitly allowlisted POST
+// paths — the mint and the pairing ceremony — so a mutation cannot be bolted
+// onto it by a later task without this failing first.
 //
-// OPTIONS is in the list for every path including the mint path, and that is
+// OPTIONS is in the list for every path including those two, and that is
 // load-bearing rather than tidy: a CORS preflight that never succeeds is what
 // stops a browser from ever sending a cross-origin request carrying the
 // X-Flue-Token header that authenticates a mint.
 func TestOnlySafeMethodsAreRouted(t *testing.T) {
 	ts, _ := newTestServer(t)
-	for _, path := range []string{"/", "/api/sessions", "/ws", MintPath} {
+	// PairPagePath and uiAssetPrefix are in the list because they are the two
+	// paths served without a session token: an exemption from the credential
+	// must not become an exemption from the method policy as well.
+	for _, path := range []string{"/", "/api/sessions", "/ws", MintPath, PairPath, PairPagePath, uiAssetPrefix} {
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions} {
-			if path == MintPath && method == http.MethodPost {
-				continue // the one allowlisted exception; see TestPOSTIsRoutedOnlyToTheMintPath
+			if (path == MintPath || path == PairPath) && method == http.MethodPost {
+				continue // the allowlisted exceptions; see TestPOSTIsRoutedOnlyToTheMintPath
 			}
 			req, err := http.NewRequest(method, ts.URL+path, nil)
 			if err != nil {
@@ -583,10 +588,10 @@ func TestOnlySafeMethodsAreRouted(t *testing.T) {
 	}
 }
 
-// TestPOSTIsRoutedOnlyToTheMintPath pins the width of the exception. A POST to
-// any other path — including one that only differs by path normalisation, which
-// http.ServeMux would clean before matching — must be refused before it reaches
-// a handler.
+// TestPOSTIsRoutedOnlyToTheMintPath pins the width of the exception, which is
+// exactly two paths wide: MintPath and PairPath. A POST to any other path —
+// including one that only differs by path normalisation, which http.ServeMux
+// would clean before matching — must be refused before it reaches a handler.
 func TestPOSTIsRoutedOnlyToTheMintPath(t *testing.T) {
 	ts, _ := newTestServer(t)
 	for _, path := range []string{
@@ -597,6 +602,10 @@ func TestPOSTIsRoutedOnlyToTheMintPath(t *testing.T) {
 		"/api/handoff/x",
 		"/api/./handoff",
 		"//api/handoff",
+		"/api/pair/",
+		"/api/pair/x",
+		"/api/./pair",
+		"//api/pair",
 		"/api/spawn",
 	} {
 		req, err := http.NewRequest(http.MethodPost, ts.URL+path, nil)
@@ -610,7 +619,7 @@ func TestPOSTIsRoutedOnlyToTheMintPath(t *testing.T) {
 		}
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
-			t.Errorf("POST %s = 200; only %s may answer a POST", path, MintPath)
+			t.Errorf("POST %s = 200; only %s and %s may answer a POST", path, MintPath, PairPath)
 		}
 	}
 }
@@ -872,7 +881,7 @@ func TestConcurrentHandoffExchangesYieldExactlyOneSuccess(t *testing.T) {
 // immediately, so a token that turns up later has no business working.
 func TestExpiredHandoffIsRefusedOverHTTP(t *testing.T) {
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, nil, http.NotFoundHandler(), "test")
+	srv := New(reg, nil, http.NotFoundHandler(), "test", Identity{})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	t.Cleanup(srv.Shutdown)
@@ -1100,6 +1109,223 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
+// --- the pairing page, served to a device that holds no token ---
+
+// getAnon issues the GET the device being paired makes: no cookie, no header,
+// nothing this daemon ever issued. A scanned QR code is a user-initiated
+// navigation, so it arrives with Sec-Fetch-Site: none; whatever that document
+// then asks for arrives same-origin.
+func getAnon(t *testing.T, ts *httptest.Server, path, fetchSite string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if fetchSite != "" {
+		req.Header.Set("Sec-Fetch-Site", fetchSite)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do %s: %v", path, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestPairPageIsServedWithoutASessionToken is the whole reason the exemption
+// exists. The device that opens the pairing URL has nothing to authenticate
+// with — acquiring a credential is what it is doing — so a 401 here is a
+// ceremony that can never start, and the QR code is a link to an error page.
+//
+// It runs against the shipped UI: with a stub in place the assertion would
+// measure the stub's answer rather than the app shell the binary serves.
+func TestPairPageIsServedWithoutASessionToken(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+
+	for _, p := range []string{PairPagePath, PairPagePath + "?t=" + strings.Repeat("A", 43)} {
+		resp := getAnon(t, ts, p, "none")
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s without a token = %d, want 200", p, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Errorf("GET %s Content-Type = %q, want text/html", p, ct)
+		}
+		if !strings.Contains(string(body), `id="root"`) {
+			t.Errorf("GET %s served %.200q, want the app shell", p, body)
+		}
+	}
+}
+
+// TestPairPageAssetsAreServedWithoutASessionToken is the other half of "the
+// page loads": a shell without the module it names is a blank document, and
+// the device fetching that module still has no token.
+//
+// The asset is read out of the shell rather than named here. Its filename
+// carries a content hash and changes on every build, so the stable reference is
+// the one the document itself makes.
+func TestPairPageAssetsAreServedWithoutASessionToken(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+
+	shell, err := io.ReadAll(get(t, ts, "/", "same-origin").Body)
+	if err != nil {
+		t.Fatalf("read shell: %v", err)
+	}
+	src := scriptSrc(string(shell))
+	if !strings.HasPrefix(src, uiAssetPrefix) {
+		t.Fatalf("script src = %q, want a path under %s", src, uiAssetPrefix)
+	}
+
+	resp := getAnon(t, ts, src, "same-origin")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s without a token = %d, want 200", src, resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "javascript") {
+		t.Errorf("Content-Type for %s = %q, want JavaScript", src, ct)
+	}
+}
+
+// TestNothingBeyondThePairingPageIsExemptFromTheToken measures the width of the
+// exemption rather than its existence. Every path here answered 401 without a
+// session token before the pairing page was carved out and must still, because
+// "the shell is public at /pair" and "the shell is public" are very different
+// daemons.
+func TestNothingBeyondThePairingPageIsExemptFromTheToken(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+
+	for _, p := range []string{
+		"/",                        // the app shell everywhere else
+		"/sessions",                // another client-side route
+		"/devices",                 // the screen a pairing is started from
+		PairPagePath + "/",         // registered without a trailing slash...
+		PairPagePath + "/anything", // ...so nothing under it is exempt either
+		"/pairing",                 // nor is a path that merely begins with it
+		uiAssetPrefix,              // the asset directory names no file
+		"/api/sessions",
+		"/manifest.webmanifest",
+		"/sw.js",
+	} {
+		resp := getAnon(t, ts, p, "none")
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET %s without a token = %d, want 401", p, resp.StatusCode)
+		}
+	}
+
+	// The upgrade is the one GET that leads to every state change flue has.
+	// Nothing about serving a static page may reach it.
+	if _, _, err := websocket.Dial(context.Background(),
+		"ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", nil); err == nil {
+		t.Error("upgrade without a token succeeded, want failure")
+	}
+}
+
+// getAnonRaw is getAnon with the request target left exactly as spelled, so a
+// percent-encoded path reaches the daemon percent-encoded.
+//
+// net/url keeps the raw form in URL.RawPath and RequestURI writes that, and the
+// assertion below is what makes sure of it. A client that quietly normalised
+// the target would send /sw.js, which is refused for an entirely different
+// reason — and every case in the traversal test would pass while measuring
+// nothing.
+func getAnonRaw(t *testing.T, ts *httptest.Server, target string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, ts.URL+target, nil)
+	if err != nil {
+		t.Fatalf("NewRequest %s: %v", target, err)
+	}
+	if got := req.URL.RequestURI(); got != target {
+		t.Fatalf("request target = %q, want %q on the wire as spelled", got, target)
+	}
+	req.Header.Set("Sec-Fetch-Site", "none")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do %s: %v", target, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestTheAssetExemptionCannotBeSpelledOutOfItsOwnPrefix is a regression rather
+// than a hypothetical: every target here answered 200 before exemptStaticPath
+// existed, while its plain spelling answered 401.
+//
+// http.ServeMux unescapes each segment of the target after cleaning the escaped
+// form, so %2e%2e never trips the redirect that would normalise it, still
+// matches the /assets/ subtree, and arrives at the UI handler as ".." — which
+// path.Clean then walks back out of the prefix. The prefix was never the
+// boundary; the check on the resolved path is.
+func TestTheAssetExemptionCannotBeSpelledOutOfItsOwnPrefix(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+
+	for _, target := range []string{
+		"/assets/",                            // the directory itself: names no file, and the file server answers it with the shell
+		"/assets/%2e%2e/sw.js",                // the service worker, which is 401 spelled plainly
+		"/assets/..%2fsw.js",                  // the same, with the separator encoded instead
+		"/assets/%2e%2e/manifest.webmanifest", // any other root file
+		"/assets/%2e%2e/%2e%2e/etc/passwd",    // and out of the build entirely, which answers with the shell
+		"/assets/%2e%2e/",
+		"/pair/%2e%2e/sw.js",
+	} {
+		resp := getAnonRaw(t, ts, target)
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET %s without a token = %d, want 401 (body %.80q)", target, resp.StatusCode, body)
+		}
+	}
+
+	// The positive control: the exemption still serves what it is for, or this
+	// test is satisfied by a daemon that refuses every asset.
+	shell, err := io.ReadAll(get(t, ts, "/", "same-origin").Body)
+	if err != nil {
+		t.Fatalf("read shell: %v", err)
+	}
+	src := scriptSrc(string(shell))
+	if resp := getAnonRaw(t, ts, src); resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s without a token = %d, want 200", src, resp.StatusCode)
+	}
+}
+
+// TestThePairingPageCannotSpendAHandoffToken pins what the exemption skips as
+// well as what it allows.
+//
+// withProvenance does not run the transport's middleware, so the handoff
+// exchange never happens on these paths. That is deliberate: a navigation to
+// /pair?h=… is one any page can cause, and it must neither burn the one-time
+// credential flue open is carrying nor be answered with a session cookie for
+// asking. A page that needs no credential must not be able to spend one.
+func TestThePairingPageCannotSpendAHandoffToken(t *testing.T) {
+	ts, _ := newTestServerShippedUI(t)
+	h := mint(t, ts)
+
+	resp := getAnon(t, ts, PairPagePath+"?"+local.HandoffParam+"="+h, "none")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET the pairing page carrying a handoff token = %d, want 200", resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == local.CookieName {
+			t.Fatalf("the pairing page set %s; it authenticates nobody", local.CookieName)
+		}
+	}
+
+	// Still unspent, so the browser flue open opened gets the cookie it was
+	// sent for. Without this the test passes on a daemon that simply refuses
+	// every handoff.
+	exchange := getAnon(t, ts, "/?"+local.HandoffParam+"="+h, "none")
+	if exchange.StatusCode != http.StatusOK {
+		t.Fatalf("first load with the same handoff token = %d, want 200", exchange.StatusCode)
+	}
+	var cookie *http.Cookie
+	for _, c := range exchange.Cookies() {
+		if c.Name == local.CookieName {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatalf("the handoff token was spent by the pairing page: no %s cookie on the exchange",
+			local.CookieName)
+	}
+}
+
 // --- carried constraint 2: an exited session must not park the handler ---
 
 func waitForExit(t *testing.T, s *session.Session) {
@@ -1185,7 +1411,7 @@ func TestCloseSessionReportsExit(t *testing.T) {
 // permission.
 func TestServerWithoutAuthFailsClosed(t *testing.T) {
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, nil, http.NotFoundHandler(), "test")
+	srv := New(reg, nil, http.NotFoundHandler(), "test", Identity{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1250,7 +1476,7 @@ func TestListenAndServeBindsLoopbackOnly(t *testing.T) {
 	probe.Close()
 
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test")
+	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test", Identity{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1294,7 +1520,7 @@ func TestEndToEndOverRealListener(t *testing.T) {
 	probe.Close()
 
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test")
+	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test", Identity{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1364,7 +1590,7 @@ func TestShutdownClosesEstablishedWebSockets(t *testing.T) {
 	probe.Close()
 
 	reg := session.NewRegistry(time.Now)
-	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test")
+	srv := New(reg, local.NewAuth(tok, port), http.NotFoundHandler(), "test", Identity{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1429,18 +1655,18 @@ func TestShutdownClosesEstablishedWebSockets(t *testing.T) {
 func TestEnqueueNeverBlocksAndDropsABackloggedClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c := newConn(ctx, cancel, nil, nil, "")
+	c := newConn(ctx, cancel, nil, nil, "", "")
 
 	// Fill the outbox with no writer draining it, i.e. a client that has
 	// stopped reading its socket.
 	for i := 0; i < outboxDepth; i++ {
-		if err := c.enqueue(frame{websocket.MessageText, []byte("x")}); err != nil {
+		if err := c.enqueue(frame{typ: websocket.MessageText, b: []byte("x")}); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
 		}
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- c.enqueue(frame{websocket.MessageText, []byte("overflow")}) }()
+	go func() { done <- c.enqueue(frame{typ: websocket.MessageText, b: []byte("overflow")}) }()
 
 	select {
 	case err := <-done:
@@ -1468,12 +1694,12 @@ func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 	defer s.Close()
-	srv := New(reg, nil, nil, "test")
+	srv := New(reg, nil, nil, "test", Identity{})
 
 	newPeer := func() *conn {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		c := newConn(ctx, cancel, nil, srv, "")
+		c := newConn(ctx, cancel, nil, srv, "", "")
 		c.attach[1] = &attachment{ref: 1, s: s, sub: s.Subscribe(0), done: make(chan struct{})}
 		srv.claimPrimaryIfUnset(s.ID(), c)
 		return c
@@ -1482,7 +1708,7 @@ func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	wedged := newPeer()
 	healthy := newPeer()
 	for i := 0; i < outboxDepth; i++ {
-		if err := wedged.enqueue(frame{websocket.MessageText, []byte("x")}); err != nil {
+		if err := wedged.enqueue(frame{typ: websocket.MessageText, b: []byte("x")}); err != nil {
 			t.Fatalf("filling the wedged peer: %v", err)
 		}
 	}
@@ -2000,5 +2226,279 @@ func TestAuditDoesNotLogAnAcceptedRequest(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "auth rejected") {
 		t.Fatalf("an accepted request was logged as a rejection:\n%s", buf.String())
+	}
+}
+
+// --- devices and revocation ---
+
+// addDevice pairs a device straight into the registry. The ceremony that
+// normally puts one there is pairing_test's business; what these tests need is
+// the state it leaves behind.
+func addDevice(t *testing.T, srv *Server, label string, fill byte) crypto.Device {
+	t.Helper()
+	d, err := srv.identity.Devices.Add(label, deviceKey(fill))
+	if err != nil {
+		t.Fatalf("Add(%q): %v", label, err)
+	}
+	return d
+}
+
+// serverConns waits until the daemon holds n live connections and returns them
+// in the order it accepted them.
+//
+// The wait is what makes the order usable: websocket.Dial returns as soon as
+// the handshake completes, which can be before handleWS has registered the
+// connection, so a test that dialled and looked immediately would sometimes
+// find nothing.
+func serverConns(t *testing.T, srv *Server, n int) []*conn {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conns := srv.allConns()
+		if len(conns) == n {
+			return conns
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon holds %d live connections, want %d", len(conns), n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestDevicesAnswersTheRegistry(t *testing.T) {
+	ts, srv := newPairServer(t)
+	phone := addDevice(t, srv, "phone", 0x2a)
+	laptop := addDevice(t, srv, "laptop", 0x3b)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Devices{})
+
+	var got wire.DeviceList
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		l, ok := msg.(wire.DeviceList)
+		if ok {
+			got = l
+		}
+		return ok
+	})
+
+	if len(got.Devices) != 2 {
+		t.Fatalf("deviceList carried %d devices, want 2: %+v", len(got.Devices), got.Devices)
+	}
+	byID := map[string]wire.DeviceInfo{}
+	for _, d := range got.Devices {
+		byID[d.ID] = d
+	}
+	for _, want := range []crypto.Device{phone, laptop} {
+		info, ok := byID[want.ID]
+		if !ok {
+			t.Fatalf("deviceList has no entry for %s (%s): %+v", want.Label, want.ID, got.Devices)
+		}
+		if info.Label != want.Label {
+			t.Errorf("label = %q, want %q", info.Label, want.Label)
+		}
+		// The registry keeps time.Time and the wire carries unix seconds; a
+		// conversion that never happened would ship a zero or an RFC 3339
+		// string, and both are silently useless to the client.
+		if info.PairedAt != want.PairedAt.Unix() {
+			t.Errorf("pairedAt = %d, want the unix seconds %d", info.PairedAt, want.PairedAt.Unix())
+		}
+		if info.LastSeen != want.LastSeen.Unix() {
+			t.Errorf("lastSeen = %d, want the unix seconds %d", info.LastSeen, want.LastSeen.Unix())
+		}
+	}
+}
+
+// TestDevicesOnAnEmptyRegistryAnswersAnEmptyList pins the normalisation at the
+// one call site that reaches it: no devices paired is the state a client
+// reaches on a fresh daemon, and it must arrive as [] rather than null.
+func TestDevicesOnAnEmptyRegistryAnswersAnEmptyList(t *testing.T) {
+	ts, _ := newPairServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Devices{})
+
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		l, ok := msg.(wire.DeviceList)
+		if !ok {
+			return false
+		}
+		if len(l.Devices) != 0 {
+			t.Fatalf("deviceList = %+v, want no devices", l.Devices)
+		}
+		if l.Devices == nil {
+			t.Fatal("devices decoded to nil, so the daemon sent null; every client that ranges over the field would throw")
+		}
+		return true
+	})
+}
+
+// TestRevokeUnknownDeviceIsRefused: a revoke naming nothing must remove
+// nothing, and must say so rather than answering with a list that looks like a
+// success.
+//
+// The malformed cases answer identically because they are identically unknown —
+// no device can hold an identity of that shape — and the oversized one is the
+// reason the shape is checked at all: an id a client chose reaches the audit
+// log, and a client may send a megabyte of it.
+func TestRevokeUnknownDeviceIsRefused(t *testing.T) {
+	for name, id := range map[string]string{
+		"well-formed but absent": "ffffffffffff",
+		"empty":                  "",
+		"too short":              "ff",
+		"not hex":                "zzzzzzzzzzzz",
+		"uppercase":              "FFFFFFFFFFFF",
+		"enormous":               strings.Repeat("a", 1<<16),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts, srv := newPairServer(t)
+			buf := &syncBuffer{}
+			srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+			phone := addDevice(t, srv, "phone", 0x2a)
+
+			c := dial(t, ts)
+			writeControl(t, c, wire.Hello{Ver: "test"})
+			writeControl(t, c, wire.Revoke{DeviceID: id})
+
+			readUntil(t, c, func(msg any, _ []byte) bool {
+				e, ok := msg.(wire.Error)
+				if !ok {
+					return false
+				}
+				if e.Code != "unknown_device" {
+					t.Fatalf("error code = %q, want %q", e.Code, "unknown_device")
+				}
+				return true
+			})
+
+			list := devices(t, srv)
+			if len(list) != 1 || list[0].ID != phone.ID {
+				t.Fatalf("registry = %+v after a refused revoke, want just the phone", list)
+			}
+			waitForLog(t, buf, "revoke refused")
+			// Whatever the client sent, the log stays readable.
+			if len(buf.String()) > 4<<10 {
+				t.Errorf("a single refused revoke wrote %d bytes of audit log", len(buf.String()))
+			}
+		})
+	}
+}
+
+// TestRevokeClosesTheDeviceConnectionsAndUpdatesTheRest is the whole
+// revocation: the entry goes, the sockets that were authenticated as it are
+// told why and then ended, and everyone still connected is handed the list
+// that is now true.
+//
+// The device's identity is supplied through registerDeviceConn because no
+// loopback connection has one — a local client presents the session token,
+// which is not a device — so the map revocation walks has no members until the
+// relay transport arrives. The seam is what lets the behaviour be built and
+// pinned now rather than shipped untested alongside that transport.
+func TestRevokeClosesTheDeviceConnectionsAndUpdatesTheRest(t *testing.T) {
+	ts, srv := newPairServer(t)
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+
+	phone := addDevice(t, srv, "phone", 0x2a)
+	laptop := addDevice(t, srv, "laptop", 0x3b)
+
+	device := dial(t, ts)
+	writeControl(t, device, wire.Hello{Ver: "test"})
+	readUntil(t, device, func(msg any, _ []byte) bool { _, ok := msg.(wire.Welcome); return ok })
+	srv.registerDeviceConn(phone.ID, serverConns(t, srv, 1)[0])
+
+	ui := dial(t, ts)
+	writeControl(t, ui, wire.Hello{Ver: "test"})
+	readUntil(t, ui, func(msg any, _ []byte) bool { _, ok := msg.(wire.Welcome); return ok })
+
+	writeControl(t, ui, wire.Revoke{DeviceID: phone.ID})
+
+	readUntil(t, device, func(msg any, _ []byte) bool {
+		r, ok := msg.(wire.Revoked)
+		if ok && r.Reason != "revoked" {
+			t.Fatalf("revoked reason = %q, want %q", r.Reason, "revoked")
+		}
+		return ok
+	})
+
+	// And then the socket goes, without the client writing anything: a device
+	// that keeps its connection after revocation keeps its shells.
+	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rcancel()
+	for {
+		if _, _, err := device.Read(rctx); err != nil {
+			if rctx.Err() != nil {
+				t.Fatal("the revoked device's connection outlived its revocation")
+			}
+			break
+		}
+	}
+
+	readUntil(t, ui, func(msg any, _ []byte) bool {
+		l, ok := msg.(wire.DeviceList)
+		if !ok {
+			return false
+		}
+		if len(l.Devices) != 1 || l.Devices[0].ID != laptop.ID {
+			t.Fatalf("deviceList = %+v, want just the laptop %s", l.Devices, laptop.ID)
+		}
+		return true
+	})
+
+	list := devices(t, srv)
+	if len(list) != 1 || list[0].ID != laptop.ID {
+		t.Fatalf("registry = %+v after the revoke, want just the laptop", list)
+	}
+
+	waitForLog(t, buf, "device revoked")
+	if !logLineContains(buf, "device revoked", "device="+phone.ID) {
+		t.Errorf("the revocation was logged without the device it removed:\n%s", buf.String())
+	}
+	if !logLineContains(buf, "device revoked", "peer=") {
+		t.Errorf("the revocation was logged without the peer that asked for it:\n%s", buf.String())
+	}
+}
+
+// TestDeviceListBroadcastDoesNotWaitOnABackloggedPeer is the outbox discipline
+// applied to the new all-connections walk: telling every client the device list
+// changed must not put the revoking client — or the pairing HTTP handler — at
+// the mercy of a peer that stopped reading its socket.
+func TestDeviceListBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
+	srv := New(session.NewRegistry(time.Now), nil, nil, "test",
+		Identity{Devices: crypto.NewDeviceStore(t.TempDir())})
+
+	newPeer := func() *conn {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		c := newConn(ctx, cancel, nil, srv, "", "")
+		srv.addConn(c)
+		return c
+	}
+
+	wedged := newPeer()
+	healthy := newPeer()
+	for i := 0; i < outboxDepth; i++ {
+		if err := wedged.enqueue(frame{typ: websocket.MessageText, b: []byte("x")}); err != nil {
+			t.Fatalf("filling the wedged peer: %v", err)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() { srv.broadcastDeviceList(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcastDeviceList waited on a peer that had stopped reading")
+	}
+
+	if wedged.ctx.Err() == nil {
+		t.Error("the wedged peer was not dropped")
+	}
+	select {
+	case <-healthy.out:
+	default:
+		t.Error("the healthy peer was not sent the device list")
 	}
 }

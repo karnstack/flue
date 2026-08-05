@@ -53,6 +53,21 @@ type CloseSession struct {
 	Ref uint32 `json:"ref"`
 }
 
+// Devices asks for the paired-device list.
+type Devices struct{}
+
+// Revoke removes a paired device. The daemon answers the requester with a
+// fresh deviceList, and the revoked device's own connections with revoked.
+type Revoke struct {
+	DeviceID string `json:"deviceId"`
+}
+
+// PairStart enters pairing mode and is answered by pairing.
+type PairStart struct{}
+
+// PairCancel leaves pairing mode, invalidating any outstanding token.
+type PairCancel struct{}
+
 // Server -> client control messages.
 
 type Welcome struct {
@@ -102,6 +117,55 @@ type Error struct {
 	ReqID uint64 `json:"reqId,omitempty"`
 }
 
+// DeviceInfo is one paired device as the wire reports it. Timestamps are unix
+// seconds rather than the registry's time.Time, so a client reads them without
+// parsing RFC 3339.
+type DeviceInfo struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	PairedAt int64  `json:"pairedAt"`
+	LastSeen int64  `json:"lastSeen"`
+}
+
+// DeviceList answers devices, and follows a revoke that succeeded.
+type DeviceList struct {
+	Devices []DeviceInfo `json:"devices"`
+}
+
+// MarshalJSON writes an empty list as [] rather than null.
+//
+// A nil slice marshals to null by default, and "no devices are paired" is the
+// one state a caller reaches by building the zero value — precisely the path
+// that would ship null. The field is not optional and the client declares it
+// `DeviceInfo[]`, so null would throw in every consumer that ranges over it.
+// Normalising here rather than at each call site means no producer can get it
+// wrong.
+func (d DeviceList) MarshalJSON() ([]byte, error) {
+	// The alias sheds this method, so json.Marshal below does not recurse.
+	type alias DeviceList
+	if d.Devices == nil {
+		d.Devices = []DeviceInfo{}
+	}
+	return json.Marshal(alias(d))
+}
+
+// Pairing answers pairStart with the credentials the second device needs.
+type Pairing struct {
+	Token string `json:"token"`
+	// URL is absolute: the /pair page on this origin, carrying the token.
+	URL string `json:"url"`
+	// DaemonPub is the daemon's static public key, base64.
+	DaemonPub string `json:"daemonPub"`
+	// ExpiresAt is unix seconds. The token is single-use and short-lived.
+	ExpiresAt int64 `json:"expiresAt"`
+}
+
+// Revoked goes to the revoked device's own connections just before the daemon
+// closes them, so the tab can say why rather than showing a bare disconnect.
+type Revoked struct {
+	Reason string `json:"reason"`
+}
+
 // typeName maps a message value to its wire discriminator.
 func typeName(msg any) (string, bool) {
 	switch msg.(type) {
@@ -121,6 +185,14 @@ func typeName(msg any) (string, bool) {
 		return "signal", true
 	case CloseSession:
 		return "close", true
+	case Devices:
+		return "devices", true
+	case Revoke:
+		return "revoke", true
+	case PairStart:
+		return "pairStart", true
+	case PairCancel:
+		return "pairCancel", true
 	case Welcome:
 		return "welcome", true
 	case Sessions:
@@ -133,6 +205,12 @@ func typeName(msg any) (string, bool) {
 		return "sizeChanged", true
 	case Error:
 		return "error", true
+	case DeviceList:
+		return "deviceList", true
+	case Pairing:
+		return "pairing", true
+	case Revoked:
+		return "revoked", true
 	}
 	return "", false
 }
@@ -191,6 +269,14 @@ func DecodeControl(b []byte) (any, error) {
 			return *t, nil
 		case *CloseSession:
 			return *t, nil
+		case *Devices:
+			return *t, nil
+		case *Revoke:
+			return *t, nil
+		case *PairStart:
+			return *t, nil
+		case *PairCancel:
+			return *t, nil
 		case *Welcome:
 			return *t, nil
 		case *Sessions:
@@ -202,6 +288,12 @@ func DecodeControl(b []byte) (any, error) {
 		case *SizeChanged:
 			return *t, nil
 		case *Error:
+			return *t, nil
+		case *DeviceList:
+			return *t, nil
+		case *Pairing:
+			return *t, nil
+		case *Revoked:
 			return *t, nil
 		}
 		return nil, fmt.Errorf("wire: unhandled message %T", v)
@@ -224,6 +316,14 @@ func DecodeControl(b []byte) (any, error) {
 		return deref(into(&Signal{}))
 	case "close":
 		return deref(into(&CloseSession{}))
+	case "devices":
+		return deref(into(&Devices{}))
+	case "revoke":
+		return deref(into(&Revoke{}))
+	case "pairStart":
+		return deref(into(&PairStart{}))
+	case "pairCancel":
+		return deref(into(&PairCancel{}))
 	case "welcome":
 		return deref(into(&Welcome{}))
 	case "sessions":
@@ -236,6 +336,12 @@ func DecodeControl(b []byte) (any, error) {
 		return deref(into(&SizeChanged{}))
 	case "error":
 		return deref(into(&Error{}))
+	case "deviceList":
+		return deref(into(&DeviceList{}))
+	case "pairing":
+		return deref(into(&Pairing{}))
+	case "revoked":
+		return deref(into(&Revoked{}))
 	}
 	return nil, fmt.Errorf("wire: unknown control message type %q", probe.Type)
 }

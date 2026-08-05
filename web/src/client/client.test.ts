@@ -13,11 +13,18 @@ import {
   type Attached,
   type CloseMsg,
   type DetachMsg,
+  type DeviceList,
+  type DevicesMsg,
   type ErrorMsg,
   type Exit,
   type HelloMsg,
   type ListMsg,
+  type PairCancelMsg,
+  type Pairing,
+  type PairStartMsg,
   type ResizeMsg,
+  type Revoked,
+  type RevokeMsg,
   type Sessions,
   type SignalMsg,
   type SizeChanged,
@@ -188,6 +195,10 @@ describe('control message golden file', () => {
       'resize',
       'signal',
       'close',
+      'devices',
+      'revoke',
+      'pairStart',
+      'pairCancel',
       'welcome',
       'sessions',
       'attached',
@@ -196,6 +207,10 @@ describe('control message golden file', () => {
       'sizeChanged',
       'error',
       'errorForRequest',
+      'deviceList',
+      'deviceListEmpty',
+      'pairing',
+      'revoked',
     ])
   })
 
@@ -249,6 +264,26 @@ describe('control message golden file', () => {
   it('decodes close', () => {
     const want: CloseMsg = { type: 'close', ref: 3 }
     expect(fixture('close')).toStrictEqual(want)
+  })
+
+  it('decodes devices', () => {
+    const want: DevicesMsg = { type: 'devices' }
+    expect(fixture('devices')).toStrictEqual(want)
+  })
+
+  it('decodes revoke', () => {
+    const want: RevokeMsg = { type: 'revoke', deviceId: 'd1b2c3d4e5f60718' }
+    expect(fixture('revoke')).toStrictEqual(want)
+  })
+
+  it('decodes pairStart', () => {
+    const want: PairStartMsg = { type: 'pairStart' }
+    expect(fixture('pairStart')).toStrictEqual(want)
+  })
+
+  it('decodes pairCancel', () => {
+    const want: PairCancelMsg = { type: 'pairCancel' }
+    expect(fixture('pairCancel')).toStrictEqual(want)
   })
 
   it('decodes welcome', () => {
@@ -349,6 +384,53 @@ describe('control message golden file', () => {
       reqId: 7,
     }
     expect(fixture('errorForRequest')).toStrictEqual(want)
+  })
+
+  it('decodes deviceList, including all four fields of every record', () => {
+    const want: DeviceList = {
+      type: 'deviceList',
+      devices: [
+        {
+          id: 'd1b2c3d4e5f60718',
+          label: 'iPhone',
+          pairedAt: 1754380800,
+          lastSeen: 1754384400,
+        },
+        {
+          id: 'd9a8b7c6d5e4f302',
+          label: 'iPad',
+          pairedAt: 1754294400,
+          lastSeen: 1754298000,
+        },
+      ],
+    }
+    expect(fixture('deviceList')).toStrictEqual(want)
+  })
+
+  it('decodes an empty deviceList as [], not null', () => {
+    // `devices` is not omitempty on the Go side, and a daemon with nothing
+    // paired sends `[]`: a nil slice would marshal to null and every consumer
+    // that maps over the list would throw. This case pins the shape; what
+    // enforces it for values a producer builds rather than writes down is
+    // `DeviceList.MarshalJSON`, covered by TestDeviceListEncodesEmptyAsArray.
+    const want: DeviceList = { type: 'deviceList', devices: [] }
+    expect(fixture('deviceListEmpty')).toStrictEqual(want)
+  })
+
+  it('decodes pairing', () => {
+    const want: Pairing = {
+      type: 'pairing',
+      token: 'Zm91cnRlZW4tY2hhcnM',
+      url: 'https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM&k=3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hG6YwjhyZxaYQpb8k',
+      daemonPub: '3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=',
+      expiresAt: 1754384520,
+    }
+    expect(fixture('pairing')).toStrictEqual(want)
+  })
+
+  it('decodes revoked', () => {
+    const want: Revoked = { type: 'revoked', reason: 'revoked by another device' }
+    expect(fixture('revoked')).toStrictEqual(want)
   })
 })
 
@@ -1231,6 +1313,133 @@ describe('FlueClient sending', () => {
     expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
   })
 
+  it('sends the device and pairing requests the protocol defines', () => {
+    const { c, sock } = connected()
+    c.listDevices()
+    c.revokeDevice('d1b2c3d4e5f6')
+    c.startPairing()
+    c.cancelPairing()
+
+    expect(sock.sentControl().slice(1)).toStrictEqual([
+      { type: 'devices' },
+      { type: 'revoke', deviceId: 'd1b2c3d4e5f6' },
+      { type: 'pairStart' },
+      { type: 'pairCancel' },
+    ])
+  })
+
+  it('holds a device list asked for before the socket opens', () => {
+    // Same hazard as `list`, and worse: `deviceList` is otherwise only pushed
+    // when a pairing or a revoke happens, so a request dropped on a cold mount
+    // leaves the screen empty until somebody changes something.
+    const { c, sockets } = harness()
+    c.connect()
+    expect(() => c.listDevices()).not.toThrow()
+    sockets[0]!.open()
+
+    expect(sockets[0]!.sentControl()).toStrictEqual([
+      { type: 'hello', ver: PROTOCOL_VERSION, caps: ['binary'] },
+      { type: 'devices' },
+    ])
+  })
+
+  it('asks once however many times the device list was asked for while down', () => {
+    const { c, sockets } = harness()
+    c.connect()
+    for (let i = 0; i < 500; i++) c.listDevices()
+    sockets[0]!.open()
+    expect(sockets[0]!.sentControl().map((m) => m.type)).toEqual(['hello', 'devices'])
+  })
+
+  it('asks for the device list again on every connection, not only the first', async () => {
+    // The list is push-on-change and nothing polls it, so an answer received
+    // before an outage is the last word the tab will ever get. A device
+    // revoked while the socket was down would go on showing, with a Revoke
+    // button aimed at an id the daemon no longer knows, until the tab is
+    // reloaded. Nobody asks again here: the client re-asks on the consumer's
+    // behalf, exactly as it replays the reattach plan.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+    const seen: string[][] = []
+    c.onDeviceList((devices) => seen.push(devices.map((d) => d.id)))
+
+    c.connect()
+    sockets[0]!.open()
+    c.listDevices()
+    sockets[0]!.emitControl({
+      type: 'deviceList',
+      devices: [
+        { id: 'd1b2c3d4e5f6', label: 'iPhone', pairedAt: 1754380800, lastSeen: 1754384400 },
+        { id: 'd9a8b7c6d5e4', label: 'iPad', pairedAt: 1754294400, lastSeen: 1754298000 },
+      ],
+    })
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().filter((m) => m.type === 'devices')).toStrictEqual([
+      { type: 'devices' },
+    ])
+
+    // And the answer reaches the same listener, which is what actually closes
+    // the gap: the iPhone was revoked during the outage.
+    sockets[1]!.emitControl({
+      type: 'deviceList',
+      devices: [{ id: 'd9a8b7c6d5e4', label: 'iPad', pairedAt: 1754294400, lastSeen: 1754298000 }],
+    })
+    expect(seen).toEqual([['d1b2c3d4e5f6', 'd9a8b7c6d5e4'], ['d9a8b7c6d5e4']])
+  })
+
+  it('asks for no device list on a connection where none was ever wanted', async () => {
+    // The re-ask is a standing intent, not something every connection does.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+  })
+
+  it('does not carry the device-list intent across a close', () => {
+    // `close` is the tab letting go for good, so the standing re-ask goes with
+    // it — a later `connect` on the same client starts wanting nothing.
+    const { c, sockets } = harness()
+    c.connect()
+    c.listDevices()
+    c.close()
+    c.connect()
+    sockets[1]!.open()
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+  })
+
+  it('drops rather than holds a pairing or a revoke issued while the socket is down', async () => {
+    // Neither is idempotent the way a list is. A pairing token is good for two
+    // minutes, so one that surfaced behind a ten-second backoff would show a
+    // dead token at a screen that had moved on; and a revoke replayed after an
+    // outage could unpair a device the user had paired again in between.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    c.startPairing()
+    c.cancelPairing()
+    c.revokeDevice('d1b2c3d4e5f6')
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+  })
+
   it('sends the remaining control messages the protocol defines', () => {
     const { c, sock } = connected()
     attachRef(sock, 3)
@@ -1282,6 +1491,89 @@ describe('FlueClient control messages', () => {
       ],
     })
     expect(seen).toEqual([['s1']])
+  })
+
+  it('exposes the device list, asked for or not', () => {
+    // The daemon broadcasts `deviceList` to every remaining connection after a
+    // pairing or a revoke, so one arrives with no request of this tab's behind
+    // it. Nothing here correlates it with a `devices`, which is what makes the
+    // pushed copy and the answered one the same event.
+    const { c, sock } = connected()
+    const seen: string[][] = []
+    c.onDeviceList((devices) => seen.push(devices.map((d) => d.id)))
+    sock.emitControl({
+      type: 'deviceList',
+      devices: [
+        { id: 'd1b2c3d4e5f6', label: 'iPhone', pairedAt: 1754380800, lastSeen: 1754384400 },
+      ],
+    })
+    sock.emitControl({ type: 'deviceList', devices: [] })
+
+    expect(seen).toEqual([['d1b2c3d4e5f6'], []])
+  })
+
+  it('hands on the pairing message whole', () => {
+    // Every field is load-bearing at a different place on the pairing screen:
+    // the QR encodes `url` — which carries the token and the key the second
+    // device pins — and the countdown reads `expiresAt`. A client that
+    // projected one of them would drop the rest silently.
+    const { c, sock } = connected()
+    const seen: Pairing[] = []
+    c.onPairing((p) => seen.push(p))
+
+    const pairing: Pairing = {
+      type: 'pairing',
+      token: 'Zm91cnRlZW4tY2hhcnM',
+      url: 'https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM&k=3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hG6YwjhyZxaYQpb8k',
+      daemonPub: '3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=',
+      expiresAt: 1754384520,
+    }
+    sock.emitControl(pairing)
+
+    expect(seen).toStrictEqual([pairing])
+  })
+
+  it('reports why a revocation ended this connection', () => {
+    const { c, sock } = connected()
+    const seen: string[] = []
+    c.onRevoked((reason) => seen.push(reason))
+    sock.emitControl({ type: 'revoked', reason: 'revoked by another device' })
+    expect(seen).toEqual(['revoked by another device'])
+  })
+
+  it('reports a revocation before the close that follows it', () => {
+    // The daemon sends `revoked` and then ends the connection — the frame
+    // rides the same queue as the goodbye, so it always arrives first. If the
+    // client reordered them, every consumer would see a bare disconnect and
+    // the reason would land against a socket that was already reconnecting.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sock } = connected()
+    const seen: string[] = []
+    c.onRevoked((reason) => seen.push(`revoked:${reason}`))
+    c.onStatus((s) => seen.push(`status:${s}`))
+
+    sock.emitControl({ type: 'revoked', reason: 'revoked' })
+    sock.close()
+
+    expect(seen).toEqual(['revoked:revoked', 'status:reconnecting'])
+  })
+
+  it('lets a consumer stop the client from inside onRevoked', async () => {
+    // What the ordering buys: a revoked device that kept reconnecting would
+    // hammer a daemon whose registry no longer holds its key, and each attempt
+    // would fail with no reason attached. Stopping is the consumer's call, and
+    // it can only make it because the reason arrives before the close does.
+    vi.useFakeTimers()
+    const { c, sock, sockets } = connected()
+    c.onRevoked(() => c.close())
+
+    sock.emitControl({ type: 'revoked', reason: 'revoked' })
+    sock.close()
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    expect(sockets).toHaveLength(1)
+    expect(c.status).toBe('closed')
   })
 
   it('delivers a dimension change for a ref it knows', () => {
@@ -1647,6 +1939,27 @@ describe('FlueClient listeners', () => {
     expect(seen).toEqual(['not_found'])
   })
 
+  it('stops delivering devices, pairing and revocation after unsubscribe', () => {
+    const { c, sock } = connected()
+    const seen: string[] = []
+    const offs = [
+      c.onDeviceList((devices) => seen.push(`devices:${devices.length}`)),
+      c.onPairing((p) => seen.push(`pairing:${p.token}`)),
+      c.onRevoked((reason) => seen.push(`revoked:${reason}`)),
+    ]
+
+    const push = () => {
+      sock.emitControl({ type: 'deviceList', devices: [] })
+      sock.emitControl({ type: 'pairing', token: 't', url: 'u', daemonPub: 'k', expiresAt: 1 })
+      sock.emitControl({ type: 'revoked', reason: 'r' })
+    }
+    push()
+    for (const off of offs) off()
+    push()
+
+    expect(seen).toEqual(['devices:0', 'pairing:t', 'revoked:r'])
+  })
+
   it('registers every kind of listener and hands back an unsubscribe', () => {
     const { c } = connected()
     for (const off of [
@@ -1657,6 +1970,9 @@ describe('FlueClient listeners', () => {
       c.onSessions(() => {}),
       c.onError(() => {}),
       c.onStatus(() => {}),
+      c.onDeviceList(() => {}),
+      c.onPairing(() => {}),
+      c.onRevoked(() => {}),
     ]) {
       expect(typeof off).toBe('function')
       off()

@@ -14,9 +14,11 @@
 </p>
 
 > Status: the local terminal works, and `flue enable` installs the login
-> service. Remote transports and pairing are designed, not yet built. No
-> release is tagged yet — the pipeline is live, and the first tag ships
-> binaries, a brew formula, and the installer.
+> service. Pairing works over `local` — pair a second device from the UI, see
+> it listed, revoke it — and the end-to-end crypto it pins is in place. The
+> remote transports that carry it are designed, not yet built. No release is
+> tagged yet — the pipeline is live, and the first tag ships binaries, a brew
+> formula, and the installer.
 
 ## Install
 
