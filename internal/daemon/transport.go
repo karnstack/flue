@@ -15,10 +15,15 @@ import (
 // only thing the two have in common is this: ordered messages, each either
 // control or data, until one end stops.
 type MessageConn interface {
+	// Read blocks until the next message arrives. The implementation is
+	// responsible for bounding what it will accept: the WebSocket transport
+	// sets readLimit on the socket at accept, and a relay's reader has to bound
+	// its own frames, because nothing past this seam does.
 	Read(ctx context.Context) (text bool, data []byte, err error)
 	Write(ctx context.Context, text bool, data []byte) error
 	// Close ends the stream. It must be safe to call more than once and
-	// safe to call concurrently with Read/Write.
+	// safe to call concurrently with Read/Write. It need not interrupt a Read
+	// already in flight — cancel the connection's context for that.
 	Close() error
 }
 
@@ -46,18 +51,24 @@ type ConnMeta struct {
 func (s *Server) ServeConn(ctx context.Context, mc MessageConn, meta ConnMeta) {
 	connCtx, cancel := context.WithCancel(s.baseCtx)
 	defer cancel()
+	// Deferred rather than run after serve returns, because the close is what
+	// hands the transport's own resources back — for a relay, a multiplexed
+	// channel over a socket shared with every other device — and a panic on the
+	// serve path must not be the one way out that skips it. Close is
+	// contractually idempotent, so a transport that also closes on its own way
+	// out is unharmed.
+	defer func() { _ = mc.Close() }()
 
 	c := newConn(connCtx, cancel, mc, s, meta.Peer, meta.Origin)
 	// Registered before it is served and forgotten however it ends, so the
 	// broadcast set is exactly the set of connections that can be written to.
-	s.addConn(c)
-	if meta.DeviceID != "" {
-		s.registerDeviceConn(meta.DeviceID, c)
-	}
+	// The device it authenticated as is part of that one registration rather
+	// than a step after it; see addConn for what lands in between otherwise.
+	s.addConn(c, meta.DeviceID)
 	defer s.removeConn(c)
 
+	s.markDeviceSeen(meta.DeviceID)
 	c.serve()
-	_ = mc.Close()
 }
 
 // wsMessageConn adapts a coder/websocket connection to MessageConn.

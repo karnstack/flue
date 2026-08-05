@@ -164,6 +164,42 @@ func TestAddDecidesDuplicatesOnTheWholeKey(t *testing.T) {
 	}
 }
 
+// TestUpdateLastSeen: the column the devices screen shows is only as truthful
+// as the write behind it, and a device that is not there is not a failure —
+// a connection may be stamping itself at the moment it is revoked.
+func TestUpdateLastSeen(t *testing.T) {
+	s := NewDeviceStore(t.TempDir())
+	dev, err := s.Add("phone", testKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	later := time.Now().Add(time.Hour).Truncate(time.Second)
+	ok, err := s.UpdateLastSeen(dev.ID, later)
+	if err != nil || !ok {
+		t.Fatalf("UpdateLastSeen = %v, %v", ok, err)
+	}
+
+	list, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("registry = %+v, want the one device", list)
+	}
+	if !list[0].LastSeen.Equal(later) {
+		t.Fatalf("LastSeen = %v, want %v", list[0].LastSeen, later)
+	}
+	// The stamp is the only thing that moved.
+	if !list[0].PairedAt.Equal(dev.PairedAt) || !bytes.Equal(list[0].PublicKey, dev.PublicKey) {
+		t.Fatalf("UpdateLastSeen rewrote the device: %+v, want %+v", list[0], dev)
+	}
+
+	if ok, err := s.UpdateLastSeen("000000000000", later); ok || err != nil {
+		t.Fatalf("UpdateLastSeen of an unknown device = %v, %v, want false and no error", ok, err)
+	}
+}
+
 func TestDeviceStoreRemove(t *testing.T) {
 	s := NewDeviceStore(t.TempDir())
 	d, err := s.Add("phone", testKey(t))

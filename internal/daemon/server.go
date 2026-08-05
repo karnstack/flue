@@ -75,6 +75,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -738,13 +739,27 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 
 // --- the connection registry ---
 
-// addConn records an established connection. Every connection enters here and
-// leaves through removeConn, so "every live client" is a fact the server holds
-// rather than one a broadcast has to reconstruct.
-func (s *Server) addConn(c *conn) {
+// addConn records an established connection, together with the device it
+// authenticated as when it has one. Every connection enters here and leaves
+// through removeConn, so "every live client" is a fact the server holds rather
+// than one a broadcast has to reconstruct.
+//
+// Both registries are written under a single hold of connMu because the gap
+// between them is reachable, and a revoke is what reaches it: disconnectDevice
+// takes the device's bucket as it stands — without a connection that has been
+// added but not yet bound — closes what it found, and returns. A binding that
+// followed would then re-create the bucket the revocation had just emptied,
+// leaving the revoked device holding a live socket that nothing will ever look
+// for again. There is no such gap: a revoke observes both registries or
+// neither.
+func (s *Server) addConn(c *conn, deviceID string) {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 	s.conns = append(s.conns, c)
+	if deviceID == "" {
+		return
+	}
+	s.bindDeviceLocked(deviceID, c)
 }
 
 // removeConn forgets a connection that has ended, including its device bucket.
@@ -765,20 +780,42 @@ func (s *Server) removeConn(c *conn) {
 	}
 }
 
-// registerDeviceConn records that c is authenticated as deviceID, so revoking
-// that device reaches it.
+// registerDeviceConn records that a connection already in s.conns is
+// authenticated as deviceID, so revoking that device reaches it.
 //
-// Nothing on the local transport calls this, and nothing on it should: the
-// session token is a machine-local credential, not a device identity, so a
-// loopback connection has no bucket and revoking a device can never close the
-// user's own terminal. The relay transport calls it once per connection, with
-// the device its Noise handshake resolved.
+// Admission is not this: a transport that knows the device before it hands the
+// connection over — which is every transport that has one, since the identity
+// comes out of the handshake — passes it to ServeConn and is registered in one
+// step by addConn. What is left for this is binding a device to a connection
+// that is already up, which is how the revocation path is exercised over the
+// loopback transport: no local connection has a device identity of its own, the
+// session token being a machine-local credential rather than a device, so
+// without this seam the map revocation walks would have no members to test
+// against until the relay shipped.
+//
+// A connection that is no longer live is refused rather than registered.
 func (s *Server) registerDeviceConn(deviceID string, c *conn) {
 	if c == nil || deviceID == "" {
 		return
 	}
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
+	// A connection that has already left must not be registered after the fact.
+	// Revocation walks this bucket, so an entry for a conn that is gone is one
+	// it will close pointlessly — and worse, the bucket the late registration
+	// re-creates holds nothing but dead connections, which is a device that can
+	// never be disconnected again. A linear scan because s.conns is the live
+	// client list, which is small by the nature of the thing.
+	if !slices.Contains(s.conns, c) {
+		return
+	}
+	s.bindDeviceLocked(deviceID, c)
+}
+
+// bindDeviceLocked records c under deviceID in the device registry. connMu
+// must be held: c.device is written here and read by removeConn, and the
+// bucket is what revocation walks.
+func (s *Server) bindDeviceLocked(deviceID string, c *conn) {
 	c.device = deviceID
 	s.deviceConns[deviceID] = append(s.deviceConns[deviceID], c)
 }
@@ -799,7 +836,14 @@ func (s *Server) allConns() []*conn {
 func dropConn(list []*conn, c *conn) []*conn {
 	for i, other := range list {
 		if other == c {
-			return append(list[:i], list[i+1:]...)
+			// The vacated tail slot is cleared rather than left holding the
+			// element that was copied down. The slice shrinks; its backing
+			// array does not, so a stale pointer there keeps a finished
+			// connection — its outbox, its attachments, its context — reachable
+			// for as long as the registry lives.
+			copy(list[i:], list[i+1:])
+			list[len(list)-1] = nil
+			return list[:len(list)-1]
 		}
 	}
 	return list
@@ -832,6 +876,25 @@ func (s *Server) deviceList() (wire.DeviceList, error) {
 		})
 	}
 	return wire.DeviceList{Devices: infos}, nil
+}
+
+// markDeviceSeen records that deviceID is connected right now, which is the
+// only event that ever moves the "last seen" column the devices screen shows.
+//
+// Best effort, and deliberately so. It runs on the connect path, where the
+// transport has already authenticated the device against this same registry, so
+// a registry that has since become unreadable is a reason to log rather than to
+// refuse a connection that was granted. A device that is simply not there raced
+// its own revocation: whoever removed it is closing this connection, and the
+// stamp has nothing to say about that.
+func (s *Server) markDeviceSeen(deviceID string) {
+	if deviceID == "" || s.identity.Devices == nil {
+		return
+	}
+	if _, err := s.identity.Devices.UpdateLastSeen(deviceID, time.Now()); err != nil {
+		s.logger().Warn("could not record a device's last-seen time",
+			"device", deviceID, "err", err)
+	}
 }
 
 // deviceIDLen is the width of the identity crypto.DeviceID derives: twelve

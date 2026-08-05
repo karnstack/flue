@@ -131,6 +131,34 @@ func (s *DeviceStore) Remove(id string) (Device, bool, error) {
 	return Device{}, false, nil
 }
 
+// UpdateLastSeen stamps the device's LastSeen to now, reporting whether the
+// device exists. Missing devices are not an error: a connection may race its
+// own revocation, and the registry is the truth either way — a device that was
+// unpaired a moment ago is not brought back by having connected.
+//
+// The whole file is rewritten, like every other mutation here, because that is
+// what makes a concurrent revoke and a concurrent stamp serialise on the same
+// lock rather than on two partial views of the same JSON.
+func (s *DeviceStore) UpdateLastSeen(id string, now time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	devices, err := s.load()
+	if err != nil {
+		return false, err
+	}
+	for i := range devices {
+		if devices[i].ID != id {
+			continue
+		}
+		devices[i].LastSeen = now.UTC()
+		// True with the error: the device is there, and the caller's own
+		// question — "was there one to stamp" — is answered whether or not the
+		// write landed.
+		return true, s.save(devices)
+	}
+	return false, nil
+}
+
 func (s *DeviceStore) FindByKey(publicKey []byte) (Device, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

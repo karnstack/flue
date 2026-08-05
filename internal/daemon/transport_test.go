@@ -1,13 +1,19 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
@@ -103,6 +109,120 @@ func TestServeConnSpeaksTheWireProtocol(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeConn did not return after the conn closed")
 	}
+}
+
+// panicConn is a MessageConn whose read panics, standing in for any unhandled
+// failure on the serve path. It writes and closes like the pipe it embeds.
+type panicConn struct{ *pipeConn }
+
+func (panicConn) Read(context.Context) (bool, []byte, error) { panic("boom") }
+
+// TestServeConnClosesTheTransportOnTheWayOutOfAPanic: the close is what returns
+// the transport's own resources — for the relay, a multiplexed channel over a
+// socket shared with every other device — so it cannot be the one step that a
+// panic in the connection state machine skips.
+func TestServeConnClosesTheTransportOnTheWayOutOfAPanic(t *testing.T) {
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test", Identity{})
+	p := newPipeConn()
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the panic was swallowed rather than propagated")
+			}
+		}()
+		srv.ServeConn(context.Background(), panicConn{p}, ConnMeta{Peer: "relay"})
+	}()
+
+	select {
+	case <-p.closed:
+	default:
+		t.Fatal("ServeConn left the transport open")
+	}
+	if len(srv.allConns()) != 0 {
+		t.Fatal("ServeConn left the connection registered")
+	}
+}
+
+// TestServeConnStampsTheDeviceLastSeen: "last seen" is what the devices screen
+// shows, and a connection is the only event that can move it. Nothing on the
+// local transport carries a device, so this is the seam that makes the column
+// true once the relay arrives.
+func TestServeConnStampsTheDeviceLastSeen(t *testing.T) {
+	store := crypto.NewDeviceStore(t.TempDir())
+	dev, err := store.Add("phone", bytes.Repeat([]byte{0x2a}, 32))
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// Backdated, so the assertion is about the daemon's write rather than about
+	// two calls to time.Now landing in different nanoseconds.
+	stale := time.Now().Add(-time.Hour)
+	if ok, err := store.UpdateLastSeen(dev.ID, stale); err != nil || !ok {
+		t.Fatalf("backdating the device: %v, %v", ok, err)
+	}
+
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
+		Identity{Devices: store})
+	p := newPipeConn()
+	defer p.Close()
+	go srv.ServeConn(context.Background(), p, ConnMeta{Peer: "relay", DeviceID: dev.ID})
+	expectControl(t, p) // welcome: the stamp happens before the conn is served
+
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("registry = %+v, want the one device", list)
+	}
+	if !list[0].LastSeen.After(stale) {
+		t.Fatalf("LastSeen = %v, want something later than %v", list[0].LastSeen, stale)
+	}
+}
+
+// TestServeConnServesADeviceTheRegistryDoesNotHold: an id with no entry behind
+// it raced its own revocation. There is nothing to stamp and nothing to report —
+// whoever removed the device is already closing this connection — so the
+// absence must not be logged as a failure, or every revocation leaves a warning
+// an operator has to rule out.
+func TestServeConnServesADeviceTheRegistryDoesNotHold(t *testing.T) {
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
+		Identity{Devices: crypto.NewDeviceStore(t.TempDir())})
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+
+	p := newPipeConn()
+	defer p.Close()
+	go srv.ServeConn(context.Background(), p, ConnMeta{Peer: "relay", DeviceID: "abcdefabcdef"})
+	if _, ok := expectControl(t, p).(wire.Welcome); !ok {
+		t.Fatal("a device the registry does not hold was not served")
+	}
+	if strings.Contains(buf.String(), "could not record") {
+		t.Fatalf("a device that was simply gone was logged as a failure:\n%s", buf.String())
+	}
+}
+
+// TestServeConnServesADeviceTheRegistryCannotStamp: the stamp is bookkeeping,
+// and bookkeeping does not get to refuse a connection the transport has already
+// authenticated. A registry that cannot be read or written is the operator's
+// problem, and goes to the log.
+func TestServeConnServesADeviceTheRegistryCannotStamp(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
+		Identity{Devices: crypto.NewDeviceStore(dir)})
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+
+	p := newPipeConn()
+	defer p.Close()
+	go srv.ServeConn(context.Background(), p, ConnMeta{Peer: "relay", DeviceID: "abcdefabcdef"})
+	if _, ok := expectControl(t, p).(wire.Welcome); !ok {
+		t.Fatal("a device whose last-seen could not be written was not served")
+	}
+	waitForLog(t, buf, "could not record")
 }
 
 func TestServeConnRegistersTheDevice(t *testing.T) {

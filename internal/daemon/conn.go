@@ -55,6 +55,24 @@ var (
 	errConnBacklogged = errors.New("daemon: client is not draining its socket")
 )
 
+// What a client is told when the device registry fails, in place of the error
+// itself.
+//
+// The store is a file in the config directory, so its errors name that path,
+// and the path names $HOME and the local username. Any paired device can
+// provoke one by asking for the device list — a phone on a relayed connection
+// has no business learning the account name of the machine it dials. The real
+// error is not lost: it goes to the log, which is where whoever can do
+// something about a broken registry is looking anyway.
+//
+// The distinction the client keeps is the one it can act on: a read that failed
+// leaves the screen as it was, and a write that failed means the revoke it just
+// asked for did not happen.
+const (
+	msgRegistryUnreadable = "the device registry is unavailable"
+	msgRegistryUnwritable = "the device registry could not be written"
+)
+
 // signals is the set of signals a client may deliver, by both their canonical
 // and bare names.
 //
@@ -436,7 +454,8 @@ func (c *conn) handleControl(msg any) {
 	case wire.Devices:
 		list, err := c.srv.deviceList()
 		if err != nil {
-			c.sendError("devices_unavailable", err.Error())
+			c.srv.logger().Warn("device list unavailable", "peer", c.peer, "err", err)
+			c.sendError("devices_unavailable", msgRegistryUnreadable)
 			return
 		}
 		_ = c.sendControl(list)
@@ -519,12 +538,12 @@ func (c *conn) revokeDevice(id string) {
 	case errors.Is(err, errNoDeviceRegistry):
 		c.srv.logger().Warn("revoke refused",
 			"peer", c.peer, "device", id, "reason", "no device registry")
-		c.sendError("devices_unavailable", err.Error())
+		c.sendError("devices_unavailable", msgRegistryUnreadable)
 		return
 	case err != nil:
 		c.srv.logger().Warn("revoke refused",
 			"peer", c.peer, "device", id, "reason", "the registry could not be written", "err", err)
-		c.sendError("revoke_failed", err.Error())
+		c.sendError("revoke_failed", msgRegistryUnwritable)
 		return
 	case !ok:
 		// Answered rather than ignored: a devices screen acting on a row that

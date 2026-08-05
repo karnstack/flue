@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -2472,7 +2474,7 @@ func TestDeviceListBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		c := newConn(ctx, cancel, nil, srv, "", "")
-		srv.addConn(c)
+		srv.addConn(c, "")
 		return c
 	}
 
@@ -2500,5 +2502,151 @@ func TestDeviceListBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	case <-healthy.out:
 	default:
 		t.Error("the healthy peer was not sent the device list")
+	}
+}
+
+// --- the connection registry ---
+
+// TestRegisterDeviceConnRefusesAConnAlreadyGone: a connection that raced its
+// own teardown must not be registered afterwards. Revocation walks the device
+// bucket, so an entry for a conn that has already left is one it will close
+// pointlessly — and the bucket the registration re-created outlives every
+// connection in it, which is a device that can never be disconnected again.
+func TestRegisterDeviceConnRefusesAConnAlreadyGone(t *testing.T) {
+	srv := New(session.NewRegistry(time.Now), local.NewAuth(tok, 0), nil, "test", Identity{})
+	c := &conn{}
+	srv.addConn(c, "")
+	srv.removeConn(c)
+	srv.registerDeviceConn("abcdefabcdef", c)
+
+	srv.connMu.Lock()
+	defer srv.connMu.Unlock()
+	if len(srv.deviceConns["abcdefabcdef"]) != 0 {
+		t.Fatal("a removed conn was registered into the device bucket")
+	}
+}
+
+// TestADeviceConnJoinsBothRegistriesAtOnce: there must be no instant at which
+// a connection is live but not yet its device's.
+//
+// A revoke landing in that instant takes the bucket as it stands — without this
+// connection — closes what it found, and returns. The registration that follows
+// then re-creates the bucket the revocation just emptied, so the revoked device
+// keeps a live socket, and every shell on it, in a bucket nothing will ever
+// look at again. The interleaving is written out here as three calls in the
+// order they would have happened: the conn is admitted, the revoke lands, and
+// the late registration — which is now the only thing that could still resurrect
+// it — is refused.
+func TestADeviceConnJoinsBothRegistriesAtOnce(t *testing.T) {
+	const device = "abcdefabcdef"
+	srv := New(session.NewRegistry(time.Now), local.NewAuth(tok, 0), nil, "test", Identity{})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c := newConn(ctx, cancel, nil, srv, "relay", "")
+
+	// Admission is one step, so a revoke can only observe both registries or
+	// neither.
+	srv.addConn(c, device)
+	if n := srv.disconnectDevice(device, "revoked"); n != 1 {
+		t.Fatalf("the revoke closed %d connections, want 1", n)
+	}
+	srv.registerDeviceConn(device, c)
+
+	// The reason was queued for it rather than the socket simply dropped: with
+	// no writer goroutine running, the queued frame is where that stops.
+	select {
+	case <-c.out:
+	default:
+		t.Fatal("the revoked connection was told nothing")
+	}
+
+	srv.connMu.Lock()
+	defer srv.connMu.Unlock()
+	if len(srv.conns) != 0 {
+		t.Fatalf("the revoked device's connection is still live: %d", len(srv.conns))
+	}
+	if len(srv.deviceConns) != 0 {
+		t.Fatalf("the revoked device's bucket was re-created: %+v", srv.deviceConns)
+	}
+}
+
+// TestDropConnClearsTheVacatedSlot: the slice shrinks but its backing array
+// does not, so the tail slot has to be cleared or the registry keeps a
+// finished connection — its outbox, its attachments, its context — reachable
+// for as long as the array lives.
+func TestDropConnClearsTheVacatedSlot(t *testing.T) {
+	a, b := &conn{}, &conn{}
+	list := []*conn{a, b}
+
+	got := dropConn(list, a)
+	if len(got) != 1 || got[0] != b {
+		t.Fatalf("dropConn = %v, want just the second conn", got)
+	}
+	if list[1] != nil {
+		t.Fatal("dropConn left the dropped conn reachable through the backing array")
+	}
+}
+
+// TestStoreErrorsDoNotReachClientsVerbatim: devices.json lives in the config
+// directory under $HOME, so the store's own errors name that path — the local
+// username with it. Any paired device can provoke one by asking for the list,
+// and the socket must carry the fact rather than the filesystem. The operator
+// still gets the real thing, in the log.
+func TestStoreErrorsDoNotReachClientsVerbatim(t *testing.T) {
+	// A store rooted in a plain file: every load fails with ENOTDIR, naming
+	// the path it tried. Deterministic, and it does not depend on running as
+	// a user who can be denied by mode bits.
+	dir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(session.NewRegistry(time.Now), nil, http.NotFoundHandler(), "test",
+		Identity{Devices: crypto.NewDeviceStore(dir)})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	srv.SetAuth(local.NewAuth(tok, portOf(t, ts)))
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+
+	for _, tc := range []struct {
+		name string
+		op   any
+		code string
+		log  string
+	}{
+		{"list", wire.Devices{}, "devices_unavailable", "device list unavailable"},
+		{"revoke", wire.Revoke{DeviceID: "abcdefabcdef"}, "revoke_failed", "revoke refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := dial(t, ts)
+			writeControl(t, c, wire.Hello{Ver: "test"})
+			writeControl(t, c, tc.op)
+
+			readUntil(t, c, func(msg any, _ []byte) bool {
+				e, ok := msg.(wire.Error)
+				if !ok {
+					return false
+				}
+				if e.Code != tc.code {
+					t.Fatalf("error code = %q, want %q", e.Code, tc.code)
+				}
+				if strings.Contains(e.Msg, dir) {
+					t.Fatalf("the error leaked the store path: %q", e.Msg)
+				}
+				// Nothing weaker than "no path at all": a message carrying any
+				// part of a filesystem is one this assertion should catch
+				// whatever the temp directory happens to be called.
+				if strings.Contains(e.Msg, "/") {
+					t.Fatalf("the error carries a filesystem path: %q", e.Msg)
+				}
+				return true
+			})
+
+			waitForLog(t, buf, tc.log)
+			if !logLineContains(buf, tc.log, dir) {
+				t.Fatalf("the store error never reached the log:\n%s", buf.String())
+			}
+		})
 	}
 }
