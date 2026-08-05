@@ -87,6 +87,20 @@ export interface SessionInfo {
   lastActive: string
 }
 
+/**
+ * One paired device, as `deviceList` reports it.
+ *
+ * Both timestamps are unix **seconds**, not milliseconds — `wire.DeviceInfo`
+ * flattens the registry's `time.Time` on the way out, so a consumer building a
+ * `Date` must multiply by 1000.
+ */
+export interface DeviceInfo {
+  id: string
+  label: string
+  pairedAt: number
+  lastSeen: number
+}
+
 // Client -> server.
 
 export interface HelloMsg {
@@ -155,6 +169,30 @@ export interface CloseMsg {
   ref: number
 }
 
+/** Ask for the paired-device list. Answered by `deviceList`. */
+export interface DevicesMsg {
+  type: 'devices'
+}
+
+/**
+ * Remove a paired device. The requester gets a fresh `deviceList`; the revoked
+ * device's own connections get `revoked` and are then closed.
+ */
+export interface RevokeMsg {
+  type: 'revoke'
+  deviceId: string
+}
+
+/** Enter pairing mode. Answered by `pairing`. */
+export interface PairStartMsg {
+  type: 'pairStart'
+}
+
+/** Leave pairing mode, invalidating any outstanding token. */
+export interface PairCancelMsg {
+  type: 'pairCancel'
+}
+
 export type ClientMessage =
   | HelloMsg
   | ListMsg
@@ -164,6 +202,10 @@ export type ClientMessage =
   | ResizeMsg
   | SignalMsg
   | CloseMsg
+  | DevicesMsg
+  | RevokeMsg
+  | PairStartMsg
+  | PairCancelMsg
 
 // Server -> client.
 
@@ -240,4 +282,41 @@ export interface ErrorMsg {
   reqId?: number
 }
 
-export type ServerMessage = Welcome | Sessions | Attached | Exit | SizeChanged | ErrorMsg
+export interface DeviceList {
+  type: 'deviceList'
+  /** Empty rather than absent when nothing is paired. */
+  devices: DeviceInfo[]
+}
+
+/** Answers `pairStart` with everything the second device needs to pair. */
+export interface Pairing {
+  type: 'pairing'
+  /** Single-use, and good for two minutes. */
+  token: string
+  /** Absolute: the `/pair` page on this origin, carrying the token. */
+  url: string
+  /** The daemon's static public key, base64. */
+  daemonPub: string
+  /** Unix **seconds**, matching the Go side. */
+  expiresAt: number
+}
+
+/**
+ * This device was revoked. Arrives just before the daemon closes the
+ * connection, so the tab can say why rather than showing a bare disconnect.
+ */
+export interface Revoked {
+  type: 'revoked'
+  reason: string
+}
+
+export type ServerMessage =
+  | Welcome
+  | Sessions
+  | Attached
+  | Exit
+  | SizeChanged
+  | ErrorMsg
+  | DeviceList
+  | Pairing
+  | Revoked

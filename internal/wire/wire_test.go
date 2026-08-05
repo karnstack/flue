@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -175,6 +176,60 @@ func TestAttachRoundTripsReqID(t *testing.T) {
 	}
 	if a.ReqID != 9 {
 		t.Fatalf("ReqID = %d, want 9", a.ReqID)
+	}
+}
+
+// TestControlRoundTripsDeviceAndPairingMessages pins the device and pairing
+// messages the way Spawn and Attached are pinned above: encode, read back the
+// discriminator, decode, and compare the value whole. A missing tag, a struct
+// left out of typeName, or a decoder that returns the wrong concrete type all
+// fail here rather than at the daemon.
+func TestControlRoundTripsDeviceAndPairingMessages(t *testing.T) {
+	cases := []struct {
+		name string
+		typ  string
+		msg  any
+	}{
+		{"devices", "devices", Devices{}},
+		{"revoke", "revoke", Revoke{DeviceID: "d1b2c3d4e5f60718"}},
+		{"pairStart", "pairStart", PairStart{}},
+		{"pairCancel", "pairCancel", PairCancel{}},
+		{"deviceList", "deviceList", DeviceList{Devices: []DeviceInfo{
+			{ID: "d1b2c3d4e5f60718", Label: "iPhone", PairedAt: 1754380800, LastSeen: 1754384400},
+			{ID: "d9a8b7c6d5e4f302", Label: "iPad", PairedAt: 1754294400, LastSeen: 1754298000},
+		}}},
+		{"pairing", "pairing", Pairing{
+			Token:     "Zm91cnRlZW4tY2hhcnM",
+			URL:       "https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM",
+			DaemonPub: "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=",
+			ExpiresAt: 1754384520,
+		}},
+		{"revoked", "revoked", Revoked{Reason: "revoked by another device"}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b, err := EncodeControl(c.msg)
+			if err != nil {
+				t.Fatalf("EncodeControl: %v", err)
+			}
+			var probe struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(b, &probe); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if probe.Type != c.typ {
+				t.Fatalf("type = %q, want %q", probe.Type, c.typ)
+			}
+			got, err := DecodeControl(b)
+			if err != nil {
+				t.Fatalf("DecodeControl: %v", err)
+			}
+			if !reflect.DeepEqual(got, c.msg) {
+				t.Fatalf("round trip = %#v, want %#v", got, c.msg)
+			}
+		})
 	}
 }
 

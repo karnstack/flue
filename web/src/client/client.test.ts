@@ -13,11 +13,18 @@ import {
   type Attached,
   type CloseMsg,
   type DetachMsg,
+  type DeviceList,
+  type DevicesMsg,
   type ErrorMsg,
   type Exit,
   type HelloMsg,
   type ListMsg,
+  type PairCancelMsg,
+  type Pairing,
+  type PairStartMsg,
   type ResizeMsg,
+  type Revoked,
+  type RevokeMsg,
   type Sessions,
   type SignalMsg,
   type SizeChanged,
@@ -188,6 +195,10 @@ describe('control message golden file', () => {
       'resize',
       'signal',
       'close',
+      'devices',
+      'revoke',
+      'pairStart',
+      'pairCancel',
       'welcome',
       'sessions',
       'attached',
@@ -196,6 +207,10 @@ describe('control message golden file', () => {
       'sizeChanged',
       'error',
       'errorForRequest',
+      'deviceList',
+      'deviceListEmpty',
+      'pairing',
+      'revoked',
     ])
   })
 
@@ -249,6 +264,26 @@ describe('control message golden file', () => {
   it('decodes close', () => {
     const want: CloseMsg = { type: 'close', ref: 3 }
     expect(fixture('close')).toStrictEqual(want)
+  })
+
+  it('decodes devices', () => {
+    const want: DevicesMsg = { type: 'devices' }
+    expect(fixture('devices')).toStrictEqual(want)
+  })
+
+  it('decodes revoke', () => {
+    const want: RevokeMsg = { type: 'revoke', deviceId: 'd1b2c3d4e5f60718' }
+    expect(fixture('revoke')).toStrictEqual(want)
+  })
+
+  it('decodes pairStart', () => {
+    const want: PairStartMsg = { type: 'pairStart' }
+    expect(fixture('pairStart')).toStrictEqual(want)
+  })
+
+  it('decodes pairCancel', () => {
+    const want: PairCancelMsg = { type: 'pairCancel' }
+    expect(fixture('pairCancel')).toStrictEqual(want)
   })
 
   it('decodes welcome', () => {
@@ -349,6 +384,51 @@ describe('control message golden file', () => {
       reqId: 7,
     }
     expect(fixture('errorForRequest')).toStrictEqual(want)
+  })
+
+  it('decodes deviceList, including all four fields of every record', () => {
+    const want: DeviceList = {
+      type: 'deviceList',
+      devices: [
+        {
+          id: 'd1b2c3d4e5f60718',
+          label: 'iPhone',
+          pairedAt: 1754380800,
+          lastSeen: 1754384400,
+        },
+        {
+          id: 'd9a8b7c6d5e4f302',
+          label: 'iPad',
+          pairedAt: 1754294400,
+          lastSeen: 1754298000,
+        },
+      ],
+    }
+    expect(fixture('deviceList')).toStrictEqual(want)
+  })
+
+  it('decodes an empty deviceList as [], not null', () => {
+    // `devices` is not omitempty on the Go side, and a daemon with nothing
+    // paired must send `[]`: a nil slice would marshal to null and every
+    // consumer that maps over the list would throw.
+    const want: DeviceList = { type: 'deviceList', devices: [] }
+    expect(fixture('deviceListEmpty')).toStrictEqual(want)
+  })
+
+  it('decodes pairing', () => {
+    const want: Pairing = {
+      type: 'pairing',
+      token: 'Zm91cnRlZW4tY2hhcnM',
+      url: 'https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM',
+      daemonPub: '3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=',
+      expiresAt: 1754384520,
+    }
+    expect(fixture('pairing')).toStrictEqual(want)
+  })
+
+  it('decodes revoked', () => {
+    const want: Revoked = { type: 'revoked', reason: 'revoked by another device' }
+    expect(fixture('revoked')).toStrictEqual(want)
   })
 })
 

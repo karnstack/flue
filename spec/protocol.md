@@ -21,27 +21,56 @@ Every control message is a JSON object with a `type` discriminator.
 
 ### Client to server
 
-| type | fields |
-|---|---|
-| `hello` | `ver`, `caps[]` |
-| `list` | — |
-| `spawn` | `cwd`, `cmd[]`, `cols`, `rows`, `reqId?` |
-| `attach` | `id`, `lastSeq`, `reqId?` |
-| `detach` | `ref` |
-| `resize` | `ref`, `cols`, `rows`, `primary` |
-| `signal` | `ref`, `sig` |
-| `close` | `ref` |
+| type | fields | meaning |
+|---|---|---|
+| `hello` | `ver`, `caps[]` | open the conversation |
+| `list` | — | list the daemon's sessions |
+| `spawn` | `cwd`, `cmd[]`, `cols`, `rows`, `reqId?` | start a session and attach to it |
+| `attach` | `id`, `lastSeq`, `reqId?` | attach to an existing session |
+| `detach` | `ref` | release an attachment |
+| `resize` | `ref`, `cols`, `rows`, `primary` | report this view's dimensions |
+| `signal` | `ref`, `sig` | send a signal to the session's process |
+| `close` | `ref` | end the session |
+| `devices` | — | list the paired devices |
+| `revoke` | `deviceId` | unpair a device and cut its connections |
+| `pairStart` | — | enter pairing mode |
+| `pairCancel` | — | leave pairing mode, invalidating the token |
 
 ### Server to client
 
-| type | fields |
-|---|---|
-| `welcome` | `daemonId`, `host`, `ver`, `caps[]` |
-| `sessions` | `sessions[]` |
-| `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `head`, `truncated`, `primary`, `reqId?` |
-| `exit` | `ref`, `code` |
-| `sizeChanged` | `ref`, `cols`, `rows`, `primary` |
-| `error` | `code`, `msg`, `reqId?` |
+| type | fields | meaning |
+|---|---|---|
+| `welcome` | `daemonId`, `host`, `ver`, `caps[]` | answers `hello` |
+| `sessions` | `sessions[]` | answers `list`, and follows any change to the set |
+| `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `head`, `truncated`, `primary`, `reqId?` | answers `attach` or `spawn` |
+| `exit` | `ref`, `code` | the session's process ended |
+| `sizeChanged` | `ref`, `cols`, `rows`, `primary` | the PTY's dimensions changed |
+| `error` | `code`, `msg`, `reqId?` | a request failed, or a stream did |
+| `deviceList` | `devices[]` | answers `devices`, and follows a `revoke` |
+| `pairing` | `token`, `url`, `daemonPub`, `expiresAt` | answers `pairStart` |
+| `revoked` | `reason` | this device was unpaired; the connection is about to close |
+
+Each record of `deviceList.devices[]` carries `id`, `label`, `pairedAt` and
+`lastSeen`. Both timestamps are unix **seconds**, not the RFC 3339 strings
+`sessions[]` uses.
+
+## Pairing
+
+`pairStart` puts the daemon into pairing mode and is answered by `pairing`,
+which carries a token, the daemon's static public key, and an absolute `/pair`
+URL on this origin for the second device to open. The token lives **two
+minutes** and is **single-use**: `POST /api/pair` spends it and registers the
+device, and `pairCancel` — or the deadline, or a completed pairing — ends
+pairing mode. The daemon holds at most one outstanding token, so a second
+`pairStart` supersedes the first. `revoke` unpairs a device: the requester
+gets a fresh `deviceList`, and the revoked device's own connections get
+`revoked` and are then closed.
+
+`POST /api/pair` is the one part of the ceremony that is not a WebSocket
+message: the new device posts the token and its own public key there, and the
+pairing token — not the session token — is the credential. Its request and
+response shapes, and the refusals that go with them, are specified alongside
+the daemon's pairing mode.
 
 ## Correlation
 
