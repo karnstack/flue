@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
+import { PlusIcon } from 'lucide-react'
 
 import { useFlueClient } from '@/client/provider'
 import { ExitOverlay } from '@/components/exit-overlay'
-import { DARK_SCHEME_QUERY, prefersDark, terminalPalette } from '@/emulator/palette'
+import { ThemeMenu } from '@/components/theme-menu'
+import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
+import { resolveTheme } from '@/emulator/themes'
 import type { Emulator } from '@/emulator/types'
 import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
+import { loadSessionTheme, saveSessionTheme } from '@/lib/session-theme'
 import {
   cellBox,
   cellsThatFit,
@@ -118,12 +122,23 @@ export function Terminal({
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
   const [cwd, setCwd] = useState<string | null>(null)
-  // The effect's handle for the overlay's Restart. The spawn bookkeeping is
-  // effect-local, so the action is built inside the effect and reached from
-  // render through this ref. Close needs no daemon action at all: the exit
-  // already retired the ref on both ends, and an exited session reaps itself
-  // after ExitedRetention — Close just leaves.
-  const actionsRef = useRef<{ restart: (dir: string | null) => void } | null>(null)
+  // The session's theme choice, read once per mount and mirrored into a ref
+  // so the effect can resolve it without carrying the state in its
+  // dependency array — a theme change must restyle the live emulator, never
+  // rebuild it, because rebuilding drops the scrollback.
+  const [themeId, setThemeId] = useState(() => loadSessionTheme(sessionId))
+  const themeIdRef = useRef(themeId)
+  themeIdRef.current = themeId
+  // The effect's handles for the floating controls. The spawn bookkeeping
+  // and the emulator are effect-local, so the actions that need them are
+  // built inside the effect and reached from render through this ref. Close
+  // needs no daemon action at all: the exit already retired the ref on both
+  // ends, and an exited session reaps itself after ExitedRetention — Close
+  // just leaves.
+  const actionsRef = useRef<{
+    restart: (dir: string | null) => void
+    applyTheme: (id: string) => void
+  } | null>(null)
   // The latest onRestarted, readable from inside the effect without putting
   // a prop identity in its dependency array.
   const restartedRef = useRef(onRestarted)
@@ -135,7 +150,7 @@ export function Terminal({
     const surface = surfaceRef.current
     if (!pane || !inner || !surface) return
 
-    const palette = terminalPalette(prefersDark())
+    const palette = resolveTheme(themeIdRef.current, prefersDark())
     const emulator = createEmulator({ cols: 80, rows: 24, theme: palette })
     emulator.attachTo(surface)
     emulator.focus()
@@ -382,7 +397,9 @@ export function Terminal({
 
     const media = globalThis.matchMedia?.(DARK_SCHEME_QUERY)
     const onScheme = () => {
-      const next = terminalPalette(media?.matches ?? true)
+      // Through resolveTheme, so a chosen preset holds its ground when the
+      // OS scheme flips — only System follows it.
+      const next = resolveTheme(themeIdRef.current, media?.matches ?? true)
       emulator.setTheme(next)
       // The pane shows through wherever a scaled surface does not reach, so it
       // has to follow the terminal's background and not the app's.
@@ -398,6 +415,11 @@ export function Terminal({
         if (restartReq !== null) return
         const reqId = client.spawn({ cwd: dir ?? undefined, cols: dims.cols, rows: dims.rows })
         if (reqId !== null) restartReq = reqId
+      },
+      applyTheme: (id) => {
+        const next = resolveTheme(id, prefersDark())
+        emulator.setTheme(next)
+        pane.style.backgroundColor = next.background ?? ''
       },
     }
 
@@ -426,6 +448,11 @@ export function Terminal({
 
   const handleRestart = () => actionsRef.current?.restart(cwd)
   const handleClose = () => onClosed?.()
+  const handleTheme = (id: string) => {
+    setThemeId(id)
+    saveSessionTheme(sessionId, id)
+    actionsRef.current?.applyTheme(id)
+  }
 
   return (
     <div
@@ -460,6 +487,7 @@ export function Terminal({
           loses to them — the controls must win the stack or the scrollbar
           eats their clicks. */}
       <div className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
+        <ThemeMenu value={themeId} onChange={handleTheme} />
         {/*
           A real link, so a middle or cmd click behaves browser-natively. It
           opens in a new tab by default so this session stays put; the root
@@ -470,13 +498,15 @@ export function Terminal({
           target="_blank"
           rel="noopener"
           title="New session here"
+          // The same box as the theme trigger — an icon in px-2.5 py-1.5 —
+          // so the cluster reads as one control strip, not two heights.
           className={cn(
-            'rounded-lg px-2.5 py-1.5 text-base/6 font-medium sm:text-sm/6',
+            'rounded-lg px-2.5 py-1.5',
             'bg-zinc-950/80 text-zinc-400 shadow-lg ring-1 ring-white/10 backdrop-blur-sm',
             'transition-colors hover:text-zinc-100',
           )}
         >
-          <span aria-hidden="true">+</span>
+          <PlusIcon aria-hidden="true" className="size-4" />
           <span className="sr-only">New session in this directory</span>
         </a>
         {phase !== 'live' && (

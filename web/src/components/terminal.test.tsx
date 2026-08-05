@@ -77,6 +77,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   document.title = 'flue'
+  localStorage.clear()
 })
 
 /**
@@ -941,6 +942,24 @@ describe('the exit overlay', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close' }))
     expect(sock.ofType('close')).toHaveLength(0)
     expect(onClosed).toHaveBeenCalled()
+  })
+})
+
+describe('the session theme', () => {
+  it('mounts with the theme the session chose before', () => {
+    localStorage.setItem('flue:theme:s1', 'dracula')
+    const { em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    // The stored preset is the emulator's very first theme — applied at
+    // construction, not corrected after a default-themed first paint.
+    expect(em.live().themes[0]?.background).toBe('#282a36')
+  })
+
+  it('mounts with flue’s own palette when the session never chose', () => {
+    const { em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    // The harness's matchMedia reports light, so flue's light pair — the
+    // point is that it is flue's own palette, not a preset's.
+    expect(em.live().themes[0]?.background).toBe('#ffffff')
   })
 })
 
