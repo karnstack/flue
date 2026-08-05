@@ -76,7 +76,10 @@ describe('createFlueRouter', () => {
 
   it('wraps a management route in the app shell when it renders', async () => {
     await renderAt('/sessions')
-    expect(screen.getByRole('complementary')).toBeTruthy()
+    // The shell's chrome, by its landmarks: the nav inside the sidebar, and
+    // the content region the sidebar primitives render as <main>.
+    expect(screen.getByRole('navigation')).toBeTruthy()
+    expect(screen.getByRole('main')).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Sessions' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Sessions' })).toBeTruthy()
   })
@@ -92,9 +95,9 @@ describe('createFlueRouter', () => {
     // is about absence, and a route that threw would satisfy all of them.
     expect(container.querySelector('[data-flue-surface]')).not.toBeNull()
 
-    expect(screen.queryByRole('complementary')).toBeNull()
-    expect(screen.queryByRole('banner')).toBeNull()
     expect(screen.queryByRole('navigation')).toBeNull()
+    expect(screen.queryByRole('main')).toBeNull()
+    expect(document.querySelector('[data-slot="sidebar"]')).toBeNull()
     // The one link is the terminal's own new-session control — part of the
     // terminal, not chrome around it. Anything beyond it is chrome creeping
     // back in.
