@@ -162,6 +162,11 @@ local pairing ceremony, the Devices screen and `/pair`). Part 2 is the relay —
   redeem step — a 503, or a provenance 403 (`web/src/routes/pair.tsx:219-239`).
   The token is still good and the UI says otherwise. Nothing writes an audit line
   for a provenance 403 at an exempt path, either.
+- `Device.LastSeen` is written once, at pairing (`internal/crypto/devices.go`), and
+  never updated, so the Devices screen's "Last seen" column is truthful only
+  until `cfrelay` lands — nothing over `local` connects as a device. Part 2 must
+  add `DeviceStore.UpdateLastSeen` and call it on connect; writing that method
+  now would be one with no caller.
 - `loadIdentity` failing is fatal to `serve` (`cmd/flue/main.go:170`). Degrading
   to an empty `Identity` — pairing off, shells still up — is the friendlier shape
   for a keystore that got chmod'd wrong.
