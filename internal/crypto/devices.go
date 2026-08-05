@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -95,9 +96,13 @@ func (s *DeviceStore) Add(label string, publicKey []byte) (Device, error) {
 		return Device{}, err
 	}
 	id := DeviceID(publicKey)
+	// On the bytes, not on the id. The id is a 48-bit digest of the key — a
+	// label for people and for URLs — so deciding "already paired" from it
+	// would refuse a genuinely new device that happened to collide, and would
+	// tell whoever ground the collision out that they had found one.
 	for _, d := range devices {
-		if d.ID == id {
-			return Device{}, fmt.Errorf("crypto: device %s is already paired", id)
+		if bytes.Equal(d.PublicKey, publicKey) {
+			return Device{}, fmt.Errorf("crypto: device %s is already paired", d.ID)
 		}
 	}
 	now := time.Now().UTC()
@@ -134,8 +139,15 @@ func (s *DeviceStore) FindByKey(publicKey []byte) (Device, bool, error) {
 		return Device{}, false, err
 	}
 	id := DeviceID(publicKey)
+	// Both halves, and the bytes are the load-bearing one. DeviceID is
+	// hex(sha256(key))[:12] — 48 bits — so a lookup that matched on it alone
+	// would accept any key ground out to collide with a paired device's digest,
+	// which is offline work against a fixed target with nothing to rate-limit
+	// it. That key would then pass as the paired device at every caller of this
+	// function, including the handshake. The id is compared first because it is
+	// a cheap reject, not because it decides anything.
 	for _, d := range devices {
-		if d.ID == id {
+		if d.ID == id && bytes.Equal(d.PublicKey, publicKey) {
 			return d, true, nil
 		}
 	}

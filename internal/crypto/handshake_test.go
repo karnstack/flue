@@ -13,9 +13,9 @@ type pipe struct{ a2b, b2a chan []byte }
 
 func newPipe() *pipe { return &pipe{a2b: make(chan []byte, 4), b2a: make(chan []byte, 4)} }
 
-func (p *pipe) aSend(b []byte) error { p.a2b <- b; return nil }
+func (p *pipe) aSend(b []byte) error   { p.a2b <- b; return nil }
 func (p *pipe) aRecv() ([]byte, error) { return <-p.b2a, nil }
-func (p *pipe) bSend(b []byte) error { p.b2a <- b; return nil }
+func (p *pipe) bSend(b []byte) error   { p.b2a <- b; return nil }
 func (p *pipe) bRecv() ([]byte, error) { return <-p.a2b, nil }
 
 func handshakePair(t *testing.T) (initiator, responder *Channel, deviceStatic []byte) {
