@@ -94,7 +94,42 @@ func (p *pairingState) cancel() {
 	p.token, p.expires = "", time.Time{}
 }
 
-// redeem spends token, reporting whether it was the live one.
+// redeemResult is the outcome of presenting a pairing token.
+//
+// It exists for the audit log and for nothing else. To the caller of
+// /api/pair every non-accepted value is the same refusal, byte for byte — see
+// refusePair — because the difference between them is information about the
+// user's live ceremony. To whoever reads the daemon's log the difference is
+// the whole point: "someone probed an endpoint that was inert" and "someone
+// presented a wrong token against a window the user had open, and burned it"
+// are the same 403 and very different events.
+type redeemResult int
+
+const (
+	pairAccepted redeemResult = iota
+	pairNoWindow
+	pairWrongToken
+	pairExpired
+)
+
+// String is what the audit log records. Phrases rather than codes, because
+// this is read by a person looking at stderr, not parsed.
+func (r redeemResult) String() string {
+	switch r {
+	case pairAccepted:
+		return "accepted"
+	case pairNoWindow:
+		return "no pairing window open"
+	case pairWrongToken:
+		return "wrong token against an open window"
+	case pairExpired:
+		return "pairing window had expired"
+	}
+	return "unknown"
+}
+
+// redeem spends token, reporting whether it was the live one and, when it was
+// not, which of the three ways it was not.
 //
 // This is find-and-delete inside a single critical section — the same
 // discipline as local.Auth.Redeem, for the same reason: two concurrent
@@ -110,22 +145,29 @@ func (p *pairingState) cancel() {
 // makes the user press "pair" again, which is a cost worth paying and one the
 // UI can explain.
 //
+// A mismatch is reported as such even when the window had also expired,
+// because the two say different things about who presented it: the token was
+// never right, as opposed to a real ceremony that ran out of time. Neither
+// distinction ever leaves this process except through the log.
+//
 // The comparison is crypto/subtle's rather than ==, so the answer does not
 // depend on how long a prefix the guess got right.
-func (p *pairingState) redeem(token string, now time.Time) bool {
+func (p *pairingState) redeem(token string, now time.Time) redeemResult {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	active, expires := p.token, p.expires
 	p.token, p.expires = "", time.Time{}
 
-	if active == "" {
-		return false
+	switch {
+	case active == "":
+		return pairNoWindow
+	case subtle.ConstantTimeCompare([]byte(active), []byte(token)) != 1:
+		return pairWrongToken
+	case !now.Before(expires):
+		return pairExpired
 	}
-	if subtle.ConstantTimeCompare([]byte(active), []byte(token)) != 1 {
-		return false
-	}
-	return now.Before(expires)
+	return pairAccepted
 }
 
 // pairRequest is what the /pair page posts.
@@ -154,11 +196,13 @@ func (s *Server) daemonPub() string {
 
 // refusePair answers a rejected pairing attempt.
 //
-// One status and one body for every refusal, with the reason going only to the
-// audit log. Whether a window was open, whether the token was one that had
-// existed, whether it had expired — all of that is information about the
-// user's live ceremony, and an endpoint reachable without the session token
-// must not be an oracle for it.
+// One status and one body — the same bytes, every time — with the reason going
+// only to the audit log. Whether a window was open, whether the token was one
+// that had existed, whether it had expired: all of that is information about
+// the user's live ceremony, and an endpoint reachable without the session
+// token must not be an oracle for it. The uniformity of the answer and the
+// specificity of the log are both pinned by tests, because the two pull in
+// opposite directions and it would be easy to fix one by spoiling the other.
 func (s *Server) refusePair(w http.ResponseWriter, r *http.Request, reason string, args ...any) {
 	s.logger().Warn("pairing refused",
 		append([]any{"peer", r.RemoteAddr, "reason", reason}, args...)...)
@@ -226,10 +270,11 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.pairing.redeem(req.Token, time.Now()) {
-		// Indistinguishable on purpose: no window, wrong token and expired
-		// token are one answer to the caller and three lines in the log.
-		s.refusePair(w, r, "no live pairing token")
+	if res := s.pairing.redeem(req.Token, time.Now()); res != pairAccepted {
+		// Indistinguishable on purpose in the answer, and deliberately
+		// distinguished in the log: no window, wrong token and expired token
+		// are one 403 to the caller and three different reasons on stderr.
+		s.refusePair(w, r, res.String())
 		return
 	}
 

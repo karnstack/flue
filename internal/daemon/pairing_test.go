@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,11 +27,11 @@ func TestPairingTokenRedeemsExactlyOnce(t *testing.T) {
 	now := time.Now()
 	token, _ := p.start(now)
 
-	if !p.redeem(token, now) {
-		t.Fatal("first redeem of a live token failed, want success")
+	if got := p.redeem(token, now); got != pairAccepted {
+		t.Fatalf("first redeem of a live token = %v, want accepted", got)
 	}
-	if p.redeem(token, now) {
-		t.Fatal("second redeem of the same token succeeded; the token is single-use")
+	if got := p.redeem(token, now); got != pairNoWindow {
+		t.Fatalf("second redeem of the same token = %v, want no window; the token is single-use", got)
 	}
 }
 
@@ -59,20 +61,20 @@ func TestPairingTokenExpires(t *testing.T) {
 	if want := now.Add(PairingTTL); !expires.Equal(want) {
 		t.Fatalf("expires = %v, want %v", expires, want)
 	}
-	if !live.redeem(token, expires.Add(-time.Nanosecond)) {
-		t.Fatal("redeem an instant before the deadline failed, want success")
+	if got := live.redeem(token, expires.Add(-time.Nanosecond)); got != pairAccepted {
+		t.Fatalf("redeem an instant before the deadline = %v, want accepted", got)
 	}
 
 	var dead pairingState
 	token, expires = dead.start(now)
-	if dead.redeem(token, expires) {
-		t.Fatal("redeem at the deadline succeeded, want failure")
+	if got := dead.redeem(token, expires); got != pairExpired {
+		t.Fatalf("redeem at the deadline = %v, want expired", got)
 	}
 
 	var later pairingState
 	token, expires = later.start(now)
-	if later.redeem(token, expires.Add(time.Second)) {
-		t.Fatal("redeem after the deadline succeeded, want failure")
+	if got := later.redeem(token, expires.Add(time.Second)); got != pairExpired {
+		t.Fatalf("redeem after the deadline = %v, want expired", got)
 	}
 }
 
@@ -84,11 +86,11 @@ func TestPairingWrongTokenBurnsTheWindow(t *testing.T) {
 	now := time.Now()
 	token, _ := p.start(now)
 
-	if p.redeem("not-the-token", now) {
-		t.Fatal("redeem of a wrong token succeeded")
+	if got := p.redeem("not-the-token", now); got != pairWrongToken {
+		t.Fatalf("redeem of a wrong token = %v, want wrong token", got)
 	}
-	if p.redeem(token, now) {
-		t.Fatal("the real token still redeemed after a wrong guess; a guess must burn the window")
+	if got := p.redeem(token, now); got != pairNoWindow {
+		t.Fatalf("the real token after a wrong guess = %v, want no window; a guess must burn it", got)
 	}
 }
 
@@ -101,15 +103,15 @@ func TestPairingStartTwiceOnlySecondRedeems(t *testing.T) {
 	if first == second {
 		t.Fatal("two starts produced the same token")
 	}
-	if !p.redeem(second, now) {
-		t.Fatal("the second token did not redeem, want success")
+	if got := p.redeem(second, now); got != pairAccepted {
+		t.Fatalf("the second token = %v, want accepted", got)
 	}
 
 	var q pairingState
 	first, _ = q.start(now)
 	q.start(now)
-	if q.redeem(first, now) {
-		t.Fatal("the superseded token redeemed, want failure")
+	if got := q.redeem(first, now); got != pairWrongToken {
+		t.Fatalf("the superseded token = %v, want wrong token", got)
 	}
 }
 
@@ -119,18 +121,18 @@ func TestPairingCancelClearsTheWindow(t *testing.T) {
 	token, _ := p.start(now)
 	p.cancel()
 
-	if p.redeem(token, now) {
-		t.Fatal("a cancelled token redeemed, want failure")
+	if got := p.redeem(token, now); got != pairNoWindow {
+		t.Fatalf("a cancelled token = %v, want no window", got)
 	}
 }
 
 func TestPairingRedeemWithNoWindowFails(t *testing.T) {
 	var p pairingState
-	if p.redeem("anything", time.Now()) {
-		t.Fatal("redeem with no active window succeeded")
+	if got := p.redeem("anything", time.Now()); got != pairNoWindow {
+		t.Fatalf("redeem with no active window = %v, want no window", got)
 	}
-	if p.redeem("", time.Now()) {
-		t.Fatal("redeem of an empty token with no active window succeeded")
+	if got := p.redeem("", time.Now()); got != pairNoWindow {
+		t.Fatalf("redeem of an empty token with no active window = %v, want no window", got)
 	}
 }
 
@@ -377,6 +379,116 @@ func TestMalformedRequestDoesNotBurnTheWindow(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(deviceKey(0x2a))
 	if resp := pairPost(t, ts, ts.URL, token, key, "phone"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("pair after a malformed attempt = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestPairRefusalReasonsAreLoggedApart is the other half of the uniform 403.
+// The caller must not be able to tell the three failures apart; whoever reads
+// the daemon's log must. "Someone probed an endpoint that was inert" and
+// "someone presented a wrong token against a window the user had open, and
+// burned it" are the same answer over HTTP and very different events, and an
+// audit trail that collapses them cannot be used to notice the second.
+func TestPairRefusalReasonsAreLoggedApart(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(deviceKey(0x2a))
+
+	for name, tc := range map[string]struct {
+		open  time.Duration // how long ago the window was opened; 0 for none
+		token func(live string) string
+		want  string
+	}{
+		"no window": {
+			token: func(string) string { return "Zm91cnRlZW4tY2hhcnM" },
+			want:  pairNoWindow.String(),
+		},
+		"wrong token against a live window": {
+			open:  time.Second,
+			token: func(string) string { return "Zm91cnRlZW4tY2hhcnM" },
+			want:  pairWrongToken.String(),
+		},
+		"expired window": {
+			open:  PairingTTL + time.Second,
+			token: func(live string) string { return live },
+			want:  pairExpired.String(),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts, srv := newPairServer(t)
+			buf := &syncBuffer{}
+			srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+
+			live := ""
+			if tc.open != 0 {
+				live, _ = srv.pairing.start(time.Now().Add(-tc.open))
+			}
+			resp := pairPost(t, ts, ts.URL, tc.token(live), key, "phone")
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("pair = %d, want 403", resp.StatusCode)
+			}
+
+			want := "reason=" + strconv.Quote(tc.want)
+			if !logLineContains(buf, "pairing refused", want) {
+				t.Errorf("no refusal logged with %s; log:\n%s", want, buf.String())
+			}
+			// The reason belongs to the log and nowhere else.
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if strings.Contains(string(body), tc.want) {
+				t.Errorf("the response body leaked the refusal reason: %q", body)
+			}
+		})
+	}
+}
+
+// TestEveryPairRefusalAnswersTheSameBytes is the invariant the log has to be
+// specific *instead of*: however the request was wrong, and whether or not a
+// token had ever existed, the answer is one status and one body. Anything that
+// varies here is an oracle for the user's live pairing ceremony.
+func TestEveryPairRefusalAnswersTheSameBytes(t *testing.T) {
+	good := base64.StdEncoding.EncodeToString(deviceKey(0x2a))
+
+	// Each case is (open a window?, origin, token, key) and every one of them
+	// must produce byte-identical output.
+	cases := []struct {
+		name   string
+		open   time.Duration
+		origin func(ts *httptest.Server) string
+		token  func(live string) string
+		key    string
+	}{
+		{"no window", 0, func(ts *httptest.Server) string { return ts.URL }, func(string) string { return "Zm91cnRlZW4tY2hhcnM" }, good},
+		{"wrong token", time.Second, func(ts *httptest.Server) string { return ts.URL }, func(string) string { return "Zm91cnRlZW4tY2hhcnM" }, good},
+		{"expired", PairingTTL + time.Second, func(ts *httptest.Server) string { return ts.URL }, func(live string) string { return live }, good},
+		{"foreign origin", time.Second, func(*httptest.Server) string { return "http://127.0.0.1:3000" }, func(live string) string { return live }, good},
+		{"malformed key", time.Second, func(ts *httptest.Server) string { return ts.URL }, func(live string) string { return live }, "not base64 at all!!"},
+		{"no token", time.Second, func(ts *httptest.Server) string { return ts.URL }, func(string) string { return "" }, good},
+	}
+
+	var first []byte
+	var firstName string
+	for _, tc := range cases {
+		ts, srv := newPairServer(t)
+		live := ""
+		if tc.open != 0 {
+			live, _ = srv.pairing.start(time.Now().Add(-tc.open))
+		}
+		resp := pairPost(t, ts, tc.origin(ts), tc.token(live), tc.key, "phone")
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s: pair = %d, want 403", tc.name, resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("%s: read body: %v", tc.name, err)
+		}
+		if first == nil {
+			first, firstName = body, tc.name
+			continue
+		}
+		if !bytes.Equal(body, first) {
+			t.Errorf("%s answered %q but %s answered %q; every refusal must answer the same bytes",
+				tc.name, body, firstName, first)
+		}
 	}
 }
 
