@@ -173,8 +173,12 @@ export class FlueClient {
   /** A `list` asked for while the socket was down. See `list`. */
   private listOwed = false
 
-  /** A `devices` asked for while the socket was down. See `listDevices`. */
-  private devicesOwed = false
+  /**
+   * Whether this tab wants the paired-device list. Unlike `listOwed`, this
+   * outlives the connection it was set on and is replayed on every one after
+   * it, for the reason spelled out on `listDevices`.
+   */
+  private devicesWanted = false
 
   private outputListeners = new Emitter<[number, Uint8Array]>()
   private attachedListeners = new Emitter<[Attached]>()
@@ -301,7 +305,7 @@ export class FlueClient {
     this.clearRetry()
     this.attempt = 0
     this.listOwed = false
-    this.devicesOwed = false
+    this.devicesWanted = false
     this.teardown()
     this.setStatus('closed')
   }
@@ -319,15 +323,25 @@ export class FlueClient {
   }
 
   /**
-   * Ask for the paired-device list.
+   * Ask for the paired-device list, and keep asking on every connection after
+   * this one.
    *
-   * Held while the socket is down for the same reasons `list` is, and one
-   * more: a `deviceList` is otherwise only pushed when a pairing or a revoke
-   * happens, so a request dropped on a cold mount leaves that screen empty
-   * until somebody changes something, which may be never.
+   * The only request that goes further than `list`'s hold-while-down, and it
+   * has to. `deviceList` is pushed only when a pairing or a revoke happens, so
+   * nothing else will ever correct a stale list — and a reconnect is precisely
+   * when it is likely to *be* stale, because a device revoked during the
+   * outage leaves the tab showing an entry that no longer exists, for as long
+   * as the tab stays open. `list` needs no such thing only because the
+   * sessions screen re-asks every few seconds; a devices screen has no reason
+   * to poll and should not have to.
+   *
+   * The intent is one flag rather than a queue, because the question is
+   * idempotent, and it lasts until `close`: one `devices` per connection
+   * thereafter, alongside the reattach replay that connection already carries.
    */
   listDevices() {
-    if (!this.send({ type: 'devices' })) this.devicesOwed = true
+    this.devicesWanted = true
+    this.send({ type: 'devices' })
   }
 
   /**
@@ -503,10 +517,9 @@ export class FlueClient {
         this.listOwed = false
         this.send({ type: 'list' })
       }
-      if (this.devicesOwed) {
-        this.devicesOwed = false
-        this.send({ type: 'devices' })
-      }
+      // Not cleared, unlike the owed list: what this replays is a standing
+      // intent, and the answer is what corrects a list the outage invalidated.
+      if (this.devicesWanted) this.send({ type: 'devices' })
     }
 
     sock.onclose = () => {

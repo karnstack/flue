@@ -1351,7 +1351,65 @@ describe('FlueClient sending', () => {
     expect(sockets[0]!.sentControl().map((m) => m.type)).toEqual(['hello', 'devices'])
   })
 
-  it('does not carry a held device list across a close', () => {
+  it('asks for the device list again on every connection, not only the first', async () => {
+    // The list is push-on-change and nothing polls it, so an answer received
+    // before an outage is the last word the tab will ever get. A device
+    // revoked while the socket was down would go on showing, with a Revoke
+    // button aimed at an id the daemon no longer knows, until the tab is
+    // reloaded. Nobody asks again here: the client re-asks on the consumer's
+    // behalf, exactly as it replays the reattach plan.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+    const seen: string[][] = []
+    c.onDeviceList((devices) => seen.push(devices.map((d) => d.id)))
+
+    c.connect()
+    sockets[0]!.open()
+    c.listDevices()
+    sockets[0]!.emitControl({
+      type: 'deviceList',
+      devices: [
+        { id: 'd1b2c3d4e5f6', label: 'iPhone', pairedAt: 1754380800, lastSeen: 1754384400 },
+        { id: 'd9a8b7c6d5e4', label: 'iPad', pairedAt: 1754294400, lastSeen: 1754298000 },
+      ],
+    })
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().filter((m) => m.type === 'devices')).toStrictEqual([
+      { type: 'devices' },
+    ])
+
+    // And the answer reaches the same listener, which is what actually closes
+    // the gap: the iPhone was revoked during the outage.
+    sockets[1]!.emitControl({
+      type: 'deviceList',
+      devices: [{ id: 'd9a8b7c6d5e4', label: 'iPad', pairedAt: 1754294400, lastSeen: 1754298000 }],
+    })
+    expect(seen).toEqual([['d1b2c3d4e5f6', 'd9a8b7c6d5e4'], ['d9a8b7c6d5e4']])
+  })
+
+  it('asks for no device list on a connection where none was ever wanted', async () => {
+    // The re-ask is a standing intent, not something every connection does.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+  })
+
+  it('does not carry the device-list intent across a close', () => {
+    // `close` is the tab letting go for good, so the standing re-ask goes with
+    // it — a later `connect` on the same client starts wanting nothing.
     const { c, sockets } = harness()
     c.connect()
     c.listDevices()
