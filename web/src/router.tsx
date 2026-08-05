@@ -6,6 +6,7 @@ import {
   useRouterState,
 } from '@tanstack/react-router'
 import { AppShell } from '@/components/app-shell'
+import { DevicesRoute } from '@/routes/devices'
 import { SessionsRoute } from '@/routes/sessions'
 import { TerminalRoute } from '@/routes/terminal'
 
@@ -43,9 +44,9 @@ const sessionsRoute = createRoute({
   component: SessionsRoute,
 })
 
-/** Thin placeholder so the nav link resolves. Devices and pairing are a
- *  later build step; a Link to a route that does not exist is a type error
- *  and a dead link. */
+/** Thin placeholder so the nav link resolves. Settings are a later build
+ *  step; a Link to a route that does not exist is a type error and a dead
+ *  link. */
 function Placeholder({ title, blurb }: { title: string; blurb: string }) {
   return (
     <div className="p-4 sm:p-6 lg:p-8">
@@ -62,12 +63,7 @@ function Placeholder({ title, blurb }: { title: string; blurb: string }) {
 const devicesRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/devices',
-  component: () => (
-    <Placeholder
-      title="Devices"
-      blurb="Pairing a phone or another laptop arrives once remote transports land."
-    />
-  ),
+  component: DevicesRoute,
 })
 
 const settingsRoute = createRoute({
