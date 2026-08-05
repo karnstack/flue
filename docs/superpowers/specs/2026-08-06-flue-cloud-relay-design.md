@@ -201,6 +201,18 @@ Beyond the relay, the hosted product adds:
   limits, a kill switch, and terms — from day one, independent of billing. See
   Open Items.
 
+**Stack (decided 2026-08-06):** the flue.sh control plane is a **TanStack Start
+app deployed to Cloudflare Workers**, with **SQLite as the database — local
+SQLite in dev, Cloudflare D1 in production**. It is a separate Worker from the
+relay: the relay stays a small, auditable forwarder; the control plane owns
+accounts, invites, and the device directory. The relay authenticates SaaS
+channels by verifying tokens the control plane signs (a shared signing secret
+set on both Workers), so the relay never calls the control plane on the hot
+path. **Email login codes only, no passwords.** Delivery of the code email goes
+through a provider-agnostic sender interface with a placeholder implementation
+(logs the code in dev); the real email provider is wired in later — the seam,
+not the sender, is in scope.
+
 ### Self-host (the sideline)
 
 Open source. A self-hoster runs `flue` and points it at their own Cloudflare
@@ -262,9 +274,10 @@ One design, decomposed into sequenced implementation plans (each its own
   hash + PWA, and the honest-MITM FAQ. **Ends with a working self-host relay you
   can reach your own machine through** — and it is the exact substrate the SaaS
   sits on. This is also the cost-measurement vehicle.
-- **Plan 2 — flue.sh SaaS (invite-only).** Email-only auth (magic link or code),
-  an invite gate, the device directory, account-based enrollment
-  (device-authorization flow), the multi-tenant Worker auth front-end, per-account
+- **Plan 2 — flue.sh SaaS (invite-only).** The TanStack Start control plane on
+  Workers + D1: email-code auth (no passwords, placeholder code delivery behind
+  a sender seam), an invite gate, the device directory, account-based enrollment
+  (device-authorization flow), the signed-token relay auth front-end, per-account
   rate limits, an abuse kill switch, and ToS. **No billing and no open signup.**
   Built on Plan 1's substrate; the relay core is untouched.
 - **Later — OAuth/managed auth, billing, native apps.** GitHub/Google or a
