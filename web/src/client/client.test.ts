@@ -421,7 +421,7 @@ describe('control message golden file', () => {
     const want: Pairing = {
       type: 'pairing',
       token: 'Zm91cnRlZW4tY2hhcnM',
-      url: 'https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM',
+      url: 'https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM&k=3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hG6YwjhyZxaYQpb8k',
       daemonPub: '3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=',
       expiresAt: 1754384520,
     }
@@ -1514,9 +1514,9 @@ describe('FlueClient control messages', () => {
 
   it('hands on the pairing message whole', () => {
     // Every field is load-bearing at a different place on the pairing screen:
-    // the QR encodes `url`, the second device pins `daemonPub`, and the
-    // countdown reads `expiresAt`. A client that projected one of them would
-    // drop the rest silently.
+    // the QR encodes `url` — which carries the token and the key the second
+    // device pins — and the countdown reads `expiresAt`. A client that
+    // projected one of them would drop the rest silently.
     const { c, sock } = connected()
     const seen: Pairing[] = []
     c.onPairing((p) => seen.push(p))
@@ -1524,7 +1524,7 @@ describe('FlueClient control messages', () => {
     const pairing: Pairing = {
       type: 'pairing',
       token: 'Zm91cnRlZW4tY2hhcnM',
-      url: 'https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM',
+      url: 'https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM&k=3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hG6YwjhyZxaYQpb8k',
       daemonPub: '3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=',
       expiresAt: 1754384520,
     }

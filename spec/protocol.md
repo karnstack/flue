@@ -72,6 +72,15 @@ The token is 256 bits of randomness encoded as **URL-safe base64, unpadded**
 (RFC 4648 §5, no `=`). `pairing.url` splices it into `?t=` with no escaping, so
 the encoding has to survive a URL as itself.
 
+`pairing.url` also carries the daemon's static public key in `?k=`, the same 32
+bytes in the same URL-safe unpadded base64, spliced in the same way. That is the
+pinning: the QR is drawn on a screen the user physically controls and read by a
+camera, so it is the one leg of the ceremony an intermediary cannot reach. The
+device being paired pins the key from `?k=` and requires the `daemonPub` in the
+`200` to equal it, refusing the pairing outright on a mismatch. It never pins the
+answer's key, which would be trust-on-first-use over the channel Noise IK exists
+to protect, and it refuses to pair at all from a link that carries no `k`.
+
 `POST /api/pair` is the one part of the ceremony that is not a WebSocket
 message: the new device posts the token and its own public key there, and the
 pairing token — not the session token — is the credential. The request is JSON

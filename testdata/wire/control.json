@@ -27,6 +27,6 @@
     { "id": "d9a8b7c6d5e4f302", "label": "iPad", "pairedAt": 1754294400, "lastSeen": 1754298000 }
   ] } },
   { "name": "deviceListEmpty", "json": { "type": "deviceList", "devices": [] } },
-  { "name": "pairing",     "json": { "type": "pairing", "token": "Zm91cnRlZW4tY2hhcnM", "url": "https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM", "daemonPub": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=", "expiresAt": 1754384520 } },
+  { "name": "pairing",     "json": { "type": "pairing", "token": "Zm91cnRlZW4tY2hhcnM", "url": "https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM&k=3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hG6YwjhyZxaYQpb8k", "daemonPub": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=", "expiresAt": 1754384520 } },
   { "name": "revoked",     "json": { "type": "revoked", "reason": "revoked by another device" } }
 ]

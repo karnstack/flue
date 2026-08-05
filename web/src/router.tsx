@@ -5,13 +5,44 @@ import {
   Outlet,
   useRouterState,
 } from '@tanstack/react-router'
+import { FlueClientProvider } from '@/client/provider'
 import { AppShell } from '@/components/app-shell'
 import { DevicesRoute } from '@/routes/devices'
 import { PairRoute } from '@/routes/pair'
 import { SessionsRoute } from '@/routes/sessions'
 import { TerminalRoute } from '@/routes/terminal'
 
-const rootRoute = createRootRoute({ component: () => <Outlet /> })
+/** The pairing page's path. Its own constant because two routing decisions
+ *  turn on it: the route below, and whether the tab opens a socket at all. */
+const PAIR_PATH = '/pair'
+
+/**
+ * The tab's one client, and the one route that must not have it.
+ *
+ * The provider is here rather than above the router in main.tsx for a single
+ * reason: /pair is served to a device that holds no session token — getting one
+ * is the entire purpose of the page — so the socket it would open is answered
+ * with 401, and the client's backoff then retries it for as long as the tab is
+ * open. That is a WARN in the daemon's audit log every few seconds and a phone
+ * radio kept awake, in exchange for a socket the page never reads: /pair speaks
+ * to the daemon with one fetch and nothing else.
+ *
+ * The root route is where it goes because the root match outlives every
+ * navigation, so this is still exactly one client per tab and one socket for
+ * sessions, the terminal and Devices alike. Only crossing in or out of /pair
+ * changes which branch renders, and nothing in the app links there.
+ */
+const rootRoute = createRootRoute({
+  component: function Root() {
+    const pathname = useRouterState({ select: (s) => s.location.pathname })
+    if (pathname === PAIR_PATH) return <Outlet />
+    return (
+      <FlueClientProvider>
+        <Outlet />
+      </FlueClientProvider>
+    )
+  },
+})
 
 /**
  * Pathless layout for management screens. The terminal deliberately sits
@@ -106,16 +137,28 @@ const terminalRoute = createRoute({
  */
 const pairRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: '/pair',
+  path: PAIR_PATH,
   /**
-   * `t` is the pairing token the QR code carries. Narrowed to a non-empty
-   * string or nothing at all, so a link that arrives with `?t` repeated (which
-   * parses to an array) or with an empty value lands on the page's explainer
-   * rather than posting something token-shaped at the daemon and spending the
-   * user's window on it.
+   * The two halves of what a QR code carries.
+   *
+   * `t` is the single-use pairing token. `k` is the daemon's static public key,
+   * unpadded URL-safe base64 of 32 bytes — the thing the scanning device pins,
+   * and the reason the QR is the trusted channel rather than the answer to the
+   * device's own POST. `internal/daemon/conn.go` writes both.
+   *
+   * Each is narrowed to a non-empty string or dropped, so a link that arrives
+   * with a parameter repeated (which parses to an array) or empty lands on the
+   * page's refusal rather than posting something token-shaped at the daemon and
+   * spending the user's window on it. The page re-checks both types anyway: a
+   * route's search is its parent's merged with its own and the root route has
+   * no schema, so what reaches the component is the raw parse.
    */
-  validateSearch: (search: Record<string, unknown>): { t?: string } =>
-    typeof search.t === 'string' && search.t !== '' ? { t: search.t } : {},
+  validateSearch: (search: Record<string, unknown>): { t?: string; k?: string } => {
+    const out: { t?: string; k?: string } = {}
+    if (typeof search.t === 'string' && search.t !== '') out.t = search.t
+    if (typeof search.k === 'string' && search.k !== '') out.k = search.k
+    return out
+  },
   component: PairRoute,
 })
 

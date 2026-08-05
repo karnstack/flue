@@ -553,7 +553,8 @@ func TestPairStartAnswersPairing(t *testing.T) {
 	if got.Token == "" {
 		t.Fatal("pairing carried no token")
 	}
-	if want := ts.URL + "/pair?t=" + got.Token; got.URL != want {
+	if want := ts.URL + "/pair?t=" + got.Token + "&k=" +
+		base64.RawURLEncoding.EncodeToString(srv.identity.Key.Public); got.URL != want {
 		t.Errorf("url = %q, want %q", got.URL, want)
 	}
 	if want := base64.StdEncoding.EncodeToString(srv.identity.Key.Public); got.DaemonPub != want {
@@ -586,6 +587,67 @@ func TestPairStartAnswersPairing(t *testing.T) {
 		}
 		return true
 	})
+}
+
+// TestPairStartURLCarriesTheDaemonKey: the QR is the trusted channel, so the
+// URL it encodes has to carry the daemon's static public key as well as the
+// token.
+//
+// Without it the device being paired learns the key it pins from the answer to
+// its own POST — which is trust-on-first-use over exactly the channel Noise IK
+// exists to protect, and hands anything sitting in the middle of that request
+// the ability to be pinned as the daemon. The key travels in `k=`, raw 32 bytes
+// in unpadded URL-safe base64, so it survives the URL as itself and can be
+// spliced in unescaped beside the token.
+func TestPairStartURLCarriesTheDaemonKey(t *testing.T) {
+	ts, srv := newPairServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.PairStart{})
+
+	var got wire.Pairing
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		p, ok := msg.(wire.Pairing)
+		if ok {
+			got = p
+		}
+		return ok
+	})
+
+	u, err := url.Parse(got.URL)
+	if err != nil {
+		t.Fatalf("pairing url %q does not parse: %v", got.URL, err)
+	}
+	q := u.Query()
+	if q.Get("t") != got.Token {
+		t.Errorf("t = %q, want the token %q", q.Get("t"), got.Token)
+	}
+	k := q.Get("k")
+	if k == "" {
+		t.Fatalf("pairing url %q carries no k=; the device has nothing to pin", got.URL)
+	}
+	// Unpadded and URL-safe, like the token: nothing in this URL may need
+	// escaping, because nothing escapes it.
+	if strings.ContainsAny(k, "+/=") {
+		t.Errorf("k = %q carries characters that are not URL-safe", k)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(k)
+	if err != nil {
+		t.Fatalf("k = %q is not unpadded URL-safe base64: %v", k, err)
+	}
+	if len(raw) != 32 {
+		t.Fatalf("k decodes to %d bytes, want the 32 of a Noise static key", len(raw))
+	}
+	if !bytes.Equal(raw, srv.identity.Key.Public) {
+		t.Errorf("k decodes to %x, want the daemon's static public key %x", raw, srv.identity.Key.Public)
+	}
+
+	// The same key the wire field carries, in the encoding each of them uses.
+	// The URL is what the second device pins; the field is what the browser
+	// that is already trusted reads. They must never be two different keys.
+	if want := base64.StdEncoding.EncodeToString(raw); got.DaemonPub != want {
+		t.Errorf("daemonPub = %q, want the key from the URL %q", got.DaemonPub, want)
+	}
 }
 
 func TestPairCancelInvalidatesTheToken(t *testing.T) {

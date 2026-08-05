@@ -453,11 +453,24 @@ func (c *conn) handleControl(msg any) {
 		}
 		token, expires := c.srv.pairing.start(time.Now())
 		c.srv.logger().Info("pairing started", "peer", c.peer, "expiresAt", expires.Unix())
-		// The token is unpadded URL-safe base64 precisely so it can be spliced
-		// in raw here; see pairingState.start.
+		// Two parameters, and they are not the same kind of thing. `t` is the
+		// single-use credential; `k` is the daemon's static public key, and it
+		// is here because this URL is what the QR encodes — a screen the user
+		// physically controls, read by a camera, which is the only leg of the
+		// ceremony no intermediary can sit in. The device pins the key it reads
+		// there and then requires the answer to its POST to match it. Learning
+		// the key from that answer instead would be trust-on-first-use over
+		// precisely the channel the pinned key exists to protect.
+		//
+		// Both are unpadded URL-safe base64 so they can be spliced in raw with
+		// no escaping; see pairingState.start and Server.daemonPubParam.
+		//
+		// DaemonPub stays on the message as well. It is the same key in the
+		// encoding the rest of the wire uses, read by a browser that is already
+		// trusted, and the two are pinned to each other by test.
 		_ = c.sendControl(wire.Pairing{
 			Token:     token,
-			URL:       c.origin + PairPagePath + "?t=" + token,
+			URL:       c.origin + PairPagePath + "?t=" + token + "&k=" + c.srv.daemonPubParam(),
 			DaemonPub: c.srv.daemonPub(),
 			ExpiresAt: expires.Unix(),
 		})

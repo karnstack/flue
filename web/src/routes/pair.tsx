@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useSearch } from '@tanstack/react-router'
 
 import { Button } from '@/components/ui/button'
@@ -35,6 +35,30 @@ const FALLBACK_LABEL = 'This device'
  */
 const EXPIRY_NOTE =
   'Pairing links work once and expire after two minutes — start again from Devices on the paired browser.'
+
+/**
+ * What a device is told when the daemon answered as a key other than the one
+ * the QR named.
+ *
+ * This is the attack the pinned key exists to catch, so it is stated as one.
+ * Nothing was paired with the machine whose code was scanned — whatever
+ * answered is something else — and the only safe move is to go back to the
+ * screen that draws the code and start again.
+ */
+const IMPOSTOR_NOTE =
+  'This pairing link is being tampered with — the daemon that answered is not the one in the QR. Nothing was paired with the machine you scanned. Start again from Devices.'
+
+/**
+ * What a device is told after a 200 it cannot finish.
+ *
+ * Deliberately not the impostor's message and deliberately not "nothing was
+ * kept": a 200 means the daemon has already written this device into its
+ * registry. The pairing is half-done — real on the daemon, useless here — and
+ * the paired browser is now listing a row the user has no working half of. The
+ * only thing that clears it is a revoke there, so that is what this says.
+ */
+const ORPHAN_NOTE =
+  'The paired browser now lists this device even so — open Devices there and revoke it.'
 
 /*
  * The page's two shared class strings, spelled out rather than assembled.
@@ -84,6 +108,38 @@ function fromBase64(text: string): Uint8Array | null {
 }
 
 /**
+ * The daemon's static key as the QR carries it: unpadded URL-safe base64.
+ *
+ * `?k=` is spliced into the pairing URL raw by the daemon — see conn.go, which
+ * does the same with the token — so the alphabet is RFC 4648 §5 and there is no
+ * padding to strip. Anything that is not exactly 32 bytes of that is not a
+ * Noise static key and is refused as one, rather than being rounded off into a
+ * shorter string that happens to decode.
+ */
+function keyFromLink(text: string): Uint8Array | null {
+  if (text === '' || /[^A-Za-z0-9_-]/.test(text)) return null
+  const std = text.replace(/-/g, '+').replace(/_/g, '/')
+  const key = fromBase64(std.padEnd(Math.ceil(std.length / 4) * 4, '='))
+  return key !== null && key.length === KEY_BYTES ? key : null
+}
+
+/**
+ * Whether two keys are the same key.
+ *
+ * Length first, then every byte, without an early exit. Both operands are
+ * public keys — one from a QR the user photographed, one from an HTTP response
+ * — so there is no secret here for a timing side channel to leak; the loop runs
+ * to the end because writing the cheap version of a key comparison teaches the
+ * next reader of this file the wrong habit.
+ */
+function sameKey(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) diff |= a[i]! ^ b[i]!
+  return diff === 0
+}
+
+/**
  * What to call this device before the user says.
  *
  * navigator.platform is deprecated and coarse — "iPhone", "MacIntel", "Linux
@@ -123,23 +179,46 @@ function Frame({ title, children }: { title: string; children: ReactNode }) {
  * has none — getting one is what this page is for. See `withProvenance` in
  * internal/daemon/server.go for how narrow that exemption is.
  *
- * The token is read from `?t=`, and the route id is written out rather than
- * imported from src/router.tsx: importing it would close a cycle, since the
- * router imports this component. The literal is not unchecked — `from` is typed
- * against the registered route tree, so a path that drifts is a compile error
- * rather than an empty object at runtime.
+ * The QR carries two things and both are read here: the token in `?t=`, and the
+ * daemon's static public key in `?k=`. The key is the one this device pins, and
+ * the answer to the POST below is only ever checked against it — the code on
+ * the screen is the trusted channel, not the request.
+ *
+ * The route id is written out rather than imported from src/router.tsx:
+ * importing it would close a cycle, since the router imports this component.
+ * The literal is not unchecked — `from` is typed against the registered route
+ * tree, so a path that drifts is a compile error rather than an empty object at
+ * runtime.
  */
 export function PairRoute() {
-  const { t } = useSearch({ from: '/pair' })
+  const { t, k } = useSearch({ from: '/pair' })
   /*
-   * The route's validateSearch narrows `t` to a non-empty string, and the type
-   * here says it did — but a route's search is its parent's merged with its
-   * own, and the root route has no schema at all, so what actually arrives is
-   * whatever the URL parsed to. A link carrying ?t twice parses to an array,
-   * and an array is not a token. Measured rather than believed, because the one
-   * thing this value does is get posted at the daemon.
+   * The route's validateSearch narrows `t` and `k` to non-empty strings, and
+   * the types here say it did — but a route's search is its parent's merged
+   * with its own, and the root route has no schema at all, so what actually
+   * arrives is whatever the URL parsed to. A link carrying ?t twice parses to
+   * an array, and an array is not a token. Measured rather than believed,
+   * because one of these values is posted at the daemon and the other is the
+   * key everything this device ever says to it will be sealed to.
    */
   const token = typeof t === 'string' ? t : ''
+  const carried = typeof k === 'string' ? k : ''
+
+  /**
+   * The daemon's static key, from the QR and from nowhere else.
+   *
+   * This is the pinning. The QR is drawn on a screen the user physically
+   * controls and read by a camera, which is the one leg of this ceremony no
+   * intermediary can sit in; the POST below and its answer travel exactly the
+   * channel Noise IK exists to protect. So the key is taken from the link, and
+   * the answer's `daemonPub` is only ever *checked against* it — a device that
+   * pinned whatever answered would be doing trust-on-first-use over the
+   * attacker's own wire.
+   *
+   * Memoised on the raw parameter rather than recomputed, because a fresh
+   * Uint8Array every render is a fresh effect dependency every render.
+   */
+  const pinned = useMemo(() => keyFromLink(carried), [carried])
 
   const [key, setKey] = useState<DeviceKey | null>(null)
   const [label, setLabel] = useState(defaultLabel)
@@ -160,10 +239,11 @@ export function PairRoute() {
   const pending = useRef<Promise<DeviceKey> | null>(null)
 
   useEffect(() => {
-    // Nothing is generated and nothing is asked of the daemon without a token:
-    // a visitor who arrived here by hand is reading an explanation, not
-    // beginning a ceremony.
-    if (token === '') return
+    // Nothing is generated and nothing is asked of the daemon without a token
+    // and a key: a visitor who arrived here by hand is reading an explanation,
+    // not beginning a ceremony, and a link with no key in it cannot begin one
+    // that would be safe to finish.
+    if (token === '' || pinned === null) return
 
     let live = true
     pending.current ??= loadOrCreateDeviceKey()
@@ -182,7 +262,7 @@ export function PairRoute() {
     return () => {
       live = false
     }
-  }, [token])
+  }, [token, pinned])
 
   /**
    * The whole exchange as one answer: null when this device is paired, and a
@@ -191,8 +271,11 @@ export function PairRoute() {
    * The daemon's own words are carried out verbatim. It is the thing that
    * refused, this page has no better account of why than it does, and a
    * paraphrase would be this page inventing a reason.
+   *
+   * `expected` is the key from the QR, taken as an argument rather than read
+   * from the closure so that this function cannot be reached without one.
    */
-  async function attempt(device: DeviceKey): Promise<Failure | null> {
+  async function attempt(device: DeviceKey, expected: Uint8Array): Promise<Failure | null> {
     let res: Response
     try {
       res = await fetch(PAIR_ENDPOINT, {
@@ -223,19 +306,32 @@ export function PairRoute() {
     const daemonPub = typeof answer?.daemonPub === 'string' ? fromBase64(answer.daemonPub) : null
     if (daemonPub === null || daemonPub.length !== KEY_BYTES) {
       // The device is registered by now — this is a 200 — but a device that
-      // cannot name the daemon's static key can never open the handshake, so
-      // this is a failure however the daemon sees it.
+      // cannot read what the daemon answered has nothing to check the QR's key
+      // against, so this is a failure however the daemon sees it. It is a
+      // failure with a device in the registry, which is what ORPHAN_NOTE says.
       return {
-        text: 'The daemon took this device but answered with a key that could not be read, so nothing was kept.',
+        text: `The daemon took this device but answered with a key that could not be read. ${ORPHAN_NOTE}`,
         spent: true,
       }
     }
 
+    // The check the QR is for. Whatever answered has to be the daemon named on
+    // the screen the user scanned, and nothing else will do: the alternative is
+    // pinning a key handed over the very channel the pin protects. A mismatch
+    // is reported as tampering rather than as an error, because that is what it
+    // is — and unlike the branch above, nothing was registered under this
+    // device's key on the machine the user actually meant.
+    if (!sameKey(daemonPub, expected)) {
+      return { text: IMPOSTOR_NOTE, spent: true }
+    }
+
     try {
-      await savePinnedDaemonKey(daemonPub)
+      // `expected`, not `daemonPub`. They are equal by the line above, and this
+      // says which of the two is the trusted one.
+      await savePinnedDaemonKey(expected)
     } catch {
       return {
-        text: 'This browser would not keep the daemon’s key, so this device cannot reach it.',
+        text: `This browser would not keep the daemon’s key, so this device cannot reach it. ${ORPHAN_NOTE}`,
         spent: true,
       }
     }
@@ -244,11 +340,11 @@ export function PairRoute() {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (key === null || sending) return
+    if (key === null || pinned === null || sending) return
     const named = label.trim() || FALLBACK_LABEL
     setFailure(null)
     setSending(true)
-    void attempt(key).then((outcome) => {
+    void attempt(key, pinned).then((outcome) => {
       setSending(false)
       if (outcome === null) setPaired(named)
       else setFailure(outcome)
@@ -264,6 +360,34 @@ export function PairRoute() {
           open the link printed beside it here.
         </p>
         <p className={PROSE}>{EXPIRY_NOTE}</p>
+      </Frame>
+    )
+  }
+
+  /*
+   * A token with no key beside it. The daemon writes both into every link it
+   * hands out, so this is a link that was saved, retyped, forwarded through
+   * something that rewrote it — or fabricated.
+   *
+   * The tempting fallback is to pair anyway and pin whatever the daemon
+   * answers. That is precisely the trust-on-first-use this parameter exists to
+   * end: the answer arrives over the channel an intermediary would be sitting
+   * in, so a device that accepted it would pin the intermediary and never know.
+   * So nothing is generated, nothing is sent, and the page says why.
+   */
+  if (pinned === null) {
+    return (
+      <Frame title="This link cannot pair anything">
+        <p className={PROSE}>
+          A pairing link carries the daemon’s own key, and this one does not carry a usable one — so
+          this device has no way to tell the real daemon from something answering in its place.
+          Nothing has been sent.
+        </p>
+        <p className={PROSE}>
+          Scan the code Devices is showing on the paired browser right now. A link that was saved,
+          retyped or passed through something that shortened it has lost the part that makes pairing
+          safe.
+        </p>
       </Frame>
     )
   }

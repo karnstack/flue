@@ -293,9 +293,18 @@ export interface Pairing {
   type: 'pairing'
   /** Single-use, and good for two minutes. */
   token: string
-  /** Absolute: the `/pair` page on this origin, carrying the token. */
+  /**
+   * Absolute: the `/pair` page on this origin, carrying the token in `?t=` and
+   * the daemon's static public key in `?k=` (URL-safe base64, unpadded). This
+   * is what the QR encodes, and `?k=` is what the second device pins — the code
+   * is drawn on a screen the user controls, which no intermediary can reach.
+   */
   url: string
-  /** The daemon's static public key, base64. */
+  /**
+   * The daemon's static public key, standard base64. The same key `url` carries
+   * in `?k=`, for the browser that is already paired; the device being paired
+   * takes its copy from the URL rather than from here or from `POST /api/pair`.
+   */
   daemonPub: string
   /** Unix **seconds**, matching the Go side. */
   expiresAt: number

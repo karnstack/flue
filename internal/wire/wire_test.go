@@ -200,7 +200,7 @@ func TestControlRoundTripsDeviceAndPairingMessages(t *testing.T) {
 		}}},
 		{"pairing", "pairing", Pairing{
 			Token:     "Zm91cnRlZW4tY2hhcnM",
-			URL:       "https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM",
+			URL:       "https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM&k=3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hG6YwjhyZxaYQpb8k",
 			DaemonPub: "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=",
 			ExpiresAt: 1754384520,
 		}},

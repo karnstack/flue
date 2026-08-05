@@ -206,6 +206,22 @@ func (s *Server) daemonPub() string {
 	return base64.StdEncoding.EncodeToString(s.identity.Key.Public)
 }
 
+// daemonPubParam is the same 32 bytes as the pairing URL carries them.
+//
+// Unpadded and URL-safe, for the reason the pairing token is: conn.go splices
+// both into the query string raw, with no escaping, so the encoding has to be
+// one that survives a URL as itself. Standard base64's `+` and `/` do not — a
+// `+` in a query string is a space to half the things that will ever read it.
+//
+// This is the value the device being paired pins. It travels in the QR, which
+// is the one channel of this ceremony that an intermediary cannot reach: it is
+// drawn on a screen the user physically controls and read by a camera. Every
+// other route the key could take — the answer to the device's own POST, most of
+// all — is the channel the pinned key exists to protect.
+func (s *Server) daemonPubParam() string {
+	return base64.RawURLEncoding.EncodeToString(s.identity.Key.Public)
+}
+
 // refusePair answers a rejected pairing attempt.
 //
 // One status and one body — the same bytes, every time — with the reason going

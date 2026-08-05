@@ -14,6 +14,17 @@ const TOKEN = 'Zm91cnRlZW4tY2hhcnMtb2YtdG9rZW4tc2hhcGVkLXQ'
 const DAEMON_PUB_BYTES = Uint8Array.from({ length: 32 }, (_, i) => i + 1)
 const DAEMON_PUB = btoa(String.fromCharCode(...DAEMON_PUB_BYTES))
 
+/** The same key as the QR carries it: unpadded URL-safe base64, in `?k=`. */
+const urlSafe = (std: string) => std.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+const DAEMON_PUB_PARAM = urlSafe(DAEMON_PUB)
+
+/** Some other daemon's key — 32 bytes that are not the ones in the QR. */
+const OTHER_PUB_BYTES = Uint8Array.from({ length: 32 }, (_, i) => 200 - i)
+const OTHER_PUB = btoa(String.fromCharCode(...OTHER_PUB_BYTES))
+
+/** A whole pairing link, as the QR encodes it: the token and the key. */
+const LINK = `?t=${TOKEN}&k=${DAEMON_PUB_PARAM}`
+
 const EXPIRY_NOTE =
   'Pairing links work once and expire after two minutes — start again from Devices on the paired browser.'
 
@@ -98,7 +109,7 @@ afterEach(() => {
 describe('PairRoute', () => {
   it('posts the token, the device key and the label, then confirms', async () => {
     fetchMock.mockResolvedValue(paired())
-    await renderPair(`?t=${TOKEN}`)
+    await renderPair(LINK)
 
     const name = await screen.findByLabelText('Name this device')
     await userEvent.clear(name)
@@ -124,21 +135,70 @@ describe('PairRoute', () => {
     expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
   })
 
-  it('pins the daemon key the answer carried', async () => {
+  it('pins the key the QR carried, once the daemon answers as that key', async () => {
     fetchMock.mockResolvedValue(paired())
-    await renderPair(`?t=${TOKEN}`)
+    await renderPair(LINK)
 
     await userEvent.click(await armedPairButton())
     await screen.findByRole('heading', { name: 'Paired' })
 
     // The bytes, not the base64: this is what the Noise initiator will name as
-    // the responder's static key.
+    // the responder's static key. They come from `?k=` — the QR — and the
+    // answer to the POST is only ever checked against them.
     expect(await loadPinnedDaemonKey()).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('refuses a daemon whose key is not the one in the QR', async () => {
+    // The whole point of `?k=`. The QR is drawn on a screen the user controls
+    // and read by a camera; the POST and its answer travel the channel Noise IK
+    // exists to protect. So a 200 from something that names a different key is
+    // not a pairing to complete with a warning — it is the attack, and the
+    // device must pin nothing and say so.
+    fetchMock.mockResolvedValue(paired({ daemonPub: OTHER_PUB }))
+    await renderPair(LINK)
+
+    await userEvent.click(await armedPairButton())
+
+    expect(await screen.findByText(/tampered with/)).toBeTruthy()
+    expect(status()).toContain('not the one in the QR')
+    expect(screen.queryByRole('heading', { name: 'Paired' })).toBeNull()
+
+    // Neither key is kept: not the impostor's, and not the QR's either.
+    expect(await loadPinnedDaemonKey()).toBeNull()
+
+    // And no retry, because whatever answered has spent the window.
+    expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks the daemon for nothing when the link carries no key', async () => {
+    // An old link, one retyped from a screenshot, or one a chat app shortened.
+    // Without `?k=` there is nothing to check the daemon against, so falling
+    // back to whatever the answer names would be trust-on-first-use over the
+    // very channel the pinned key protects. It is a refusal, not a warning.
+    await renderPair(`?t=${TOKEN}`)
+
+    expect(await screen.findByText(/does not carry/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await loadPinnedDaemonKey()).toBeNull()
+  })
+
+  it('refuses a key parameter that is not 32 bytes of URL-safe base64', async () => {
+    // Truncated in transit, or half of one. A key that will not decode to a
+    // Noise static key is no key at all, and is refused exactly like a missing
+    // one rather than being quietly dropped in favour of the answer's.
+    await renderPair(`?t=${TOKEN}&k=${DAEMON_PUB_PARAM.slice(0, 20)}`)
+
+    expect(await screen.findByText(/does not carry/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await loadPinnedDaemonKey()).toBeNull()
   })
 
   it('repeats the daemon’s refusal and says why it will not work twice', async () => {
     fetchMock.mockResolvedValue(refused())
-    await renderPair(`?t=${TOKEN}`)
+    await renderPair(LINK)
 
     await userEvent.click(await armedPairButton())
 
@@ -161,7 +221,7 @@ describe('PairRoute', () => {
     // still be live, and a second press is the user's to make. It is never
     // made for them.
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
-    await renderPair(`?t=${TOKEN}`)
+    await renderPair(LINK)
 
     await userEvent.click(await armedPairButton())
 
@@ -176,13 +236,44 @@ describe('PairRoute', () => {
     // pairing that only fails at the first handshake, long after the page is
     // closed.
     fetchMock.mockResolvedValue(paired({ daemonPub: 'not base64 at all' }))
-    await renderPair(`?t=${TOKEN}`)
+    await renderPair(LINK)
 
     await userEvent.click(await armedPairButton())
 
     expect(await screen.findByText(/could not be read/)).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'Paired' })).toBeNull()
     expect(await loadPinnedDaemonKey()).toBeNull()
+
+    // And it says what is actually true on the other side. The 200 means the
+    // daemon wrote this device into devices.json, so "nothing was kept" would
+    // be a lie about the daemon: the paired browser is listing a device the
+    // user has no working half of, and only a revoke there clears it.
+    expect(status()).toContain('now lists this device')
+    expect(status()).toContain('revoke')
+  })
+
+  it('says the device is paired anyway when the key cannot be stored', async () => {
+    // Same side of the 200, different failure: the daemon kept its half and
+    // this browser could not keep its own. The device is registered either way,
+    // so the instruction is the same one — go and revoke it.
+    fetchMock.mockResolvedValue(paired())
+    await renderPair(LINK)
+
+    // The device key is already in hand by the time the button arms, so taking
+    // the store away here fails exactly the save that follows the 200.
+    const button = await armedPairButton()
+    vi.stubGlobal('indexedDB', {
+      open() {
+        throw new Error('the key store is gone')
+      },
+    })
+
+    await userEvent.click(button)
+
+    expect(await screen.findByText(/would not keep/)).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Paired' })).toBeNull()
+    expect(status()).toContain('now lists this device')
+    expect(status()).toContain('revoke')
   })
 
   it('explains itself and asks the daemon for nothing without a token', async () => {
@@ -203,12 +294,12 @@ describe('PairRoute', () => {
     fetchMock.mockResolvedValue(paired())
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('iPhone')
 
-    const view = await renderPair(`?t=${TOKEN}`)
+    const view = await renderPair(LINK)
     expect(await screen.findByDisplayValue('iPhone')).toBeTruthy()
     view.unmount()
 
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('')
-    await renderPair(`?t=${TOKEN}`)
+    await renderPair(LINK)
     expect(await screen.findByDisplayValue('This device')).toBeTruthy()
   })
 })
