@@ -15,14 +15,34 @@ export interface FlueClientProviderProps {
 }
 
 /**
- * One client per browser tab, mounted above the router so a single WebSocket
- * serves every route.
+ * One client per browser tab, mounted at the root of the routes that speak to
+ * the daemon so a single WebSocket serves all of them.
  *
  * Per-component clients would open a fresh socket on every navigation, and two
  * components rendering at once would open two — each of which the daemon
  * counts as a separate attachment with its own byte offsets.
+ *
+ * Nested inside another provider it is a pass-through: the client already in
+ * context is the tab's client, and building a second one here would be the very
+ * thing this component exists to prevent. That is what lets a test put a
+ * scripted client above the router and still exercise the real tree, in which
+ * the router mounts one of these for itself.
  */
 export function FlueClientProvider({ children, client }: FlueClientProviderProps) {
+  const inherited = useContext(FlueClientContext)
+  if (client === undefined && inherited !== null) return <>{children}</>
+  return <OwnClientProvider client={client}>{children}</OwnClientProvider>
+}
+
+/**
+ * The half that owns a client: builds one if it was not given one, connects it
+ * on mount, and closes it on unmount.
+ *
+ * Split out so the connect/close effect belongs to the provider that is
+ * actually responsible for the socket. A pass-through running it too would
+ * close the tab's one client the moment the inner provider unmounted.
+ */
+function OwnClientProvider({ children, client }: FlueClientProviderProps) {
   // Built on the first render that needs one, and not before: an injected
   // client means no socket URL has to be derived at all, which keeps this
   // usable anywhere `location` is not what the client should be aimed at.

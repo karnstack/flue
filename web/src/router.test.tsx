@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import { RouterProvider } from '@tanstack/react-router'
 import { FlueClientProvider } from './client/provider'
@@ -37,6 +37,59 @@ async function renderAt(path: string) {
   )
   return { ...view, client, sockets }
 }
+
+/**
+ * Mount the real router with nothing above it, and record every socket the app
+ * would have opened.
+ *
+ * No client provider from the test: the whole question here is which routes
+ * mount one for themselves, so supplying one would answer it in advance. The
+ * WebSocket constructor is the seam, because that is the only thing a daemon
+ * ever sees.
+ */
+async function renderBare(path: string): Promise<string[]> {
+  const urls: string[] = []
+  class RecordingWebSocket {
+    binaryType = ''
+    onopen: unknown = null
+    onclose: unknown = null
+    onmessage: unknown = null
+    constructor(url: string) {
+      urls.push(url)
+    }
+    send() {}
+    close() {}
+  }
+  vi.stubGlobal('WebSocket', RecordingWebSocket)
+
+  window.history.replaceState(null, '', path)
+  const router = createFlueRouter()
+  await router.load()
+  render(<RouterProvider router={router} />)
+  return urls
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+describe('the daemon socket', () => {
+  it('is not opened on the pairing route', async () => {
+    // The device on this route has no session token — getting one is what the
+    // page is for — so /ws answers 401, the client backs off and retries, and
+    // it does that for as long as the tab is open: a WARN in the daemon's audit
+    // log every few seconds, and a phone radio kept awake for a page that only
+    // ever makes one fetch. The route needs no socket, so it opens none.
+    expect(await renderBare('/pair')).toEqual([])
+  })
+
+  it('is opened on a route that has one to use', async () => {
+    // The other half, so the assertion above cannot pass by the app having
+    // stopped connecting anywhere. Sessions, the terminal and Devices all speak
+    // to the daemon over this socket, and they share exactly one.
+    expect(await renderBare('/sessions')).toEqual(['ws://localhost:3000/ws'])
+  })
+})
 
 describe('createFlueRouter', () => {
   it('matches the sessions route', () => {

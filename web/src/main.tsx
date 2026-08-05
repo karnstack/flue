@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import './styles.css'
 import { createFlueRouter } from '@/router'
-import { FlueClientProvider } from '@/client/provider'
 import { stripHandoff } from '@/lib/url'
 import { registerServiceWorker } from '@/lib/sw-register'
 
@@ -25,14 +24,15 @@ const router = createFlueRouter()
 const root = document.getElementById('root')
 if (!root) throw new Error('missing #root')
 
-// Above the router, so the whole tab shares one socket to the daemon. Mounted
-// per route instead, every navigation would open a fresh one and two screens
-// rendering at once would open two.
+// The client provider is deliberately not here. It lives on the router's root
+// route — see src/router.tsx — which outlives every navigation just as this
+// would, so the tab still shares one socket, but which can also see where the
+// tab actually is: /pair is served to a device with no session token, and a
+// socket opened there is a 401 the client would retry for as long as the page
+// is open.
 createRoot(root).render(
   <StrictMode>
-    <FlueClientProvider>
-      <RouterProvider router={router} />
-    </FlueClientProvider>
+    <RouterProvider router={router} />
   </StrictMode>,
 )
 
