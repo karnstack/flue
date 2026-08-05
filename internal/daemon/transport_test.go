@@ -180,25 +180,84 @@ func TestServeConnStampsTheDeviceLastSeen(t *testing.T) {
 	}
 }
 
-// TestServeConnServesADeviceTheRegistryDoesNotHold: an id with no entry behind
-// it raced its own revocation. There is nothing to stamp and nothing to report —
-// whoever removed the device is already closing this connection — so the
-// absence must not be logged as a failure, or every revocation leaves a warning
-// an operator has to rule out.
-func TestServeConnServesADeviceTheRegistryDoesNotHold(t *testing.T) {
+// TestServeConnRefusesADeviceTheRegistryNoLongerHolds: the interleaving where
+// a whole revocation lands between the handshake and the connection joining the
+// registries.
+//
+// Revocation is two steps — remove the device, then close its connections — and
+// a handshake that authenticated against the registry a moment before the first
+// step can arrive here after the second. The revoke walked an empty bucket and
+// returned; nothing is left that will ever look at this connection again. Every
+// step is written out below in the order it would have happened, so the state
+// ServeConn is entered in is exactly the state the race produces, with nothing
+// timing-dependent about reaching it. What must not happen is what happened
+// before this check existed: a revoked credential joining both registries and
+// being served a shell indefinitely.
+func TestServeConnRefusesADeviceTheRegistryNoLongerHolds(t *testing.T) {
+	store := crypto.NewDeviceStore(t.TempDir())
+	dev, err := store.Add("phone", bytes.Repeat([]byte{0x2a}, 32))
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
 	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
-		Identity{Devices: crypto.NewDeviceStore(t.TempDir())})
+		Identity{Devices: store})
 	buf := &syncBuffer{}
 	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
 
+	// The revoke, both halves, while the connection is still in its handshake.
+	if _, ok, err := srv.removeDevice(dev.ID); err != nil || !ok {
+		t.Fatalf("removeDevice = %v, %v", ok, err)
+	}
+	// Zero is the premise of the test rather than an incidental: the revoke
+	// found nothing to close, so it is done, and this connection is past
+	// everything that would have ended it.
+	if n := srv.disconnectDevice(dev.ID, "revoked"); n != 0 {
+		t.Fatalf("the revoke closed %d connections, want 0 — the race is not staged", n)
+	}
+
 	p := newPipeConn()
 	defer p.Close()
-	go srv.ServeConn(context.Background(), p, ConnMeta{Peer: "relay", DeviceID: "abcdefabcdef"})
-	if _, ok := expectControl(t, p).(wire.Welcome); !ok {
-		t.Fatal("a device the registry does not hold was not served")
+	done := make(chan struct{})
+	go func() { srv.ServeConn(context.Background(), p, ConnMeta{Peer: "relay", DeviceID: dev.ID}); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeConn served a device the registry no longer holds")
 	}
+
+	// Told why, in the same frame a revocation that had caught it would have
+	// sent: from the client's side the two are the same event.
+	switch m := expectControl(t, p).(type) {
+	case wire.Revoked:
+		if m.Reason != "revoked" {
+			t.Fatalf("Revoked.Reason = %q, want %q", m.Reason, "revoked")
+		}
+	default:
+		t.Fatalf("the refused connection was sent %#v, want a revoked", m)
+	}
+
+	select {
+	case <-p.closed:
+	default:
+		t.Fatal("the refused connection left the transport open")
+	}
+	if len(srv.allConns()) != 0 {
+		t.Fatal("the refused connection is still registered")
+	}
+	srv.connMu.Lock()
+	defer srv.connMu.Unlock()
+	if len(srv.deviceConns) != 0 {
+		t.Fatalf("the revoked device's bucket was re-created: %+v", srv.deviceConns)
+	}
+	// A device that is simply gone is not a bookkeeping failure, and must not
+	// be logged as one: that line means "the registry is broken", which this is
+	// not, and an operator would have to rule it out on every revocation.
 	if strings.Contains(buf.String(), "could not record") {
-		t.Fatalf("a device that was simply gone was logged as a failure:\n%s", buf.String())
+		t.Fatalf("a revoked device was logged as a stamp failure:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "no longer paired") {
+		t.Fatalf("the refusal was not logged:\n%s", buf.String())
 	}
 }
 

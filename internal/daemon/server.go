@@ -878,23 +878,34 @@ func (s *Server) deviceList() (wire.DeviceList, error) {
 	return wire.DeviceList{Devices: infos}, nil
 }
 
-// markDeviceSeen records that deviceID is connected right now, which is the
-// only event that ever moves the "last seen" column the devices screen shows.
+// markDeviceSeen records that deviceID is connected right now — the only event
+// that ever moves the "last seen" column the devices screen shows — and reports
+// whether the registry still holds the device at all.
 //
-// Best effort, and deliberately so. It runs on the connect path, where the
-// transport has already authenticated the device against this same registry, so
-// a registry that has since become unreadable is a reason to log rather than to
-// refuse a connection that was granted. A device that is simply not there raced
-// its own revocation: whoever removed it is closing this connection, and the
-// stamp has nothing to say about that.
-func (s *Server) markDeviceSeen(deviceID string) {
+// The two halves are not the same kind of answer. The stamp is bookkeeping and
+// best effort: a registry that has become unreadable or unwritable since the
+// handshake is the operator's problem, logged and then set aside, because
+// bookkeeping does not get to refuse a connection that was already granted. Not
+// finding the device is not bookkeeping. It means the registry was read and the
+// device is not in it, which is the one thing that can be true of a credential
+// that was revoked between the handshake and now — and ServeConn treats it as
+// such. A read that failed says nothing either way, so it reports still-paired
+// rather than turning a broken file into a lockout of every paired device.
+//
+// An empty id or an identity-less daemon has no device to say anything about:
+// the local transport authenticates a machine-local session token rather than a
+// device, and there is nothing for a revocation to have removed.
+func (s *Server) markDeviceSeen(deviceID string) (stillPaired bool) {
 	if deviceID == "" || s.identity.Devices == nil {
-		return
+		return true
 	}
-	if _, err := s.identity.Devices.UpdateLastSeen(deviceID, time.Now()); err != nil {
+	found, err := s.identity.Devices.UpdateLastSeen(deviceID, time.Now())
+	if err != nil {
 		s.logger().Warn("could not record a device's last-seen time",
 			"device", deviceID, "err", err)
+		return true
 	}
+	return found
 }
 
 // deviceIDLen is the width of the identity crypto.DeviceID derives: twelve

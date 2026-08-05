@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/coder/websocket"
+	"github.com/karnstack/flue/internal/wire"
 )
 
 // MessageConn is one client's ordered message stream, however it reached the
@@ -43,6 +44,11 @@ type ConnMeta struct {
 // It blocks. Authentication is the transport's job and is already done: this
 // is the point past which every transport is the same.
 //
+// The one thing it re-checks is the one thing that can have changed in between:
+// a device whose credential was revoked while its handshake was in flight is
+// told so and not served. See the comment on the markDeviceSeen call for why
+// that check has to come after the connection is registered rather than before.
+//
 // ctx is the caller's, and it deliberately bounds nothing here. The connection
 // is parented to the server's base context instead, because the context that
 // accepted it belongs to whoever handed it over — a request net/http stopped
@@ -67,8 +73,47 @@ func (s *Server) ServeConn(ctx context.Context, mc MessageConn, meta ConnMeta) {
 	s.addConn(c, meta.DeviceID)
 	defer s.removeConn(c)
 
-	s.markDeviceSeen(meta.DeviceID)
+	// After addConn, never before, and the ordering is the whole point.
+	//
+	// Revocation is two steps: remove the device from the registry, then close
+	// the connections in its bucket. A connection that authenticated a moment
+	// before the revoke has to be caught by exactly one of them. Registering
+	// first means a revoke that is still running finds this connection in the
+	// bucket and closes it; a revoke that already finished walked an empty
+	// bucket, which is only possible if its removal has already landed, so the
+	// registry read below cannot find the device. Checking first and registering
+	// after would leave the gap where neither half sees it: a revoked credential
+	// holding a live, shell-spawning connection that nothing will ever close.
+	if !s.markDeviceSeen(meta.DeviceID) {
+		s.refuseUnpairedDevice(connCtx, mc, meta)
+		return
+	}
 	c.serve()
+}
+
+// refuseUnpairedDevice ends a connection whose device the registry no longer
+// holds, telling it why first.
+//
+// The frame is the same wire.Revoked a live revocation sends, because this is
+// the same event seen from the other side of a race — the client's credential
+// was revoked, and whether the daemon learned it a moment before or a moment
+// after the handshake is not a distinction the client can act on.
+//
+// Written straight to the transport rather than queued. The outbox is drained
+// by the writer that conn.serve starts, and the whole point here is that this
+// connection is never served; the deferred Close in ServeConn is what ends it
+// once the reason has gone out. Nothing else can be writing: no writer
+// goroutine was ever started for this conn.
+func (s *Server) refuseUnpairedDevice(ctx context.Context, mc MessageConn, meta ConnMeta) {
+	s.logger().Warn("refused a connection whose device is no longer paired",
+		"peer", meta.Peer, "device", meta.DeviceID)
+	b, err := wire.EncodeControl(wire.Revoked{Reason: "revoked"})
+	if err != nil {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	_ = mc.Write(writeCtx, true, b)
 }
 
 // wsMessageConn adapts a coder/websocket connection to MessageConn.
