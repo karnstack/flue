@@ -123,6 +123,12 @@ func newID() string {
 // login shell, inheriting the environment: flue is a terminal, and a
 // sanitised environment would defeat the purpose.
 func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
+	return r.start(opts, newID(), nil, "")
+}
+
+// start is Spawn with the fields a revival dictates: the session's id, bytes
+// preloaded into the ring ahead of any live output, and an initial title.
+func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string) (*Session, error) {
 	shell := loginShell()
 	argv := opts.Cmd
 	if len(argv) == 0 {
@@ -157,7 +163,7 @@ func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
 	}
 
 	s := &Session{
-		id:        newID(),
+		id:        id,
 		pty:       f,
 		cmd:       cmd,
 		clock:     r.clock,
@@ -180,6 +186,14 @@ func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
 		},
 	}
 	s.info.ID = s.id
+	s.info.Title = title
+	// Before pump starts, so everything restored precedes everything live.
+	// The `head` a fresh attach reports covers the whole preloaded region as
+	// a consequence, which is what keeps the client's probe-reply mute gate
+	// correct over restored scrollback.
+	if len(preload) > 0 {
+		s.ring.Write(preload)
+	}
 	go s.pump()
 	go s.supervise()
 

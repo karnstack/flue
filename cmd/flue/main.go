@@ -152,6 +152,15 @@ func cmdServe(args []string) error {
 	}
 
 	reg := session.NewRegistry(time.Now)
+	// Bring back what the previous daemon saved on its way out: each session
+	// returns under its old id with its scrollback and a fresh shell in its
+	// directory. Failures are reported and skipped — revival is a courtesy,
+	// and the daemon always comes up.
+	for _, snap := range session.LoadAndClearSnapshots(snapshotsDir()) {
+		if _, err := reg.Revive(snap); err != nil {
+			fmt.Fprintf(os.Stderr, "flue: could not revive session %s: %v\n", snap.ID, err)
+		}
+	}
 	// Held rather than inlined into daemon.New because the banner below mints
 	// its own handoff token from it. Doing that in-process needs no
 	// authentication ceremony: this is the process that read the token file, so
@@ -202,7 +211,28 @@ func cmdServe(args []string) error {
 	// ListenAndServe reports a ctx-caused shutdown as nil, not as
 	// http.ErrServerClosed, so there is nothing to filter out here: whatever
 	// it returns is the exit status of the daemon.
-	return <-serveErr
+	servedErr := <-serveErr
+
+	// The daemon is no longer serving, but the shells are still its children
+	// and the rings are intact — this is the one moment revival state can be
+	// written. Nothing runs on SIGKILL, so a killed daemon revives nothing;
+	// that is the accepted shape of a graceful-only snapshot.
+	if err := session.SaveSnapshots(snapshotsDir(), reg.Snapshots()); err != nil {
+		fmt.Fprintf(os.Stderr, "flue: could not save sessions for revival: %v\n", err)
+	}
+	return servedErr
+}
+
+// snapshotsDir is where shutdown snapshots live between daemons. An empty
+// string when the config dir is unavailable — Load treats it as no
+// snapshots, Save fails with a path error it reports; neither stops a
+// daemon.
+func snapshotsDir() string {
+	dir, err := config.Dir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, session.SnapshotsDirName)
 }
 
 // serveBanner is what flue serve prints once it is listening.
