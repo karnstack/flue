@@ -103,18 +103,20 @@ on the Go side — not even `go vet` — compiles until `web/dist` exists. The
 Makefile encodes that ordering; let it do the sequencing:
 
 ```sh
-make build       # web UI first, then the binary
-bin/flue serve   # run the daemon in the foreground; prints a one-time UI URL
+make run   # builds the web UI, then runs the daemon from source; prints a one-time UI URL
 ```
 
-`make test` runs both suites (Go and Vitest), `make lint` is `go vet` plus a
-TypeScript typecheck. Use pnpm, never npm — the web workspace pins it.
+Iterating on Go only? `go run ./cmd/flue serve` skips the web rebuild once
+`web/dist` exists. `make test` runs both suites (Go and Vitest), `make lint`
+is `go vet` plus a TypeScript typecheck. Use pnpm, never npm — the web
+workspace pins it, and `mise.toml` pins the exact go/node/pnpm versions CI
+uses.
 
 For frontend work, run Vite against a real daemon:
 
 ```sh
-bin/flue serve       # terminal 1: the daemon on 127.0.0.1:7717
-cd web && pnpm dev   # terminal 2: Vite on 127.0.0.1:5173
+make run       # terminal 1: the daemon on 127.0.0.1:7717
+make web-dev   # terminal 2: Vite on 127.0.0.1:5173
 ```
 
 Open the one-time URL `flue serve` printed once — that sets the auth cookie —

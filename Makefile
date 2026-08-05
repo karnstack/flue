@@ -6,7 +6,7 @@
 #
 # web/dist is gitignored on purpose and must stay that way — see web/embed.go.
 
-.PHONY: all web build test test-go test-web lint clean site-dev site-deploy
+.PHONY: all web build run web-dev test test-go test-web lint clean site-dev site-deploy
 
 all: build
 
@@ -16,6 +16,17 @@ web:
 build: web
 	mkdir -p bin
 	go build -o bin/flue ./cmd/flue
+
+# The developer loop: `make run` in one terminal, `make web-dev` in another.
+# `go run` needs web/dist like any other Go build — the web prerequisite
+# guarantees it. Iterating on Go only? `go run ./cmd/flue serve` directly
+# skips the web rebuild once dist exists.
+
+run: web
+	go run ./cmd/flue serve
+
+web-dev:
+	cd web && pnpm install --frozen-lockfile && pnpm dev
 
 test: test-go test-web
 
