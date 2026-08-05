@@ -875,7 +875,7 @@ func TestServeBannerMintsRatherThanPrintingTheSessionToken(t *testing.T) {
 	const sessionToken = "0123456789abcdef-the-session-token"
 	auth := local.NewAuth(sessionToken, 7717)
 
-	out := serveBanner(7717, auth)
+	out := serveBanner(7717, auth, false)
 	if strings.Contains(out, sessionToken) {
 		t.Fatalf("banner printed the session token: %s", out)
 	}
@@ -934,6 +934,64 @@ func TestServeBannerDegradesWhenMintingFails(t *testing.T) {
 	}
 }
 
+// TestServeBannerOpensTheBrowserWhenAsked: with --open, the browser gets a
+// redeemable one-time link and the printed banner carries no credential at
+// all — the token the browser holds must never also sit in scrollback.
+func TestServeBannerOpensTheBrowserWhenAsked(t *testing.T) {
+	auth := local.NewAuth("0123456789abcdef-the-session-token", 7717)
+
+	var opened string
+	restore := openBrowser
+	openBrowser = func(url string) error { opened = url; return nil }
+	t.Cleanup(func() { openBrowser = restore })
+
+	out := serveBanner(7717, auth, true)
+	if opened == "" {
+		t.Fatalf("no browser launch happened; banner: %s", out)
+	}
+	u, err := url.Parse(opened)
+	if err != nil {
+		t.Fatalf("browser got an unparseable URL %q: %v", opened, err)
+	}
+	h := u.Query().Get(local.HandoffParam)
+	if h == "" {
+		t.Fatalf("browser URL carries no handoff token: %s", opened)
+	}
+	if !auth.Redeem(h) {
+		t.Fatal("the browser was handed a token its own daemon will not accept")
+	}
+	if strings.Contains(out, h) {
+		t.Fatalf("banner printed the token the browser already holds: %s", out)
+	}
+	if !strings.Contains(out, "flue open") {
+		t.Errorf("banner does not say how to get another tab: %s", out)
+	}
+}
+
+// TestServeBannerFallsBackToTheLinkWhenTheLaunchFails: a machine with no
+// browser launcher still has to let the user in, so the failure path prints
+// the link — the same fallback flue open uses.
+func TestServeBannerFallsBackToTheLinkWhenTheLaunchFails(t *testing.T) {
+	auth := local.NewAuth("0123456789abcdef-the-session-token", 7717)
+
+	restore := openBrowser
+	openBrowser = func(string) error { return errors.New("no browser here") }
+	t.Cleanup(func() { openBrowser = restore })
+
+	out := serveBanner(7717, auth, true)
+	link := bannerURL(out)
+	if link == "" {
+		t.Fatalf("no fallback link in the banner: %s", out)
+	}
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("fallback link %q is unparseable: %v", link, err)
+	}
+	if !auth.Redeem(u.Query().Get(local.HandoffParam)) {
+		t.Fatal("the fallback link's token is not redeemable")
+	}
+}
+
 // TestServeBannerLinkWorksExactlyOnceAgainstARealDaemon is the integration
 // half: the banner's convenience is only real if the link actually logs you in
 // over HTTP, and the security claim is only real if it does so once.
@@ -954,7 +1012,7 @@ func TestServeBannerLinkWorksExactlyOnceAgainstARealDaemon(t *testing.T) {
 	auth := local.NewAuth("the-session-token", port)
 	srv.SetAuth(auth)
 
-	banner := serveBanner(port, auth)
+	banner := serveBanner(port, auth, false)
 	if strings.Contains(banner, "the-session-token") {
 		t.Fatalf("banner leaked the session token: %s", banner)
 	}

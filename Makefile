@@ -23,7 +23,7 @@ build: web
 # frontend. A production-like run is `make build && bin/flue serve`.
 
 run:
-	go run -tags dev ./cmd/flue serve
+	go run -tags dev ./cmd/flue serve --open
 
 web-dev:
 	cd web && pnpm install --frozen-lockfile && pnpm dev

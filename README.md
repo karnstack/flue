@@ -107,11 +107,14 @@ make web-dev   # terminal 2: Vite with hot reload on 127.0.0.1:5173
 
 `make run` compiles with the `dev` build tag, which swaps the embedded UI
 for a redirect to Vite (`web/dev.go`) — `web/dist` need not exist and Node
-never runs. Open the one-time URL `make run` prints: it sets the auth
-cookie and lands you on the Vite server. Vite proxies `/api` and `/ws` back
-to the daemon and rewrites the Origin so its checks pass; the cookie rides
-along because cookies ignore the port. Stick to `127.0.0.1`, not
-`localhost`: the cookie is set for that host exactly.
+never runs. It passes `--open`, so the browser opens itself: the one-time
+link plants the auth cookie and lands you on the Vite server, no clicking
+race. Vite proxies `/api` and `/ws` back to the daemon and rewrites the
+Origin so its checks pass; the cookie rides along because cookies ignore
+the port. Stick to `127.0.0.1`, not `localhost`: the cookie is set for that
+host exactly. Restarting a lot and tired of tabs? `go run -tags dev
+./cmd/flue serve` skips the auto-open; the cookie from the first open keeps
+working.
 
 A production-like run — the embedded UI, exactly what a user gets — is:
 

@@ -96,7 +96,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue disable            remove the login service
   flue status             daemon, login service, and session diagnostics
   flue open [path]        spawn a session in path and open it in the browser
-  flue serve [--port N]   run the daemon in the foreground
+  flue serve [--port N] [--open]   run the daemon in the foreground
 `
 
 func usage() {
@@ -117,6 +117,10 @@ func usage() {
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.Int("port", defaultPort, "loopback port")
+	// Opt-in, never default: serve's other callers are programmatic — the
+	// login service and startDetachedDaemon both run bare `serve` — and a
+	// daemon that popped a browser tab at every login would be obnoxious.
+	openUI := fs.Bool("open", false, "open the UI in a browser once serving")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -193,7 +197,7 @@ func cmdServe(args []string) error {
 	// Only now, after the bind is confirmed and the runtime record is in place,
 	// so the link is never printed for a daemon that turned out not to be
 	// serving.
-	fmt.Print(serveBanner(*port, auth))
+	fmt.Print(serveBanner(*port, auth, *openUI))
 
 	// ListenAndServe reports a ctx-caused shutdown as nil, not as
 	// http.ErrServerClosed, so there is nothing to filter out here: whatever
@@ -232,10 +236,22 @@ func cmdServe(args []string) error {
 // (startDetachedDaemon leaves Stdout nil), so the token is wasted rather than
 // leaked. Wasting one costs nothing: the store is bounded and it expires on its
 // own.
-func serveBanner(port int, auth *local.Auth) string {
+//
+// With openUI it first launches the browser the way flue open does — same
+// mint, same launcher — so nobody has to race HandoffTTL by hand. The printed
+// link is the fallback when the launch fails, and a spent token is never
+// printed: the success message carries no credential at all.
+func serveBanner(port int, auth *local.Auth, openUI bool) string {
 	handoff, err := auth.Mint()
 	if err != nil {
 		return bannerText(port, "")
+	}
+	if openUI {
+		if err := openBrowser(openURL(port, handoff, "")); err == nil {
+			return fmt.Sprintf("daemon running on 127.0.0.1:%d\n  opened the UI in your browser; run \"flue open\" for another tab\n", port)
+		}
+		// The launch failed, so the link is the way in — flue open's own
+		// fallback, for the same reason.
 	}
 	return bannerText(port, handoff)
 }
