@@ -458,6 +458,31 @@ describe('Terminal', () => {
       )
     })
 
+    it('a resize storm reaches the pty once, at the settled size', async () => {
+      // A browser sidebar's slide fires the observer every animation frame.
+      // Each pty resize is a SIGWINCH the shell answers with a prompt
+      // redraw, so the storm must collapse to its final size or the
+      // scrollback fills with prompts.
+      const observers = resizeObservers()
+      const box = paneOf(800 + GUTTER_PX, 408)
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      em.live().measured = { width: 800, height: 408 }
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24, primary: true })))
+
+      // Heights sweeping like an animation, all inside the settle window.
+      for (const height of [500, 600, 700, 816]) {
+        box.mockReturnValue({ width: 800 + GUTTER_PX, height } as DOMRect)
+        act(() => observers.fire())
+        await new Promise((r) => setTimeout(r, 20))
+      }
+
+      await waitFor(() => expect(sock.ofType('resize')).toHaveLength(1))
+      // The one resize is the settled layout, not a width passed through.
+      expect(sock.ofType('resize')[0]).toMatchObject({ ref: 1, cols: 80, rows: 48 })
+    })
+
     it('re-fits when only the pane changed, with nothing arriving from the daemon', async () => {
       // The observer is the sole path here: no attach, no size broadcast, no
       // navigation. A window that is dragged narrower has to reach the pty.

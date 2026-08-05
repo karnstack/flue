@@ -65,6 +65,15 @@ const EXIT_NOTICE = (code: number) =>
   new TextEncoder().encode(`\r\n\x1b[90m[process exited: ${code}]\x1b[0m\r\n`)
 
 /**
+ * How long the pane must hold still before the pty hears about its size.
+ *
+ * Longer than any animation frame, shorter than a human pause: a browser
+ * sidebar's slide lands one resize instead of twenty SIGWINCHes' worth of
+ * redrawn prompts, and a hand-dragged window reflows the moment it rests.
+ */
+export const RESIZE_SETTLE_MS = 150
+
+/**
  * The terminal, full bleed, one session.
  *
  * This renders outside AppShell on purpose: a session *is* the tab, so sidebar
@@ -193,6 +202,13 @@ export function Terminal({
     // one restart in flight at a time, per mount.
     let restartReq: number | null = null
     let frame = 0
+    // The pty-resize debounce. A browser sidebar sliding open resizes the
+    // pane on every animation frame, and each pty resize is a SIGWINCH the
+    // shell answers by redrawing its prompt — an animated toggle used to
+    // leave a wall of prompt lines in the scrollback, with right-prompt
+    // fragments stranded at every mid-animation width. Display keeps up per
+    // frame; the pty hears about it once, when the layout has settled.
+    let settleTimer = 0
     const priorTitle = document.title
 
     const paneBox = (): Box => {
@@ -224,7 +240,9 @@ export function Terminal({
 
       if (primary) {
         // The pty is this client's to size, so the surface simply fills the
-        // pane and nothing is transformed.
+        // pane and nothing is transformed — but the pty itself is told only
+        // after RESIZE_SETTLE_MS without further movement, one SIGWINCH per
+        // settled layout rather than one per animation frame.
         surface.style.removeProperty('width')
         surface.style.removeProperty('height')
         surface.style.removeProperty('scale')
@@ -233,7 +251,8 @@ export function Terminal({
         if (!cell) return
         const want = cellsThatFit(paneBox(), cell)
         if (want.cols === dims.cols && want.rows === dims.rows) return
-        client.resize(ref, want.cols, want.rows, true)
+        if (settleTimer) clearTimeout(settleTimer)
+        settleTimer = window.setTimeout(sendFittedSize, RESIZE_SETTLE_MS)
         return
       }
 
@@ -260,6 +279,23 @@ export function Terminal({
       // all land in one turn, and three frames would do the same work thrice.
       if (frame) return
       frame = requestAnimationFrame(relayout)
+    }
+
+    // The debounce's trailing edge. Everything is re-measured at fire time —
+    // the layout has usually moved since the frame that armed the timer, and
+    // the point is to fit the pane where it stopped, not where it passed
+    // through. The guards re-run too: a detach, a promotion loss, or an
+    // unmount can all land inside the settle window.
+    const sendFittedSize = () => {
+      settleTimer = 0
+      if (ref === null || !primary) return
+      const content = emulator.contentSize()
+      if (!content) return
+      const cell = cellBox(content, dims)
+      if (!cell) return
+      const want = cellsThatFit(paneBox(), cell)
+      if (want.cols === dims.cols && want.rows === dims.rows) return
+      client.resize(ref, want.cols, want.rows, true)
     }
 
     emulator.onData((bytes) => {
@@ -455,6 +491,7 @@ export function Terminal({
       media?.removeEventListener?.('change', onScheme)
       keys.dispose()
       if (frame) cancelAnimationFrame(frame)
+      if (settleTimer) clearTimeout(settleTimer)
       // A ref if the reply landed, the session's name if it did not. Both are
       // needed: `detach` is the only thing that retires a ref, and an unmount
       // inside the attach round-trip has no ref to give — which is exactly
