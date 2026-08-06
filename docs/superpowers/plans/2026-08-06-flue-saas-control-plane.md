@@ -191,8 +191,8 @@ export const devices = sqliteTable('devices', {
   disabled: integer('disabled', { mode: 'boolean' }).notNull().default(false),
 })
 export const deviceAuth = sqliteTable('device_auth', {
-  userCode: text('user_code').primaryKey(),      // short code shown by `flue enable`
-  deviceCode: text('device_code').notNull(),     // opaque, the daemon polls with this
+  userCode: text('user_code').primaryKey(),      // short code shown by `flue enable`; normalize case/format before lookup (human-typed)
+  deviceCode: text('device_code').notNull(),     // SHA-256(device_code) — the daemon polls with the raw code; hash on write AND on lookup (a D1 dump inside the ~15-min window otherwise lets a reader poll a pending grant and steal the approved token)
   createdAt: integer('created_at').notNull(),
   expiresAt: integer('expires_at').notNull(),
   approvedUserId: text('approved_user_id'),       // set when the logged-in user confirms
@@ -368,10 +368,11 @@ export async function confirmDeviceAuth(input: { userCode: string }): Promise<{ 
 ```
 
 **Behavior:**
-- The device id **must match the daemon's `crypto.DeviceID`** (first 12 lowercase-hex chars of some digest of the pubkey — read `internal/crypto/devices.go` `DeviceID` and reproduce it exactly in TS, pinned by a shared test vector). Otherwise the relay's account-scoping and the daemon's own device identity disagree.
-- The device enrollment token: 32 random bytes base64url, returned to the daemon **once** (on the approving poll), only its `SHA-256` hash stored (`devices.tokenHash`). The daemon uses it to authenticate to the relay's `/daemon` leg in SaaS mode (Task 9 verifies a channel token derived from it, not this raw token — see Task 7).
-- `confirmDeviceAuth` binds the device to `context.user.id`. Approval is idempotent-safe (a second confirm of the same code is a no-op returning the same device).
-- `pollDeviceAuth` returns the `deviceToken` exactly once; subsequent polls of an approved row return `approved` without the token (the daemon already has it).
+- The device id **must match the daemon's `crypto.DeviceID`** — `hex.EncodeToString(sha256(pubkey))[:12]` (12 lowercase-hex chars; read `internal/crypto/devices.go` `DeviceID` and reproduce it exactly in TS, pinned by a shared test vector). Otherwise the relay's account-scoping and the daemon's own device identity disagree.
+- **`device_code` is stored hashed** (`SHA-256`, per the schema): `startDeviceAuth` stores `sha256(deviceCode)`, and `pollDeviceAuth` looks up by `sha256(submitted)`. The daemon holds the raw code; the DB never does.
+- **The enrollment-token lifecycle is dictated by the schema** (`devices.tokenHash` is NOT NULL and `device_auth` has no column to carry a raw token between requests — by design): so the token is minted on the **approving poll**, not at confirm. Concretely: `confirmDeviceAuth` only sets `approvedUserId` + `deviceId` on the `device_auth` row (it does NOT create the device yet); the first `pollDeviceAuth` that sees an approved row mints the 32-byte base64url token, and in **one `db.batch([...])`** inserts the `devices` row (with `tokenHash = sha256(token)`) and deletes the `device_auth` grant, then returns the raw token to the daemon exactly once. A subsequent poll finds neither a pending nor an approved grant (it was burned) — treat "grant gone but device exists for this deviceCode's derived id" as already-approved-without-token, or simpler: the daemon stops polling once it has the token, so a second approved poll is not expected; return `expired`/`{status:'approved'}` without a token defensively.
+- **`devices.id` is a content-derived primary key** (`sha256(pubkey)[:12]`), so a daemon **re-enrolling** after a revoke, or the same key enrolled twice, collides on the PK. The mint-on-poll batch must therefore **delete-then-insert** (or upsert) the `devices` row for that id rather than a bare insert — a re-enroll replaces the prior row (new token, new `userId`). State this in the implementation.
+- `confirmDeviceAuth` binds the device to `context.user.id`. Approval is idempotent-safe (a second confirm of the same still-pending code is a no-op).
 
 - [ ] **Step 1: Failing tests.** start→poll(pending)→confirm→poll(approved with token)→poll(approved without token); an expired row polls `expired`; confirm requires a session (unauth throws); the derived `deviceId` matches a known vector from the Go side; the token hash is stored, never the token. Add a cross-language vector: a fixed pubkey → the exact 12-hex id the Go `DeviceID` yields (compute it once from Go, pin it in `app/test/`).
 - [ ] **Step 2: Run to verify failure, implement, re-run** — green.
