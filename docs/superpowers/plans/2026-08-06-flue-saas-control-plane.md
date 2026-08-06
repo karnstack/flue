@@ -537,6 +537,30 @@ A controller-driven pass (not a fresh-subagent task in the usual sense — the c
 - [ ] **Step 2:** Verify `cd app && pnpm test && pnpm build` and `cd web && pnpm test && pnpm build` green; check desktop + mobile.
 - [ ] **Step 3: Commit.** `git commit -m "design: polish the control-plane and remote-access screens"`
 
+### Task 15: The SaaS browser-session path (per-device key pinning + token refresh)
+
+Tasks 8–9 built the pieces of opening a session (mint a client token, navigate to the relay with it in the fragment, the relay verifies it and routes an account-scoped hub), but three gaps (tracked in `docs/FOLLOW-UPS.md` item 14) make a SaaS browser session not yet functional for a real multi-machine account. This task closes them so "click a device → get a terminal" actually works over the hosted relay.
+
+**The core problem:** the daemon's Noise handshake pins the *daemon's static public key*, and the browser's crypto store (`web/src/crypto/keys.ts` `savePinnedDaemonKey`/`loadPinnedDaemonKey`) holds **one** pinned key per origin. A SaaS relay is one origin (`relay.flue.sh`) for every machine on every account, so opening device B's session builds the IK initiator against device A's pinned key and the handshake fails silently. The control plane already stores each device's public key (`devices.publicKey`), so the fix is to carry the *target device's* public key to the browser at open-a-session and pin per-device.
+
+**Files:**
+- Modify: `app/src/server/channel-token.ts` (`mintClientToken` also returns the device's `publicKey`), `app/src/server/devices.ts` (`openSession` puts the pubkey in the fragment alongside the token), `app/src/routes/devices.tsx`
+- Create: `app/src/server/refresh-token.ts` (or extend channel-token) — a `refreshClientToken(deviceId)` server fn behind `requireUser` that re-mints a fresh 60s client token for a device the user owns (same ownership + kill-switch predicate as `mintClientToken`)
+- Modify: `web/src/relay/mode.ts` + `web/src/crypto/keys.ts` (pin/load a daemon key **keyed by device id**, not per-origin), `web/src/relay/socket.ts` (use the per-device pinned key; refresh the channel token before each reconnect dial via the control-plane endpoint), `web/src/main.tsx` (read both token and pubkey from the fragment)
+- Test: `app/test/refresh-token.test.ts`, `web/src/relay/*.test.ts`, `web/src/crypto/keys.test.ts`
+
+**Behavior:**
+- **Open a session** now carries both the client token and the target device's public key in the fragment: `https://<relay>/#t=<token>&k=<base64url(pubkey)>`. The browser reads both from `location.hash` (still scrubs immediately), pins the pubkey **under the device id** (derive the device id from the pubkey the same way — `sha256(pubkey)[:12]` — or carry `d=<deviceId>` too), and runs the Noise initiator against *that* key. A second machine's session pins and uses its own key.
+- **Token refresh:** the web client, before each (re)dial of the SaaS relay, calls `refreshClientToken(deviceId)` on the control plane (`app.flue.sh`, a cross-origin `fetch` with credentials — the session cookie authenticates it) to get a fresh 60s token, rather than reusing the one captured at open time. So a reconnect after the first minute re-mints instead of dying. (The refresh endpoint is same-account, ownership-scoped, kill-switch-gated — a disabled device/user stops getting tokens, which is the revocation path.)
+- **CORS:** `app.flue.sh` must allow the credentialed `refreshClientToken` call from the `relay.flue.sh` origin (a narrow CORS allowance on that one endpoint, `Access-Control-Allow-Origin: https://relay.flue.sh` + `Allow-Credentials: true`, or serve the refresh from the relay origin via a service binding — decide; the simplest correct option is the narrow CORS allowance).
+- **SaaS pairing:** SaaS enrollment is `flue enable`/device-authorization (Task 6/11), not the QR `/pair` flow, so `pair.tsx` sending no bearer is moot for SaaS — confirm and document that the QR pair path is self-host-only; if the SaaS UI ever surfaces pairing, it must send the bearer.
+- Keep self-host (single pinned key, no token, no refresh) working and its tests green.
+
+- [ ] **Step 1: Failing tests.** `refreshClientToken` re-mints for an owned enabled device, refuses a non-owned or disabled one (same as `mintClientToken`); `openSession` fragment carries both `t` and `k`; the web client pins per-device (two device ids → two stored keys, no collision) and picks the right one; a reconnect re-mints a fresh token; self-host still uses the single key and no refresh.
+- [ ] **Step 2: Run to verify failure, implement, re-run.** `cd app && pnpm test`; `cd web && pnpm test` (only the pre-existing 55 fail) + `pnpm lint`; `cd relay && pnpm test` (unchanged, green).
+- [ ] **Step 3: Manual E2E note** in `docs/SAAS.md`: two real machines enrolled to one account, open each from the directory, both terminals live — the release gate this task exists to make possible.
+- [ ] **Step 4: Commit.** `git commit -m "feat: per-device key pinning and token refresh for saas browser sessions"`
+
 ---
 
 ## Execution notes for the controller
