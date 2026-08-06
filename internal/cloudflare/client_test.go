@@ -376,8 +376,20 @@ func TestTokenIsNeverInAnError(t *testing.T) {
 	if strings.Contains(err.Error(), testToken) {
 		t.Errorf("error %q leaks the API token", err)
 	}
-	if s := fmt.Sprintf("%v %s", f.client(), f.client()); strings.Contains(s, testToken) {
-		t.Errorf("formatting a Client leaks the API token: %s", s)
+	// Every way a Client can end up in a log line. %v on a value misses a
+	// pointer-receiver String, and %#v ignores String entirely, so both have to
+	// be covered rather than assumed.
+	for _, s := range []string{
+		fmt.Sprintf("%v", f.client()),
+		fmt.Sprintf("%s", f.client()),
+		fmt.Sprintf("%v", *f.client()),
+		fmt.Sprintf("%s", *f.client()),
+		fmt.Sprintf("%#v", f.client()),
+		fmt.Sprintf("%#v", *f.client()),
+	} {
+		if strings.Contains(s, testToken) {
+			t.Errorf("formatting a Client leaks the API token: %s", s)
+		}
 	}
 }
 
@@ -778,6 +790,85 @@ func TestDeployDoesNotRetryOtherErrors(t *testing.T) {
 	}
 }
 
+// TestDeployDoesNotRetryOtherMigrationErrors: dropping the migration is only
+// the right move when Cloudflare has already applied it. For any other
+// migration failure — a tag that does not line up, a class that is not there —
+// a retry without migrations could *succeed*, deploying a Worker whose Durable
+// Object was never actually migrated and burying the real error.
+func TestDeployDoesNotRetryOtherMigrationErrors(t *testing.T) {
+	for _, message := range []string{
+		"Worker script migration tag does not match latest tag",
+		"Migration contains a class that does not exist in the script",
+	} {
+		t.Run(message, func(t *testing.T) {
+			puts := 0
+			f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+				if strings.HasSuffix(r.URL.Path, "/assets-upload-session") {
+					writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "session-jwt", "buckets": [][]string{}})
+					return
+				}
+				puts++
+				writeAPIError(w, http.StatusBadRequest, 10061, message)
+			})
+
+			err := f.client().Deploy(context.Background(), deployFixture())
+			if err == nil {
+				t.Fatal("Deploy = nil, want the migration error surfaced")
+			}
+			if !strings.Contains(err.Error(), message) {
+				t.Errorf("error %q does not carry Cloudflare's message", err)
+			}
+			if puts != 1 {
+				t.Errorf("script PUTs = %d, want 1: this is not an already-applied migration", puts)
+			}
+		})
+	}
+}
+
+// TestDeployRejectsAnEmptySessionToken: an upload session with no JWT leaves
+// nothing to authenticate the upload with. The danger is specific — an empty
+// bearer falls back to the account API token — so the deploy must stop rather
+// than send the user's API token to the asset endpoint.
+func TestDeployRejectsAnEmptySessionToken(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/assets-upload-session") {
+			writeEnvelope(t, w, http.StatusOK, map[string]any{
+				"jwt": "", "buckets": [][]string{{hashHTML, hashJS, hashCSS}},
+			})
+			return
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "completion-token"})
+	})
+
+	err := f.client().Deploy(context.Background(), deployFixture())
+	if err == nil {
+		t.Fatal("Deploy with an empty session token = nil, want an error")
+	}
+	for _, r := range f.requests() {
+		if strings.HasSuffix(r.Path, "/workers/assets/upload") {
+			t.Errorf("uploaded with Authorization %q despite having no session token", r.Auth)
+		}
+	}
+}
+
+// TestDeployRejectsAnEmptyCompletionTokenFromAnEmptyBucketSession: the same
+// hazard on the other branch — no buckets and no JWT would otherwise attach
+// `"jwt": ""` to the script and deploy a Worker with no assets.
+func TestDeployRejectsAnEmptyCompletionTokenFromAnEmptyBucketSession(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/assets-upload-session") {
+			writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "", "buckets": [][]string{}})
+			return
+		}
+		t.Errorf("script was PUT with no asset token: %s %s", r.Method, r.URL.Path)
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+
+	if err := f.client().Deploy(context.Background(), deployFixture()); err == nil {
+		t.Fatal("Deploy with an empty session token and no buckets = nil, want an error")
+	}
+}
+
 // TestDeployReportsAMissingCompletionToken: uploading every bucket without ever
 // being handed a completion token means the assets cannot be attached, and
 // PUTting the script anyway would deploy a Worker with no UI.
@@ -897,6 +988,11 @@ func TestEnableSubdomainComposesTheHost(t *testing.T) {
 	enable := f.only("/accounts/acct-123/workers/scripts/flue-relay/subdomain")
 	if enable.Method != http.MethodPost {
 		t.Errorf("enable method = %s, want POST", enable.Method)
+	}
+	// This endpoint is versioned by date. Without the header the meaning of the
+	// request is whatever vintage the account defaults to.
+	if got, want := enable.Header.Get("Cloudflare-Workers-Script-Api-Date"), "2025-08-01"; got != want {
+		t.Errorf("Cloudflare-Workers-Script-Api-Date = %q, want %q", got, want)
 	}
 	read := f.only("/accounts/acct-123/workers/subdomain")
 	if read.Method != http.MethodGet {

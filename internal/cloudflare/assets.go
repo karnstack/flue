@@ -102,6 +102,16 @@ func hashOf(a Asset) string {
 	return hex.EncodeToString(sum[:])[:32]
 }
 
+// bounded caps a server-supplied string on its way into an error message. A
+// hash is 32 characters; anything longer is a response worth truncating.
+func bounded(s string) string {
+	const max = 64
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
 // manifestEntry describes one file to the upload session.
 type manifestEntry struct {
 	Hash string `json:"hash"`
@@ -146,6 +156,13 @@ func (c *Client) uploadAssets(ctx context.Context, accountID, script string, ass
 	if err := json.Unmarshal(raw, &session); err != nil {
 		return "", fmt.Errorf("cloudflare: could not read the asset upload session: %w", err)
 	}
+	// Without a session token there is nothing to authenticate the upload with,
+	// and an empty bearer would fall back to the account API token — sending the
+	// user's credential to an endpoint that should only ever see a short-lived
+	// scoped JWT. Stop here instead.
+	if session.JWT == "" {
+		return "", fmt.Errorf("cloudflare: the asset upload session returned no token")
+	}
 
 	// Cloudflare already holds every file, so there is nothing to upload and
 	// the session token is itself the completion token.
@@ -181,7 +198,10 @@ func (c *Client) uploadBucket(ctx context.Context, accountID, sessionJWT string,
 		if !ok {
 			// Cloudflare asked for a file this deploy does not have. Uploading
 			// the rest would produce a Worker missing an asset, so stop.
-			return "", fmt.Errorf("cloudflare: the upload session asked for hash %s, which is not in this deploy's manifest", h)
+			// h came off the wire, so it is quoted and bounded before it reaches
+			// a terminal: a broken or hostile response should not be able to
+			// write arbitrary bytes into the user's screen.
+			return "", fmt.Errorf("cloudflare: the upload session asked for hash %q, which is not in this deploy's manifest", bounded(h))
 		}
 		// The field name and filename are both the hash: this endpoint is
 		// addressed by content, and the body is base64 because the request

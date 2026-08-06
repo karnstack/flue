@@ -65,11 +65,19 @@ type Client struct {
 
 // String redacts the token. Client is carried through the setup flow next to
 // things that do get logged, and the token must never be one of them.
-func (c *Client) String() string {
+//
+// The receiver is a value, not a pointer, because a pointer receiver would
+// leave `%v` on a Client value printing the token verbatim — and a Client is
+// small enough to be passed around by value. GoString covers `%#v`, which
+// ignores Stringer entirely and would otherwise dump every field.
+func (c Client) String() string {
 	return fmt.Sprintf("cloudflare.Client{Base: %q, Token: [redacted]}", c.baseURL())
 }
 
-func (c *Client) baseURL() string {
+// GoString redacts the token under %#v.
+func (c Client) GoString() string { return c.String() }
+
+func (c Client) baseURL() string {
 	if c.Base == "" {
 		return defaultBase
 	}
@@ -383,16 +391,20 @@ func (c *Client) putScript(ctx context.Context, in DeployInput, meta scriptMetad
 // Object migration that the account has already run.
 //
 // The match is on the message rather than the code because Cloudflare has
-// reported this condition under more than one code. That is deliberately loose,
-// and it is safe to be: the caller only consults this after a deploy that
-// carried migrations, and only ever retries once. A migration error that was
-// not "already applied" simply fails again on the retry.
+// reported this condition under more than one code, but it deliberately
+// requires *both* halves of the claim: that this is about a migration, and
+// that the migration is already in place. Matching "migration" alone would
+// also catch a mismatched tag or a class that is not in the script — and for
+// those, retrying without migrations could succeed, deploying a Worker whose
+// Durable Object was never migrated and burying the real error behind a
+// second request.
 func migrationAlreadyApplied(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	return strings.Contains(strings.ToLower(apiErr.Message), "migration")
+	msg := strings.ToLower(apiErr.Message)
+	return strings.Contains(msg, "migration") && strings.Contains(msg, "already")
 }
 
 // SetSecret sets a secret on the script. Cloudflare stores it as a
