@@ -367,8 +367,9 @@ secret so the only thing after it is a local file write. What is left:
 ### 13. Left standing by the relay substrate
 
 Found while building `cfrelay` and deliberately not fixed in it: three want a
-number or a front-end that does not exist yet, and one is a logging line that
-only matters once someone is reading the logs.
+number or a front-end that does not exist yet, one is a logging line that only
+matters once someone is reading the logs, and one is release infrastructure a
+documented promise depends on.
 
 - **No per-session output rate cap.** The Durable Object bounds concurrency —
   64 channels, a 30 s handshake deadline, 8 parked pairings, a 4 KiB pairing
@@ -406,6 +407,22 @@ only matters once someone is reading the logs.
   `opened` (or a computed duration) to the line, and a periodic line for
   long-lived channels, is what makes a month of logs answer the question on its
   own.
+- **No release publishes the web bundle's digest.**
+  `web/scripts/bundle-hash.mjs` computes a reproducible SHA-256 over
+  `web/dist`, and `docs/faq.md` leans on it for the one thing end-to-end
+  encryption cannot fix — whether the origin served you the published code.
+  `.github/workflows/release.yml` emits no such value, so the check a reader
+  can run today only proves *this source builds to this bundle*, never *that
+  origin is serving the release*, and the FAQ now says so out loud. The release
+  pipeline has to publish the digest as a release asset and, better, attest it
+  (`actions/attest-build-provenance` over `web/dist`) so the comparison is
+  against something the user did not produce. Two things gate it: the release
+  job must run `pnpm hash` on the same tree goreleaser ships, and the digest is
+  only known-reproducible on one platform — the lockfile pins per-platform
+  native binaries (esbuild, `@tailwindcss/oxide`) and `mise.toml` pins no OS or
+  CPU, so a published macOS digest is unfalsifiable from a Linux machine until
+  a container-pinned build makes it portable. Publish the platform beside the
+  digest at minimum.
 
 ## Things worth knowing before touching this code
 

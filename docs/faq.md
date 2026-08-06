@@ -30,19 +30,31 @@ What we do about it, in order of how much it actually helps:
   binary, which you can build yourself.
 - **The source is open.** The daemon, the web app, and the Worker are all in
   this repository under MIT. There is no closed component.
-- **A reproducible bundle hash, published per release.** Build the release tag
-  yourself and run it:
+- **A bundle digest you can recompute yourself.** Build the tag and run it:
 
   ```sh
   cd web && pnpm build && pnpm hash
   ```
 
   That prints one hex line — a SHA-256 over every file in `web/dist`, path by
-  path — and a per-file listing under it. Compare the line with the digest
-  published for that release (`pnpm hash <expected>` does the comparison and
-  exits non-zero on a mismatch). Vite's filenames are content-hashed, so the
-  digest changes if and only if the output changes. Same source, same
-  lockfile, same pinned toolchain (`mise.toml`), same digest.
+  path — and a per-file listing under it. The digest is taken over the file
+  *bytes*, so any change to what would be shipped changes it. Same source,
+  same lockfile, same pinned toolchain (`mise.toml`), same digest — *on the
+  same platform*. That last clause is a real limit and not boilerplate: the
+  lockfile pins per-platform native binaries (esbuild, Tailwind's oxide) and
+  `mise.toml` pins no OS or CPU, so reproducibility across platforms is
+  **not verified**. The digests we have were produced on macOS/arm64. A
+  mismatch against a bundle built on another OS may be those native binaries
+  differing rather than anyone tampering, so compare like for like. Making the
+  digest portable would take a pinned container build, which is not written.
+
+  **And the half that does not exist yet:** no release publishes a digest. So
+  today this answers "does this source build to this bundle", which you can
+  check alone; it does not yet answer "is that origin serving me the release",
+  which needs a value you did not produce. A digest published and attested per
+  release — the `<expected>` in `pnpm hash <expected>`, which does the
+  comparison and exits non-zero on a mismatch — is roadmap, tracked in
+  [`FOLLOW-UPS.md`](FOLLOW-UPS.md) §13.
 - **Install it as an app.** flue is a PWA: once installed, the shell and its
   code are held by the service worker and not re-fetched on every load, so an
   update is the only window in which different code could arrive. That
@@ -56,7 +68,10 @@ What a relay operator can observe even while the terminal stays unreadable —
 who connected, when, how much traffic, and the whole pairing exchange — is
 listed in `spec/relay-protocol.md` under "What the relay sees". Pairing
 through a relay is a trust decision about that relay's operator; pair over the
-daemon's own origin when you can.
+daemon's own origin when you can — which means when the browser can already
+reach the machine directly: same LAN, or a private network like Tailscale.
+A phone that is off the network has no such path, and there the relay is the
+only way to pair at all.
 
 ## What does flue.sh store?
 
