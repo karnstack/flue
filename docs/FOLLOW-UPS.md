@@ -2,7 +2,7 @@
 
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size. Items 7–9 are the same exercise for the
-crypto+pairing milestone, and items 10–12 for the relay.
+crypto+pairing milestone, and items 10–13 for the relay.
 
 ## Done
 
@@ -138,6 +138,11 @@ local pairing ceremony, the Devices screen and `/pair`). Part 2 is the relay —
 
 ### 8. Worth a second look before or during part 2
 
+Part 2's first plan — `cfrelay`, the relay substrate — has now landed, and the
+items it closed are marked inline below with the commit that closed them. The
+unmarked ones still stand, and the first bullet got worse rather than better:
+see §11.
+
 - **The pairing pin is only as trustworthy as the code that reads it.** The QR now
   carries the daemon's static key (`?k=`, `internal/daemon/conn.go`), and `/pair`
   pins that key and rejects a `POST /api/pair` answer whose `daemonPub` differs
@@ -151,17 +156,29 @@ local pairing ceremony, the Devices screen and `/pair`). Part 2 is the relay —
   ship a native/installed pairing client, or integrity-pin the bundle by something
   the relay cannot rewrite. Until one of those exists, the `k`-in-QR work is a
   necessary prerequisite, not a finished defence.
+
+  **Still open, and now live rather than latent** — the wiring task pointed the
+  QR at the relay deliberately, because a phone that is not on this LAN cannot
+  open `http://127.0.0.1:7717`. §11 is the whole accounting.
 - `registerDeviceConn` has two latent races (`internal/daemon/server.go:778`): a
   connection that flaps can leave its predecessor's entry behind, and a revoke
   landing mid-handshake is undone by the registration that follows it. Neither is
   reachable while nothing calls it — `cfrelay` is its first caller, so the
   "still in `s.conns`" guard wants to exist before that does. `dropConn`
   (`server.go:801`) also leaves a stale `*conn` in the backing array's tail.
+
+  **Done** (`717fe7d`) — the relay transport is that first caller, so this went
+  live with it. Registration is one hold of `connMu`, a late `registerDeviceConn`
+  refuses a conn that has already left, and `dropConn` clears the vacated tail
+  slot.
 - Store errors reach clients verbatim: `err.Error()` on `devices_unavailable` and
   `revoke_failed` (`internal/daemon/conn.go:437,507,512`) carries the
   `devices.json` path, which discloses `$HOME` and the username to any paired
   device. It matches what the rest of the file already does; sanitize the whole
   set at once rather than one call site.
+
+  **Done** (`717fe7d`) — the registry's own errors go to the log; the socket
+  carries the fact and not the path.
 - `wire.Sessions` marshals a nil slice as `null` while the TypeScript type says
   `SessionInfo[]` (`internal/wire/control.go:80`). Exactly the gap this branch
   closed for `DeviceList` with a `MarshalJSON` (`control.go:143`) — it pre-dates
@@ -175,11 +192,20 @@ local pairing ceremony, the Devices screen and `/pair`). Part 2 is the relay —
   redeem step — a 503, or a provenance 403 (`web/src/routes/pair.tsx:219-239`).
   The token is still good and the UI says otherwise. Nothing writes an audit line
   for a provenance 403 at an exempt path, either.
+
+  **Half done** (`4a951e1`, with `a0fbea9` reserving 403 for the daemon's own
+  verdict end to end) — `spent` is now exactly `res.status === REFUSED_STATUS`,
+  so a 503, a 504, a 429 and the relay's own refusals all leave the window open
+  and offer a retry. The audit-line half is untouched: a provenance 403 at an
+  exempt path still logs nothing.
 - `Device.LastSeen` is written once, at pairing (`internal/crypto/devices.go`), and
   never updated, so the Devices screen's "Last seen" column is truthful only
   until `cfrelay` lands — nothing over `local` connects as a device. Part 2 must
   add `DeviceStore.UpdateLastSeen` and call it on connect; writing that method
   now would be one with no caller.
+
+  **Done** (`717fe7d`) — `DeviceStore.UpdateLastSeen` exists and `ServeConn`
+  calls it, which is the caller this was waiting for. The column is true.
 - `loadIdentity` failing is fatal to `serve` (`cmd/flue/main.go:170`). Degrading
   to an empty `Identity` — pairing off, shells still up — is the friendlier shape
   for a keystore that got chmod'd wrong.
@@ -297,6 +323,12 @@ having the paired device show what it pinned makes a substituted key something a
 user can see. A native pairing client or an integrity-pinned bundle closes it
 properly; both are larger than the ceremony they protect.
 
+The other half of the same problem *is* fixed: the loopback QR that started this
+work — Pair, over a `local`-only daemon, printing a `127.0.0.1` URL no other
+device could follow — is gone (`791b07d`). The Devices screen now holds the Pair
+button shut, with an explainer, unless the relay is connected or the page itself
+is served from a relay origin, and re-evaluates on every welcome.
+
 ### 12. `flue relay setup` — the self-host deploy
 
 Carried out of the guided setup flow (`cmd/flue/relay.go`, `internal/cloudflare`).
@@ -331,6 +363,49 @@ secret so the only thing after it is a local file write. What is left:
   answering — nothing fetches it, and a fresh subdomain can lag; and `relayLine()`
   (`cmd/flue/main.go`) reports only the relay's `url`, never its `origin`, which is
   the address a user would open in a browser.
+
+### 13. Left standing by the relay substrate
+
+Found while building `cfrelay` and deliberately not fixed in it: three want a
+number or a front-end that does not exist yet, and one is a logging line that
+only matters once someone is reading the logs.
+
+- **No per-session output rate cap.** The Durable Object bounds concurrency —
+  64 channels, a 30 s handshake deadline, 8 parked pairings, a 4 KiB pairing
+  body — and bounds nothing about *rate*. A session streaming continuously
+  (`yes`, `tail -f` on a firehose) pins the object active and floods
+  invocations, which is the one abuse vector that converts directly into a bill
+  (`docs/RELAY.md`, the cost model). The cap wants a real number — the
+  99th-percentile session's frame rate, so ordinary interactive use never
+  touches it — which is what the month of counters in the same document is for.
+  Distinct from §10, which is the daemon's own outbound queue rather than the
+  relay's.
+- **The browser leg has no auth, and the SaaS needs one.**
+  `authorizeClient` (`relay/src/index.ts`) returns `true` and `hubIdFor` returns
+  `idFromName('hub')` — correct for self-hosting, where one daemon owns the
+  Worker and Noise is the confidentiality boundary. A multi-tenant relay has to
+  verify a signed token on `/client` and route to the right hub by account and
+  daemon id. The seam is deliberately in place and the implementation is Plan 2.
+- **Relay-served assets carry none of the daemon's security headers.** The
+  daemon wraps every response in `securityHeaders`
+  (`internal/daemon/server.go`) — `Referrer-Policy: no-referrer` and a CSP with
+  `script-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`. The
+  Worker serves the *same bundle* through `env.ASSETS.fetch(req)` with neither.
+  Nothing in the app depends on the CSP for correctness, so this is defence in
+  depth — but it is the same defence, dropped for the one origin that is
+  reachable from the internet. A `_headers` file uploaded with the assets is the
+  cheap fix; wrapping the ASSETS response in the Worker is the other. The
+  daemon's exact policy needs one edit for a relay origin: the
+  `ws://127.0.0.1:*` and `ws://localhost:*` entries in `connect-src` are
+  loopback-shaped and `'self'` already covers a same-origin `wss://`.
+- **`channel_closed` says how much, never how long.** The hub logs frames and
+  bytes per direction when a channel closes, and `opened` sits in the
+  attachment unlogged — so a channel's lifetime has to be reconstructed from
+  `wrangler tail` timestamps, and a channel that never closes reports nothing at
+  all. Both matter for the cost measurement rather than for correctness: adding
+  `opened` (or a computed duration) to the line, and a periodic line for
+  long-lived channels, is what makes a month of logs answer the question on its
+  own.
 
 ## Things worth knowing before touching this code
 
