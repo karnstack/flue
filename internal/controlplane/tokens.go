@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -34,19 +35,35 @@ const RefreshMargin = 90 * time.Second
 // dial would put a round trip into every reconnect — which is to say, into
 // exactly the moment the network is already unreliable — and would spend the
 // endpoint's per-IP cap on a machine that is merely flapping.
+//
+// What this deliberately does *not* do is choose where to dial. Every mint
+// names a relay and this ignores it: the address the transport uses is the one
+// in relay.json, settled once by `flue link`. So a control plane that moves its
+// relay does not move its linked machines with it — see the note in
+// cmd/flue/link.go for why that is a known limitation rather than a design.
 type DaemonTokens struct {
 	client     *Client
 	deviceID   string
 	enrollment string
 
+	// Logger takes the one thing this type ever says out loud — see shortTTL
+	// below. Nil means slog.Default(); the daemon sets the same logger the
+	// relay transport writes to, so the warning lands wherever launchd or
+	// systemd is already capturing.
+	Logger *slog.Logger
+
 	// now is the clock, a field so a test can move it rather than wait out a
 	// five-minute TTL.
 	now func() time.Time
 
-	mu       sync.Mutex
-	token    string
-	expiry   time.Time
-	relayURL string
+	// shortTTL fires the misconfiguration warning once per process. Once,
+	// because the condition it reports repeats on every single mint and the
+	// point is to be readable in a log, not to fill one.
+	shortTTL sync.Once
+
+	mu     sync.Mutex
+	token  string
+	expiry time.Time
 }
 
 // NewDaemonTokens builds a token source for one enrolled machine.
@@ -98,19 +115,34 @@ func (d *DaemonTokens) Token(ctx context.Context) (string, error) {
 	} else {
 		d.expiry = time.Time{}
 	}
-	d.relayURL = grant.RelayURL
+	d.warnIfTTLIsUnusable(grant.ExpiresIn)
 	return d.token, nil
 }
 
-// RelayURL is the relay the control plane last named, or "" before the first
-// successful mint.
+// warnIfTTLIsUnusable says, once, that the cache above cannot do its job.
 //
-// The address travels with the token rather than being read out of relay.json
-// on every dial, so a control plane that moves its relay moves the daemons with
-// it. `flue link` records the first one it is told about so the daemon has
-// somewhere to dial before it has minted anything.
-func (d *DaemonTokens) RelayURL() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.relayURL
+// A token whose whole life is inside RefreshMargin can never be handed to a
+// second dial: the branch at the top of Token is false the moment it is stored,
+// so every call mints. That is *safe* — the dial always gets a fresh token —
+// and it quietly turns a reconnect storm into one control-plane round trip per
+// dial, against an endpoint that caps mints per IP.
+//
+// It is a mismatch between two numbers that live in different repositories —
+// DAEMON_TOKEN_TTL_S in app/, RefreshMargin here — with nothing between them to
+// keep them in step, so nothing else in the system will ever mention it. Hence
+// a log line rather than a refusal: the daemon still works, and the operator
+// gets the one sentence that explains the traffic.
+func (d *DaemonTokens) warnIfTTLIsUnusable(expiresIn int) {
+	if time.Duration(expiresIn)*time.Second > RefreshMargin {
+		return
+	}
+	d.shortTTL.Do(func() {
+		log := d.Logger
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("the control plane mints relay tokens with a life this daemon cannot cache; every dial will mint a new one",
+			"ttl", (time.Duration(expiresIn) * time.Second).String(),
+			"refreshMargin", RefreshMargin.String())
+	})
 }

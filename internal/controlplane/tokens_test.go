@@ -1,8 +1,10 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -163,20 +165,58 @@ func TestDaemonTokensNeverLeaksACredential(t *testing.T) {
 	}
 }
 
-// TestDaemonTokensReportsTheRelayItWasToldAbout: the relay URL travels with the
-// token, so a control plane moved to a new relay moves its daemons with it
-// rather than needing every relay.json re-written.
-func TestDaemonTokensReportsTheRelayItWasToldAbout(t *testing.T) {
+// TestDaemonTokensWarnsOnceAboutATTLItCannotCache.
+//
+// DAEMON_TOKEN_TTL_S lives in app/ and RefreshMargin lives here, with nothing
+// between them; if the TTL is ever dropped under the margin, the cache above
+// can never hand a token to a second dial and every call mints. That is safe
+// and silent, which is the problem — a reconnect storm becomes one round trip
+// per dial against a capped endpoint, and nothing in either system says why.
+//
+// Once, not per mint: the condition is true of every single mint, and a line
+// per mint would bury the one that explains it.
+func TestDaemonTokensWarnsOnceAboutATTLItCannotCache(t *testing.T) {
+	t.Parallel()
+	m := newMintingControlPlane(t, 60) // under the 90s margin
+	now := time.Now()
+	d := newTestTokens(m, &now)
+
+	var logged bytes.Buffer
+	d.Logger = slog.New(slog.NewTextHandler(&logged, nil))
+
+	for i := 0; i < 3; i++ {
+		if _, err := d.Token(context.Background()); err != nil {
+			t.Fatalf("Token: %v", err)
+		}
+	}
+	if got := m.count(); got != 3 {
+		t.Errorf("the control plane was asked %d times, want 3 (a TTL under the margin cannot be cached)", got)
+	}
+	if got := strings.Count(logged.String(), "every dial will mint"); got != 1 {
+		t.Errorf("the misconfiguration was logged %d times, want exactly 1:\n%s", got, logged.String())
+	}
+	if !strings.Contains(logged.String(), "ttl=1m0s") || !strings.Contains(logged.String(), "refreshMargin=1m30s") {
+		t.Errorf("the warning names neither number it is about:\n%s", logged.String())
+	}
+}
+
+// TestDaemonTokensSaysNothingAboutATTLItCanUse: the deployed pair is 300s
+// against a 90s margin, and a warning on the ordinary configuration is a
+// warning nobody reads.
+func TestDaemonTokensSaysNothingAboutATTLItCanUse(t *testing.T) {
 	t.Parallel()
 	m := newMintingControlPlane(t, 300)
 	now := time.Now()
 	d := newTestTokens(m, &now)
 
+	var logged bytes.Buffer
+	d.Logger = slog.New(slog.NewTextHandler(&logged, nil))
+
 	if _, err := d.Token(context.Background()); err != nil {
 		t.Fatalf("Token: %v", err)
 	}
-	if got := d.RelayURL(); got != "wss://relay.flue.sh" {
-		t.Errorf("RelayURL = %q, want wss://relay.flue.sh", got)
+	if logged.Len() != 0 {
+		t.Errorf("a healthy 300s TTL logged something:\n%s", logged.String())
 	}
 }
 

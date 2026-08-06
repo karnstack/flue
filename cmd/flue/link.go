@@ -55,6 +55,19 @@ const defaultGrantLife = 10 * time.Minute
 // system for a hostname. Something has to go in the device directory.
 const fallbackLabel = "flue daemon"
 
+// maxUserCodeLen bounds the code this command prints. The deployed control
+// plane sends nine characters (XXXX-XXXX); this is a bound on a string chosen
+// by whatever answered, not a claim about the format.
+const maxUserCodeLen = 32
+
+// deviceIDLen is the width of the identity both sides derive: twelve
+// characters of lowercase hex, hex(sha256(publicKey))[:12]. Written out here
+// rather than imported from crypto.DeviceID for the same reason
+// internal/daemon writes it out — what this file needs is a bound on a string
+// that arrived over the network, and a bound that moved with the deriver would
+// stop being one.
+const deviceIDLen = 12
+
 func cmdLink(args []string) error {
 	fs := flag.NewFlagSet("link", flag.ExitOnError)
 	origin := fs.String("app", controlplane.DefaultOrigin,
@@ -120,6 +133,13 @@ func runLink(ctx context.Context, w io.Writer, l *linker) error {
 		return err
 	}
 	l.api.Origin = origin
+	// http:// is accepted because `vite dev` is where this flow gets developed,
+	// and refusing it would mean nobody could. It is never *silent*, though: the
+	// poll that approves this machine carries its permanent enrollment token
+	// back over that connection, and every mint after it sends the token out
+	// again. On loopback that is fine; anywhere else it is the credential in
+	// plaintext across the network.
+	warnIfCleartext(w, "the control plane", origin)
 
 	dir, err := config.Dir()
 	if err != nil {
@@ -158,8 +178,20 @@ func runLink(ctx context.Context, w io.Writer, l *linker) error {
 	// The user code and the URL, and nothing else from the grant: the device
 	// code beside them is a live bearer credential for as long as the grant is
 	// open, and this text goes into terminal scrollback.
-	fmt.Fprintf(w, "  open %s and enter this code:\n\n      %s\n\n",
-		grant.VerificationURL, grant.UserCode)
+	//
+	// Both are strings the *remote side* chose, and they are about to be written
+	// to a terminal that interprets some bytes rather than drawing them — so
+	// both are checked before they are printed. See printableCode and
+	// verificationPage.
+	userCode, err := printableCode(grant.UserCode)
+	if err != nil {
+		return err
+	}
+	page, err := verificationPage(grant.VerificationURL, l.api.Origin)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "  open %s and enter this code:\n\n      %s\n\n", page, userCode)
 	fmt.Fprintf(w, "  waiting for approval…\n")
 
 	poll, err := l.await(ctx, grant)
@@ -167,12 +199,22 @@ func runLink(ctx context.Context, w io.Writer, l *linker) error {
 		return err
 	}
 
+	// Safe to print unescaped: await refused anything that is not twelve
+	// characters of lowercase hex.
 	fmt.Fprintf(w, "  ✓ approved — this machine is %s\n", poll.DeviceID)
 
-	// The proof, and the only way to learn where the relay is: the control
-	// plane names it with every token it signs, so a service that moves its
-	// relay moves its daemons with it rather than needing every relay.json
-	// rewritten by hand.
+	// The proof, and the only way to learn where the relay is: neither
+	// startDeviceAuth nor pollDeviceAuth names it, and this mint does.
+	//
+	// It is read exactly once — here — and written into relay.json. The daemon
+	// dials what that file says on every reconnect for the rest of its life and
+	// never takes the address out of a later mint (see
+	// controlplane.DaemonTokens). So a control plane that moves its relay does
+	// *not* move its linked machines with it: each one keeps dialling the old
+	// address until somebody runs `flue link` again on it. That is a known
+	// limitation rather than a decision, and it is the same missing piece as
+	// `flue unlink` — both want a command that rewrites relay.json after
+	// enrolment, which today only this one does.
 	channel, err := l.api.DaemonToken(ctx, poll.DeviceID, poll.DeviceToken)
 	if err != nil {
 		return fmt.Errorf("this machine was enrolled, but %s would not mint it a relay token: %w",
@@ -182,6 +224,9 @@ func runLink(ctx context.Context, w io.Writer, l *linker) error {
 	if err != nil {
 		return fmt.Errorf("%s named a relay this daemon cannot dial: %w", l.api.Origin, err)
 	}
+	// The relay is the other place a credential goes out: every dial presents a
+	// channel token in an Authorization header, over this URL.
+	warnIfCleartext(w, "the relay", dialURL)
 
 	// Last, and it replaces the whole file rather than merging into it. A
 	// relay.json naming both a self-hosted secret and a flue.sh enrolment is one
@@ -252,6 +297,16 @@ func (l *linker) await(ctx context.Context, grant controlplane.Grant) (controlpl
 				return controlplane.Poll{}, errors.New("the code expired before anyone approved it; run flue link again")
 			}
 		case controlplane.StatusApproved:
+			// Before the token, because this is the field that outlives the
+			// command: it is printed, written into relay.json, and sent as a
+			// parameter of every mint the daemon ever makes. A device id is
+			// derived from a key on both sides and has exactly one shape, so
+			// anything else is a control plane this daemon should not be
+			// storing strings from — start over rather than keep it.
+			if !validDeviceID(poll.DeviceID) {
+				return controlplane.Poll{}, errors.New(
+					"the control plane approved this machine under something that is not a device id; run flue link again")
+			}
 			if poll.DeviceToken == "" {
 				// The token exists in exactly one response, ever — the poll
 				// that minted the device — and this is that response arriving
@@ -262,9 +317,17 @@ func (l *linker) await(ctx context.Context, grant controlplane.Grant) (controlpl
 			}
 			return poll, nil
 		case controlplane.StatusConflict:
+			// Same string, same terminal, and this one is interpolated into an
+			// error rather than dropped — so a malformed id becomes a blank
+			// rather than a reason to lose the message that explains the
+			// conflict.
+			id := poll.DeviceID
+			if !validDeviceID(id) {
+				id = "unknown"
+			}
 			return controlplane.Poll{}, fmt.Errorf(
 				"this machine (%s) is already enrolled on another flue.sh account; remove it from that account's device list, then run flue link again",
-				poll.DeviceID)
+				id)
 		case controlplane.StatusExpired:
 			return controlplane.Poll{}, errors.New("the code expired, or was already used; run flue link again")
 		default:
@@ -311,6 +374,101 @@ func relayEndpoints(raw string) (dialURL, origin string, err error) {
 		path = "/daemon"
 	}
 	return socketScheme + "://" + u.Host + path, originScheme + "://" + u.Host, nil
+}
+
+// validDeviceID reports whether id has the one shape a device identity has:
+// twelve characters of lowercase hex.
+//
+// Both sides derive it from the machine's public key — hex(sha256(key))[:12] in
+// crypto.DeviceID and in app/src/lib/device-id.ts — so this is not a guess about
+// a format, it is the format. What makes it worth checking is where the string
+// goes: into a terminal, into relay.json, and into the body of every token
+// request this machine makes for as long as it is enrolled.
+func validDeviceID(id string) bool {
+	if len(id) != deviceIDLen {
+		return false
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// printableCode is the user code, checked before it reaches a terminal.
+//
+// A terminal does not draw every byte it is given: a carriage return rewrites
+// the line above, and an ESC moves the cursor, repaints, retitles the window,
+// or on some emulators answers back. The string being checked was chosen by
+// whatever answered the start call, which is the definition of somewhere else,
+// and it is printed with no escaping into a session the operator is watching.
+//
+// The check is "graphic ASCII, and short" rather than the control plane's own
+// alphabet on purpose. The alphabet lives in app/ (USER_CODE_ALPHABET), the
+// daemon is installed and updated separately, and a client that hard-refused an
+// alphabet it had not been told about would be the same drift in the other
+// direction — an installed flue that stops working because a server changed a
+// constant. Anything a person can read off a screen and type passes; nothing
+// that moves a cursor does.
+func printableCode(raw string) (string, error) {
+	if raw == "" {
+		return "", errors.New("the control plane opened a grant with no code for the operator to type; run flue link again")
+	}
+	if len(raw) > maxUserCodeLen {
+		return "", errors.New("the control plane answered with a user code far longer than one; not printing it")
+	}
+	for _, r := range raw {
+		// '!' through '~': printable ASCII with no space, which is every
+		// character a code has ever been made of and no character a terminal
+		// acts on.
+		if r < '!' || r > '~' {
+			return "", errors.New("the control plane answered with a user code that is not printable text; not printing it")
+		}
+	}
+	return raw, nil
+}
+
+// verificationPage is where the operator is told to go, checked against the
+// control plane they asked for.
+//
+// The app builds this URL from the request's own origin (`new URL('/enroll',
+// requestOrigin())`), so on a control plane that is behaving it is always the
+// origin this command was pointed at — which makes same-origin a condition that
+// costs a correct server nothing and catches the case worth catching: a URL that
+// walks the operator somewhere else to "approve" a link. url.Parse refuses a raw
+// string containing control bytes outright, and String() re-escapes what it
+// parsed, so the printed result is ASCII this terminal will only draw.
+//
+// The refusal deliberately does not quote what arrived — printing it is the
+// thing being avoided.
+func verificationPage(raw, origin string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("%s answered with a verification page that is not a URL; run flue link again", origin)
+	}
+	if u.Scheme+"://"+u.Host != origin {
+		return "", fmt.Errorf(
+			"%s wants this machine approved on a different site; not sending you there — run flue link again, and check --app",
+			origin)
+	}
+	return u.String(), nil
+}
+
+// warnIfCleartext says out loud when a credential is about to cross a link
+// nothing encrypts.
+//
+// http:// and ws:// are accepted everywhere in this flow because a developer
+// pointing a daemon at `vite dev` and a local relay is the ordinary way this
+// gets worked on. What must not happen is the same thing quietly: the enrollment
+// token comes back over the control-plane connection and the channel token goes
+// out over the relay one, so on anything but loopback this is the machine's
+// credentials in plaintext to everyone on the path.
+func warnIfCleartext(w io.Writer, what, addr string) {
+	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "ws://") {
+		return
+	}
+	fmt.Fprintf(w, "  warning: %s (%s) is not encrypted — this machine's credentials will travel in cleartext; fine on localhost, unsafe over a network\n\n", what, addr)
 }
 
 // hostLabel is what this machine calls itself in somebody's device list.

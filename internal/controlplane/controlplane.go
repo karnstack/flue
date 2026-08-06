@@ -358,6 +358,12 @@ func (c *Client) post(ctx context.Context, path string, form url.Values, out any
 // than trimmed: an operator who typed one meant something this client cannot
 // honour, and silently ignoring it would send their daemon somewhere else.
 //
+// http:// is accepted, not just https://, because `vite dev` serves the control
+// plane over it and refusing would mean nobody could develop this flow. It is
+// not treated as equivalent: every credential in this package travels in a body
+// over that connection, so `flue link` prints a cleartext warning for an origin
+// that is not https — see warnIfCleartext there.
+//
 // Exported so `flue link` can settle on one spelling before it writes one into
 // relay.json — a stored origin that differs from the one this client sends is a
 // 403 the next time the daemon needs a token.
@@ -371,7 +377,7 @@ func NormalizeOrigin(raw string) (string, error) {
 		return "", fmt.Errorf("the control-plane origin %q is not a URL: %w", raw, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("the control-plane origin %q needs an https:// scheme", raw)
+		return "", fmt.Errorf("the control-plane origin %q needs an https:// scheme (http:// is accepted for local development)", raw)
 	}
 	if u.Host == "" {
 		return "", fmt.Errorf("the control-plane origin %q names no host", raw)

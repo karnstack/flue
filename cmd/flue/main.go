@@ -316,8 +316,12 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 				"err", "relay.json names a flue.sh enrolment with no control plane or no device id; run flue link again")
 			return
 		}
-		cfg.Tokens = controlplane.NewDaemonTokens(
+		tokens := controlplane.NewDaemonTokens(
 			&controlplane.Client{Origin: rc.ControlPlane}, rc.DeviceID, rc.EnrollmentToken)
+		// The same sink the transport writes to, so its one warning — a token
+		// TTL too short to cache — lands beside the dials it is about.
+		tokens.Logger = logger
+		cfg.Tokens = tokens
 	}
 
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
