@@ -100,8 +100,13 @@ describe('verifyChannelToken accepts', () => {
     }
   })
 
-  it('a token that expires in the next second', async () => {
-    expect(await verifyChannelToken(SECRET, await mint({ exp: inSeconds(1) }))).not.toBeNull()
+  it('a token that is nearly expired', async () => {
+    // Two seconds and not one. `inSeconds` reads a clock, `verifyChannelToken`
+    // reads it again, and a second boundary crossed between them would make
+    // `exp === now` — which the strict check correctly refuses, failing this
+    // test for the very behaviour the expiry cases below assert. The margin is
+    // the smallest one that cannot flake, not a claim about the format.
+    expect(await verifyChannelToken(SECRET, await mint({ exp: inSeconds(2) }))).not.toBeNull()
   })
 })
 
