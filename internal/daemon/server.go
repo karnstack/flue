@@ -174,6 +174,15 @@ type Server struct {
 	// disconnect behaviour untested.
 	deviceConns map[string][]*conn
 
+	// relayMu guards the relay status below. Its own lock, and the smallest one
+	// here: it is written by the relay transport's own goroutine on every
+	// reconnect and read on two hot-ish paths — every welcome, and every
+	// pairStart — neither of which has any business waiting behind the
+	// connection registry or the primary bookkeeping.
+	relayMu     sync.RWMutex
+	relayStatus string
+	relayOrigin string
+
 	primaryMu sync.Mutex
 	primary   map[string]*conn // session ID -> primary connection
 	// attached is the connections holding each session, in
@@ -198,6 +207,11 @@ func New(reg *session.Registry, auth *local.Auth, ui http.Handler, version strin
 		baseCancel: baseCancel,
 		auth:       auth,
 		log:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
+
+		// No relay until something says otherwise. Whoever starts the daemon
+		// decides whether there is one to dial; this server only ever learns
+		// what happened to it.
+		relayStatus: RelayOff,
 
 		deviceConns: map[string][]*conn{},
 		primary:     map[string]*conn{},
@@ -735,6 +749,99 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 		return nil
 	}
 	return err
+}
+
+// --- the relay's status ---
+
+// The three states the relay leg can be in, and the only three strings that
+// ever reach a client in wire.RelayInfo.Status.
+//
+// They are exported because the transport that reports them lives in another
+// package (internal/transport/relay) and the compiler is the only thing that
+// can keep the two spellings identical.
+const (
+	// RelayOff is a daemon with no relay: none configured, or one that has
+	// stopped being dialled. It is never sent on the wire — the welcome omits
+	// the relay field entirely — so no client has to branch on it.
+	RelayOff = "off"
+	// RelayConnecting is a relay this daemon is trying to reach: dialling,
+	// backing off between dials, or waiting out a refusal. Nothing is reachable
+	// through it, so it names no origin.
+	RelayConnecting = "connecting"
+	// RelayConnected is a live socket to the relay, and the one state that
+	// carries an origin.
+	RelayConnected = "connected"
+)
+
+// SetRelayStatus records what the relay transport is doing. It is the only way
+// into that state and the transport is its only caller.
+//
+// Nothing is broadcast. The status decides two things — what a welcome reports
+// and which origin a pairing URL names — and both are read at the moment they
+// are needed rather than pushed: a client that connected before the relay came
+// up learns about it on its next connection, which is also when it could first
+// act on it.
+//
+// Two inputs are refused rather than stored, because both would have something
+// downstream act on a state that cannot be true:
+//
+//   - A status outside the three constants above. The wire field is a closed
+//     set and the TypeScript type is a union of the same three, so a fourth
+//     would reach a client with no branch for it. Treated as off.
+//   - "connected" with no origin. The origin is the entire use of a connected
+//     relay: it is the address a pairing URL names and the one a client shows.
+//     A socket that cannot name one is, to everything downstream, still
+//     dialling — and recording it as connected would hand pairStart an empty
+//     string to build a URL from.
+func (s *Server) SetRelayStatus(status, origin string) {
+	switch status {
+	case RelayConnected:
+		if origin == "" {
+			status = RelayConnecting
+		}
+	case RelayConnecting:
+		// Dialling reaches nothing, so it names nothing, whatever it was
+		// handed.
+		origin = ""
+	default:
+		status, origin = RelayOff, ""
+	}
+
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	s.relayStatus, s.relayOrigin = status, origin
+}
+
+// relayInfo is what a welcome carries, or nil when this daemon has no relay.
+//
+// Nil rather than an object saying "off": the field is optional on both sides,
+// and "present but off" is a third shape neither the Go encoder nor the client
+// has a meaning for.
+func (s *Server) relayInfo() *wire.RelayInfo {
+	s.relayMu.RLock()
+	defer s.relayMu.RUnlock()
+	if s.relayStatus == "" || s.relayStatus == RelayOff {
+		return nil
+	}
+	return &wire.RelayInfo{Status: s.relayStatus, Origin: s.relayOrigin}
+}
+
+// pairingOrigin is the origin a pairing URL should name, given the origin the
+// connection asking for one arrived on.
+//
+// A live relay wins. The URL is what a second device opens — usually by pointing
+// a camera at a QR code on this screen — and a phone cannot reach
+// http://127.0.0.1:7717 however correct that address is for the browser that
+// asked. Without a relay the connection's own origin is the only honest answer,
+// and for a connection that arrived *over* the relay the two are the same value
+// anyway.
+func (s *Server) pairingOrigin(connOrigin string) string {
+	s.relayMu.RLock()
+	defer s.relayMu.RUnlock()
+	if s.relayStatus == RelayConnected && s.relayOrigin != "" {
+		return s.relayOrigin
+	}
+	return connOrigin
 }
 
 // --- the connection registry ---

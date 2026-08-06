@@ -1200,3 +1200,147 @@ func TestStatusReportsTheStampedVersion(t *testing.T) {
 		t.Fatalf("status output is missing the daemon line:\n%s", out)
 	}
 }
+
+// TestStatusReportsNoRelayWhenUnconfigured: the relay line is unconditional.
+// "flue status" is the CLI's only diagnostics surface, and "there is no relay"
+// is the answer most users have — leaving the line out for them would make its
+// presence a puzzle rather than a report.
+func TestStatusReportsNoRelayWhenUnconfigured(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var buf bytes.Buffer
+	if err := statusTo(&buf); err != nil {
+		t.Fatalf("statusTo: %v", err)
+	}
+	if !strings.Contains(buf.String(), "relay:    not configured") {
+		t.Fatalf("status output is missing the relay line:\n%s", buf.String())
+	}
+}
+
+// TestStatusReportsAConfiguredRelayWithoutItsSecret: status reads the config
+// file, so it is the one CLI path that holds the daemon secret in memory. It
+// prints the URL, which is not a credential, and never the secret, which is the
+// whole credential — and status output goes to terminals, pastebins and bug
+// reports.
+func TestStatusReportsAConfiguredRelayWithoutItsSecret(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	const secret = "s3cr3t-daemon-secret"
+	if err := config.SaveRelay(config.Relay{
+		URL:    "wss://flue-relay.example/daemon",
+		Secret: secret,
+		Origin: "https://flue-relay.example",
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := statusTo(&buf); err != nil {
+		t.Fatalf("statusTo: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "relay:    configured (wss://flue-relay.example/daemon)") {
+		t.Fatalf("status output does not report the configured relay:\n%s", out)
+	}
+	if strings.Contains(out, secret) {
+		t.Fatalf("status printed the daemon secret:\n%s", out)
+	}
+}
+
+// --- the relay leg of serve ---
+
+// TestStartRelayDialsAConfiguredRelay is the wiring end to end from the config
+// file: relay.json on disk, and the daemon opens the outbound socket the whole
+// relay depends on, carrying the secret in the header rather than the URL.
+//
+// The stand-in relay answers 401, which is enough — this asserts that the dial
+// happens and what it carries, not what a real relay would do next.
+func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var attempts atomic.Int64
+	var auth atomic.Value
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth.Store(r.Header.Get("Authorization"))
+		attempts.Add(1)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+
+	const secret = "s3cr3t-daemon-secret"
+	if err := config.SaveRelay(config.Relay{
+		URL:    "ws" + strings.TrimPrefix(ts.URL, "http") + "/daemon",
+		Secret: secret,
+		Origin: "https://r.example",
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+
+	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth("0123456789abcdef", 0),
+		uiHandler(), version, daemon.Identity{})
+	t.Cleanup(srv.Shutdown)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startRelay(ctx, srv, daemon.Identity{})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for attempts.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the daemon never dialled the configured relay")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got, want := auth.Load().(string), "Bearer "+secret; got != want {
+		t.Errorf("Authorization = %q, want %q", got, want)
+	}
+}
+
+// TestStartRelayIsNeverFatal: every way a relay configuration can be wrong
+// costs remote access and nothing else. The daemon serves loopback regardless,
+// which is why startRelay returns no error to propagate — and why it must not
+// block either, since it runs on the path between a confirmed bind and the
+// banner that tells the user their terminal is ready.
+func TestStartRelayIsNeverFatal(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string // relay.json, or "" for no file at all
+	}{
+		{"no relay configured", ""},
+		{"malformed json", "{not json"},
+		{"no url", `{"secret":"s","origin":"https://r.example"}`},
+		{"no secret", `{"url":"wss://r.example/daemon","origin":"https://r.example"}`},
+		{"no origin", `{"url":"wss://r.example/daemon","secret":"s"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", base)
+			if tc.content != "" {
+				dir := filepath.Join(base, "flue")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "relay.json"), []byte(tc.content), 0o600); err != nil {
+					t.Fatalf("write relay.json: %v", err)
+				}
+			}
+
+			srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth("0123456789abcdef", 0),
+				uiHandler(), version, daemon.Identity{})
+			t.Cleanup(srv.Shutdown)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				startRelay(ctx, srv, daemon.Identity{})
+			}()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("startRelay did not return; a daemon must not wait on its relay to finish coming up")
+			}
+		})
+	}
+}

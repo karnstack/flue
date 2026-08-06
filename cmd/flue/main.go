@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,6 +27,7 @@ import (
 	"github.com/karnstack/flue/internal/service"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
+	"github.com/karnstack/flue/internal/transport/relay"
 	"github.com/karnstack/flue/web"
 )
 
@@ -208,6 +210,14 @@ func cmdServe(args []string) error {
 		<-held
 	}()
 
+	// After the bind is confirmed, deliberately. The relay's Durable Object
+	// hands the daemon leg to whoever dialled last and closes the incumbent
+	// (relay/src/hub.ts), so a second daemon started by mistake — the usual
+	// reason the bind fails — would kick the working one off the relay on its
+	// way to exiting. Dialling only once this process owns the port means the
+	// daemon that is actually serving is the one that is reachable.
+	startRelay(ctx, srv, identity)
+
 	// Only now, after the bind is confirmed and the runtime record is in place,
 	// so the link is never printed for a daemon that turned out not to be
 	// serving.
@@ -249,6 +259,54 @@ func loadIdentity() (daemon.Identity, error) {
 		return daemon.Identity{}, fmt.Errorf("load the daemon static key: %w", err)
 	}
 	return daemon.Identity{Key: key, Devices: crypto.NewDeviceStore(dir)}, nil
+}
+
+// startRelay dials the configured relay, if there is one, and keeps it dialled
+// until ctx ends. It returns as soon as the transport is started; Run does the
+// waiting, on a goroutine of its own.
+//
+// Nothing here is fatal, and that is the whole shape of it. flue's promise is a
+// terminal in a browser tab on this machine; the relay is what makes that tab
+// openable from somewhere else. A relay.json that cannot be read, one missing a
+// field, a relay that is down — each of them costs remote access and none of
+// them is a reason to refuse the local daemon. Every failure is a log line and
+// the daemon comes up serving loopback exactly as it would have.
+//
+// The secret never reaches the log. relay.New's errors name the field that is
+// missing rather than the value that is there, and the transport logs the URL
+// it dials and nothing else from the config.
+func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identity) {
+	// The same sink and format the daemon's own default logger uses, which
+	// launchd and systemd already capture.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	rc, ok, err := config.LoadRelay()
+	if err != nil {
+		// Configured and unreadable is worth a line: "no relay" is the ordinary
+		// state, but this is a file somebody wrote and this daemon cannot use.
+		logger.Warn("relay not started", "err", err)
+		return
+	}
+	if !ok {
+		return
+	}
+
+	t, err := relay.New(relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin},
+		srv, identity.Key, identity.Devices, logger)
+	if err != nil {
+		logger.Warn("relay not started", "err", err)
+		return
+	}
+	go func() {
+		if err := t.Run(ctx); err != nil {
+			logger.Warn("relay stopped", "err", err)
+		}
+	}()
+	// The transport reports this itself the moment it starts dialling, but the
+	// goroutine above has not necessarily been scheduled yet, and a client that
+	// connects in the meantime should be told a relay is coming up rather than
+	// that there is none.
+	srv.SetRelayStatus(daemon.RelayConnecting, "")
 }
 
 // snapshotsDir is where shutdown snapshots live between daemons. An empty
@@ -597,6 +655,10 @@ func statusTo(w io.Writer) error {
 	if mgr, err := newServiceManager(); err == nil {
 		fmt.Fprintln(w, serviceLine(mgr))
 	}
+	// Before the daemon lines, because the two branches below both return: a
+	// relay line that only appeared for a running daemon would be missing from
+	// exactly the report somebody is reading to find out why nothing works.
+	fmt.Fprintln(w, relayLine())
 	recorded, _, ok := daemon.ReadRuntimeRecord()
 	if !ok {
 		fmt.Fprintln(w, "daemon:   not running")
@@ -1097,6 +1159,34 @@ func runDisable(w io.Writer) error {
 	}
 	fmt.Fprintln(w, "  ✓ login service removed")
 	return nil
+}
+
+// relayLine is the relay's line in the status report.
+//
+// It reports the configuration and stops there. Whether the socket is actually
+// up is something only the daemon's own process knows, and it publishes it
+// where it is useful — on the welcome, to the UI that draws pairing QRs. This
+// CLI would have to open a WebSocket to ask, which is a lot of ceremony for a
+// line of text, so it says what it can honestly say from a file on disk.
+//
+// The URL is printed and the secret never is. A URL is an address; the secret
+// is the entire credential for the relay leg, and status output ends up in
+// terminals, screenshots and bug reports.
+func relayLine() string {
+	rc, ok, err := config.LoadRelay()
+	switch {
+	case err != nil:
+		// "unknown", the same word and shape serviceLine uses for the same
+		// situation: the question was asked and could not be answered. The
+		// error says whether that was an unreadable config directory or a
+		// relay.json somebody broke.
+		return fmt.Sprintf("relay:    unknown (%v)", err)
+	case !ok:
+		return "relay:    not configured"
+	case rc.URL == "":
+		return "relay:    configured, but with no URL to dial"
+	}
+	return fmt.Sprintf("relay:    configured (%s), status unknown from here", rc.URL)
 }
 
 // serviceLine is the login-service line flue status gains.

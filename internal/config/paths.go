@@ -54,14 +54,18 @@ func LoadOrCreateToken() (string, error) {
 		return "", err
 	}
 	tok := hex.EncodeToString(raw[:])
-	if err := writeTokenAtomically(dir, path, tok); err != nil {
+	if err := writeSecretAtomically(dir, path, []byte(tok)); err != nil {
 		return "", err
 	}
 	return tok, nil
 }
 
-// writeTokenAtomically replaces path's contents with tok without ever
-// writing through path's existing inode. Two reasons:
+// writeSecretAtomically replaces path's contents with b without ever
+// writing through path's existing inode. It is the one write path for every
+// secret this package persists — the loopback token and the relay
+// configuration — so neither can drift from the guarantees below.
+//
+// Two reasons:
 //
 //  1. Unix permission checks happen at open, not at read. If path already
 //     existed at a loose mode (blank content, or the exposed-secret case
@@ -80,16 +84,19 @@ func LoadOrCreateToken() (string, error) {
 //     no window at all.
 //
 // The rename is also atomic, so a crash mid-write can't leave a truncated
-// or empty token file.
-func writeTokenAtomically(dir, path, tok string) error {
-	tmp, err := os.CreateTemp(dir, "token-*.tmp")
+// or empty file where a complete one was.
+//
+// The temp file is named after its destination so a crash between create and
+// rename leaves something whoever finds it can identify.
+func writeSecretAtomically(dir, path string, b []byte) error {
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+"-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath) // no-op once the rename below has succeeded
 
-	if _, err := tmp.WriteString(tok); err != nil {
+	if _, err := tmp.Write(b); err != nil {
 		tmp.Close()
 		return err
 	}

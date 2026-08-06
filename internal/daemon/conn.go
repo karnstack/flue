@@ -308,6 +308,11 @@ func (c *conn) serve() {
 		DaemonID: "local",
 		Host:     c.srv.hostname,
 		Ver:      c.srv.version,
+		// Read here, once, at the moment this connection opens. The status is
+		// not a stream — nothing pushes an update when the relay reconnects —
+		// so what a client holds is what was true when it arrived, which is
+		// also when it decides what to render.
+		Relay: c.srv.relayInfo(),
 	})
 
 	for {
@@ -489,9 +494,14 @@ func (c *conn) handleControl(msg any) {
 		// DaemonPub stays on the message as well. It is the same key in the
 		// encoding the rest of the wire uses, read by a browser that is already
 		// trusted, and the two are pinned to each other by test.
+		//
+		// The base is not this connection's own origin but whatever
+		// pairingOrigin decides: a live relay's origin when there is one, and
+		// c.origin otherwise. A QR is read by a phone, and a phone cannot open
+		// the loopback address this connection arrived on.
 		_ = c.sendControl(wire.Pairing{
 			Token:     token,
-			URL:       c.origin + PairPagePath + "?t=" + token + "&k=" + c.srv.daemonPubParam(),
+			URL:       c.srv.pairingOrigin(c.origin) + PairPagePath + "?t=" + token + "&k=" + c.srv.daemonPubParam(),
 			DaemonPub: c.srv.daemonPub(),
 			ExpiresAt: expires.Unix(),
 		})

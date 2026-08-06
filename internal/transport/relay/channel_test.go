@@ -159,6 +159,10 @@ func (s *readingServer) PairDevice(body []byte, peer string) daemon.PairOutcome 
 	return daemon.PairRefusal()
 }
 
+// SetRelayStatus is nothing to these tests: they drive the channel layer
+// directly rather than through a dial, so no status transition ever happens.
+func (s *readingServer) SetRelayStatus(string, string) {}
+
 func (s *readingServer) served() []daemon.ConnMeta {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -576,6 +580,8 @@ func (panickingServer) ServeConn(context.Context, daemon.MessageConn, daemon.Con
 func (panickingServer) PairDevice([]byte, string) daemon.PairOutcome {
 	return daemon.PairRefusal()
 }
+
+func (panickingServer) SetRelayStatus(string, string) {}
 
 // TestRelayChannelSurvivesAPanicOnTheServePath: over the relay the caller is a
 // goroutine of this package's own, and a panic escaping it would end a process

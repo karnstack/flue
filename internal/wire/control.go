@@ -75,6 +75,33 @@ type Welcome struct {
 	Host     string   `json:"host"`
 	Ver      string   `json:"ver"`
 	Caps     []string `json:"caps,omitempty"`
+	// Relay is how this daemon is reachable from outside the machine, or nil
+	// when it is not configured for a relay at all. See RelayInfo.
+	Relay *RelayInfo `json:"relay,omitempty"`
+}
+
+// RelayInfo is the state of the daemon's relay leg, as of the moment the
+// connection carrying it was accepted.
+//
+// It rides the welcome rather than a message of its own because it is not a
+// stream: a client needs it to decide what to render — a QR that names an
+// address a phone can reach, an honest "remote access is down" — and the
+// connection's own opening frame is when it needs it. A daemon whose relay
+// changes state does not push an update; the next connection carries the truth.
+//
+// A pointer on Welcome, so "no relay configured" is an absent field rather than
+// an object saying "off". The client's type is a union of the three statuses,
+// and a fourth state — present but empty — is one neither side has a meaning
+// for.
+type RelayInfo struct {
+	// Status is "connecting" while the daemon is dialling and "connected" once
+	// the socket is up. "off" is what a daemon with no relay would say and is
+	// never sent: it is expressed by omitting Relay entirely.
+	Status string `json:"status"`
+	// Origin is the https origin the relay serves browsers on — the address a
+	// pairing URL names while the relay is up. Empty unless Status is
+	// "connected", because a socket that is not up carries nothing.
+	Origin string `json:"origin,omitempty"`
 }
 
 type Sessions struct {

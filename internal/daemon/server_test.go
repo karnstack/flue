@@ -2650,3 +2650,145 @@ func TestStoreErrorsDoNotReachClientsVerbatim(t *testing.T) {
 		})
 	}
 }
+
+// --- relay status ---
+
+// TestPairingURLPrefersTheRelayOrigin: the QR is opened by a phone, and a URL
+// naming 127.0.0.1 is one the phone cannot reach. Whenever this daemon has a
+// live relay, that is the origin the second device is sent to; when the relay
+// goes away the URL goes back to the origin the asking connection arrived on,
+// which is the only address that is honest without one.
+func TestPairingURLPrefersTheRelayOrigin(t *testing.T) {
+	ts, srv := newPairServer(t)
+	srv.SetRelayStatus(RelayConnected, "https://r.example")
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.PairStart{})
+
+	var got wire.Pairing
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		p, ok := msg.(wire.Pairing)
+		if ok {
+			got = p
+		}
+		return ok
+	})
+	if want := "https://r.example" + PairPagePath + "?t=" + got.Token; !strings.HasPrefix(got.URL, want) {
+		t.Fatalf("url = %q, want it to start with %q", got.URL, want)
+	}
+
+	// The relay drops. The next window must name the origin this connection
+	// actually arrived on rather than a relay that is no longer carrying
+	// anything.
+	srv.SetRelayStatus(RelayOff, "")
+	writeControl(t, c, wire.PairStart{})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		p, ok := msg.(wire.Pairing)
+		if !ok || p.Token == got.Token {
+			return false
+		}
+		if want := ts.URL + PairPagePath + "?t=" + p.Token; !strings.HasPrefix(p.URL, want) {
+			t.Fatalf("url after the relay went away = %q, want it to start with %q", p.URL, want)
+		}
+		return true
+	})
+}
+
+// TestWelcomeReportsTheRelay: the status is not broadcast, so a client learns
+// it from the welcome its own connection opens with — which means the welcome
+// has to carry whatever was true at the moment that connection was accepted.
+func TestWelcomeReportsTheRelay(t *testing.T) {
+	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
+
+	// No relay: the field is absent, not an object saying "off".
+	c := dial(t, ts)
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		w, ok := msg.(wire.Welcome)
+		if !ok {
+			return false
+		}
+		if w.Relay != nil {
+			t.Fatalf("a daemon with no relay sent relay = %+v, want nothing", *w.Relay)
+		}
+		return true
+	})
+
+	srv.SetRelayStatus(RelayConnecting, "")
+	c = dial(t, ts)
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		w, ok := msg.(wire.Welcome)
+		if !ok {
+			return false
+		}
+		if w.Relay == nil {
+			t.Fatal("welcome carried no relay while the transport was dialling")
+		}
+		if w.Relay.Status != RelayConnecting || w.Relay.Origin != "" {
+			t.Fatalf("relay = %+v, want {connecting}", *w.Relay)
+		}
+		return true
+	})
+
+	srv.SetRelayStatus(RelayConnected, "https://r.example")
+	c = dial(t, ts)
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		w, ok := msg.(wire.Welcome)
+		if !ok {
+			return false
+		}
+		if w.Relay == nil {
+			t.Fatal("welcome carried no relay while the transport was connected")
+		}
+		if w.Relay.Status != RelayConnected || w.Relay.Origin != "https://r.example" {
+			t.Fatalf("relay = %+v, want {connected https://r.example}", *w.Relay)
+		}
+		return true
+	})
+}
+
+// TestSetRelayStatusRefusesStatesItCannotMean guards the two ways a caller can
+// hand this server a status that says something it does not mean.
+//
+// The wire field is a closed set of three strings and the TypeScript type is a
+// union of the same three, so a fourth would reach a client that has no branch
+// for it. And "connected" with no origin is a contradiction: the origin is the
+// entire use of being connected — it is what a pairing URL is built from — so a
+// connection that cannot name one is still, as far as anything downstream is
+// concerned, dialling.
+func TestSetRelayStatusRefusesStatesItCannotMean(t *testing.T) {
+	srv := New(session.NewRegistry(time.Now), nil, http.NotFoundHandler(), "test", Identity{})
+
+	if info := srv.relayInfo(); info != nil {
+		t.Fatalf("a freshly built server reports relay = %+v, want nothing", *info)
+	}
+	if got := srv.pairingOrigin("http://127.0.0.1:7717"); got != "http://127.0.0.1:7717" {
+		t.Fatalf("pairingOrigin = %q with no relay, want the connection's own origin", got)
+	}
+
+	srv.SetRelayStatus("hallucinating", "https://r.example")
+	if info := srv.relayInfo(); info != nil {
+		t.Fatalf("an unknown status was reported as %+v, want it treated as off", *info)
+	}
+	if got := srv.pairingOrigin("http://127.0.0.1:7717"); got != "http://127.0.0.1:7717" {
+		t.Fatalf("pairingOrigin = %q under an unknown status, want the connection's own origin", got)
+	}
+
+	srv.SetRelayStatus(RelayConnected, "")
+	info := srv.relayInfo()
+	if info == nil {
+		t.Fatal("a connected relay with no origin was reported as no relay at all")
+	}
+	if info.Status != RelayConnecting {
+		t.Fatalf("relay status = %q for a connection with no origin, want %q", info.Status, RelayConnecting)
+	}
+	if got := srv.pairingOrigin("http://127.0.0.1:7717"); got != "http://127.0.0.1:7717" {
+		t.Fatalf("pairingOrigin = %q for a relay with no origin, want the connection's own origin", got)
+	}
+
+	// And "connecting" never carries an origin, whatever it was handed.
+	srv.SetRelayStatus(RelayConnecting, "https://r.example")
+	if info := srv.relayInfo(); info == nil || info.Origin != "" {
+		t.Fatalf("relay = %+v while connecting, want no origin", info)
+	}
+}

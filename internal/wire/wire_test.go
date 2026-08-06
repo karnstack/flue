@@ -233,6 +233,75 @@ func TestControlRoundTripsDeviceAndPairingMessages(t *testing.T) {
 	}
 }
 
+// TestWelcomeCarriesRelayStatus pins the field a client reads to know whether
+// this daemon is reachable from outside the machine, and in particular that a
+// daemon with no relay sends no `relay` key at all rather than an object
+// claiming to be off. The TypeScript type declares it optional; a value that is
+// present but empty is a third state neither side has a meaning for.
+func TestWelcomeCarriesRelayStatus(t *testing.T) {
+	b, err := EncodeControl(Welcome{
+		DaemonID: "local", Host: "macbook", Ver: "0.1.0",
+		Relay: &RelayInfo{Status: "connected", Origin: "https://flue-relay.example"},
+	})
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	relay, ok := got["relay"].(map[string]any)
+	if !ok {
+		t.Fatalf("welcome carried no relay object: %s", b)
+	}
+	if relay["status"] != "connected" || relay["origin"] != "https://flue-relay.example" {
+		t.Fatalf("relay = %v, want {status:connected origin:https://flue-relay.example}", relay)
+	}
+
+	msg, err := DecodeControl(b)
+	if err != nil {
+		t.Fatalf("DecodeControl: %v", err)
+	}
+	w, ok := msg.(Welcome)
+	if !ok {
+		t.Fatalf("msg is %T, want wire.Welcome", msg)
+	}
+	if w.Relay == nil {
+		t.Fatal("decoded welcome dropped the relay field")
+	}
+	if w.Relay.Status != "connected" || w.Relay.Origin != "https://flue-relay.example" {
+		t.Fatalf("decoded relay = %+v, want {connected https://flue-relay.example}", *w.Relay)
+	}
+
+	// A relay that is merely dialling has no origin to name, and the field is
+	// omitted rather than sent empty.
+	b, err = EncodeControl(Welcome{DaemonID: "local", Relay: &RelayInfo{Status: "connecting"}})
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	got = nil
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	relay, _ = got["relay"].(map[string]any)
+	if _, present := relay["origin"]; present {
+		t.Fatalf("a connecting relay carried an origin: %s", b)
+	}
+
+	// And a daemon with no relay at all sends no relay key.
+	b, err = EncodeControl(Welcome{DaemonID: "local", Host: "macbook", Ver: "0.1.0"})
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	got = nil
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, present := got["relay"]; present {
+		t.Fatalf("a daemon with no relay encoded one: %s", b)
+	}
+}
+
 // TestDeviceListEncodesEmptyAsArray enforces the invariant the fixture's
 // deviceListEmpty case only illustrates: a daemon with nothing paired sends
 // [], never null. `devices` is not optional, and the TypeScript side declares

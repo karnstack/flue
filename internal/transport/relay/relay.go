@@ -144,6 +144,13 @@ type Server interface {
 	// daemon dialled. It answers the status and JSON body the Worker writes
 	// back to the browser that posted it.
 	PairDevice(body []byte, peer string) daemon.PairOutcome
+	// SetRelayStatus reports what this transport is doing, in the daemon's own
+	// vocabulary: daemon.RelayConnecting while there is no socket, and
+	// daemon.RelayConnected with the configured origin while there is one. The
+	// daemon builds pairing URLs and answers welcomes out of it, so it tracks
+	// the socket rather than the configuration — a relay that is configured and
+	// down is one nothing can be reached through.
+	SetRelayStatus(status, origin string)
 }
 
 // The daemon is the implementation, and the compiler is what keeps the two in
@@ -239,6 +246,11 @@ func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceSto
 // answering 401 while its operator rotates a secret is a temporary state, and a
 // daemon that gave up on it would never come back without a restart.
 func (t *Transport) Run(ctx context.Context) error {
+	// Whatever ends this loop, the relay is off. Run only returns when its
+	// context is done, and a status left reading "connecting" would have every
+	// welcome after it announce a relay nothing is trying to reach.
+	defer t.srv.SetRelayStatus(daemon.RelayOff, "")
+
 	attempt := 0
 	for {
 		connectedAt, err := t.runOnce(ctx)
@@ -280,6 +292,14 @@ func (t *Transport) Run(ctx context.Context) error {
 // that failed from a connection that dropped — they are logged differently —
 // and how long the connection lasted, which is what the backoff resets on.
 func (t *Transport) runOnce(ctx context.Context) (connectedAt time.Time, err error) {
+	// The status belongs to the socket, so it starts and ends with this
+	// function: dialling is "connecting", and anything that ends the connection
+	// returns to it. The deferred half is what makes that immediate rather than
+	// waiting out the backoff — a pairing URL handed out during a thirty-second
+	// wait must not name a relay that is carrying nothing.
+	t.srv.SetRelayStatus(daemon.RelayConnecting, "")
+	defer t.srv.SetRelayStatus(daemon.RelayConnecting, "")
+
 	// The dial's deadline is the dial's alone. coder/websocket applies an
 	// HTTPClient timeout exactly this way — a derived context it cancels the
 	// moment the handshake returns — so cancelling it here does not touch the
@@ -304,6 +324,11 @@ func (t *Transport) runOnce(ctx context.Context) (connectedAt time.Time, err err
 	// never complete.
 	defer ws.CloseNow()
 
+	// The origin is the configured one rather than anything the relay said:
+	// this is the address the daemon dialled and the address it checks every
+	// announced open against, so it is the only one it can honestly hand a
+	// browser.
+	t.srv.SetRelayStatus(daemon.RelayConnected, t.cfg.Origin)
 	t.log.Info("relay connected", "url", t.cfg.URL)
 
 	connCtx, cancel := context.WithCancel(ctx)

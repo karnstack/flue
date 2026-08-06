@@ -12,6 +12,8 @@
   { "name": "pairStart",   "json": { "type": "pairStart" } },
   { "name": "pairCancel",  "json": { "type": "pairCancel" } },
   { "name": "welcome",     "json": { "type": "welcome", "daemonId": "local", "host": "macbook", "ver": "0.1.0" } },
+  { "name": "welcomeRelay","json": { "type": "welcome", "daemonId": "local", "host": "macbook", "ver": "0.1.0", "relay": { "status": "connected", "origin": "https://flue-relay.karn.workers.dev" } } },
+  { "name": "welcomeRelayConnecting", "json": { "type": "welcome", "daemonId": "local", "host": "macbook", "ver": "0.1.0", "relay": { "status": "connecting" } } },
   { "name": "sessions",    "json": { "type": "sessions", "sessions": [
     { "id": "s1", "title": "zsh", "cwd": "/home/karn/code", "cmd": ["zsh", "-l"], "state": "running", "exitCode": 0, "cols": 120, "rows": 40, "lastActive": "2026-07-28T10:30:00Z" },
     { "id": "s2", "title": "vim", "cwd": "/home/karn/work", "cmd": ["vim", "file.txt"], "state": "exited", "exitCode": 1, "cols": 80, "rows": 24, "lastActive": "2026-07-28T09:00:00Z" }

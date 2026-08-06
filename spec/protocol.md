@@ -40,7 +40,7 @@ Every control message is a JSON object with a `type` discriminator.
 
 | type | fields | meaning |
 |---|---|---|
-| `welcome` | `daemonId`, `host`, `ver`, `caps[]` | answers `hello` |
+| `welcome` | `daemonId`, `host`, `ver`, `caps[]`, `relay?` | answers `hello` |
 | `sessions` | `sessions[]` | answers `list`, and follows any change to the set |
 | `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `head`, `truncated`, `primary`, `reqId?` | answers `attach` or `spawn` |
 | `exit` | `ref`, `code` | the session's process ended |
@@ -54,11 +54,22 @@ Each record of `deviceList.devices[]` carries `id`, `label`, `pairedAt` and
 `lastSeen`. Both timestamps are unix **seconds**, not the RFC 3339 strings
 `sessions[]` uses.
 
+`welcome.relay`, when present, is `{status, origin?}` — the state of the
+daemon's relay leg at the moment this connection was accepted. `status` is
+`connecting` while the daemon is dialling, and `connected` once the socket is
+up, in which case `origin` is the https origin the relay serves browsers on. A
+daemon with no relay configured omits the field entirely rather than sending
+`off`. It is not a stream: nothing pushes an update when the relay reconnects,
+so a client learns the current state from the `welcome` of its next connection.
+
 ## Pairing
 
 `pairStart` puts the daemon into pairing mode and is answered by `pairing`,
 which carries a token, the daemon's static public key, and an absolute `/pair`
-URL on this origin for the second device to open. The token lives **two
+URL for the second device to open. That URL names the relay's origin whenever
+the daemon has a live relay (`welcome.relay.status == "connected"`) and the
+origin the asking connection arrived on otherwise: the QR is read by a phone,
+and a phone cannot open the loopback address a local browser is using. The token lives **two
 minutes** and is **single-use**: `POST /api/pair` spends it and registers the
 device, and `pairCancel` — or the deadline, or a completed pairing — ends
 pairing mode. The daemon holds at most one outstanding token, so a second

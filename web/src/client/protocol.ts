@@ -209,6 +209,29 @@ export type ClientMessage =
 
 // Server -> client.
 
+/**
+ * The state of the daemon's relay leg, as of the moment this connection was
+ * accepted.
+ *
+ * `connecting` means the daemon is dialling and nothing is reachable through
+ * it yet; `connected` carries the https origin the relay serves browsers on,
+ * which is the address a pairing URL names while the relay is up.
+ *
+ * `off` is in the union because it is the third state the daemon models, but
+ * it never arrives: a daemon with no relay omits `welcome.relay` entirely. A
+ * consumer must therefore treat an absent `relay` and `status: 'off'` the same
+ * way rather than assuming one of the two spellings.
+ *
+ * It is not a stream. Nothing pushes an update when the relay reconnects, so
+ * what a client holds is what was true when it arrived — which is also when it
+ * decides what to render.
+ */
+export interface RelayInfo {
+  status: 'off' | 'connecting' | 'connected'
+  /** Absent unless `status` is `connected`. */
+  origin?: string
+}
+
 export interface Welcome {
   type: 'welcome'
   daemonId: string
@@ -216,6 +239,8 @@ export interface Welcome {
   ver: string
   /** `omitempty` on the daemon side, so genuinely absent rather than empty. */
   caps?: string[]
+  /** Absent when this daemon is not configured for a relay. See RelayInfo. */
+  relay?: RelayInfo
 }
 
 export interface Sessions {

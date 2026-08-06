@@ -24,8 +24,52 @@ import (
 // socket rather than about what it carries. It counts what reached it, so a
 // test that expects nothing to be served can say so.
 type stubServer struct {
-	mu    sync.Mutex
-	calls int
+	mu       sync.Mutex
+	calls    int
+	statuses []relayStatus
+}
+
+// relayStatus is one SetRelayStatus call, kept in order so a test can assert
+// what the daemon was told and when.
+type relayStatus struct {
+	status string
+	origin string
+}
+
+func (s *stubServer) SetRelayStatus(status, origin string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statuses = append(s.statuses, relayStatus{status, origin})
+}
+
+// lastStatus is the most recent state the daemon was told about, or the zero
+// value if it has been told nothing.
+func (s *stubServer) lastStatus() relayStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.statuses) == 0 {
+		return relayStatus{}
+	}
+	return s.statuses[len(s.statuses)-1]
+}
+
+// awaitStatus waits for the daemon to have been told want, and fails with
+// everything it was told instead.
+func (s *stubServer) awaitStatus(t *testing.T, want relayStatus) {
+	t.Helper()
+	deadline := time.Now().Add(waitFor)
+	for {
+		if got := s.lastStatus(); got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.mu.Lock()
+			history := append([]relayStatus(nil), s.statuses...)
+			s.mu.Unlock()
+			t.Fatalf("the daemon was never told %+v within %s; it was told %+v", want, waitFor, history)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func (s *stubServer) ServeConn(context.Context, daemon.MessageConn, daemon.ConnMeta) {
@@ -279,6 +323,59 @@ func TestTransportReconnectsWhenTheRelayDropsTheSocket(t *testing.T) {
 	r.accept(t)
 	if n := r.attempts(); n < 2 {
 		t.Errorf("the relay saw %d upgrade attempts, want at least 2", n)
+	}
+}
+
+// TestTransportReportsItsStatusToTheDaemon: the daemon builds pairing URLs and
+// answers welcomes out of this status, so it has to track the socket rather
+// than the configuration. In particular the status returns to "connecting" the
+// moment the socket is lost — before the backoff, not after it — because a QR
+// handed out during a thirty-second wait would otherwise name a relay that is
+// carrying nothing.
+func TestTransportReportsItsStatusToTheDaemon(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	tr, srv := newTestTransport(t, r, "s", nil)
+	stop := runTransport(t, tr)
+
+	first := r.accept(t)
+	srv.awaitStatus(t, relayStatus{"connected", "https://relay.example"})
+	// Dialling comes first, and it never claims an origin: nothing is reachable
+	// through a socket that is not up yet.
+	srv.mu.Lock()
+	opening := srv.statuses[0]
+	srv.mu.Unlock()
+	if opening != (relayStatus{"connecting", ""}) {
+		t.Errorf("the first status was %+v, want {connecting }", opening)
+	}
+
+	first.kill()
+	srv.awaitStatus(t, relayStatus{"connecting", ""})
+
+	r.accept(t)
+	srv.awaitStatus(t, relayStatus{"connected", "https://relay.example"})
+
+	// And a transport that has been told to stop is off, not perpetually
+	// dialling: every welcome after this would otherwise announce a relay
+	// nothing is trying to reach.
+	stop()
+	if got := srv.lastStatus(); got != (relayStatus{"off", ""}) {
+		t.Errorf("status after Run returned = %+v, want {off }", got)
+	}
+}
+
+// TestTransportReportsDiallingWhileTheRelayRefusesIt: a relay answering 401 is
+// a relay this daemon is not reachable through, and the retry loop must not
+// leave the daemon believing otherwise.
+func TestTransportReportsDiallingWhileTheRelayRefusesIt(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "right")
+	tr, srv := newTestTransport(t, r, "wrong", nil)
+	runTransport(t, tr)
+
+	r.waitAttempts(t, 2)
+	if got := srv.lastStatus(); got != (relayStatus{"connecting", ""}) {
+		t.Errorf("status while the relay refuses the secret = %+v, want {connecting }", got)
 	}
 }
 
