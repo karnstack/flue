@@ -113,11 +113,13 @@ interface PairAnswer {
  * again.
  *
  * `spent` is the difference between a request the daemon's pairing handler read
- * and everything else. Read is enough: either it reached redeem, which closes
- * the window on a wrong token as readily as on a right one, or it was refused
- * before redeem by a check that will refuse the identical retry just as flatly
- * — see REFUSED_STATUS. Either way the button would be a click that cannot
- * work. A request that never got that far spent nothing, whether it was never
+ * and everything else. Read is enough, and it stays enough now that a wrong
+ * token no longer closes the window: this page's token comes out of the URL and
+ * never changes, so whatever refused it — redeem, or a check ahead of redeem —
+ * will refuse the identical retry just as flatly (see REFUSED_STATUS). Either
+ * way the button would be a click that cannot work. The one thing the daemon's
+ * 403 no longer means is that the *user's* window is over; only that this
+ * device's attempt at it is. A request that never got that far spent nothing, whether it was never
  * sent or whether the relay in front of the daemon answered instead, and
  * pressing Pair again is a fair thing to offer. Neither case ever retries on its
  * own.
@@ -495,10 +497,11 @@ export function PairRoute() {
 
   /*
    * A refusal the daemon itself answered is the end of this page. Either the
-   * window closed on that presentation — it does, right token or wrong — or the
-   * check that refused it will refuse an identical retry identically, and a
-   * button that cannot work is worse than no button, because it reads as though
-   * the ceremony is still in reach.
+   * window closed on that presentation — which it does when the token was the
+   * right one — or whatever refused it will refuse an identical retry
+   * identically, and this page has no second token to offer. A button that
+   * cannot work is worse than no button, because it reads as though the
+   * ceremony is still in reach.
    */
   const stopped = failure?.spent === true
 

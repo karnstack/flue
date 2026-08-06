@@ -213,9 +213,15 @@ see §11.
   drops the `revoked` frame on the `errConnBacklogged` path
   (`internal/daemon/conn.go:231`), leaving a bare close the client reconnects
   from. Only reachable once a device holds a real connection — part 2.
-- Any local process can burn an open pairing window by guessing wrong once. That
+- ~~Any local process can burn an open pairing window by guessing wrong once. That
   is the intended shape of burn-on-wrong-guess and it is bounded by the two-minute
-  TTL, but it is worth knowing before the ceremony is driven from anywhere else.
+  TTL, but it is worth knowing before the ceremony is driven from anywhere else.~~
+  **Done** — "anywhere else" arrived: the relay makes `POST /api/pair` reachable
+  from the internet without a credential, so burn-on-wrong-guess handed anyone a
+  way to cancel every window the user opens, forever. `pairingState.redeem` now
+  spends a window only on the presentation that pairs a device, or on the TTL.
+  The bound it gave up was never worth anything against 32 bytes of
+  `crypto/rand`.
 
 ### 9. Smaller carried items
 
@@ -381,6 +387,21 @@ documented promise depends on.
   touches it — which is what the month of counters in the same document is for.
   Distinct from §10, which is the daemon's own outbound queue rather than the
   relay's.
+- **`POST /api/pair` is credential-less and internet-reachable, and nothing
+  rate limits it.** It has to be credential-less — the device presenting a
+  pairing token is by definition a device holding no credential — and the
+  Durable Object bounds what one caller can *hold* (8 parked attempts, a 4 KiB
+  body, a 10 s deadline) rather than how fast they can arrive. A wrong token no
+  longer costs the user anything, so a flood buys an attacker nothing but noise
+  in the daemon's log and requests against the Worker's daily allowance. That
+  last part is the residue: a determined stranger who knows the workers.dev host
+  can spend a self-hosted relay's free tier without ever pairing anything. The
+  fix is operator-side rather than in this repo — a **Cloudflare Rate Limiting
+  rule on `/api/pair`** in the dashboard, which is free on every plan and is
+  where a rate this code cannot see belongs. `docs/RELAY.md` says so under fair
+  use. Doing it in the Worker instead would mean per-IP state in the Durable
+  Object, which is a hibernation cost paid on every request to save one the edge
+  can refuse for nothing.
 - **The browser leg has no auth, and the SaaS needs one.**
   `authorizeClient` (`relay/src/index.ts`) returns `true` and `hubIdFor` returns
   `idFromName('hub')` — correct for self-hosting, where one daemon owns the

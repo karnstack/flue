@@ -25,10 +25,12 @@ import (
 // scanning a code or following a link. Four rules keep that narrow:
 //
 //   - There has to be an open window. Outside one, this endpoint is inert.
-//   - The window closes on the first presentation, right or wrong (see
-//     pairingState.redeem), so there are no retries to grind through the
-//     256-bit token with.
-//   - The window closes on its own after PairingTTL.
+//   - The window closes on the presentation that succeeds (see
+//     pairingState.redeem), so a token pairs exactly one device.
+//   - The window closes on its own after PairingTTL. Nothing else closes it:
+//     a wrong guess costs the guesser a request and the user nothing, because
+//     this endpoint is reachable from the internet over a relay and the token
+//     it protects is 256 bits.
 //   - The request must be same-origin, checked before the token is compared,
 //     so a page that is not the /pair page this daemon served cannot even
 //     reach the comparison.
@@ -115,8 +117,10 @@ func (p *pairingState) cancel() {
 // refusePair — because the difference between them is information about the
 // user's live ceremony. To whoever reads the daemon's log the difference is
 // the whole point: "someone probed an endpoint that was inert" and "someone
-// presented a wrong token against a window the user had open, and burned it"
-// are the same 403 and very different events.
+// presented a wrong token against a window the user had open" are the same 403
+// and very different events. The second costs the user nothing now (see
+// pairingState.redeem), which is exactly why the log is the only place it is
+// visible at all.
 type redeemResult int
 
 const (
@@ -151,18 +155,28 @@ func (r redeemResult) String() string {
 // nothing, so there is no read-then-write gap in which one token pairs two
 // devices.
 //
-// It differs from the handoff store in one deliberate way. The window is
-// cleared whether or not the presented token matched, so a wrong guess burns
-// it: with one window and no retries, a guessing attacker gets exactly one
-// attempt at a 256-bit secret per ceremony the user starts, rather than as
-// many as they can fit inside two minutes. The cost is that a wrong guess
-// makes the user press "pair" again, which is a cost worth paying and one the
-// UI can explain.
+// Exactly two things spend a window: a correct token, and the deadline. A wrong
+// guess spends nothing.
+//
+// It used to burn on any presentation, right or wrong, on the theory that one
+// attempt per ceremony is a tighter bound on guessing than as many as fit in
+// two minutes. That reasoning was never worth much — the token is 32 bytes from
+// crypto/rand, and 2^256 does not care whether an attacker gets one guess or a
+// billion — and once this endpoint became reachable through a relay it started
+// costing something real. `POST /api/pair` carries no credential by design
+// (spec/relay-protocol.md, Auth), so under burn-on-wrong-guess anyone on the
+// internet could spend every window the user opened, indefinitely, by posting
+// nonsense at it: the user presses Pair, an attacker's loop burns it before the
+// phone can present the real token, the phone gets the same 403 a wrong guess
+// gets, and the ceremony can never complete. Guesses now consume nothing, which
+// makes that flood inert.
 //
 // A mismatch is reported as such even when the window had also expired,
 // because the two say different things about who presented it: the token was
 // never right, as opposed to a real ceremony that ran out of time. Neither
-// distinction ever leaves this process except through the log.
+// distinction ever leaves this process except through the log. The expired
+// window is swept either way — it can no longer pair anything, and leaving a
+// dead token in memory for the next comparison serves nobody.
 //
 // The comparison is crypto/subtle's rather than ==, so the answer does not
 // depend on how long a prefix the guess got right.
@@ -171,16 +185,20 @@ func (p *pairingState) redeem(token string, now time.Time) redeemResult {
 	defer p.mu.Unlock()
 
 	active, expires := p.token, p.expires
-	p.token, p.expires = "", time.Time{}
+	expired := active != "" && !now.Before(expires)
+	if expired {
+		p.token, p.expires = "", time.Time{}
+	}
 
 	switch {
 	case active == "":
 		return pairNoWindow
 	case subtle.ConstantTimeCompare([]byte(active), []byte(token)) != 1:
 		return pairWrongToken
-	case !now.Before(expires):
+	case expired:
 		return pairExpired
 	}
+	p.token, p.expires = "", time.Time{}
 	return pairAccepted
 }
 
@@ -254,9 +272,11 @@ var pairRefusedJSON = []byte(`{"error":"` + pairRefusedText + `"}`)
 // without running the ceremony: the relay adapter, which drops a `pair` whose
 // announced origin is not the relay this daemon dialled. That request must be
 // answered — a Worker holding a parked HTTP request would otherwise wait out
-// its own deadline — and it must be answered without redeeming anything, since
-// a token is spent by any presentation and a relay lying about its origin must
-// not be able to burn the user's window.
+// its own deadline — and it must be answered without redeeming anything. A
+// wrong token no longer spends a window (pairingState.redeem), but a relay
+// lying about its origin is a relay that can *see* the live token on channel 0
+// (spec/relay-protocol.md, what the relay sees), and presenting that would
+// spend it against a device of the relay's choosing.
 //
 // The body is a fresh copy, so no caller can edit the refusal every other
 // caller is about to send.
@@ -405,7 +425,8 @@ func (s *Server) writePairOutcome(w http.ResponseWriter, out PairOutcome) {
 //  3. The request's shape: parseable JSON, a token that is at least present,
 //     a key that is 32 bytes of base64. A client that fumbles its own request
 //     has not guessed at the secret, so it does not spend the window.
-//  4. Only then redeem, which spends the window whatever the answer.
+//  4. Only then redeem, which spends the window on the answer that pairs a
+//     device and on nothing else.
 //
 // The first two are this transport's, and stay here. The last two are the
 // ceremony itself and live in PairDevice, which the relay leg reaches with its

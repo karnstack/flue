@@ -100,8 +100,11 @@ static key in **standard** base64; the answer is `200 {deviceId, daemonPub}`,
 `daemonPub` likewise standard base64. Every refusal — no window open, wrong
 token, expired token, an origin other than the daemon's own, a malformed key —
 is the same `403` with the same body, so the endpoint says nothing about
-whether a token ever existed. A presented token closes the window whether or
-not it was the right one.
+whether a token ever existed. The window closes on the presentation that pairs
+a device, and otherwise only when its two minutes are up: a wrong token spends
+nothing, because this endpoint is reachable without a credential — over a relay,
+from the internet — and a window anyone could close on demand is a window the
+user could never finish using.
 
 ## Correlation
 

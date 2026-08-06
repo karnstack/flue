@@ -42,7 +42,9 @@
 //     It is bounded instead: it does nothing unless the user has opened a
 //     pairing window from an already-trusted UI, it refuses anything that is
 //     not same-origin before comparing the token, and the window closes on the
-//     first presentation whether or not it was right. See pairing.go.
+//     presentation that pairs a device. A wrong one closes nothing: the token
+//     is 256 bits and this endpoint is reachable from the internet over a
+//     relay, so burn-on-wrong-guess only ever cost the user. See pairing.go.
 //   - The page that makes that POST cannot authenticate either, so the two
 //     GETs which serve it — PairPagePath and uiAssetPrefix — are exempt from
 //     the token as well. What the exemption covers is decided by

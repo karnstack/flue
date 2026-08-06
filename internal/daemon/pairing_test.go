@@ -79,19 +79,42 @@ func TestPairingTokenExpires(t *testing.T) {
 	}
 }
 
-// TestPairingWrongTokenBurnsTheWindow pins the find-and-delete discipline: the
-// active window is cleared by any presentation, so a guess costs the window
-// rather than buying another attempt.
-func TestPairingWrongTokenBurnsTheWindow(t *testing.T) {
+// TestPairingWrongTokenLeavesTheWindowOpen pins the rule that replaced
+// burn-on-wrong-guess: only a correct token spends a window. The endpoint is
+// reachable from the internet over a relay, so burning on a wrong guess made
+// every window the user opens cancellable by anyone who could POST at it —
+// against a 256-bit token, which no flood of guesses is going to find.
+func TestPairingWrongTokenLeavesTheWindowOpen(t *testing.T) {
 	var p pairingState
 	now := time.Now()
 	token, _ := p.start(now)
 
-	if got := p.redeem("not-the-token", now); got != pairWrongToken {
-		t.Fatalf("redeem of a wrong token = %v, want wrong token", got)
+	for i := range 1000 {
+		if got := p.redeem("not-the-token", now); got != pairWrongToken {
+			t.Fatalf("guess %d = %v, want wrong token", i, got)
+		}
+	}
+	if got := p.redeem(token, now); got != pairAccepted {
+		t.Fatalf("the real token after a thousand wrong guesses = %v, want accepted", got)
 	}
 	if got := p.redeem(token, now); got != pairNoWindow {
-		t.Fatalf("the real token after a wrong guess = %v, want no window; a guess must burn it", got)
+		t.Fatalf("the real token again = %v, want no window; success is what spends it", got)
+	}
+}
+
+// TestPairingExpiryClosesTheWindow: the TTL is the other thing that spends a
+// window, and it spends it for good — a presentation past the deadline leaves
+// nothing behind for the next one to compare against.
+func TestPairingExpiryClosesTheWindow(t *testing.T) {
+	var p pairingState
+	now := time.Now()
+	token, expires := p.start(now)
+
+	if got := p.redeem(token, expires); got != pairExpired {
+		t.Fatalf("redeem at the deadline = %v, want expired", got)
+	}
+	if got := p.redeem(token, expires); got != pairNoWindow {
+		t.Fatalf("redeem after the expiry swept it = %v, want no window", got)
 	}
 }
 
@@ -386,9 +409,10 @@ func TestMalformedRequestDoesNotBurnTheWindow(t *testing.T) {
 // TestPairRefusalReasonsAreLoggedApart is the other half of the uniform 403.
 // The caller must not be able to tell the three failures apart; whoever reads
 // the daemon's log must. "Someone probed an endpoint that was inert" and
-// "someone presented a wrong token against a window the user had open, and
-// burned it" are the same answer over HTTP and very different events, and an
-// audit trail that collapses them cannot be used to notice the second.
+// "someone presented a wrong token against a window the user had open" are the
+// same answer over HTTP and very different events, and an audit trail that
+// collapses them cannot be used to notice the second — which, since a wrong
+// guess costs the user nothing, is the only trace it leaves anywhere.
 func TestPairRefusalReasonsAreLoggedApart(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(deviceKey(0x2a))
 

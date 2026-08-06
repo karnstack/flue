@@ -414,9 +414,11 @@ func (t *Transport) pair(s *socket, m *relaywire.Pair) {
 	if m.Origin != t.cfg.Origin {
 		// Answered rather than dropped — a Worker is holding a parked HTTP
 		// request that would otherwise wait out its own deadline — and refused
-		// without running the ceremony, because any presentation spends the
-		// user's window and a relay lying about its origin must not be able to
-		// spend it.
+		// without running the ceremony. A wrong token spends nothing now
+		// (daemon.pairingState.redeem), but a relay lying about its origin is
+		// one that can read the live token off the cleartext control channel,
+		// and presenting that would spend the user's window on a device the
+		// relay chose.
 		t.log.Warn("relay forwarded a pairing request on an origin this daemon did not dial",
 			"id", m.ID, "origin", clip(m.Origin), "dialled", t.cfg.Origin)
 		t.answerPair(s, m.ID, daemon.PairRefusal())

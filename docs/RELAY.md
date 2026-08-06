@@ -145,10 +145,28 @@ daemon:
 | bound | value | what it stops |
 |---|---|---|
 | concurrent client channels | 64 | a socket flood; over it, `503 relay full` |
+| client message size | 1 MiB | one browser taking the daemon leg down; over it, that socket alone closes `1009` |
 | handshake deadline | 30 s | channels opened and never used, reaped by alarm |
 | concurrent parked pair requests | 8 | pairing attempts held open; over it, `429` |
 | pairing body cap | 4 KiB | an oversized POST; over it, `413` |
 | pairing answer deadline | 10 s | a daemon that never answers; `504` |
+
+The message cap is the one whose *number* matters beyond itself: the daemon
+reads the socket carrying every browser on your machine with a 2 MiB limit that
+kills the connection rather than the message, so the relay's 1 MiB has to stay
+under it. Anything else and one oversized frame from a stranger drops every
+session on the machine, repeatedly.
+
+**Worth adding yourself: a rate limit on `/api/pair`.** That endpoint carries no
+credential by design, and the caps above bound how many attempts one caller can
+*hold* rather than how fast they can arrive. A wrong token costs you nothing —
+it does not spend your pairing window — so a flood cannot stop you pairing, but
+it can spend a free-plan relay's daily request allowance. Cloudflare's own
+**Rate Limiting rules** (dashboard → your Worker's route → Security → WAF) are
+free, run at the edge before the Durable Object wakes, and are the right place
+for a limit that depends on your traffic rather than on this code. Something
+like 10 requests per minute per IP on `/api/pair` is far above any human
+ceremony (`docs/FOLLOW-UPS.md` §13).
 
 **What does not exist yet is an output-rate cap.** A session that streams
 continuously (`yes`, `tail -f` on a firehose) pins the object active and floods
