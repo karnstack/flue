@@ -16,7 +16,7 @@
  * Determinism is the whole point, so the digest reads only what a build
  * produces and never how it was produced: no mtimes, no inode order, no
  * absolute paths, no build host. Files are visited in byte order of their
- * `dist`-relative POSIX path, and each contributes
+ * `dist`-relative POSIX path under Unicode NFC, and each contributes
  *
  *     <path> NUL <byte length in decimal> NUL <bytes>
  *
@@ -70,22 +70,31 @@ async function walk(dir, base, found) {
  * such a filename; the comparator costs nothing and means the digest does not
  * quietly depend on that staying true.
  *
- * Callers pass names already put through `normalize('NFC')`, for the same
- * reason: macOS hands back a decomposed spelling of a non-ASCII filename where
- * Linux hands back a composed one, and unnormalized they sort and hash as two
- * different names for one asset.
+ * The primary key callers pass is a name already put through `normalize('NFC')`,
+ * for the same reason: macOS hands back a decomposed spelling of a non-ASCII
+ * filename where Linux hands back a composed one, and unnormalized they sort and
+ * hash as two different names for one asset. Sorting on the on-disk spelling
+ * instead would not do: `café.js` and `cafz.js` order one way composed (`c3` >
+ * `z`) and the other way decomposed (`e` < `z`), which is the cross-machine
+ * divergence the normalization exists to remove.
  */
 function byBytes(a, b) {
   return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'))
 }
 
 async function bundleHash(dir) {
-  // Sorted and hashed under NFC; read back under the spelling the filesystem
-  // actually gave us, because handing a normalized name to `readFile` on a
-  // system that stored the other spelling is how you get an ENOENT.
+  // Sorted, hashed and listed under NFC, with the on-disk spelling as the
+  // tiebreak. NFC alone is not a total order: a filesystem that stores names as
+  // opaque bytes (ext4 does) can hold both spellings of one name at once, they
+  // normalize equal, and the order of that pair would fall through to whatever
+  // `readdir` happened to return — undefined, and different per machine.
+  // On-disk spellings are unique by construction, so the tiebreak always
+  // decides. Read back under the spelling the filesystem actually gave us,
+  // because handing a normalized name to `readFile` on a system that stored the
+  // other spelling is how you get an ENOENT.
   const entries = (await walk(dir, dir, []))
     .map((onDisk) => ({ onDisk, path: onDisk.normalize('NFC') }))
-    .sort((a, b) => byBytes(a.path, b.path))
+    .sort((a, b) => byBytes(a.path, b.path) || byBytes(a.onDisk, b.onDisk))
   const whole = createHash('sha256')
   const files = []
   for (const { onDisk, path } of entries) {
@@ -155,7 +164,11 @@ async function main() {
   }
 
   // The digest first and alone on its line, so `| head -1` is the whole
-  // answer; the listing below it is what a mismatch is diagnosed with.
+  // answer; the listing below it is what a mismatch is diagnosed with. Paths
+  // there are the NFC spelling the digest is taken over, which on a filesystem
+  // that stored a non-ASCII name decomposed is not byte-for-byte what `ls`
+  // prints — the digest has to be normalized to compare across machines at all,
+  // so the listing follows it rather than the disk.
   const lines = [result.digest, '']
   for (const file of result.files) lines.push(`${file.sha256}  ${file.size}  ${file.path}`)
   console.log(lines.join('\n'))

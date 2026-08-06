@@ -100,7 +100,8 @@ daemon's key pinned at pairing), so the relay forwards ciphertext and can
 never read your shell. The honest limits of that sentence — the browser loads
 its JavaScript from the relay's origin, and no amount of end-to-end encryption
 fixes that — are answered plainly in the [FAQ](docs/faq.md), along with the
-reproducible bundle hash you can check a release against.
+bundle digest you can recompute from this source and exactly what it does and
+does not prove today.
 
 **There is no hosted service today.** No flue account, no flue server, no
 billing: every remote path runs on infrastructure you own, and
@@ -117,10 +118,12 @@ make build     # builds the web UI and the relay Worker, embeds both, produces b
 make test
 ```
 
-`cd web && pnpm hash` prints a reproducible digest of the bundle you just
-built — the value the [FAQ](docs/faq.md) tells you to compare against the one
-published for a release, and the closest thing a browser-served app has to a
-signature.
+`cd web && pnpm hash` prints a SHA-256 over every file in `web/dist`, so you can
+check for yourself that this source builds to that bundle — same source, same
+lockfile, same pinned toolchain, same digest, *on the same platform*. No release
+publishes a digest to compare a served bundle against yet; the
+[FAQ](docs/faq.md) has both halves of that, along with why the cross-platform
+caveat is real.
 
 ## Developing
 
