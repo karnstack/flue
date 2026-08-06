@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FlueClientProvider } from '@/client/provider'
-import type { DeviceInfo, Pairing } from '@/client/protocol'
+import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
 import { renderWithRouter } from '@/testing/render'
 import { fakeClient, type FakeSocket } from '@/testing/socket'
 import { DevicesRoute } from './devices'
@@ -39,6 +39,15 @@ function pairing(over: Partial<Pairing> = {}): Pairing {
   }
 }
 
+/** What the daemon says when its relay leg is up, which most cases start from. */
+const RELAY_UP: RelayInfo = { status: 'connected', origin: 'https://flue-relay.example' }
+
+/** The daemon's greeting, which every real connection opens with. */
+const welcomed = (sock: FakeSocket, relay?: RelayInfo) =>
+  act(() =>
+    sock.emitControl({ type: 'welcome', daemonId: 'local', host: 'mb', ver: '0.1.0', relay }),
+  )
+
 /**
  * Mount the screen with a scripted socket under it.
  *
@@ -49,8 +58,15 @@ function pairing(over: Partial<Pairing> = {}): Pairing {
  * The socket is opened after the first render on purpose — a cold tab mounts
  * this screen while the client is still connecting, and the request for the
  * device list has to survive that.
+ *
+ * The welcome carries a connected relay by default, because jsdom serves every
+ * test from localhost: without an address other devices could reach, the Pair
+ * button is gated shut, and most of this file is about what happens after it
+ * is pressed. The gating cases below say `relay` themselves.
  */
-async function mountDevices({ open = true } = {}) {
+async function mountDevices(
+  { open = true, relay = RELAY_UP }: { open?: boolean; relay?: RelayInfo } = {},
+) {
   const { client, sockets } = fakeClient()
   const view = await renderWithRouter(
     <FlueClientProvider client={client}>
@@ -59,7 +75,10 @@ async function mountDevices({ open = true } = {}) {
     '/devices',
   )
   const sock = sockets[0]!
-  if (open) act(() => sock.open())
+  if (open) {
+    act(() => sock.open())
+    welcomed(sock, relay)
+  }
   return { ...view, client, sockets, sock }
 }
 
@@ -70,6 +89,14 @@ const offered = (sock: FakeSocket, p: Pairing = pairing()) => act(() => sock.emi
 
 const pairButton = () => screen.getByRole('button', { name: 'Pair device' })
 const notice = () => screen.getByRole('status').textContent ?? ''
+
+/**
+ * The words the gate shows, pinned exactly: this copy is the screen's whole
+ * account of why its primary button is shut, and a paraphrase drifting away
+ * from the actual command (`flue relay setup`) would strand the reader.
+ */
+const EXPLAINER =
+  "Remote devices can't reach 127.0.0.1. Run flue relay setup to give this daemon an address, then pair."
 
 /**
  * A 2D context good enough for lean-qr, since jsdom ships none.
@@ -413,6 +440,46 @@ describe('DevicesRoute', () => {
     )
 
     expect(notice()).not.toContain('chdir')
+  })
+
+  it('gates pairing when no other device could reach the address the QR would carry', async () => {
+    // jsdom serves this page from localhost — the loopback case — and the
+    // daemon's welcome says its relay leg is off, so a pairing URL made now
+    // would name 127.0.0.1: an address every other device resolves to itself.
+    const { sock } = await mountDevices({ relay: { status: 'off' } })
+    listed(sock, [])
+
+    expect(pairButton().hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText(EXPLAINER)).toBeTruthy()
+  })
+
+  it('offers pairing while the relay is connected, and says nothing else about it', async () => {
+    const { sock } = await mountDevices({ relay: RELAY_UP })
+    listed(sock, [])
+
+    expect(pairButton().hasAttribute('disabled')).toBe(false)
+    expect(screen.queryByText(EXPLAINER)).toBeNull()
+  })
+
+  it('re-evaluates the gate on the welcome each reconnect brings', async () => {
+    // The welcome is a snapshot taken as each connection is accepted, so a
+    // relay that fell over during an outage is only ever reported by the next
+    // connection's greeting — the screen has to listen rather than remember.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { sock, sockets } = await mountDevices()
+    expect(pairButton().hasAttribute('disabled')).toBe(false)
+
+    act(() => sock.close())
+    await act(() => vi.advanceTimersByTimeAsync(2_000))
+    const next = sockets[sockets.length - 1]!
+    act(() => next.open())
+    welcomed(next, { status: 'off' })
+
+    // Shut by the gate, not by the outage: the connection is back up.
+    expect(notice()).toBe('')
+    expect(pairButton().hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText(EXPLAINER)).toBeTruthy()
   })
 
   it('has the live region on the page before it has anything to say', async () => {

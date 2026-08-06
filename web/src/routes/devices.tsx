@@ -4,9 +4,10 @@ import { generate } from 'lean-qr'
 
 import type { ConnStatus } from '@/client/client'
 import { useFlueClient } from '@/client/provider'
-import type { DeviceInfo, Pairing } from '@/client/protocol'
+import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { isRelayOrigin } from '@/relay/mode'
 
 /** How often the pairing window's remaining time is redrawn. */
 const TICK_MS = 1_000
@@ -43,6 +44,18 @@ const REFUSALS: Record<string, string> = {
   revoke_failed: 'The daemon could not write the change, so that device is still paired.',
   pairing_unavailable: 'This daemon has no pairing identity, so it cannot pair anything.',
 }
+
+/**
+ * Why the Pair button is shut when nothing but loopback would be on the QR.
+ *
+ * Pinned word for word by devices.test.tsx, because the command it names is
+ * the whole of the way out: the daemon binds loopback and only loopback, so a
+ * pairing URL made from this page would say 127.0.0.1 — an address every
+ * other device resolves to itself — and a QR nobody can follow, offered
+ * anyway, was the bug that motivated the relay.
+ */
+const UNREACHABLE =
+  "Remote devices can't reach 127.0.0.1. Run flue relay setup to give this daemon an address, then pair."
 
 /**
  * How long ago, in the coarsest unit that still says something.
@@ -377,6 +390,9 @@ export function DevicesRoute() {
   // Seeded from the client, because onStatus reports only changes: a screen
   // reached by navigating mounts into a connection that is already up.
   const [status, setStatus] = useState<ConnStatus>(() => client.status)
+  // Seeded for the same reason: the welcome that said what the relay is doing
+  // usually landed before this screen was navigated to.
+  const [relay, setRelay] = useState<RelayInfo>(() => client.relay)
   const [pairing, setPairing] = useState<Pairing | null>(null)
   const [left, setLeft] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
@@ -436,6 +452,12 @@ export function DevicesRoute() {
         showWindow(p)
       }),
 
+      // The relay state is a snapshot each connection's welcome carries, not
+      // a stream — nothing announces a relay that fell over or came back
+      // mid-connection — so every welcome re-answers whether pairing is worth
+      // offering, and a reconnect is exactly when the answer changes.
+      client.onWelcome(() => setRelay(client.relay)),
+
       client.onStatus((s) => {
         setStatus(s)
         setNotice(null)
@@ -489,6 +511,16 @@ export function DevicesRoute() {
 
   const connected = status === 'open'
 
+  /**
+   * Whether a second device could actually reach the address a pairing URL
+   * made now would carry. Two ways it can: the daemon's relay leg is up, so
+   * the URL names the relay's public origin — or this page itself was served
+   * from one, in which case the daemon plainly has a reachable address
+   * whatever its snapshot said. Otherwise the URL names 127.0.0.1, and a QR
+   * promising that is the original bug this gate exists to close.
+   */
+  const reachable = relay.status === 'connected' || isRelayOrigin()
+
   function pair() {
     setNotice(null)
     client.startPairing()
@@ -532,6 +564,17 @@ export function DevicesRoute() {
           >
             {message}
           </p>
+          {/*
+            The gate's explainer, and not part of the live region above it: it
+            states a standing fact about this daemon rather than announcing an
+            event, and stuffing it into `role="status"` would have a screen
+            reader interrupt with it on every welcome that reaffirms it.
+          */}
+          {!reachable && (
+            <p className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+              {UNREACHABLE}
+            </p>
+          )}
         </div>
         {/*
           The one filled button on this screen, taking its amber from --primary
@@ -540,9 +583,12 @@ export function DevicesRoute() {
 
           Held shut while the connection is not up: `pairStart` is dropped when
           it cannot be sent, and a token that never arrives looks exactly like
-          a button that does nothing.
+          a button that does nothing. Held shut just the same while no device
+          could reach the address the QR would carry — see `reachable` — since
+          a pairing that succeeds against 127.0.0.1 is worse than one refused:
+          it mints a device that can never connect.
         */}
-        <Button size="sm" className="shrink-0" disabled={!connected} onClick={pair}>
+        <Button size="sm" className="shrink-0" disabled={!connected || !reachable} onClick={pair}>
           <QrCodeIcon data-icon="inline-start" aria-hidden="true" />
           Pair device
         </Button>

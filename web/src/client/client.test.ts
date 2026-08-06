@@ -1647,15 +1647,75 @@ describe('FlueClient control messages', () => {
     expect(seen).toEqual([])
   })
 
-  it('ignores welcome and any message type it does not know', () => {
+  it('ignores a message type it does not know', () => {
     const { c, sock } = connected()
     const errs: string[] = []
     c.onError((e) => errs.push(e.code))
-    expect(() =>
-      sock.emitControl({ type: 'welcome', daemonId: 'local', host: 'mb', ver: '0.1.0' }),
-    ).not.toThrow()
     expect(() => sock.emitControl({ type: 'somethingNewer', x: 1 })).not.toThrow()
     expect(errs).toEqual([])
+  })
+
+  it('hands the welcome to onWelcome and remembers its relay leg', () => {
+    const { c, sock } = connected()
+    const seen: Welcome[] = []
+    c.onWelcome((w) => seen.push(w))
+
+    const welcome: Welcome = {
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'mb',
+      ver: '0.1.0',
+      relay: { status: 'connected', origin: 'https://r.example' },
+    }
+    sock.emitControl(welcome)
+
+    expect(seen).toStrictEqual([welcome])
+    expect(c.relay).toStrictEqual({ status: 'connected', origin: 'https://r.example' })
+    expect(c.relay.origin).toBe('https://r.example')
+  })
+
+  it('reports the relay off before any welcome has arrived', () => {
+    // The getter exists for consumers that mount between welcomes, so before
+    // the first one it must answer something — and "off" is the only claim a
+    // client with no daemon's word yet can honestly make.
+    const { c } = connected()
+    expect(c.relay).toStrictEqual({ status: 'off' })
+    expect(c.relay.origin).toBeUndefined()
+  })
+
+  it('reads a welcome that omits relay as off', () => {
+    // A daemon with no relay omits the field entirely; `off` never arrives on
+    // the wire. The getter folds the two spellings together so no consumer
+    // ever has to know there are two.
+    const { c, sock } = connected()
+    sock.emitControl({ type: 'welcome', daemonId: 'local', host: 'mb', ver: '0.1.0' })
+    expect(c.relay).toStrictEqual({ status: 'off' })
+  })
+
+  it('holds only the latest welcome, so a reconnect can change the answer', async () => {
+    // The welcome is a snapshot taken as each connection is accepted, so the
+    // one from the connection before it is exactly the stale claim to drop.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.emitControl({
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'mb',
+      ver: '0.1.0',
+      relay: { status: 'connected', origin: 'https://r.example' },
+    })
+    expect(c.relay.status).toBe('connected')
+
+    sockets[0]!.close()
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+    sockets[1]!.emitControl({ type: 'welcome', daemonId: 'local', host: 'mb', ver: '0.1.0' })
+
+    expect(c.relay).toStrictEqual({ status: 'off' })
   })
 
   it('reports a frame it cannot parse instead of throwing out of the socket', () => {
@@ -2001,6 +2061,7 @@ describe('FlueClient listeners', () => {
       c.onDeviceList(() => {}),
       c.onPairing(() => {}),
       c.onRevoked(() => {}),
+      c.onWelcome(() => {}),
     ]) {
       expect(typeof off).toBe('function')
       off()

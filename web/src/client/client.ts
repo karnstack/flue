@@ -10,9 +10,11 @@ import {
   type DeviceInfo,
   type ErrorMsg,
   type Pairing,
+  type RelayInfo,
   type ServerMessage,
   type SessionInfo,
   type SizeChanged,
+  type Welcome,
 } from './protocol'
 
 /** The subset of WebSocket the client needs, so tests can substitute one. */
@@ -191,6 +193,15 @@ export class FlueClient {
   private deviceListeners = new Emitter<[DeviceInfo[]]>()
   private pairingListeners = new Emitter<[Pairing]>()
   private revokedListeners = new Emitter<[string]>()
+  private welcomeListeners = new Emitter<[Welcome]>()
+
+  /**
+   * The last welcome this client was handed, kept across reconnects rather
+   * than dropped in `teardown`: what it carries is a claim about the daemon,
+   * not about the connection it rode in on, and each new connection's welcome
+   * replaces it whole. Null only before the very first one.
+   */
+  private lastWelcome: Welcome | null = null
 
   constructor(
     private url: string,
@@ -268,6 +279,19 @@ export class FlueClient {
   }
 
   /**
+   * The daemon's greeting, one per connection.
+   *
+   * What it carries — and why anyone listens — is the state of the daemon's
+   * relay leg, which is a snapshot taken as the connection was accepted, not
+   * a stream: nothing pushes an update when the relay drops or comes back, so
+   * a reconnect's welcome is the only event that ever refreshes it. Anything
+   * gating on the relay re-evaluates here, or it is gating on history.
+   */
+  onWelcome(cb: (w: Welcome) => void) {
+    return this.welcomeListeners.add(cb)
+  }
+
+  /**
    * The current connection state.
    *
    * `onStatus` only reports changes, so anything mounting mid-connection would
@@ -275,6 +299,19 @@ export class FlueClient {
    */
   get status(): ConnStatus {
     return this.state
+  }
+
+  /**
+   * The relay leg of the last welcome — `onWelcome`'s counterpart for a
+   * consumer that mounts between welcomes, as `status` is for `onStatus`.
+   *
+   * A daemon with no relay omits `welcome.relay` entirely and `off` never
+   * arrives on the wire, so the absent field and a client no welcome has
+   * reached yet both land on the same `{ status: 'off' }` here, rather than
+   * every consumer folding three spellings of "no relay" into one.
+   */
+  get relay(): RelayInfo {
+    return this.lastWelcome?.relay ?? { status: 'off' }
   }
 
   /** The offset of the next byte expected on `ref`, if it is still attached. */
@@ -663,6 +700,10 @@ export class FlueClient {
         break
 
       case 'welcome':
+        // Stored before it is announced, so a listener that reads `relay`
+        // inside its callback sees the welcome it is being told about.
+        this.lastWelcome = msg
+        this.welcomeListeners.emit(msg)
         break
 
       // Anything newer is ignored rather than raised, so a daemon may add a
