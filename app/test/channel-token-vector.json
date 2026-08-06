@@ -1,5 +1,5 @@
 {
-  "note": "Cross-implementation vector for the relay channel token. app/src/lib/tokens.ts signs these bytes; relay/src/channel-auth.ts must verify them (copy this file into relay/test/ verbatim). exp is 2100-01-01T00:00:00Z so the vector never rots. Derived independently with node:crypto, not from the implementation under test.",
+  "note": "The SHARED cross-language channel-token vector. app/src/lib/tokens.ts signs these bytes; relay/src/channel-auth.ts must verify them. Both app/test/channel-token.test.ts and relay/test/tokens.ts IMPORT this file directly — do NOT copy it into relay/test/ — so any regeneration reddens both packages at once. exp is 2100-01-01T00:00:00Z so the vector never rots. Derived independently with node:crypto, not from the implementation under test.",
   "secret": "vector-relay-signing-secret",
   "vectors": [
     {
