@@ -177,9 +177,14 @@ here; they are the only one.
 
 ### 4. Deploy
 
+Three moves, in this order: build and deploy the control plane, put the real
+web bundle in the relay's assets directory, and only then deploy the relay —
+it ships whatever is in that directory at the moment it runs.
+
+The control plane:
+
 ```sh
-cd app && pnpm build && pnpm exec wrangler deploy    # the control plane
-cd ../relay && pnpm exec wrangler deploy             # the relay
+cd app && pnpm build && pnpm exec wrangler deploy
 ```
 
 **The control plane's build is not optional.** The Cloudflare Vite plugin writes
@@ -194,7 +199,7 @@ ships the previous one.
 wrong.** `relay/public/index.html` is one line telling you to deploy the web
 bundle. Under flue.sh the relay origin is what serves the browser the terminal
 app — `openSession` navigates a tab to `https://relay.flue.sh/#…` — so the real
-`web/` bundle has to be in that directory before the deploy:
+`web/` bundle has to be in that directory *before* the relay is deployed:
 
 ```sh
 cd web && pnpm build
@@ -207,9 +212,18 @@ its contents as script metadata, and it carries the `Referrer-Policy` and the
 CSP that `web/src/crypto/keys.ts` names as the compensating control for holding
 a private key in IndexedDB ([`FOLLOW-UPS.md`](FOLLOW-UPS.md) §13). The copied
 bundle is build output and `.gitignore` keeps it out of the repository; deploy
-the relay from the same checkout that built it. Skip this and the deploy still
-succeeds — the origin then serves that one-line page, and "open a session"
-lands on it.
+the relay from the same checkout that built it.
+
+Now the relay, carrying the bundle just copied:
+
+```sh
+cd relay && pnpm exec wrangler deploy
+```
+
+Skip the copy and this deploy still succeeds — the origin then serves that
+one-line placeholder, and "open a session" lands on it. The same holds in the
+other order: assets upload at deploy time, so a bundle copied in *after* a
+deploy changes nothing until the relay is deployed again.
 
 (`flue relay setup`, the self-host path, reads none of this: it builds its own
 deploy request in `cmd/flue/relay.go` and uploads the bundle compiled into the
@@ -265,7 +279,7 @@ What is outstanding:
 
 ```sh
 pnpm exec wrangler d1 execute flue --remote \
-  --command "select code, email, redeemed_by from invites"
+  --command "select code, email from invites where redeemed_by is null"
 ```
 
 ### 6. Email is a placeholder — the one thing left to build

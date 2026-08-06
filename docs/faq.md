@@ -143,9 +143,9 @@ can check against the source: its whole database is seven tables
   to, and an eight-hour expiry. Never the cookie itself, so a dump of this
   table cannot be replayed at the front door.
 - **`devices`** — one row per machine you enrol: its id (which *is*
-  `sha256(public key)[:12]`), the label you gave it, its **public** Noise key, a
-  SHA-256 of its enrollment token, a created-at, a last-seen, and a disabled
-  flag.
+  `sha256(public key)[:12]`), the account it belongs to, the label you gave it,
+  its **public** Noise key, a SHA-256 of its enrollment token, a created-at, a
+  last-seen, and a disabled flag.
 - **`device_auth`** — the `flue link` handshake while it is in flight, for ten
   minutes: the short code you type, a digest of the daemon's code, and the
   label that machine proposed. Single-use.
