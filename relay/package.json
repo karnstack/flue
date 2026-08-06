@@ -1,0 +1,21 @@
+{
+  "name": "@karnstack/flue-relay",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "build": "esbuild src/index.ts --bundle --format=esm --outfile=dist/index.js --external:cloudflare:workers"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.20.2",
+    "@cloudflare/workers-types": "^5",
+    "esbuild": "^0.25",
+    "typescript": "^5.9",
+    "vitest": "^4.1.0",
+    "wrangler": "^4"
+  }
+}

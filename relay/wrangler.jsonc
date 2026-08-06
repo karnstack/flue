@@ -1,0 +1,14 @@
+{
+  "name": "flue-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/daemon", "/client", "/api/*"]
+  },
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "DaemonHub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DaemonHub"] }],
+  "observability": { "enabled": true }
+}

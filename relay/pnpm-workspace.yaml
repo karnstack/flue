@@ -1,0 +1,11 @@
+# pnpm 11 refuses to finish an install that silently skipped a package's build
+# script (see web/pnpm-workspace.yaml for the long version). esbuild's
+# postinstall links the platform binary; workerd's does the same for the
+# runtime wrangler and the vitest workers pool run tests inside.
+allowBuilds:
+  esbuild: true
+  workerd: true
+minimumReleaseAgeExclude:
+  - '@cloudflare/vitest-pool-workers@0.20.2'
+  - miniflare@5.20260801.0-alpha
+  - wrangler@4.119.0
