@@ -105,6 +105,13 @@ relay has to carry it without understanding it.
 the bare text `pairing refused`; over the relay the same refusal travels as
 `{"error":"pairing refused"}` with `status` 403.
 
+`403` on `POST /api/pair` is **reserved for the daemon**: it means the daemon's
+pairing handler ran on this body, which is what the browser reads to decide the
+user's pairing window is spent. The relay's own refusals — a foreign `Origin`, a
+body that is not JSON, a body over the cap, no daemon leg, a deadline, too many
+parked attempts — answer `400`, `413`, `503`, `504` or `429` instead, because
+none of them presented a token to anything and the window is still open.
+
 `pair.id` is assigned by the relay and means nothing outside one relay socket's
 lifetime: a daemon that reconnects must not answer a `pair` it read before the
 break, because the Worker has forgotten the HTTP request it belonged to. Ids

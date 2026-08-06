@@ -126,7 +126,10 @@ export class DaemonHub extends DurableObject<Env> {
    *
    * The relay refuses what it can judge alone — provenance, size, shape, and
    * how many attempts it is already holding — before it spends a pair id or
-   * the daemon's attention on the request.
+   * the daemon's attention on the request. None of those refusals wears 403:
+   * that status is the daemon's verdict on a token, and the browser reads it as
+   * the end of the ceremony (see pairRejected, and REFUSED_STATUS in
+   * web/src/routes/pair.tsx).
    */
   private async pair(req: Request): Promise<Response> {
     const origin = new URL(req.url).origin
@@ -137,7 +140,7 @@ export class DaemonHub extends DurableObject<Env> {
     // non-browser client never sends one — and costs nothing, because the
     // pairing token is the credential either way.
     const claimed = req.headers.get('Origin')
-    if (claimed !== null && claimed !== origin) return pairRefused()
+    if (claimed !== null && claimed !== origin) return pairRejected()
     const raw = await readCapped(req, MAX_PAIR_BYTES)
     if (raw === null) return pairTooLarge()
     const body = decoder.decode(raw)
@@ -152,9 +155,10 @@ export class DaemonHub extends DurableObject<Env> {
     try {
       JSON.parse(body)
     } catch {
-      // What the daemon's own handler answers a malformed request, in the JSON
-      // shape this leg carries a refusal in (spec, `pairResult.body`).
-      return pairRefused()
+      // The guard stays; only the status is the relay's own. A malformed body
+      // is refused by the daemon too, but this one never got there — see
+      // pairRejected.
+      return pairRejected()
     }
     const daemon = this.daemon()
     if (!daemon) return offline()
@@ -631,13 +635,33 @@ function offline(): Response {
 }
 
 /**
- * A pairing attempt the relay refused on its own. One status and one body,
- * whatever the reason — the same uniformity the daemon's own refusePair keeps,
- * for the same reason: an endpoint reachable without a session token must not
- * be an oracle for the state of the user's live ceremony.
+ * A pairing attempt the relay rejected on its own, before the daemon heard of
+ * it. One status and one body whatever the reason, the same uniformity the
+ * daemon's own refusePair keeps and for the same reason: an endpoint reachable
+ * without a session token must not be an oracle for anything.
+ *
+ * 400 and deliberately **not** 403. 403 on this endpoint means the daemon's
+ * pairing handler ran — over this leg it can only arrive in a `pairResult`,
+ * since `PairDevice` and the daemon's own relay adapter answer 200 or 403 and
+ * nothing else (internal/daemon/pairing.go). The browser reads it as exactly
+ * that and stops offering Pair, because a token the daemon looked at is a token
+ * the ceremony is over for (web/src/routes/pair.tsx, REFUSED_STATUS). Neither
+ * refusal here presented a token to anything — a phone on a bad connection can
+ * truncate a POST carrying a perfectly live token into a body that will not
+ * parse — so wearing the daemon's status would throw away a window that is
+ * still open. 400 is free to say so: the daemon never answers a pairing with
+ * one, on either transport.
+ *
+ * The body is not `pairing refused` for the same reason. That phrase is the
+ * daemon's verdict, in the exact bytes it writes, and a page that quoted it
+ * back would be telling the user the daemon rejected them when the daemon was
+ * never asked.
  */
-function pairRefused(): Response {
-  return new Response('{"error":"pairing refused"}', { status: 403, headers: JSON_NO_STORE })
+function pairRejected(): Response {
+  return new Response('{"error":"pairing request rejected"}', {
+    status: 400,
+    headers: JSON_NO_STORE,
+  })
 }
 
 function pairTooLarge(): Response {

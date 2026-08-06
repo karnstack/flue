@@ -279,6 +279,23 @@ describe('PairRoute', () => {
     expect(pairButton()).toBeTruthy()
   })
 
+  it('keeps the token alive when the relay rejected the request before the daemon saw it', async () => {
+    // 400 from the Worker: a foreign Origin, or a body that did not parse.
+    // The second is what a POST truncated by a phone's flaky connection looks
+    // like — token and all, still live — and the relay answers 400 rather than
+    // 403 for exactly this reason (relay/src/hub.ts, pairRejected). A retry is
+    // the user's to make and this page must not have taken it away.
+    fetchMock.mockResolvedValue(relayFailure(400, 'pairing request rejected'))
+    await renderPair(LINK)
+
+    await userEvent.click(await armedPairButton())
+
+    expect(await screen.findByText(/pairing request rejected/)).toBeTruthy()
+    expect(status()).not.toContain('{')
+    expect(pairButton()).toBeTruthy()
+    expect(await loadPinnedDaemonKey()).toBeNull()
+  })
+
   it('does not put a proxy’s error page on the screen', async () => {
     // A relay origin has intermediaries in front of the daemon, and an edge
     // that is having a bad day answers with HTML. React would escape it and it

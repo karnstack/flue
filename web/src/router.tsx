@@ -66,7 +66,10 @@ export interface FlueRouterOptions {
  * branch deliberately — that page is the only way out of the state, and a flag
  * that swallowed it would leave the user with an explainer pointing at a screen
  * the app refuses to render. The URL is left alone rather than redirected, so
- * the moment a pairing lands, a reload of the same address is the app.
+ * the moment a pairing lands, a reload of the same address is the app — and the
+ * explainer asks the key store again when it mounts, so a tab that pairs and
+ * then routes back into the app reloads itself rather than sitting on a flag
+ * that was answered before the ceremony (src/routes/unpaired.tsx).
  */
 const rootRoute = createRootRouteWithContext<FlueRouterOptions>()({
   component: function Root() {

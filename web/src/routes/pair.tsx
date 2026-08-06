@@ -13,22 +13,34 @@ const PAIR_ENDPOINT = '/api/pair'
 const KEY_BYTES = 32
 
 /**
- * The one refusal status that means the daemon itself decided.
+ * The one status that means the request reached the daemon's pairing handler.
  *
- * It is the whole of the `spent` question. The daemon answers a pairing attempt
- * with 200 or 403 and nothing else (`writePairOutcome`), and 403 is reached only
- * after redeem — which closes the window whether the token was right or wrong.
- * Every other status on this endpoint comes from something in front of the
- * daemon: 503 when the relay has no daemon leg connected, 504 when it parked the
- * request until its deadline, 502 when it could not make sense of the answer,
- * 429 and 413 when it refused the request outright. None of those presented a
- * token to anything, so none of them spent one.
+ * That is the guarantee, and it is narrower than "the token was redeemed". The
+ * daemon answers a pairing attempt with 200 or 403 and nothing else
+ * (`writePairOutcome`), but several of its 403s are decided *before* redeem: no
+ * pairing identity configured, a body that would not parse, a missing token, a
+ * public key that is not 32 bytes, a failed provenance check, a request that
+ * went away mid-body. Those left the window open. They cannot be told apart from
+ * the ones that closed it — the uniformity is deliberate, see refusePair — and
+ * they do not need to be, because every one of them is deterministic: the same
+ * page posting the same body a second time fails the same check. Re-offering
+ * Pair there would be offering a loop, so treating the whole of 403 as the end
+ * of the ceremony withholds no button that could have worked.
  *
- * The daemon's own 403 for a failed provenance check lands here too, and that
- * one really did not redeem. It cannot be told apart — the uniformity is
- * deliberate, see refusePair — and it does not matter here: a second press from
- * this same page would fail the same provenance check, so there is no working
- * button being withheld either way.
+ * What matters is the other direction, and it holds: nothing in front of the
+ * daemon answers 403. The relay reserves it for a `pairResult` and rejects what
+ * it judges alone with a status of its own — 400 for a foreign Origin or a body
+ * it could not parse, 413 over the size cap, 429 over the concurrency cap, 503
+ * with no daemon leg attached, 504 at its deadline, 502 for an answer it could
+ * not pass on (relay/src/hub.ts, pairRejected). The daemon's own origin adds 503
+ * `ErrNoAuth`, 405 and 500. None of those presented a token to anything, so the
+ * user's two minutes are still theirs and the Pair button stays.
+ *
+ * The one thing this cannot see is an intermediary that writes a 403 of its own
+ * — an edge rule, a corporate proxy — which is indistinguishable from the
+ * daemon's here and costs the user a fresh code from Devices. The alternative is
+ * matching on a body any of those could also forge, which would trade a rare
+ * wasted window for a spendable one.
  */
 const REFUSED_STATUS = 403
 
@@ -97,15 +109,18 @@ interface PairAnswer {
 }
 
 /**
- * A pairing that did not happen, and whether the token went with it.
+ * A pairing that did not happen, and whether there is any point pressing Pair
+ * again.
  *
- * `spent` is the difference between a daemon that looked at the token and
- * everything else. Once it has, the window is closed whatever it decided —
- * redeem clears it on a wrong token as readily as on a right one — so offering
- * the button again would be offering a click that cannot work. A request that
- * never reached the daemon spent nothing, whether it was never sent or whether
- * the relay in front of it answered instead, and pressing Pair again is a fair
- * thing to offer. Neither case ever retries on its own.
+ * `spent` is the difference between a request the daemon's pairing handler read
+ * and everything else. Read is enough: either it reached redeem, which closes
+ * the window on a wrong token as readily as on a right one, or it was refused
+ * before redeem by a check that will refuse the identical retry just as flatly
+ * — see REFUSED_STATUS. Either way the button would be a click that cannot
+ * work. A request that never got that far spent nothing, whether it was never
+ * sent or whether the relay in front of the daemon answered instead, and
+ * pressing Pair again is a fair thing to offer. Neither case ever retries on its
+ * own.
  */
 interface Failure {
   text: string
@@ -172,9 +187,9 @@ function quotable(text: string): boolean {
  * differently. The daemon's own origin writes `pairing refused` as text/plain
  * (`http.Error`, in writePairOutcome); the relay cannot carry a bare text body
  * over its control channel and answers `{"error":"pairing refused"}` instead —
- * spec/relay-protocol.md, `pairResult.body` — as it does for its own refusals
- * too. So the body is read once and read both ways: as that envelope first, and
- * as plain text when it is not one.
+ * spec/relay-protocol.md, `pairResult.body` — and writes its own rejections into
+ * that same envelope with words of their own. So the body is read once and read
+ * both ways: as that envelope first, and as plain text when it is not one.
  *
  * Anything else comes back empty and the caller says what it knows instead. A
  * body with no message in it, and a page of HTML from something in the middle,
@@ -373,10 +388,10 @@ export function PairRoute() {
 
     if (!res.ok) {
       const said = await refusalText(res)
-      // The one status that means a token was presented to the daemon and the
-      // window closed behind it — see REFUSED_STATUS. Everything else was
-      // answered by something in front of the daemon, which spent nothing, so
-      // the Pair button stays and the user's window stays theirs.
+      // The one status that means this request reached the daemon's pairing
+      // handler — see REFUSED_STATUS. Everything else was answered by something
+      // in front of it, which presented no token to anything, so the Pair button
+      // stays and the user's window stays theirs.
       const spent = res.status === REFUSED_STATUS
       return {
         text:
@@ -479,10 +494,11 @@ export function PairRoute() {
   }
 
   /*
-   * A refusal the daemon answered is the end of this page. The window closes on
-   * the first presentation whether or not the token was right, so a second Pair
-   * could only fail the same way — and a button that cannot work is worse than
-   * no button, because it reads as though the ceremony is still in reach.
+   * A refusal the daemon itself answered is the end of this page. Either the
+   * window closed on that presentation — it does, right token or wrong — or the
+   * check that refused it will refuse an identical retry identically, and a
+   * button that cannot work is worse than no button, because it reads as though
+   * the ceremony is still in reach.
    */
   const stopped = failure?.spent === true
 

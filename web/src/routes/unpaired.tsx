@@ -13,6 +13,9 @@
  * this page to cover that would mean telling a paired user to pair again every
  * time their laptop shut its lid.
  */
+import { useEffect } from 'react'
+
+import { loadRelayIdentity } from '@/relay/mode'
 
 /*
  * The two class strings this page shares with /pair, spelled out rather than
@@ -34,6 +37,36 @@ const PROSE = 'text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc
  * the page that says "nothing to pair with yet".
  */
 export function UnpairedRoute() {
+  /*
+   * Ask again, once, on the way in.
+   *
+   * The flag that mounts this screen is answered at the entry point, before the
+   * router exists (src/main.tsx), and never again for the life of the tab. That
+   * is one navigation away from being a lie: /pair on a relay origin is a route
+   * in this same document, so a device that pairs there and then opens any other
+   * address — a back button, a bookmark, the link in the copy above — is
+   * client-side routing into a tab still holding "no key", and would be told it
+   * is not paired while its key sits in the store. The window between the two is
+   * exactly the ceremony the user just finished.
+   *
+   * Reloading rather than flipping a state: the pinned key decides the client,
+   * its Noise transport and the router's context, and all three are built once
+   * at the entry point from the identity. A screen that swapped itself out would
+   * leave the tab holding a router whose context still says unpaired and a
+   * provider with no client to give — the reload is what makes the answer one
+   * answer. It cannot loop: the reload re-runs the entry point, which reads the
+   * same store and mounts the app instead of this page.
+   */
+  useEffect(() => {
+    let live = true
+    void loadRelayIdentity().then((identity) => {
+      if (live && identity !== null) location.reload()
+    })
+    return () => {
+      live = false
+    }
+  }, [])
+
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-sm flex-col justify-center gap-y-5 px-5 py-10 sm:max-w-md">
       <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
