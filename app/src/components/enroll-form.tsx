@@ -1,4 +1,4 @@
-// The browser half of `flue enable`: type the code, connect the machine.
+// The browser half of `flue link`: type the code, connect the machine.
 //
 // Free of every Start import, like `LoginForm` — it takes the one call it makes
 // as a prop. That keeps the component testable in a plain DOM and keeps the
@@ -72,7 +72,7 @@ export interface EnrollFormProps {
  * it does not depend on *which* refusal it was.
  */
 export const CODE_REJECTED_MESSAGE =
-  'That code did not work. Check it, or run flue enable again for a fresh one.'
+  'That code did not work. Check it, or run flue link again for a fresh one.'
 
 const UNAVAILABLE_MESSAGE = 'Something went wrong at our end. Try again in a moment.'
 
@@ -194,7 +194,7 @@ export function EnrollForm({ confirm, initialCode }: EnrollFormProps) {
               <h1>Connect a machine</h1>
             </CardTitle>
             <CardDescription>
-              Run <code>flue enable</code> on the machine you want to reach from here. It prints a
+              Run <code>flue link</code> on the machine you want to reach from here. It prints a
               code — type it below.
             </CardDescription>
           </CardHeader>
@@ -224,7 +224,7 @@ export function EnrollForm({ confirm, initialCode }: EnrollFormProps) {
                   onChange={(e) => setCode(e.target.value.toUpperCase())}
                 />
                 <FieldDescription>
-                  Eight letters, as shown by <code>flue enable</code>. Capitals and the dash are
+                  Eight letters, as shown by <code>flue link</code>. Capitals and the dash are
                   optional.
                 </FieldDescription>
                 {failure ? <FieldError>{failure.message}</FieldError> : null}

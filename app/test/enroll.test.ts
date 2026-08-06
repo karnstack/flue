@@ -1,4 +1,4 @@
-// Enrolling a daemon: the device-authorization handshake behind `flue enable`.
+// Enrolling a daemon: the device-authorization handshake behind `flue link`.
 //
 // Three calls, two of them unauthenticated, and the whole point of the file is
 // the seam between them — what is stored, what is handed back, and exactly
@@ -445,7 +445,7 @@ describe('re-enrolment', () => {
     // The kill switch has to survive the thing it is aimed at. `devices.id` is
     // sha256(pubkey)[:12], so a revoked machine re-enrolling lands on its own
     // row — and if the upsert reset `disabled`, the owner of an abused device
-    // could undo an operator's revocation by re-running `flue enable` with the
+    // could undo an operator's revocation by re-running `flue link` with the
     // session they were deliberately left holding.
     const user = await makeUser()
     const publicKey = freshKey()

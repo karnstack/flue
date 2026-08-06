@@ -10,7 +10,7 @@
 // code, times as many codes as you can ask for, is not a limit. Capping the
 // *issuing* is what turns it back into one. The callers since are the same
 // argument at other doors: submitting a code (an unauthenticated HMAC and a
-// write per guess), opening a grant (`flue enable`), and opening a relay
+// write per guess), opening a grant (`flue link`), and opening a relay
 // session (a bearer credential per call).
 //
 // A fixed window, not a sliding one: the burst at a window boundary (up to 2x

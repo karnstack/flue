@@ -1,7 +1,7 @@
 -- device_auth gains the daemon's label.
 --
 -- `devices.label` is NOT NULL and the device row is not written until the
--- approving poll, so the name `flue enable` gives itself has to survive from
+-- approving poll, so the name `flue link` gives itself has to survive from
 -- the daemon's first request to the browser's confirmation and on to the
 -- device row — three requests, one table. It is also what the person approving
 -- reads: a code alone says nothing about which machine is asking.
@@ -14,7 +14,7 @@
 -- Dropping the table is safe here in a way it would not be for any other table
 -- in this database: a device_auth row is a ten-minute, single-use grant that is
 -- deleted the moment it is spent. The worst this can do is make an enrolment
--- that was in flight at deploy time answer "expired", and `flue enable` starts
+-- that was in flight at deploy time answer "expired", and `flue link` starts
 -- a new one.
 DROP TABLE `device_auth`;--> statement-breakpoint
 CREATE TABLE `device_auth` (

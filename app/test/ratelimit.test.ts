@@ -512,7 +512,7 @@ describe('the scheduled sweep', () => {
 
   it('collects every expired row and keeps every live one', async () => {
     // Four tables, one pass. Each of them is written by an *unauthenticated*
-    // caller (a counter per address anyone types, a grant per `flue enable`, a
+    // caller (a counter per address anyone types, a grant per `flue link`, a
     // code per request) or grows with every login, and nothing reads an expired
     // row — so what is left without this is a table that only ever grows.
     const { stale, live } = await seed()

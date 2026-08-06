@@ -114,7 +114,7 @@ export const devices = sqliteTable(
   ],
 )
 
-// The OAuth-device-flow-shaped handshake behind `flue enable`: the CLI shows a
+// The OAuth-device-flow-shaped handshake behind `flue link`: the CLI shows a
 // short user code, the daemon polls with the opaque device code, and the
 // logged-in browser approves.
 //
@@ -124,12 +124,12 @@ export const devices = sqliteTable(
 export const deviceAuth = sqliteTable(
   'device_auth',
   {
-    userCode: text('user_code').primaryKey(), // short code shown by `flue enable`
+    userCode: text('user_code').primaryKey(), // short code shown by `flue link`
     // SHA-256(device code), hex — same convention as sessions.id. The daemon
     // holds the code and presents it on every poll; that makes it a bearer
     // secret, and bearer secrets are not stored here in the clear.
     deviceCode: text('device_code').notNull(),
-    // The name the daemon gave itself, carried from `flue enable` to the
+    // The name the daemon gave itself, carried from `flue link` to the
     // browser and on to `devices.label`. It has to live here because the two
     // ends of the handshake are two requests: the daemon submits it at start
     // and is not asked for it again, `devices.label` is NOT NULL, and the

@@ -206,7 +206,7 @@ describe('revokeDevice', () => {
   it('refuses to remove a machine flue has switched off, and says so', async () => {
     // The kill switch has to outrank its owner's own delete button, or it is not
     // a kill switch: `disabled` survives re-enrolment (enroll.ts carries it
-    // over), but only because the row survives. Delete it and `flue enable`
+    // over), but only because the row survives. Delete it and `flue link`
     // writes a fresh one with `disabled = 0` from the INSERT — the revocation
     // would last exactly as long as it took to click "remove" and reinstall.
     // This refusal is *not* the undistinguished one: the owner can see this

@@ -27,7 +27,7 @@ function Index() {
         </h1>
         <p className="max-w-[60ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
           flue.sh is the control plane for the flue daemon. Sign in, connect a machine with{' '}
-          <code className="font-mono">flue enable</code>, and open a shell on it from any browser —
+          <code className="font-mono">flue link</code>, and open a shell on it from any browser —
           a phone included.
         </p>
       </div>

@@ -72,7 +72,7 @@
 //
 // **A disabled machine stays disabled across re-enrolment**, which is the point
 // of leaving its owner signed in: `devices.id` is sha256(publicKey)[:12], so a
-// daemon that runs `flue enable` again lands on the same row, and the mint
+// daemon that runs `flue link` again lands on the same row, and the mint
 // upsert in server/enroll.ts deliberately carries the existing `disabled` value
 // over rather than resetting it. The re-enrolment succeeds — new token, new
 // label, no last-seen — and both mints still refuse it.
@@ -82,7 +82,7 @@
 // `disabled = 0` in the same `where` as ownership, so the dashboard's "remove"
 // refuses a machine an operator has switched off and says why. Without that
 // guard the stickiness above is decorative — delete the row and the next
-// `flue enable` INSERTs a fresh one with `disabled = 0`, no conflict to carry
+// `flue link` INSERTs a fresh one with `disabled = 0`, no conflict to carry
 // anything over from. An operator's revocation outranks its owner's.
 //
 // Turning it back on is an operator action and nothing else:
@@ -153,7 +153,7 @@ export async function enableUser(userId: string): Promise<void> {
  *
  * **Sticky, and not deletable by its owner.** Re-enrolling the same machine does
  * not undo this: the upsert in server/enroll.ts carries the flag over (a device
- * id is derived from the public key, so `flue enable` returns to this row), and
+ * id is derived from the public key, so `flue link` returns to this row), and
  * `enroll.test.ts` pins it. Nor does removing it from the dashboard first:
  * `revokeDevice` refuses a disabled device, because a deleted row is a row with
  * no flag to carry over. Both halves are what make leaving the owner signed in

@@ -196,7 +196,7 @@ export async function listDevices(): Promise<Array<DeviceSummary>> {
  * seconds. That window is the revocation latency of the whole system.
  *
  * Deleting also means re-enrolling the same machine works: `devices.id` is
- * derived from the daemon's public key, so `flue enable` on that machine
+ * derived from the daemon's public key, so `flue link` on that machine
  * collides with nothing and writes a fresh row (`enroll.ts`'s upsert is scoped
  * to the owner, and there is now no owner to conflict with).
  *
@@ -204,7 +204,7 @@ export async function listDevices(): Promise<Array<DeviceSummary>> {
  * removed from here.** `devices.disabled` is in the `where` beside ownership.
  * Without it this function is the way around the kill switch: the documented
  * recipe disables an abused machine *and leaves its owner signed in*, so the
- * owner opens the dashboard, deletes the row — and `flue enable` writes a fresh
+ * owner opens the dashboard, deletes the row — and `flue link` writes a fresh
  * one whose `disabled` comes from the INSERT, not from the flag that was
  * carried over on conflict. Enrolment stickiness (`enroll.ts`) only holds
  * because the row it sticks to survives. An operator's revocation outranks its

@@ -117,11 +117,12 @@ terminal see a login shell under the login service too.
   every loopback service. Defence in depth only, given `script-src 'self'`.
 
   **Half done** — the relay origin, which is the one reachable from the internet,
-  no longer carries them: `daemon.RelayCSP` is `LocalCSP` without that clause,
-  and the two are composed from a shared head and tail so the rest cannot drift.
-  The daemon's own origin still carries the wildcards, because `'self'` really
-  does not cover `ws://127.0.0.1:7717` from an `http://127.0.0.1:7717` page —
-  narrowing it needs the port, which the daemon knows and this constant does not.
+  no longer carries them: `daemon.RelayCSP` drops that clause and adds the
+  control plane in its place (see item 14), and the two policies are composed
+  from a shared head and tail so the rest cannot drift. The daemon's own origin
+  still carries the wildcards, because `'self'` really does not cover
+  `ws://127.0.0.1:7717` from an `http://127.0.0.1:7717` page — narrowing it needs
+  the port, which the daemon knows and this constant does not.
 
 ## Crypto and pairing
 
@@ -555,7 +556,7 @@ endpoint that does not exist yet.
   `/api/pair` with only a `Content-Type` header, and the SaaS relay now
   requires `Authorization: Bearer <client token>` — so SaaS pairing 401s, and
   because 401 is not `REFUSED_STATUS` the page renders the raw refusal rather
-  than the refusal copy. Possibly moot: SaaS enrollment is `flue enable` and
+  than the refusal copy. Possibly moot: SaaS enrollment is `flue link` and
   device authorization, not the QR pair flow — but if `/pair` stays reachable
   on the SaaS origin it must either carry the bearer or say why it cannot.
 - **The channel token lives 60 seconds and is captured once.** `main.tsx`
@@ -721,7 +722,7 @@ known workaround, the second is the intended behaviour written down.
   the row it already had. The mint upsert in `app/src/server/enroll.ts`
   deliberately carries the existing `disabled` value over rather than resetting
   it, because the documented recipe disables a machine while *leaving its owner
-  signed in* — and a flag that a re-run of `flue enable` cleared would have made
+  signed in* — and a flag that a re-run of `flue link` cleared would have made
   the revocation last exactly as long as it took the person it was aimed at to
   reinstall. So: the re-enrolment succeeds (new token, new label, no last-seen,
   and no refusal that would tell whoever holds the machine that this id has been
@@ -739,7 +740,7 @@ known workaround, the second is the intended behaviour written down.
   hide from them — a device that is *not* theirs still gets the one generic
   refusal whether it is disabled or not, or the message becomes an oracle).
   Without that guard the whole switch was one click and one reinstall away from
-  being undone: delete the row, run `flue enable`, and the INSERT writes a fresh
+  being undone: delete the row, run `flue link`, and the INSERT writes a fresh
   `disabled = 0` with no conflict to carry anything over from. An operator's
   revocation outranks its owner's. Pinned by `app/test/devices.test.ts`
   ("refuses to remove a machine flue has switched off, and says so", plus the

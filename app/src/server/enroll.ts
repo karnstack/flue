@@ -405,7 +405,7 @@ export async function pollDeviceAuth(input: { deviceCode: string }): Promise<Pol
         // same row — which means writing `0` here would have made revocation
         // undoable by the person it was aimed at. An operator disables an abused
         // device (deliberately leaving its owner signed in, per the recipe in
-        // server/kill-switch.ts); the owner runs `flue enable` again, confirms
+        // server/kill-switch.ts); the owner runs `flue link` again, confirms
         // it with the session they still hold, and the flag flips back within
         // seconds. A kill switch that a reinstall clears is not one.
         //

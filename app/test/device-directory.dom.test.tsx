@@ -186,10 +186,10 @@ describe('DeviceDirectory', () => {
     await waitFor(() => expect(rename).toHaveBeenCalledWith('b5d05f15398a', 'mac studio'))
   })
 
-  it('points a new account at `flue enable`', () => {
+  it('points a new account at `flue link`', () => {
     setup({ devices: [] })
     expect(screen.getByText(/no machines yet/i)).toBeDefined()
-    expect(screen.getByText(/flue enable/)).toBeDefined()
+    expect(screen.getByText(/flue link/)).toBeDefined()
     // The empty state has to lead somewhere, and enrolment is where.
     const link = screen.getByRole('link', { name: /connect a machine/i })
     expect(link.getAttribute('href')).toBe('/enroll')

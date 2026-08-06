@@ -355,7 +355,7 @@ function NoDevices() {
         </EmptyMedia>
         <EmptyTitle>No machines yet</EmptyTitle>
         <EmptyDescription>
-          Run <code className="font-mono">flue enable</code> on a machine you want to reach from
+          Run <code className="font-mono">flue link</code> on a machine you want to reach from
           here. It prints a code; enter it on the next screen and the machine joins this list.
         </EmptyDescription>
       </EmptyHeader>
@@ -729,7 +729,7 @@ function RevokeDialog({
           <AlertDialogDescription>
             This machine stops being able to reach your account. Sessions already open close within
             a minute or two, and the daemon drops the next time it reconnects. Run{' '}
-            <code className="font-mono">flue enable</code> on it again to bring it back.
+            <code className="font-mono">flue link</code> on it again to bring it back.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
