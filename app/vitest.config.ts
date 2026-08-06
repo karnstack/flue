@@ -29,7 +29,16 @@ export default defineConfig({
         // place that is still Node. The built wrangler.json already supplies
         // the DB binding itself (its migrations_dir is rewritten to point back
         // here, at app/migrations — the same directory this reads).
-        bindings: { TEST_MIGRATIONS: await readD1Migrations(migrationsDir) },
+        bindings: {
+          TEST_MIGRATIONS: await readD1Migrations(migrationsDir),
+          // A Worker *secret* in production (`wrangler secret put`), so it is
+          // deliberately absent from wrangler.jsonc and from the built
+          // wrangler.json the pool loads above — the tests have to supply their
+          // own. Its only job here is to be present and stable: login codes are
+          // stored as HMAC(this, code), so a test can recompute a hash and
+          // prove the plaintext never reached the database.
+          CODE_HMAC_SECRET: 'test-code-hmac-secret',
+        },
       },
     })),
   ],

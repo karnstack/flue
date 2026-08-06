@@ -1,0 +1,10 @@
+# Local development secrets. Copy to .dev.vars (gitignored) before `pnpm dev`.
+# In production these are Worker secrets — `wrangler secret put NAME` — and
+# never live in wrangler.jsonc.
+#
+# Generate a value: openssl rand -hex 32
+
+# Keys the HMAC that login codes are stored under. Rotating it invalidates
+# every outstanding code (they stop matching), which is the intended blast
+# radius; it has no effect on existing sessions.
+CODE_HMAC_SECRET=dev-only-not-a-real-secret
