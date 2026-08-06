@@ -335,6 +335,44 @@ describe('keepalive', () => {
     expect(h.closes()).toBe(0)
     expect(h.raw.shut).toBe(false)
   })
+
+  // Sending a ping nothing has to answer buys nothing. The edge answers every
+  // one of them without waking the Durable Object, so silence is not a busy
+  // relay — it is a socket that is open on this end only, which is what a
+  // phone whose NAT mapping went away has. Nothing else notices: the tab sits
+  // at 'open' in front of a dead terminal forever.
+  it('shuts the socket down when the relay stops answering', () => {
+    vi.useFakeTimers()
+    const h = connected()
+
+    // Three intervals of silence is still inside tolerance, and each one is
+    // one more ping.
+    vi.advanceTimersByTime(90_000)
+    expect(h.closes()).toBe(0)
+    expect(h.raw.text()).toEqual([RELAY_PING, RELAY_PING, RELAY_PING])
+
+    // The fourth finds nothing has arrived since the handshake.
+    vi.advanceTimersByTime(30_000)
+    expect(h.closes()).toBe(1)
+    expect(h.raw.shut).toBe(true)
+    // And the interval goes with it, rather than firing at a shut socket for
+    // the life of the tab.
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('a pong resets the staleness clock', () => {
+    vi.useFakeTimers()
+    const h = connected()
+
+    vi.advanceTimersByTime(90_000)
+    h.raw.deliverText(RELAY_PONG)
+    // Ninety more seconds, measured from the pong rather than the handshake.
+    vi.advanceTimersByTime(90_000)
+    expect(h.closes()).toBe(0)
+
+    vi.advanceTimersByTime(30_000)
+    expect(h.closes()).toBe(1)
+  })
 })
 
 describe('protocol errors close the socket', () => {

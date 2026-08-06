@@ -42,6 +42,20 @@ export const RELAY_PONG = 'flue-pong'
  *  cheap: the object stays asleep through every one of them. */
 const KEEPALIVE_MS = 30_000
 
+/**
+ * How many silent intervals mean this socket is open on one end only.
+ *
+ * The same number, for the same reason, as `staleFactor` in
+ * internal/transport/relay/relay.go. Sending a ping nothing has to answer buys
+ * nothing: the edge answers every `flue-ping` immediately and without waking
+ * the Durable Object, so three intervals of total silence is not a busy relay,
+ * it is a socket whose far end stopped existing — a NAT mapping a sleeping
+ * phone lost, an edge that blackholed the connection. Nothing else would
+ * notice. A browser reads from an event handler that simply never fires again,
+ * so the tab sits at `open` in front of a dead terminal until the user reloads.
+ */
+const STALE_INTERVALS = 3
+
 export interface RelayIdentity {
   /** This browser's static Noise key, from `@/crypto/keys`. */
   deviceKey: DeviceKey
@@ -76,6 +90,9 @@ export function relaySocket(
   /** Null until message B verifies; that is also what `onopen` waits for. */
   let channel: NoiseChannel | null = null
   let ping: ReturnType<typeof setInterval> | null = null
+  /** When something last arrived on this socket — a pong counts, which is the
+   *  point of sending the ping. Read by the keepalive, never by anything else. */
+  let lastRead = Date.now()
   /** Set once the close has been reported. Nothing is delivered after it: a
    *  socket the consumer has been told is over must stay over. */
   let dead = false
@@ -135,7 +152,17 @@ export function relaySocket(
     // Armed on the transport rather than on the channel: the ping is a
     // transport-level text frame the edge answers, and a handshake that stalls
     // is reaped by the Durable Object's own deadline, not by silence here.
-    ping = setInterval(() => ws.send(RELAY_PING), KEEPALIVE_MS)
+    lastRead = Date.now()
+    ping = setInterval(() => {
+      // The ping is also the check. Reported as an ordinary close, because
+      // that is the one thing FlueClient already knows how to recover from:
+      // its reconnect is what actually brings the terminal back.
+      if (Date.now() - lastRead > STALE_INTERVALS * KEEPALIVE_MS) {
+        shutdown()
+        return
+      }
+      ws.send(RELAY_PING)
+    }, KEEPALIVE_MS)
   }
 
   ws.onclose = () => {
@@ -147,6 +174,10 @@ export function relaySocket(
 
   ws.onmessage = (data) => {
     if (dead) return
+    // Before the pong is dropped, not after: a pong carries nothing except the
+    // fact that this socket still has two ends, and that fact is the whole
+    // reason the ping was sent.
+    lastRead = Date.now()
 
     if (typeof data === 'string') {
       if (data === RELAY_PONG) return
