@@ -37,7 +37,7 @@ import {
   waitOnExecutionContext,
 } from 'cloudflare:test'
 import { eq } from 'drizzle-orm'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { db } from '../src/db/client'
 import { deviceAuth, devices, loginCodes, rateLimits, sessions, users } from '../src/db/schema'
 import { base64url, hmacHex, randomToken, sha256Hex } from '../src/lib/tokens'
@@ -53,11 +53,19 @@ import {
   CODE_SUBMITS_PER_IP,
   LONGEST_WINDOW_S,
   SESSIONS_OPENED_PER_USER,
+  sweepRateLimits,
   withinLimit,
 } from '../src/server/ratelimit'
 import { SESSION_COOKIE, createSession, currentUser } from '../src/server/sessions'
 import { runScheduledSweeps } from '../src/server/sweep'
 import { inRequest } from './request'
+
+// Spy, not stub: every export keeps its real implementation (`spy: true`), so
+// the caps and the sweep behave exactly as they do without this line and every
+// other test in this file is unaffected. It exists for one case — "one broken
+// sweep does not stop the other three" — which needs a sweep that fails, and
+// the only honest way to get one is to make it fail on purpose.
+vi.mock(import('../src/server/ratelimit'), { spy: true })
 
 const now = () => Math.floor(Date.now() / 1000)
 
@@ -513,6 +521,42 @@ describe('the scheduled sweep', () => {
 
     expect(await survivors(stale)).toEqual({ rateLimit: 0, grant: 0, session: 0, code: 0 })
     expect(await survivors(live)).toEqual({ rateLimit: 1, grant: 1, session: 1, code: 1 })
+  })
+
+  it('collects the other three tables when one sweep fails, and still reports it', async () => {
+    // Cloudflare does not retry a scheduled invocation, so the sweeps must not
+    // be a chain: as four bare awaits, a sweep that fails *every hour* — a D1
+    // hiccup that persists, a migration that invalidated one DELETE — returns
+    // before the rest run, and three healthy tables stop being collected with
+    // nothing to show for it but one log line an operator has to already be
+    // reading. The first sweep is the one forced to fail here, because it is the
+    // one that would have hidden the other three.
+    const { stale, live } = await seed()
+    vi.mocked(sweepRateLimits).mockRejectedValueOnce(new Error('D1_ERROR: forced by a test'))
+
+    // Caught rather than asserted on immediately, so that the *substantive*
+    // property is the first thing checked: put the `rejects.toThrow` first and
+    // the four-awaits version passes it, since it throws too.
+    const failure = await runScheduledSweeps().then(
+      () => null,
+      (err: unknown) => err,
+    )
+
+    // The three that were not sabotaged did their work — which is the whole
+    // point — and the one that failed left its row where it was.
+    expect(await survivors(stale)).toEqual({ rateLimit: 1, grant: 0, session: 0, code: 0 })
+    expect(await survivors(live)).toEqual({ rateLimit: 1, grant: 1, session: 1, code: 1 })
+
+    // And it is still an error, one that names what failed rather than
+    // swallowing it: a broken sweep has to show up as a failed invocation in
+    // the Worker's logs.
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect((failure as AggregateError).message).toMatch(/1 of 4 sweeps failed/)
+    expect((failure as AggregateError).errors).toHaveLength(1)
+
+    // And the failure was for this call only: the next pass collects normally.
+    await runScheduledSweeps()
+    expect(await survivors(stale)).toEqual({ rateLimit: 0, grant: 0, session: 0, code: 0 })
   })
 
   it('is what the Worker’s cron trigger runs', async () => {

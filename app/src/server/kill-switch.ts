@@ -70,6 +70,19 @@
 //   "update devices set disabled = 1 where id = '<device id>'"
 // ```
 //
+// **A disabled machine stays disabled across re-enrolment**, which is the point
+// of leaving its owner signed in: `devices.id` is sha256(publicKey)[:12], so a
+// daemon that runs `flue enable` again lands on the same row, and the mint
+// upsert in server/enroll.ts deliberately carries the existing `disabled` value
+// over rather than resetting it. The re-enrolment succeeds — new token, new
+// label, no last-seen — and both mints still refuse it. Turning it back on is an
+// operator action and nothing else:
+//
+// ```sh
+// wrangler d1 execute flue --remote --command \
+//   "update devices set disabled = 0 where id = '<device id>'"
+// ```
+//
 // The address is normalized (lowercased, trimmed) everywhere this application
 // writes it, so type it that way; `select id, email, disabled from users where
 // email like '%example.com'` first if you are not sure. To take a machine off
@@ -127,13 +140,25 @@ export async function enableUser(userId: string): Promise<void> {
  * what reaches this machine — the channel token is, and both mints re-read this
  * flag. The daemon on the other end keeps its enrollment token and stops being
  * able to trade it for a channel token, so it drops on its next refresh.
+ *
+ * **Sticky.** Re-enrolling the same machine does not undo this: the upsert in
+ * server/enroll.ts carries the flag over (a device id is derived from the public
+ * key, so `flue enable` returns to this row), and `enroll.test.ts` pins it. That
+ * is what makes leaving the owner signed in safe — otherwise the revocation
+ * would last exactly as long as it took them to reinstall.
  */
 export async function disableDevice(deviceId: string): Promise<void> {
   await db().update(devices).set({ disabled: true }).where(eq(devices.id, deviceId))
   console.log(JSON.stringify({ evt: 'device_disabled', deviceId }))
 }
 
-/** Switch a machine back on. Its enrollment token never stopped being valid. */
+/**
+ * Switch a machine back on. Its enrollment token never stopped being valid.
+ *
+ * This is the *only* thing that clears a device revocation — re-enrolling does
+ * not (see `disableDevice`), so a machine that was switched off comes back
+ * because an operator decided it should.
+ */
 export async function enableDevice(deviceId: string): Promise<void> {
   await db().update(devices).set({ disabled: false }).where(eq(devices.id, deviceId))
   console.log(JSON.stringify({ evt: 'device_enabled', deviceId }))

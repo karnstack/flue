@@ -15,6 +15,7 @@ import { db } from '../src/db/client'
 import { deviceAuth, devices, users } from '../src/db/schema'
 import { deviceIdFor, encodePublicKey } from '../src/lib/device-id'
 import { sha256Hex } from '../src/lib/tokens'
+import { mintClientToken, mintDaemonToken } from '../src/server/channel-token'
 import {
   DEVICE_AUTH_TTL_S,
   GRANTS_PER_IP,
@@ -22,6 +23,7 @@ import {
   pollDeviceAuth,
   startDeviceAuth,
 } from '../src/server/enroll'
+import { disableDevice, enableDevice } from '../src/server/kill-switch'
 import { SESSION_COOKIE, createSession } from '../src/server/sessions'
 import { inRequest } from './request'
 
@@ -439,26 +441,79 @@ describe('re-enrolment', () => {
     expect(await db().select().from(devices).where(eq(devices.tokenHash, staleHash))).toEqual([])
   })
 
-  it('clears a revocation when the key comes back', async () => {
+  it('does not clear a revocation when the key comes back', async () => {
+    // The kill switch has to survive the thing it is aimed at. `devices.id` is
+    // sha256(pubkey)[:12], so a revoked machine re-enrolling lands on its own
+    // row — and if the upsert reset `disabled`, the owner of an abused device
+    // could undo an operator's revocation by re-running `flue enable` with the
+    // session they were deliberately left holding.
+    const user = await makeUser()
+    const publicKey = freshKey()
+    const deviceId = await deviceIdFor(publicKey)
+
+    const one = await start({ publicKey, label: 'before' })
+    await confirm(one.userCode, await signIn(user.id))
+    await poll(one.deviceCode)
+    await disableDevice(deviceId)
+
+    const two = await start({ publicKey, label: 'after' })
+    await confirm(two.userCode, await signIn(user.id))
+    // The enrolment itself is not refused — the daemon gets a row and a token,
+    // and finds out it is switched off when it asks for a channel (below).
+    // Refusing here instead would tell whoever holds the machine that the id
+    // they are enrolling has been singled out.
+    const approved = await poll(two.deviceCode)
+    if (approved.status !== 'approved' || !approved.deviceToken) {
+      throw new Error('the re-enrolment of a revoked device did not approve')
+    }
+
+    const [row] = await db().select().from(devices).where(eq(devices.id, deviceId))
+    // Everything else *is* the second enrolment's — the label, a fresh token,
+    // no last-seen stamp. The one field that is carried over is the flag.
+    expect(row?.disabled).toBe(true)
+    expect(row?.label).toBe('after')
+    expect(row?.lastSeen).toBeNull()
+
+    // And the flag still means what it means: neither mint issues a token, so
+    // the re-enrolled daemon cannot reach the relay and neither can its owner's
+    // browser.
+    const cookie = await signIn(user.id)
+    await expect(inRequest(() => mintClientToken(deviceId), { cookie })).rejects.toThrow(
+      'mintClientToken: no such device',
+    )
+    expect(await mintDaemonToken(deviceId, approved.deviceToken)).toBeNull()
+
+    // Un-revoking is an operator action, and only an operator action.
+    await enableDevice(deviceId)
+    expect((await inRequest(() => mintClientToken(deviceId), { cookie })).value.token).toBeTruthy()
+  })
+
+  it('leaves an enabled device enabled when it enrolls again', async () => {
+    // The other half of the same rule: carrying the flag over must not turn
+    // into carrying *something* over. A machine that was never revoked
+    // re-enrolls exactly as before.
     const user = await makeUser()
     const publicKey = freshKey()
     const deviceId = await deviceIdFor(publicKey)
 
     const one = await start({ publicKey })
     await confirm(one.userCode, await signIn(user.id))
-    await poll(one.deviceCode)
-    // The kill switch, flipped between enrolments.
-    await db().update(devices).set({ disabled: true }).where(eq(devices.id, deviceId))
+    const first = await poll(one.deviceCode)
+    if (first.status !== 'approved' || !first.deviceToken) {
+      throw new Error('the first enrolment did not approve')
+    }
 
     const two = await start({ publicKey })
     await confirm(two.userCode, await signIn(user.id))
-    expect((await poll(two.deviceCode)).status).toBe('approved')
+    const second = await poll(two.deviceCode)
+    if (second.status !== 'approved' || !second.deviceToken) {
+      throw new Error('the second enrolment did not approve')
+    }
+    expect(second.deviceToken).not.toBe(first.deviceToken)
 
     const [row] = await db().select().from(devices).where(eq(devices.id, deviceId))
-    // A fresh enrolment is a fresh device: it does not inherit the old row's
-    // disabled flag or its last-seen stamp.
     expect(row?.disabled).toBe(false)
-    expect(row?.lastSeen).toBeNull()
+    expect(await mintDaemonToken(deviceId, second.deviceToken)).not.toBeNull()
   })
 })
 

@@ -2,8 +2,9 @@
 
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size. Items 7–9 are the same exercise for the
-crypto+pairing milestone, items 10–13 for the relay, and item 14 for the SaaS
-control plane's browser leg.
+crypto+pairing milestone, items 10–13 for the relay, item 14 for the SaaS
+control plane's browser leg, and item 15 for what its kill switch does and does
+not reach.
 
 ## Done
 
@@ -521,6 +522,55 @@ endpoint that does not exist yet.
   tab calls before each (re)dial to re-mint a fresh client token for the
   device; the web client refreshes on reconnect instead of reusing the
   captured token.
+
+## 15. What the SaaS kill switch reaches
+
+Carried out of the control plane's abuse controls (`app/src/server/kill-switch.ts`,
+the `disabled` flags on `users` and `devices`, `/terms`). Both items are
+statements of what the switch actually does, recorded here so nobody has to
+rediscover them during an incident. Neither is a bug: the first is a gap with a
+known workaround, the second is the intended behaviour written down.
+
+- **Revocation does not reach a channel that is already open.** Both mints
+  (`app/src/server/channel-token.ts`) re-read `users.disabled` and
+  `devices.disabled` in the same `where` as ownership, so disabling either one
+  stops the *next* mint immediately. The relay does not ask: `authorizeToken`
+  runs once, at the WebSocket upgrade (`relay/src/index.ts`), and nothing
+  re-reads the claims or the database for the life of that connection. So a
+  terminal somebody already has open outlives both the revocation and the token
+  that opened it — it ends when it is closed, or when the daemon next reconnects
+  and its refresh is refused. The bound on "next dial" is the token TTL: 60
+  seconds for a browser, 300 for a daemon.
+
+  What an operator does today, and what `/terms` and `kill-switch.ts` both say:
+  to end a live session *now*, stop the daemon on the machine. Closing it
+  properly needs revocation the relay can hear about, and there are two shapes —
+  a hub-side check on a schedule (the Durable Object re-validating its live
+  channels against the control plane, which costs a request per channel per
+  interval), or a channel that closes when its own token's `exp` passes (free,
+  and it converts the TTL from "how stale a *new* dial can be" into "how long a
+  live session survives revocation" — which is the property everyone assumes it
+  already has). The second is the smaller change and probably the right one.
+
+- **A device revocation is sticky, and un-revoking is an operator action.**
+  `devices.id` is sha256(publicKey)[:12], so a machine that re-enrolls lands on
+  the row it already had. The mint upsert in `app/src/server/enroll.ts`
+  deliberately carries the existing `disabled` value over rather than resetting
+  it, because the documented recipe disables a machine while *leaving its owner
+  signed in* — and a flag that a re-run of `flue enable` cleared would have made
+  the revocation last exactly as long as it took the person it was aimed at to
+  reinstall. So: the re-enrolment succeeds (new token, new label, no last-seen,
+  and no refusal that would tell whoever holds the machine that this id has been
+  singled out), and both mints still refuse it. `enableDevice` — or
+  `update devices set disabled = 0` — is the only thing that turns it back on.
+  Pinned by `app/test/enroll.test.ts` ("does not clear a revocation when the key
+  comes back", plus the enabled-device case beside it).
+
+  The residue, stated so it is a decision rather than an oversight: a person
+  whose machine was revoked can enroll a *different* key on the same hardware and
+  get a new device row, since the id follows the key. That is a new device by
+  every definition this service has, and stopping it means revoking the account
+  rather than the machine — which is what `disableUser` is for.
 
 ## Things worth knowing before touching this code
 

@@ -34,9 +34,16 @@
 // means it is a *content-derived* primary key: a daemon that enrolls again —
 // after a revoke, onto a second account — collides with its own old row. The
 // mint step is therefore an upsert on that id, and a re-enrolment replaces the
-// previous row wholesale: new owner, new label, new token, and the old row's
-// `disabled` and `last_seen` cleared. Anything else would either fail with a
-// constraint error or resurrect a revocation.
+// row it lands on: new label, new token, and `last_seen` cleared, because
+// nothing has been seen on the new token yet. Anything else would fail with a
+// constraint error.
+//
+// **The one field a re-enrolment does not replace is `disabled`.** Because the
+// id follows the key, the machine an operator revoked is the machine that comes
+// back — so clearing the flag would have meant a kill switch the revoked party
+// could throw back themselves by reinstalling. It is carried over instead: a
+// device that was enabled stays enabled, a revoked one stays revoked, and only
+// `enableDevice` (server/kill-switch.ts) undoes a revocation.
 //
 // **But only the account that already owns a device may replace it.** A Noise
 // static public key is not a secret — it is printed in the pairing URL's `k=`
@@ -354,10 +361,26 @@ export async function pollDeviceAuth(input: { deviceCode: string }): Promise<Pol
         publicKey: sql`excluded.public_key`,
         tokenHash: sql`excluded.token_hash`,
         createdAt: sql`excluded.created_at`,
-        // A re-enrolment is a fresh device, not a resumed one: it must not
-        // inherit the previous row's kill switch or its last-seen stamp.
+        // A re-enrolment is a fresh connection, so the last-seen stamp starts
+        // over: nothing has been seen on this token yet.
         lastSeen: sql`null`,
-        disabled: sql`0`,
+        // The kill switch is **not** cleared. `devices.id` is
+        // sha256(publicKey)[:12], so the same machine re-enrolling lands on the
+        // same row — which means writing `0` here would have made revocation
+        // undoable by the person it was aimed at. An operator disables an abused
+        // device (deliberately leaving its owner signed in, per the recipe in
+        // server/kill-switch.ts); the owner runs `flue enable` again, confirms
+        // it with the session they still hold, and the flag flips back within
+        // seconds. A kill switch that a reinstall clears is not one.
+        //
+        // So the value is carried over from the row already in the table: a
+        // device that was not disabled re-enrolls enabled (the common case,
+        // untouched), and a disabled one stays disabled until an operator runs
+        // `enableDevice`. The rest of the row is still replaced — new token, new
+        // label — so a re-enrolment that lands on a revoked device succeeds and
+        // is still refused a channel token by both mints, which is exactly what
+        // the operator asked for.
+        disabled: sql`${devices.disabled}`,
       },
       // Who may replace an existing device row: only the account that already
       // owns it. Inside `do update`, the bare table name is the row already in

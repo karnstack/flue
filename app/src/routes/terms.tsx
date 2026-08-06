@@ -88,11 +88,17 @@ function TermsPage() {
             if the service itself is at risk.
           </p>
           <p>
-            What that does, precisely: signed-in browser sessions are dropped at once, no new
-            terminal session can be opened, and no connected machine can renew the short-lived
-            credential it needs to stay reachable. Switching an account back on does not restore the
-            browser sessions — you sign in again. A terminal that is already open ends when it is
-            closed or when the machine next reconnects, whichever comes first.
+            What that does, precisely: when we disable an account we delete its sessions, so
+            everyone signed into it is signed out at once, no new terminal session can be opened,
+            and no connected machine can renew the short-lived credential it needs to stay
+            reachable. Because those sessions are deleted rather than paused, switching an account
+            back on does not restore them — you sign in again. A terminal that is already open ends
+            when it is closed or when the machine next reconnects, whichever comes first.
+          </p>
+          <p>
+            Switching off a single machine leaves you signed in and your other machines working, and
+            it stays switched off: reinstalling flue and connecting that machine again does not turn
+            it back on. Only we can do that.
           </p>
           <p>
             You can do the same thing yourself at any time: remove a machine from the dashboard, and
