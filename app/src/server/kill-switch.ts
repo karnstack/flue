@@ -75,8 +75,17 @@
 // daemon that runs `flue enable` again lands on the same row, and the mint
 // upsert in server/enroll.ts deliberately carries the existing `disabled` value
 // over rather than resetting it. The re-enrolment succeeds — new token, new
-// label, no last-seen — and both mints still refuse it. Turning it back on is an
-// operator action and nothing else:
+// label, no last-seen — and both mints still refuse it.
+//
+// **And its owner cannot delete the row out from under that**, which is the
+// other half of the same property: `revokeDevice` (server/devices.ts) states
+// `disabled = 0` in the same `where` as ownership, so the dashboard's "remove"
+// refuses a machine an operator has switched off and says why. Without that
+// guard the stickiness above is decorative — delete the row and the next
+// `flue enable` INSERTs a fresh one with `disabled = 0`, no conflict to carry
+// anything over from. An operator's revocation outranks its owner's.
+//
+// Turning it back on is an operator action and nothing else:
 //
 // ```sh
 // wrangler d1 execute flue --remote --command \
@@ -87,7 +96,8 @@
 // writes it, so type it that way; `select id, email, disabled from users where
 // email like '%example.com'` first if you are not sure. To take a machine off
 // an account for good rather than switch it off, delete the row — that is what
-// the dashboard's "revoke" does (server/devices.ts).
+// the dashboard's "revoke" does (server/devices.ts), for every machine except
+// one that is already switched off.
 import { eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { devices, sessions, users } from '../db/schema'
@@ -141,11 +151,14 @@ export async function enableUser(userId: string): Promise<void> {
  * flag. The daemon on the other end keeps its enrollment token and stops being
  * able to trade it for a channel token, so it drops on its next refresh.
  *
- * **Sticky.** Re-enrolling the same machine does not undo this: the upsert in
- * server/enroll.ts carries the flag over (a device id is derived from the public
- * key, so `flue enable` returns to this row), and `enroll.test.ts` pins it. That
- * is what makes leaving the owner signed in safe — otherwise the revocation
- * would last exactly as long as it took them to reinstall.
+ * **Sticky, and not deletable by its owner.** Re-enrolling the same machine does
+ * not undo this: the upsert in server/enroll.ts carries the flag over (a device
+ * id is derived from the public key, so `flue enable` returns to this row), and
+ * `enroll.test.ts` pins it. Nor does removing it from the dashboard first:
+ * `revokeDevice` refuses a disabled device, because a deleted row is a row with
+ * no flag to carry over. Both halves are what make leaving the owner signed in
+ * safe — otherwise the revocation would last exactly as long as it took them to
+ * click "remove" and reinstall.
  */
 export async function disableDevice(deviceId: string): Promise<void> {
   await db().update(devices).set({ disabled: true }).where(eq(devices.id, deviceId))

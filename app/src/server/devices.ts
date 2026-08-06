@@ -22,7 +22,10 @@
 // somebody else, undistinguished, or this becomes an existence oracle for other
 // people's device ids. (Ids are derived from public keys and are not secret,
 // but the mapping id → "is a real device on this service" is not something to
-// hand out.) Anything else that throws here is ours, and routes/devices.tsx
+// hand out.) The one thing said differently is a machine of the caller's own
+// that an operator has switched off — a row their device list already shows
+// them, so hiding it there would tell them nothing except that flue lies.
+// Anything else that throws here is ours, and routes/devices.tsx
 // turns it into a fixed string — drizzle raises a failed statement as
 // `Failed query: <SQL>\nparams: <every bound value>`, which on these paths is
 // the device id and the account id.
@@ -52,6 +55,22 @@ const MAX_DEVICE_ID_INPUT = 64
  * rendered into a toast beside the machine it is about.
  */
 const NO_SUCH_MACHINE = 'That machine is no longer on your account.'
+
+/**
+ * The one exception to the sentence above, and the only one.
+ *
+ * A machine an operator has switched off is one the caller *can already see* —
+ * `listDevices` returns it, flagged — so there is nothing here to be coy about,
+ * and answering "no longer on your account" would be a lie about a row they are
+ * looking at. It is said only for a device the session owns: a stranger's
+ * disabled device gets `NO_SUCH_MACHINE` like any other stranger's device, or
+ * this becomes an oracle for "is that id a machine flue has switched off".
+ *
+ * Names no way to undo it, because the caller has none: `enableDevice` is an
+ * operator action (server/kill-switch.ts), which is the whole point of refusing
+ * the delete.
+ */
+const DISABLED_MACHINE = 'This machine has been switched off by flue and cannot be removed. Contact support.'
 
 /**
  * The one thing said to an account that is opening sessions faster than a
@@ -160,6 +179,17 @@ export async function listDevices(): Promise<Array<DeviceSummary>> {
  * collides with nothing and writes a fresh row (`enroll.ts`'s upsert is scoped
  * to the owner, and there is now no owner to conflict with).
  *
+ * **Which is exactly why a machine an operator has switched off cannot be
+ * removed from here.** `devices.disabled` is in the `where` beside ownership.
+ * Without it this function is the way around the kill switch: the documented
+ * recipe disables an abused machine *and leaves its owner signed in*, so the
+ * owner opens the dashboard, deletes the row — and `flue enable` writes a fresh
+ * one whose `disabled` comes from the INSERT, not from the flag that was
+ * carried over on conflict. Enrolment stickiness (`enroll.ts`) only holds
+ * because the row it sticks to survives. An operator's revocation outranks its
+ * owner's, and `enableDevice` is the only thing that clears it; `/terms` says
+ * so, and it is now true.
+ *
  * The enrollment token dies with the row — it was only ever stored as a digest
  * — so there is nothing else to clean up.
  */
@@ -169,12 +199,22 @@ export async function revokeDevice(deviceId: string): Promise<void> {
 
   const removed = await db()
     .delete(devices)
-    .where(and(eq(devices.id, id), eq(devices.userId, user.id)))
+    .where(and(eq(devices.id, id), eq(devices.userId, user.id), eq(devices.disabled, false)))
     .returning({ id: devices.id })
 
-  // No rows means one of: no such device, or somebody else's. The same
-  // sentence for both, on purpose.
-  if (removed.length !== 1) throw new DeviceError(NO_SUCH_MACHINE)
+  // No rows means one of three things, and only the third is told apart: no
+  // such device, somebody else's — the same sentence for both, on purpose — or
+  // the caller's own machine, switched off. The read that separates them is
+  // scoped by owner as well, so it can only ever confirm something the caller's
+  // own device list already shows them; a stranger's id finds nothing and falls
+  // through to the undistinguished refusal.
+  if (removed.length !== 1) {
+    const [own] = await db()
+      .select({ disabled: devices.disabled })
+      .from(devices)
+      .where(and(eq(devices.id, id), eq(devices.userId, user.id)))
+    throw new DeviceError(own?.disabled ? DISABLED_MACHINE : NO_SUCH_MACHINE)
+  }
 
   // Logged because it is the one destructive thing this screen does, and
   // because "my machine vanished" is a support question that needs an answer.

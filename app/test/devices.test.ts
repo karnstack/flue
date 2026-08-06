@@ -202,6 +202,48 @@ describe('revokeDevice', () => {
     expect(await row(device.id)).toBeDefined()
   })
 
+  it('refuses to remove a machine flue has switched off, and says so', async () => {
+    // The kill switch has to outrank its owner's own delete button, or it is not
+    // a kill switch: `disabled` survives re-enrolment (enroll.ts carries it
+    // over), but only because the row survives. Delete it and `flue enable`
+    // writes a fresh one with `disabled = 0` from the INSERT — the revocation
+    // would last exactly as long as it took to click "remove" and reinstall.
+    // This refusal is *not* the undistinguished one: the owner can see this
+    // machine in their list, so there is nothing to hide from them, and "that
+    // machine is no longer on your account" would be a lie about a row they are
+    // looking at.
+    const user = await makeUser()
+    const device = await makeDevice(user.id, { disabled: true })
+    const cookie = await signIn(user.id)
+
+    const refusal = await revoke(device.id, cookie).catch((e: Error) => e.message)
+
+    expect(await row(device.id)).toMatchObject({ id: device.id, disabled: true })
+    expect(refusal).toContain('switched off')
+    const gone = await revoke('ffffffffffff', cookie).catch((e: Error) => e.message)
+    expect(refusal).not.toBe(gone)
+  })
+
+  it('says nothing different about somebody else’s switched-off machine', async () => {
+    // The exception above is for machines the caller can already see. A device
+    // that is not theirs answers with the one undistinguished sentence whether
+    // it is disabled or not, or the refusal becomes an oracle for "is this id a
+    // machine flue has switched off".
+    const owner = await makeUser()
+    const mallory = await makeUser()
+    const off = await makeDevice(owner.id, { disabled: true })
+    const on = await makeDevice(owner.id)
+    const cookie = await signIn(mallory.id)
+
+    const theirsOff = await revoke(off.id, cookie).catch((e: Error) => e.message)
+    const theirsOn = await revoke(on.id, cookie).catch((e: Error) => e.message)
+    const notThere = await revoke('ffffffffffff', cookie).catch((e: Error) => e.message)
+
+    expect(theirsOff).toBe(theirsOn)
+    expect(theirsOff).toBe(notThere)
+    expect(await row(off.id)).toMatchObject({ userId: owner.id, disabled: true })
+  })
+
   it('logs the revoke, without the credential', async () => {
     // Removing a machine from an account is the one destructive thing this
     // screen does, so it leaves a trace. What it must not leave is the

@@ -98,12 +98,14 @@ function TermsPage() {
           <p>
             Switching off a single machine leaves you signed in and your other machines working, and
             it stays switched off: reinstalling flue and connecting that machine again does not turn
-            it back on. Only we can do that.
+            it back on, and neither does removing it from your dashboard — a machine we have
+            switched off stays on your list, marked, and cannot be removed from there. Only we can
+            turn it back on.
           </p>
           <p>
-            You can do the same thing yourself at any time: remove a machine from the dashboard, and
-            it can no longer be reached. To end a session that is open right now, stop the flue
-            daemon on that machine.
+            Short of that, you can take a machine off your account yourself at any time: remove it
+            from the dashboard and it can no longer be reached. To end a session that is open right
+            now, stop the flue daemon on that machine.
           </p>
         </Section>
 

@@ -566,11 +566,29 @@ known workaround, the second is the intended behaviour written down.
   Pinned by `app/test/enroll.test.ts` ("does not clear a revocation when the key
   comes back", plus the enabled-device case beside it).
 
-  The residue, stated so it is a decision rather than an oversight: a person
-  whose machine was revoked can enroll a *different* key on the same hardware and
-  get a new device row, since the id follows the key. That is a new device by
-  every definition this service has, and stopping it means revoking the account
-  rather than the machine — which is what `disableUser` is for.
+  Carrying the flag over is only half of it, because it needs a row to carry it
+  on. `revokeDevice` (`app/src/server/devices.ts`) therefore states
+  `disabled = 0` in the same `where` as ownership: the dashboard's own "remove"
+  refuses a machine an operator has switched off, and says so in a sentence
+  written for that case rather than the undistinguished "no longer on your
+  account" (that machine is on the owner's list, flagged, so there is nothing to
+  hide from them — a device that is *not* theirs still gets the one generic
+  refusal whether it is disabled or not, or the message becomes an oracle).
+  Without that guard the whole switch was one click and one reinstall away from
+  being undone: delete the row, run `flue enable`, and the INSERT writes a fresh
+  `disabled = 0` with no conflict to carry anything over from. An operator's
+  revocation outranks its owner's. Pinned by `app/test/devices.test.ts`
+  ("refuses to remove a machine flue has switched off, and says so", plus the
+  non-owner case beside it).
+
+  The residue, stated so it is a decision rather than an oversight, and it is now
+  only this one: a person whose machine was revoked can generate a *different*
+  Noise static key on the same hardware and enroll that, which is a different
+  device id and so a new row, since the id follows the key. That is a new device
+  by every definition this service has, and stopping it means revoking the
+  account rather than the machine — which is what `disableUser` is for. The
+  same-key path — delete the row from the dashboard, re-enroll, get a clean flag
+  — is closed.
 
 ## Things worth knowing before touching this code
 
