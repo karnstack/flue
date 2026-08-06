@@ -35,6 +35,7 @@ import {
   CODE_SENDS_PER_EMAIL,
   CODE_SENDS_PER_IP,
   CODE_SEND_WINDOW_S,
+  CODE_SUBMITS_PER_IP,
   clientIp,
   maybeSweepRateLimits,
   withinLimit,
@@ -184,12 +185,40 @@ async function addressMayReceiveCode(address: string, invite: string): Promise<b
  * invite gate lets them.
  *
  * `{ok:false}` covers every refusal without distinguishing them — wrong code,
- * expired code, no code, no invite, someone else's invite, a disabled account.
+ * expired code, no code, no invite, someone else's invite, a disabled account,
+ * and a caller over its own cap.
  */
 export async function submitCode(input: SubmitCodeInput): Promise<{ ok: boolean }> {
   const address = normalizeEmail(input.email)
 
-  // First, and unconditionally: a wrong code never reaches the account logic,
+  // The caller's cap first, and alone, exactly as in `requestCode` — and for
+  // the second of the two reasons that one has. It is not about the odds of a
+  // guess: those are bounded by the five attempts claimed per code below. It is
+  // that a submission is an unauthenticated HMAC plus a D1 write, a wrong guess
+  // costs the same as a right one, and nothing else here is keyed by anything
+  // an attacker cannot invent.
+  //
+  // Over the cap, this returns before the verifier runs — so the submission
+  // spends none of the code's five attempts. That matters: a cap that consumed
+  // attempts would let a flood from one address burn a real user's code out
+  // from under them. The refusal is `{ok:false}`, the same value and the same
+  // shape every other refusal here answers with, and the branch is decided by
+  // `clientIp()` alone, so it says nothing about the address.
+  const withinIpCap = await withinLimit(
+    'login-submit:ip',
+    clientIp(),
+    CODE_SUBMITS_PER_IP,
+    CODE_SEND_WINDOW_S,
+  )
+  // On both branches and before either, like the one in `requestCode`: this
+  // endpoint writes a counter row per calling address, so the collection rides
+  // on the same traffic (behind the cron, which is what actually collects — see
+  // ratelimit.ts). The coin flip is independent of the address and of the code,
+  // so it is noise on the timing rather than signal.
+  await maybeSweepRateLimits()
+  if (!withinIpCap) return { ok: false }
+
+  // Then, and unconditionally: a wrong code never reaches the account logic,
   // so no submission can create a user, spend an invite or touch a session
   // without a code that was actually sent to that address. This also spends
   // one of the code's five attempts, which is what makes guessing bounded.

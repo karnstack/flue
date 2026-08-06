@@ -219,9 +219,13 @@ export async function startDeviceAuth(input: StartDeviceAuthInput): Promise<Devi
 
   // Expired grants are dead the moment their TTL passes, and nothing reads
   // them (every lookup below carries the TTL in its predicate), so collecting
-  // them is storage and can ride on the traffic that creates them. Same coin
-  // flip as the rate-limit sweep, and for the same reason: there is no cron
-  // yet. Task 10's scheduled handler should call `sweepDeviceAuth` directly.
+  // them is storage and can ride on the traffic that creates them.
+  //
+  // The cron is what actually collects now — `sweepDeviceAuth` is called
+  // directly from the scheduled handler (src/server/sweep.ts). Same coin flip
+  // as the rate-limit sweep, kept behind it for the same reason: a deployment
+  // with no cron running (`vite dev`, a self-hosted control plane whose
+  // operator never set the trigger) still collects.
   await maybeSweepDeviceAuth()
 
   const createdAt = nowSeconds()

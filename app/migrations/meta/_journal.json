@@ -22,6 +22,13 @@
       "when": 1786022037697,
       "tag": "0002_device_auth_label",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786038941848,
+      "tag": "0003_rate_limits_window_start_idx",
+      "breakpoints": true
     }
   ]
 }

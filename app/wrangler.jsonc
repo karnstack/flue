@@ -3,8 +3,16 @@
   "name": "flue-app",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
-  "main": "@tanstack/react-start/server-entry",
+  // src/server.ts, not "@tanstack/react-start/server-entry": Start's own entry
+  // exports only `fetch`, and this Worker also needs `scheduled` (the sweeps in
+  // src/server/sweep.ts). That file re-exports Start's fetch handler verbatim.
+  "main": "./src/server.ts",
   "observability": { "enabled": true },
+  // Hourly, off the hour — the top of the hour is when every cron on the
+  // platform fires. What runs is `scheduled` in src/server.ts: four ranged
+  // deletes of rows that are already expired. Nothing reads them, so the exact
+  // minute does not matter; that it runs without traffic to ride on does.
+  "triggers": { "crons": ["17 * * * *"] },
   // Bindings declared here are typed by worker-configuration.d.ts, which is
   // generated: after adding or renaming one, run `pnpm cf-typegen`.
   // database_id "local" is a placeholder for dev; the real id is filled at

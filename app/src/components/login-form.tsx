@@ -142,6 +142,20 @@ export function LoginForm({ requestCode, submitCode, onSignedIn }: LoginFormProp
       )}
 
       {error === null ? null : <p role="alert">{error}</p>}
+
+      {/*
+       * The terms, one click from the only place an account is created — a
+       * plain anchor rather than a router `Link` so this component keeps
+       * needing nothing but React (see the note at the top of this file), and
+       * because a document load is the right thing for a static page anyway.
+       *
+       * It is on the sign-in screen because signing in *is* the sign-up: there
+       * is no separate "create an account" page to put it on, and terms nobody
+       * was shown before they agreed to them are not terms.
+       */}
+      <p>
+        By signing in you agree to the <a href="/terms">terms of service</a>.
+      </p>
     </main>
   )
 }

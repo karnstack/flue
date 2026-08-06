@@ -39,6 +39,20 @@ describe('LoginForm', () => {
     expect(screen.queryByLabelText('Code')).toBeNull()
   })
 
+  it('links the terms from both steps, because signing in is signing up', async () => {
+    // There is no separate "create an account" screen: a first-time visitor
+    // with an invite becomes a user by completing this form. So the terms have
+    // to be reachable from it, and from the step they are actually agreeing on.
+    const { user } = setup()
+    const link = () => screen.getByRole('link', { name: /terms of service/i })
+    expect(link().getAttribute('href')).toBe('/terms')
+
+    await user.type(screen.getByLabelText('Email address'), 'someone@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send me a code' }))
+    await screen.findByLabelText('Code')
+    expect(link().getAttribute('href')).toBe('/terms')
+  })
+
   it('asks the server for a code, then shows the code field', async () => {
     const { requestCode, user } = setup()
 

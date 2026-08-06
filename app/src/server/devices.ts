@@ -31,6 +31,7 @@ import { db } from '../db/client'
 import { devices } from '../db/schema'
 import { MAX_LABEL_INPUT, normalizeLabel } from '../lib/label'
 import { mintClientToken } from './channel-token'
+import { LONGEST_WINDOW_S, SESSIONS_OPENED_PER_USER, withinLimit } from './ratelimit'
 import { currentUser } from './sessions'
 
 export { MAX_LABEL } from '../lib/label'
@@ -51,6 +52,27 @@ const MAX_DEVICE_ID_INPUT = 64
  * rendered into a toast beside the machine it is about.
  */
 const NO_SUCH_MACHINE = 'That machine is no longer on your account.'
+
+/**
+ * The one thing said to an account that is opening sessions faster than a
+ * person does.
+ *
+ * Names no machine, because the cap is not about one: it is the account's
+ * budget, and a message that named the device would imply the next device would
+ * work. Written for the person looking at the screen, like every other
+ * `DeviceError` message.
+ */
+const TOO_MANY_SESSIONS = 'Too many sessions opened just now. Wait a few minutes and try again.'
+
+/**
+ * The window the cap above is measured over.
+ *
+ * Bound to ratelimit.ts's constant rather than chosen here, the same way
+ * `ENROLL_WINDOW_S` is: the sweep deletes counters older than
+ * `LONGEST_WINDOW_S`, so a bucket measured over anything longer would be swept
+ * mid-window and silently reset (`withinLimit` refuses one outright).
+ */
+const OPEN_SESSION_WINDOW_S = LONGEST_WINDOW_S
 
 /**
  * A refusal the caller is meant to read.
@@ -242,6 +264,25 @@ export async function renameDevice(deviceId: string, label: string): Promise<str
 export async function openSession(deviceId: string): Promise<{ url: string }> {
   const user = await requireSession()
   const id = readDeviceId(deviceId)
+
+  // Before the mint, and keyed by the account rather than the device: what is
+  // handed out below is a bearer credential the relay accepts *offline*, so
+  // this function is the only thing standing between a session cookie and an
+  // unbounded supply of them. A stolen cookie is otherwise a token faucet for
+  // the eight hours it lives.
+  //
+  // The subject is `user.id` — resolved from the session, never taken from the
+  // caller — so this cannot be sidestepped by naming a different machine, and
+  // one account cannot spend another's budget. The refusal is a `DeviceError`
+  // rather than a silent failure: the person here is signed in, so there is
+  // nothing to be coy about and everything to be clear about.
+  const withinCap = await withinLimit(
+    'open-session:user',
+    user.id,
+    SESSIONS_OPENED_PER_USER,
+    OPEN_SESSION_WINDOW_S,
+  )
+  if (!withinCap) throw new DeviceError(TOO_MANY_SESSIONS)
 
   // `mintClientToken` re-states ownership and both kill switches in its own
   // predicate and throws the same undistinguished refusal this module does. The

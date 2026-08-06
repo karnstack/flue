@@ -115,6 +115,22 @@ export async function dummyIssueWork(): Promise<void> {
 }
 
 /**
+ * Delete every code whose ten minutes are up.
+ *
+ * `verifyLoginCode` already sweeps the dead row for the address it was asked
+ * about, but only that one — a code that is issued and never submitted is
+ * nobody's address to sweep, and it stays. That is a row per unused login code,
+ * forever, each holding the email address it was sent to: storage, and a list of
+ * people who tried to sign in, which is exactly what this service has no reason
+ * to keep. Nothing reads an expired row (the TTL rides in every predicate that
+ * touches this table), so this can run at any time from anywhere — the cron
+ * (src/server.ts) is what runs it.
+ */
+export async function sweepExpiredLoginCodes(now: number = nowSeconds()): Promise<void> {
+  await db().delete(loginCodes).where(lte(loginCodes.expiresAt, now))
+}
+
+/**
  * Check a submitted code. `{ ok: true, email }` exactly once per issued code;
  * `{ ok: false }` for every other reason, without saying which.
  *

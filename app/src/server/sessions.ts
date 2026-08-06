@@ -16,7 +16,7 @@
 // then `createSession(userId)`. Anything that adopts a session id the visitor
 // arrived with is a session-fixation bug.
 import { deleteCookie, getCookie, setCookie } from '@tanstack/react-start/server'
-import { and, eq, gt } from 'drizzle-orm'
+import { and, eq, gt, lte } from 'drizzle-orm'
 import { db } from '../db/client'
 import { sessions, users } from '../db/schema'
 import { randomToken, sha256Hex } from '../lib/tokens'
@@ -151,4 +151,20 @@ export async function destroySession(): Promise<void> {
       .where(eq(sessions.id, await sha256Hex(token)))
   }
   deleteCookie(SESSION_COOKIE, COOKIE_OPTIONS)
+}
+
+/**
+ * Delete every session whose eight hours are up.
+ *
+ * Storage, not security: `currentUser` already carries the expiry in its
+ * predicate, so an expired row grants nothing whether it is here or not. What
+ * it does do is accumulate — one row per login, forever, each one naming a user
+ * — and the cron (src/server.ts) is what stops that.
+ *
+ * A row that is *still live* is never touched here. Deleting one would be a
+ * silent sign-out for whoever is holding that cookie, which is what
+ * `destroySession` and `disableUser` are for.
+ */
+export async function sweepExpiredSessions(now: number = nowSeconds()): Promise<void> {
+  await db().delete(sessions).where(lte(sessions.expiresAt, now))
 }

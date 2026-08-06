@@ -62,11 +62,20 @@ export const loginCodes = sqliteTable(
 // the login form would otherwise land here in the clear, including the ones
 // with no account and no invite — a list of people who tried, which the service
 // has no reason to keep. Hashing makes the row a counter and nothing else.
-export const rateLimits = sqliteTable('rate_limits', {
-  key: text('key').primaryKey(), // SHA-256("<bucket>:<subject>"), hex
-  windowStart: integer('window_start').notNull(), // unix seconds
-  count: integer('count').notNull().default(0),
-})
+export const rateLimits = sqliteTable(
+  'rate_limits',
+  {
+    key: text('key').primaryKey(), // SHA-256("<bucket>:<subject>"), hex
+    windowStart: integer('window_start').notNull(), // unix seconds
+    count: integer('count').notNull().default(0),
+  },
+  // Counting is a primary-key upsert; this index is for the other statement,
+  // `delete from rate_limits where window_start < ?` (server/ratelimit.ts's
+  // sweep). Without it that delete scans every counter in the service — and it
+  // gets slower exactly as the table grows, which is to say exactly when an
+  // unauthenticated caller is filling it.
+  (t) => [index('rate_limits_window_start_idx').on(t.windowStart)],
+)
 
 export const sessions = sqliteTable(
   'sessions',
