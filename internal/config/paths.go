@@ -100,6 +100,24 @@ func writeSecretAtomically(dir, path string, b []byte) error {
 		tmp.Close()
 		return err
 	}
+	// Flushed to the disk before the rename publishes it. A rename is atomic
+	// with respect to other processes, but not with respect to power loss: the
+	// directory entry can reach the disk before the data blocks it points at,
+	// which leaves a zero-length file where a complete one used to be.
+	//
+	// That matters more for the relay configuration than for the token. A lost
+	// token regenerates on the next start and costs one browser session; the
+	// relay secret's other copy lives in a deployed Worker, so this process
+	// cannot invent a replacement for one it dropped.
+	//
+	// The directory entry itself is deliberately not fsynced. Losing the rename
+	// is the acceptable failure — the file simply still holds what it held
+	// before — and the cost of the second sync is paid on a path that runs at
+	// every daemon start.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}

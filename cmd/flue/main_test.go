@@ -1344,3 +1344,42 @@ func TestStartRelayIsNeverFatal(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusReportsAnIncompleteRelayConfig: a relay.json missing a field is one
+// relay.New refuses, so the daemon never dials it. Reporting it as "configured"
+// would make the one report someone reads to find out why nothing works say
+// that everything is set up.
+func TestStatusReportsAnIncompleteRelayConfig(t *testing.T) {
+	const secret = "s3cr3t-daemon-secret"
+	for _, tc := range []struct {
+		name  string
+		relay config.Relay
+		want  string
+	}{
+		{"no url", config.Relay{Secret: secret, Origin: "https://r.example"}, "no url"},
+		{"no secret", config.Relay{URL: "wss://r.example/daemon", Origin: "https://r.example"}, "no secret"},
+		{"no origin", config.Relay{URL: "wss://r.example/daemon", Secret: secret}, "no origin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			if err := config.SaveRelay(tc.relay); err != nil {
+				t.Fatalf("SaveRelay: %v", err)
+			}
+
+			var buf bytes.Buffer
+			if err := statusTo(&buf); err != nil {
+				t.Fatalf("statusTo: %v", err)
+			}
+			out := buf.String()
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("status does not name the missing field (%q):\n%s", tc.want, out)
+			}
+			if strings.Contains(out, "status unknown from here") {
+				t.Errorf("status reported an incomplete relay as a working one:\n%s", out)
+			}
+			if strings.Contains(out, secret) {
+				t.Errorf("status printed the daemon secret:\n%s", out)
+			}
+		})
+	}
+}

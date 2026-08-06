@@ -283,9 +283,19 @@ func TestWelcomeCarriesRelayStatus(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	relay, _ = got["relay"].(map[string]any)
+	// Asserted before it is probed: a missing relay object reads as a nil map,
+	// and every "the origin is absent" check on a nil map passes for the wrong
+	// reason — including one run against an encoder that dropped the field
+	// altogether.
+	relay, ok = got["relay"].(map[string]any)
+	if !ok {
+		t.Fatalf("a connecting relay carried no relay object: %s", b)
+	}
 	if _, present := relay["origin"]; present {
 		t.Fatalf("a connecting relay carried an origin: %s", b)
+	}
+	if relay["status"] != "connecting" {
+		t.Fatalf("relay status = %v, want connecting", relay["status"])
 	}
 
 	// And a daemon with no relay at all sends no relay key.

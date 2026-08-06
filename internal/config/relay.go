@@ -57,10 +57,15 @@ func LoadRelay() (Relay, bool, error) {
 	}
 	var r Relay
 	if err := json.Unmarshal(b, &r); err != nil {
-		// The error names the file and the offset, never the contents: this is
-		// the one config file that holds a credential, and a parse error that
-		// quoted the line it choked on would put it in a log.
-		return Relay{}, false, fmt.Errorf("config: %s is not valid JSON: %w", relayFileName, err)
+		// "Could not be parsed" rather than "is not valid JSON", because both
+		// faults land here: a syntax error, and a well-formed file whose secret
+		// is a number. The wrapped error names the offset or the field.
+		//
+		// What it must never carry is any of the file's contents. This is the
+		// one config file that holds a credential and this error reaches both
+		// the daemon's log and `flue status`. encoding/json does not quote the
+		// value it choked on, and nothing added here may start to.
+		return Relay{}, false, fmt.Errorf("config: %s could not be parsed: %w", relayFileName, err)
 	}
 	return r, true, nil
 }

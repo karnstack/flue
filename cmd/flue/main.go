@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -297,16 +298,19 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 		logger.Warn("relay not started", "err", err)
 		return
 	}
+	// Before the goroutine, never after it. The transport reports this itself
+	// the moment it starts dialling, and this only covers the window before it
+	// is scheduled — but a seed written *after* the goroutine started races the
+	// transport's own reports and can overwrite "connected" with "connecting"
+	// on a relay that is already up. Nothing would correct it until the socket
+	// dropped: welcomes would announce a dead relay and pairing URLs would go
+	// back to naming loopback while the relay was carrying traffic.
+	srv.SetRelayStatus(daemon.RelayConnecting, "")
 	go func() {
 		if err := t.Run(ctx); err != nil {
 			logger.Warn("relay stopped", "err", err)
 		}
 	}()
-	// The transport reports this itself the moment it starts dialling, but the
-	// goroutine above has not necessarily been scheduled yet, and a client that
-	// connects in the meantime should be told a relay is coming up rather than
-	// that there is none.
-	srv.SetRelayStatus(daemon.RelayConnecting, "")
 }
 
 // snapshotsDir is where shutdown snapshots live between daemons. An empty
@@ -1183,9 +1187,27 @@ func relayLine() string {
 		return fmt.Sprintf("relay:    unknown (%v)", err)
 	case !ok:
 		return "relay:    not configured"
-	case rc.URL == "":
-		return "relay:    configured, but with no URL to dial"
 	}
+
+	// A file missing a field is one relay.New refuses, so the daemon never
+	// dials it. Reporting that as "configured" would have this report — the one
+	// somebody reads to find out why remote access does not work — say that
+	// everything is set up. The fields are named; their values never are.
+	var missing []string
+	if rc.URL == "" {
+		missing = append(missing, "no url")
+	}
+	if rc.Secret == "" {
+		missing = append(missing, "no secret")
+	}
+	if rc.Origin == "" {
+		missing = append(missing, "no origin")
+	}
+	if len(missing) > 0 {
+		return fmt.Sprintf("relay:    configured, but incomplete (%s): the daemon will not dial it",
+			strings.Join(missing, ", "))
+	}
+
 	return fmt.Sprintf("relay:    configured (%s), status unknown from here", rc.URL)
 }
 

@@ -200,3 +200,44 @@ func TestLoadRelayKeepsAnIncompleteFile(t *testing.T) {
 		t.Fatalf("LoadRelay = %+v, want only the URL set", got)
 	}
 }
+
+// TestLoadRelayErrorNeverQuotesTheFile pins a property rather than fixing a
+// bug: the error this returns is logged by `flue serve` and printed by `flue
+// status`, and the file it describes holds the daemon secret.
+//
+// encoding/json is careful here today — an UnmarshalTypeError says "cannot
+// unmarshal number into Go struct field Relay.secret of type string" and never
+// the number — but that is the decoder's choice rather than a promise, and it
+// is not uniform: the `,string` tag path quotes the input verbatim. A wrapper
+// that started passing the body through, or a field that gained that tag, would
+// put a credential in a terminal, a log file and a pasted bug report at once.
+func TestLoadRelayErrorNeverQuotesTheFile(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+
+	dir := filepath.Join(base, "flue")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	const secret = "12345678901234567890"
+	body := `{"url":"wss://r.example/daemon","secret":` + secret + `,"origin":"https://r.example"}`
+	if err := os.WriteFile(filepath.Join(dir, "relay.json"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write relay.json: %v", err)
+	}
+
+	_, ok, err := LoadRelay()
+	if err == nil {
+		t.Fatal("LoadRelay of a relay.json whose secret is not a string = nil error, want a refusal")
+	}
+	if ok {
+		t.Error("LoadRelay ok = true alongside an error, want false")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("the error quotes the file's contents: %q", err)
+	}
+	// It still has to be useful: whoever broke the file needs to know which
+	// field to look at.
+	if !strings.Contains(err.Error(), "secret") {
+		t.Errorf("the error does not name the field that is wrong: %q", err)
+	}
+}

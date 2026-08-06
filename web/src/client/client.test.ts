@@ -200,6 +200,8 @@ describe('control message golden file', () => {
       'pairStart',
       'pairCancel',
       'welcome',
+      'welcomeRelay',
+      'welcomeRelayConnecting',
       'sessions',
       'attached',
       'attachedTrunc',
@@ -291,6 +293,32 @@ describe('control message golden file', () => {
     // interface must declare it optional rather than required.
     const want: Welcome = { type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.1.0' }
     expect(fixture('welcome')).toStrictEqual(want)
+  })
+
+  it('decodes welcome with a live relay', () => {
+    const want: Welcome = {
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'macbook',
+      ver: '0.1.0',
+      relay: { status: 'connected', origin: 'https://flue-relay.karn.workers.dev' },
+    }
+    expect(fixture('welcomeRelay')).toStrictEqual(want)
+  })
+
+  it('decodes welcome while the relay is still dialling', () => {
+    // `origin` is omitempty on the Go side and absent here: nothing is
+    // reachable through a socket that is not up, so there is no address to
+    // name. The interface must declare it optional for the same reason `caps`
+    // is.
+    const want: Welcome = {
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'macbook',
+      ver: '0.1.0',
+      relay: { status: 'connecting' },
+    }
+    expect(fixture('welcomeRelayConnecting')).toStrictEqual(want)
   })
 
   it('decodes sessions, including all nine fields of every record', () => {
