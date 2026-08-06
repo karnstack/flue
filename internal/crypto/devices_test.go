@@ -3,6 +3,7 @@ package crypto
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -91,6 +92,29 @@ func TestDeviceStoreRejectsBadAndDuplicateKeys(t *testing.T) {
 	}
 	if _, err := s.Add("second", key); err == nil {
 		t.Fatal("accepted the same key twice")
+	}
+}
+
+// TestDeviceIDVector pins the one value two codebases have to agree on.
+//
+// flue.sh's control plane derives a device's id the same way this function
+// does — `hex(sha256(pubkey))[:12]` — because the daemon enrolls under an id it
+// computes for itself and is then addressed by that id everywhere else (the
+// relay's account scoping, the dashboard's device list). If the two
+// derivations ever drift, a daemon and the service disagree about who it is,
+// and nothing else in either system notices.
+//
+// The key is the initiator static from testdata/noise/ik.json, so the same
+// bytes already have a name on both sides. app/test/enroll.test.ts asserts the
+// identical pair; changing one without the other is what this test exists to
+// catch.
+func TestDeviceIDVector(t *testing.T) {
+	pub, err := hex.DecodeString("07c49831ace851c4c861ad4fa8bc850e18c6128731bdf5631076920bc1e89411")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DeviceID(pub); got != "b5d05f15398a" {
+		t.Fatalf("DeviceID(ik.json initiator static) = %q, want %q", got, "b5d05f15398a")
 	}
 }
 

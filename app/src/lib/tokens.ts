@@ -67,7 +67,23 @@ export async function hmacHex(secret: string, msg: string): Promise<string> {
  * of `sessions` cannot be pasted into a cookie jar.
  */
 export async function sha256Hex(msg: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(msg))
+  return sha256HexBytes(new TextEncoder().encode(msg))
+}
+
+/**
+ * SHA-256 of raw bytes, lowercase hex.
+ *
+ * The same digest as `sha256Hex`, for the one input that is not text: a
+ * device's Noise public key, whose id is a digest of the *key material* and has
+ * to agree byte for byte with what the Go daemon computes (see lib/device-id).
+ * Hashing its base64 spelling instead would be a different value, and the two
+ * sides would disagree about the device's name.
+ */
+export async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
+  // `.slice()` copies into a plain ArrayBuffer: a Uint8Array that is a *view*
+  // over a larger buffer (or over a SharedArrayBuffer) would otherwise hash
+  // more than the caller passed, or not typecheck as a BufferSource at all.
+  const digest = await crypto.subtle.digest('SHA-256', bytes.slice().buffer)
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
@@ -103,4 +119,24 @@ export function base64url(bytes: Uint8Array): string {
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
+}
+
+/**
+ * A bearer token: 32 bytes from the CSPRNG, base64url, 43 characters.
+ *
+ * One definition for every opaque secret this service hands out — session
+ * cookies, device-flow device codes, device enrollment tokens. They are all
+ * the same object with different lifetimes, and they are all stored as
+ * `sha256Hex(token)` and never in the clear, which only holds while "the
+ * token" means "256 unguessable bits": at that width there is no dictionary to
+ * invert and therefore nothing an HMAC key would add.
+ *
+ * 256 bits and not fewer, on purpose. These are compared by an indexed lookup
+ * rather than in constant time, and the argument for that is entirely the
+ * keyspace.
+ */
+export function randomToken(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return base64url(bytes)
 }

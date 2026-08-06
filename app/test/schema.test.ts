@@ -248,6 +248,7 @@ describe('device_auth', () => {
     await db().insert(schema.deviceAuth).values({
       userCode: 'WXYZ-1234',
       deviceCode: await sha256Hex(code),
+      label: 'a laptop',
       createdAt: 1,
       expiresAt: 900,
       publicKey: 'BASE64PUBKEY',
@@ -277,7 +278,7 @@ describe('device_auth', () => {
     const deviceCode = await sha256Hex(code)
     await db()
       .insert(schema.deviceAuth)
-      .values({ userCode: 'CCCC-3333', deviceCode, createdAt: 1, expiresAt: 900 })
+      .values({ userCode: 'CCCC-3333', deviceCode, label: 'a laptop', createdAt: 1, expiresAt: 900 })
 
     // The redeem path: insert the device and delete the grant together. Split
     // across two round trips a crashed request would leave a live grant that
@@ -306,11 +307,11 @@ describe('device_auth', () => {
     const deviceCode = await sha256Hex('opaque-device-code-2')
     await db()
       .insert(schema.deviceAuth)
-      .values({ userCode: 'AAAA-1111', deviceCode, createdAt: 1, expiresAt: 900 })
+      .values({ userCode: 'AAAA-1111', deviceCode, label: 'a laptop', createdAt: 1, expiresAt: 900 })
     const err = await rejectionChain(
       db()
         .insert(schema.deviceAuth)
-        .values({ userCode: 'BBBB-2222', deviceCode, createdAt: 1, expiresAt: 900 }),
+        .values({ userCode: 'BBBB-2222', deviceCode, label: 'a laptop', createdAt: 1, expiresAt: 900 }),
     )
     expect(err).toMatch(/UNIQUE constraint failed: device_auth\.device_code/i)
   })

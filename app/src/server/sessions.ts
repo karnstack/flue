@@ -19,7 +19,7 @@ import { deleteCookie, getCookie, setCookie } from '@tanstack/react-start/server
 import { and, eq, gt } from 'drizzle-orm'
 import { db } from '../db/client'
 import { sessions, users } from '../db/schema'
-import { base64url, sha256Hex } from '../lib/tokens'
+import { randomToken, sha256Hex } from '../lib/tokens'
 
 /**
  * The cookie name, prefix included.
@@ -78,9 +78,9 @@ const nowSeconds = () => Math.floor(Date.now() / 1000)
  * asks no questions.
  */
 export async function createSession(userId: string): Promise<void> {
-  const bytes = new Uint8Array(32) // 256 bits: unguessable, and not worth keying a hash over
-  crypto.getRandomValues(bytes)
-  const token = base64url(bytes)
+  // 256 bits: unguessable, and not worth keying a hash over. The same shape a
+  // device enrollment token has, from the same helper — see lib/tokens.
+  const token = randomToken()
   const createdAt = nowSeconds()
 
   // The token itself never reaches the database, and is never logged: the row

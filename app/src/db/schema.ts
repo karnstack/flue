@@ -117,6 +117,14 @@ export const deviceAuth = sqliteTable(
     // holds the code and presents it on every poll; that makes it a bearer
     // secret, and bearer secrets are not stored here in the clear.
     deviceCode: text('device_code').notNull(),
+    // The name the daemon gave itself, carried from `flue enable` to the
+    // browser and on to `devices.label`. It has to live here because the two
+    // ends of the handshake are two requests: the daemon submits it at start
+    // and is not asked for it again, `devices.label` is NOT NULL, and the
+    // device row is not written until the approving poll. It is also what the
+    // person approving actually reads — a code alone says nothing about which
+    // machine is asking.
+    label: text('label').notNull(),
     createdAt: integer('created_at').notNull(),
     expiresAt: integer('expires_at').notNull(),
     approvedUserId: text('approved_user_id'), // set when the logged-in user confirms
