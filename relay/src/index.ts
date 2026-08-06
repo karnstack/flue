@@ -5,6 +5,9 @@ export interface Env {
   /** Handshake deadline in ms — a test seam (vitest binds 50). Unset in
    * production, where the hub defaults to 30 000. */
   HANDSHAKE_TIMEOUT_MS?: string | number
+  /** How long `POST /api/pair` waits for the daemon, in ms — the same test
+   * seam (vitest binds 250). Unset in production, where it is 10 000. */
+  PAIR_TIMEOUT_MS?: string | number
 }
 
 /** May this request open the daemon leg? Self-host: a bearer secret. */

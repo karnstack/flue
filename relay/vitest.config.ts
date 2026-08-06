@@ -8,9 +8,14 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
-      // HANDSHAKE_TIMEOUT_MS is the hub's test seam: 50 ms here so the alarm
-      // tests run in real time; unset in production, where code defaults to 30 s.
-      miniflare: { bindings: { DAEMON_SECRET: 'test-secret', HANDSHAKE_TIMEOUT_MS: 50 } },
+      // HANDSHAKE_TIMEOUT_MS and PAIR_TIMEOUT_MS are the hub's test seams: short
+      // here so the deadline tests run in real time; unset in production, where
+      // code defaults to 30 s and 10 s. The pairing deadline is the looser of
+      // the two because the tests that must *not* hit it run a whole HTTP
+      // request through a WebSocket round trip first.
+      miniflare: {
+        bindings: { DAEMON_SECRET: 'test-secret', HANDSHAKE_TIMEOUT_MS: 50, PAIR_TIMEOUT_MS: 250 },
+      },
     }),
   ],
 })
