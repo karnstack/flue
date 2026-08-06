@@ -65,15 +65,27 @@ function callServerFn(
 
 /**
  * POST the way the *daemon* will: no cookie, no `Sec-Fetch-Site`, just an
- * `Origin`.
+ * `Origin`, and the fields form-encoded.
  *
- * That header is not decoration. start.ts validates CSRF on every server-fn
- * RPC and refuses a POST carrying no origin signal at all, so a client that
- * sends none gets 403 — which is what a naive Go http.Post would do. Saying
- * which origin it is talking to is what a non-browser client offers instead,
- * and it costs nothing: CSRF exists to stop a *browser* being made to speak
- * with its user's ambient credential, and these two endpoints have no ambient
- * credential to borrow.
+ * Both of those are load-bearing, and both are things a Go client gets wrong by
+ * default.
+ *
+ * `Origin` is not decoration: start.ts validates CSRF on every server-fn RPC
+ * and refuses a POST carrying no origin signal at all, so a client that sends
+ * none gets 403 — which is what a naive `http.Post` does. Saying which origin
+ * it is talking to is what a non-browser client offers instead, and it costs
+ * nothing: CSRF exists to stop a *browser* being made to speak with its user's
+ * ambient credential, and these two endpoints have no ambient credential to
+ * borrow.
+ *
+ * `application/x-www-form-urlencoded` is not decoration either, and it is the
+ * quieter trap. Start reads a form-encoded or multipart body as `FormData` and
+ * hands it straight to the validator; any other body goes through seroval's
+ * `fromJSON`, which wants seroval's own node shape and not a plain object. So
+ * `json.Marshal` + `Content-Type: application/json` does not arrive as
+ * `{label, publicKey}` — it arrives as nothing, and the answer is a 400 that
+ * looks like a validation bug. Every daemon-shaped call in this file therefore
+ * sends `URLSearchParams`, which is the encoding Task 11 has to send too.
  */
 function callAsDaemon(
   name: string,
@@ -100,6 +112,26 @@ async function payload(res: Response): Promise<Record<string, unknown>> {
     return JSON.parse(text) as Record<string, unknown>
   } catch {
     throw new Error(`server fn answered with something that is not JSON: ${text.slice(0, 200)}`)
+  }
+}
+
+/**
+ * Run `fn` with `device_auth` renamed out from under the running Worker, so the
+ * next statement against it fails the way a real outage does.
+ *
+ * A genuine `D1_ERROR: no such table: device_auth: SQLITE_ERROR` raised from
+ * inside the handler is the only honest way to test the "something broke that
+ * nobody wrote an error for" path — a stubbed throw would prove the wrapper
+ * catches what the test throws at it and nothing about what D1 does. Renamed
+ * rather than dropped, and restored in a `finally`, so the file's other tests
+ * (and their rows) are untouched either way.
+ */
+async function withBrokenDatabase<T>(fn: () => Promise<T>): Promise<T> {
+  await env.DB.exec('ALTER TABLE device_auth RENAME TO device_auth_gone')
+  try {
+    return await fn()
+  } finally {
+    await env.DB.exec('ALTER TABLE device_auth_gone RENAME TO device_auth')
   }
 }
 
@@ -365,6 +397,84 @@ describe('the daemon-facing endpoints', () => {
       )
     }
     expect(last?.status).toBe(429)
+  })
+
+  it('does not take a JSON body — the daemon has to form-encode', async () => {
+    // The hard input for Task 11, pinned rather than left in a comment.
+    //
+    // Start reads a form-encoded or multipart body as `FormData` and hands it
+    // to the validator; *any* other body it runs through seroval's `fromJSON`,
+    // which wants seroval's own node shape (`{"t":10,...}`) and throws on a
+    // plain object. So the obvious Go client — `json.Marshal(struct{...})`
+    // with `Content-Type: application/json` — never reaches
+    // `readStartDeviceAuth` at all. It does not even get one of this file's
+    // JSON refusals: the throw happens in Start's body parse, above the
+    // handler, so what comes back is the seroval envelope that motivated the
+    // raw `Response`s in the first place.
+    const before = (await db().select().from(deviceAuth)).length
+    const res = await SELF.fetch(urlFor('startDeviceAuthFn'), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-tsr-serverFn': 'true',
+        origin: ORIGIN,
+        'cf-connecting-ip': freshIp(),
+      },
+      body: JSON.stringify({ label: 'a go daemon', publicKey: freshKey() }),
+      redirect: 'manual',
+    })
+
+    expect(res.status).not.toBe(200)
+    // Start's envelope, not ours — the tell that this failed above the handler.
+    expect(res.headers.get('x-tss-serialized')).toBe('true')
+    // And no grant: a JSON body opens nothing, however well-formed it looks.
+    expect((await db().select().from(deviceAuth)).length).toBe(before)
+  })
+
+  it('answers a broken database in JSON, and says nothing about it', async () => {
+    // Two failures in one, and the daemon would be stuck on either.
+    //
+    // A throw that escapes a server function is not a 500 with a plain body:
+    // Start serializes it with seroval and answers `x-tss-serialized: true`
+    // with a graph the browser's RPC client decodes and a Go program does not
+    // — the exact shape these endpoints return raw `Response`s to avoid. And
+    // the message inside it is D1's, naming our storage engine and our table
+    // to a caller with no session.
+    const res = await withBrokenDatabase(() =>
+      callAsDaemon('startDeviceAuthFn', { label: 'a go daemon', publicKey: freshKey() }),
+    )
+
+    expect(res.status).toBe(500)
+    // Not Start's envelope: raw pass-through, and nothing serialized.
+    expect(res.headers.get('x-tss-serialized')).toBeNull()
+
+    // `payload` is JSON.parse, so reaching the next line is the claim that a
+    // daemon can read this. The body is the whole body: one fixed string.
+    const body = await payload(res)
+    expect(body).toEqual({ error: 'enroll: could not open a grant' })
+
+    // And said explicitly, because `toEqual` above would still pass if the
+    // fallback string itself ever grew a detail: nothing internal leaks.
+    const text = JSON.stringify(body)
+    expect(text).not.toContain('D1_ERROR')
+    expect(text).not.toContain('SQLITE')
+    expect(text).not.toContain('device_auth')
+  })
+
+  it('answers a broken database on a poll the same way', async () => {
+    // The call the daemon makes every five seconds for ten minutes, so it is
+    // the likeliest of the three to be in flight when the database has a bad
+    // moment — and it had no try/catch at all until this was written.
+    const res = await withBrokenDatabase(() =>
+      callAsDaemon('pollDeviceAuthFn', { deviceCode: 'a'.repeat(43) }),
+    )
+
+    expect(res.status).toBe(500)
+    expect(res.headers.get('x-tss-serialized')).toBeNull()
+
+    const body = await payload(res)
+    expect(body).toEqual({ error: 'enroll: could not read the grant' })
+    expect(JSON.stringify(body)).not.toContain('D1_ERROR')
   })
 
   it('refuses a POST that carries no origin signal at all', async () => {

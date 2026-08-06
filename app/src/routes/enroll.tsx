@@ -27,14 +27,33 @@
 // unauthenticated, so every unbounded field is free work for anyone.
 //
 // A note for the daemon (Task 11), because it is the one caller that is not a
-// browser. These are Start server functions, so their URLs are
-// `/_serverFn/<id>` where the id is `sha256("<file>--<name>_createServerFn_handler")`
-// — deterministic, and pinned by `enroll-e2e.test.ts` so a rename cannot move
-// one silently. And start.ts installs CSRF middleware over every server-fn RPC,
-// which refuses a POST carrying no origin signal at all: the daemon must send
-// `Origin: https://<the host it is talking to>`. That is not a hole — CSRF
-// exists to stop *a browser* being made to speak for its user, and there is no
-// ambient credential on these two endpoints for a forged request to borrow.
+// browser. Three things it has to get right, none of which it can guess:
+//
+//   1. **The URL.** These are Start server functions, so their URLs are
+//      `/_serverFn/<id>` where the id is
+//      `sha256("<file>--<name>_createServerFn_handler")` — deterministic, and
+//      pinned by `enroll-e2e.test.ts` so a rename cannot move one silently.
+//
+//   2. **`Origin: https://<the host it is talking to>`.** start.ts installs
+//      CSRF middleware over every server-fn RPC, which refuses a POST carrying
+//      no origin signal at all. That is not a hole — CSRF exists to stop *a
+//      browser* being made to speak for its user, and there is no ambient
+//      credential on these two endpoints for a forged request to borrow.
+//
+//   3. **The body must be `application/x-www-form-urlencoded`, NOT JSON.**
+//      Start reads a form-encoded (or multipart) body as `FormData` and hands
+//      it to the validator as-is; *any* other body it runs through seroval's
+//      `fromJSON`, which expects seroval's own cross-JSON node shape —
+//      `{"t":10,"i":0,"p":{...}}` — and throws on a plain object. So a Go
+//      client that does the obvious thing, `json.Marshal(struct{Label,
+//      PublicKey})` with `Content-Type: application/json`, never reaches
+//      `readStartDeviceAuth` as `{label, publicKey}`: it fails in Start's body
+//      parse, above this file entirely, and gets back the seroval error
+//      envelope that everything below goes to lengths to avoid — so not even
+//      the JSON refusal it could have read. Send `label=...&publicKey=...`
+//      (and `deviceCode=...` to poll) as form params. Every daemon-shaped call
+//      in `enroll-e2e.test.ts` does, and one test posts JSON on purpose to pin
+//      that it does not work.
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { createServerFn, useServerFn } from '@tanstack/react-start'
 import { EnrollForm } from '../components/enroll-form'
@@ -69,9 +88,14 @@ const MAX_DEVICE_CODE = 128
 const MAX_LABEL = 1024
 
 /**
- * Read one field out of whatever the request carried — the client RPC's JSON or
- * a FormData body, both of which Start accepts. Anything that is not a string
- * of a plausible length becomes `''`.
+ * Read one field out of whatever the request carried — a `FormData`, which is
+ * what Start hands over for a form-encoded or multipart body, or the object the
+ * browser's RPC client sends (seroval-encoded, and decoded before it gets
+ * here). Anything that is not a string of a plausible length becomes `''`.
+ *
+ * A body that is neither — a hand-rolled `application/json` POST, say — decodes
+ * to nothing usable, and every field then reads `''`. See the daemon note at
+ * the top of the file: that is a wire mistake, not a validation one.
  */
 function field(data: unknown, name: string, max: number): string {
   const raw =
@@ -110,6 +134,35 @@ function json(body: unknown, status = 200): Response {
   })
 }
 
+/**
+ * The refusal, in the same JSON the success path speaks.
+ *
+ * Answered rather than thrown, and that is the whole point of this function: an
+ * uncaught throw is not a 500 with a plain body, it is Start's *seroval* error
+ * envelope with `x-tss-serialized: true` — the one shape on this endpoint the
+ * Go daemon cannot read, and the reason both handlers return raw `Response`s in
+ * the first place. A failure that answers in a shape the caller cannot parse is
+ * indistinguishable, to that caller, from the service being down.
+ *
+ * Two kinds of failure, and only one of them is the caller's to see.
+ * `DeviceAuthError` is the client error this module raises on purpose — 400 for
+ * a key that is not 32 bytes, 429 for a caller over its cap — and its message is
+ * written to be read by whoever runs the daemon, so it goes out verbatim with
+ * the status it carries. Everything else is *ours*, and `err.message` is not a
+ * sentence someone wrote for a stranger: drizzle raises a failed statement as
+ * `Failed query: <the whole SQL>\nparams: <every bound value>`, so echoing it
+ * hands an unauthenticated caller the schema *and* the parameters — on the
+ * insert, a live user code and the daemon's key; on the poll, the stored
+ * `sha256(deviceCode)` digest. (Measured, not guessed: that is what came back
+ * when this path was tested against a real broken table.) So: logged where it
+ * is useful, answered with a fixed string.
+ */
+function refusal(err: unknown, fallback: string): Response {
+  if (err instanceof DeviceAuthError) return json({ error: err.message }, err.status)
+  console.error('enroll: unexpected failure', err)
+  return json({ error: fallback }, 500)
+}
+
 /** POST: open a grant, as the daemon. Unauthenticated: it has no credential yet. */
 export const startDeviceAuthFn = createServerFn({ method: 'POST' })
   .validator(readStartDeviceAuth)
@@ -117,21 +170,30 @@ export const startDeviceAuthFn = createServerFn({ method: 'POST' })
     try {
       return json(await startDeviceAuth(data))
     } catch (err) {
-      // Answered rather than thrown: an uncaught throw is a 500 carrying a
-      // serialized stack, and "your key is not 32 bytes" is not a server
-      // error. `DeviceAuthError` brings the status with it — 400 for a bad
-      // key, 429 for a caller over its cap — because a daemon that cannot
-      // tell those apart either hammers the limit or gives up on a typo.
-      const status = err instanceof DeviceAuthError ? err.status : 500
-      const error = err instanceof Error ? err.message : 'enroll: could not open a grant'
-      return json({ error }, status)
+      return refusal(err, 'enroll: could not open a grant')
     }
   })
 
-/** POST: ask what happened to a grant, as the daemon. The device code is the credential. */
+/**
+ * POST: ask what happened to a grant, as the daemon. The device code is the
+ * credential.
+ *
+ * Wrapped like `startDeviceAuthFn` even though `pollDeviceAuth` raises no
+ * `DeviceAuthError` of its own — every dead end is an ordinary `expired`. What
+ * the wrapper is for is the failure nobody writes: this is the call the daemon
+ * makes every five seconds for ten minutes, so it is the likeliest of the three
+ * to be in flight when the database has a bad moment, and it must answer that
+ * in JSON like everything else it says.
+ */
 export const pollDeviceAuthFn = createServerFn({ method: 'POST' })
   .validator(readDeviceCode)
-  .handler(async ({ data }) => json(await pollDeviceAuth(data)))
+  .handler(async ({ data }) => {
+    try {
+      return json(await pollDeviceAuth(data))
+    } catch (err) {
+      return refusal(err, 'enroll: could not read the grant')
+    }
+  })
 
 /** POST: approve a grant, as the signed-in user. `{ok:false}` is every refusal. */
 export const confirmDeviceAuthFn = createServerFn({ method: 'POST' })
