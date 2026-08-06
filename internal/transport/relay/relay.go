@@ -24,6 +24,8 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -62,6 +64,22 @@ const (
 	// the cost of being under it is nearly nothing. Tests shorten it.
 	defaultKeepalive = 30 * time.Second
 
+	// staleFactor is how many keepalive intervals of total silence mean the
+	// socket is dead.
+	//
+	// Sending pings nothing has to answer buys nothing. The edge answers every
+	// flue-ping immediately and without waking the Durable Object, so silence
+	// across three intervals is not a busy relay, it is a socket that is open
+	// on this end only — a NAT that dropped the mapping, an edge that
+	// blackholed it. Nothing else would notice: a read parks forever, the
+	// daemon believes it is reachable, and remote access is silently gone until
+	// something writes and TCP gives up a quarter of an hour later.
+	staleFactor = 3
+
+	// logStringLimit bounds a relay-chosen string on its way into a log line.
+	// Everything the relay sends is bytes it chose, up to readLimit of them.
+	logStringLimit = 120
+
 	// Backoff between dials: 250 ms doubling to a 30 s cap, with equal jitter.
 	// These are the web client's numbers (web/src/client/client.ts) because
 	// they answer the same question — how fast may something that lost its
@@ -69,6 +87,20 @@ const (
 	backoffBase       = 250 * time.Millisecond
 	backoffCap        = 30 * time.Second
 	backoffMaxAttempt = 30
+
+	// minStableConn is how long a connection has to last before the backoff
+	// forgets it ever failed.
+	//
+	// "Reset on connect" is not enough on this leg, because connecting is not
+	// the same as being kept. The Durable Object gives the daemon leg to the
+	// newcomer and closes the incumbent with 4000 "replaced" (relay/src/hub.ts),
+	// so two daemons pointed at one relay — the same self-hosted secret copied
+	// to a second machine — each kick the other off the instant they land. With
+	// the backoff reset on every such connect that is a permanent loop of four
+	// to eight upgrades a second against a Worker whose free tier is 100k
+	// requests a day. Requiring the socket to have lasted lets the pair escalate
+	// to the 30 s cap and sit there, loudly, in the log, instead.
+	minStableConn = 5 * time.Second
 )
 
 // Config is everything the adapter needs to reach a deployed relay.
@@ -110,6 +142,22 @@ type Transport struct {
 	keepalive time.Duration
 }
 
+// noRedirects is the dialer this adapter uses, and the only thing it changes
+// about the default one is that it does not follow redirects.
+//
+// A 3xx is never a valid WebSocket handshake, so nothing is lost — and
+// following one can lose the daemon secret. net/http re-sends Authorization to
+// the same host or any subdomain of it (shouldCopyHeaderOnRedirect compares
+// hosts, never schemes), so a relay that answered the upgrade with a redirect
+// to http:// on its own name would be handed the bearer token in the clear, and
+// one that redirected to a subdomain would hand it to whoever owns that
+// subdomain. Refusing means the dial fails and the ordinary backoff retries it.
+var noRedirects = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 // New builds a transport. A nil logger discards, so a caller that has not wired
 // one up gets a working adapter rather than a panic on the first log line.
 func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceStore, log *slog.Logger) *Transport {
@@ -137,19 +185,24 @@ func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceSto
 func (t *Transport) Run(ctx context.Context) error {
 	attempt := 0
 	for {
-		connected, err := t.runOnce(ctx)
+		connectedAt, err := t.runOnce(ctx)
 		if ctx.Err() != nil {
 			return nil
 		}
 
-		switch {
-		case connected:
-			// The socket lived, so whatever ended it says nothing about how
-			// long to wait before the next one: start from the base again.
-			attempt = 0
-			t.log.Info("relay connection lost", "url", t.cfg.URL, "err", err)
-		default:
+		if connectedAt.IsZero() {
 			t.log.Warn("relay dial failed", "url", t.cfg.URL, "err", err)
+		} else {
+			lasted := time.Since(connectedAt)
+			t.log.Info("relay connection lost",
+				"url", t.cfg.URL, "lasted", lasted.Round(time.Millisecond), "err", err)
+			if lasted >= minStableConn {
+				// The socket was kept, so whatever ended it says nothing about
+				// how long to wait before the next one: start from the base
+				// again. A socket that was taken away immediately says the
+				// opposite, and keeps its place in the escalation.
+				attempt = 0
+			}
 		}
 
 		delay := backoffDelay(attempt)
@@ -166,11 +219,11 @@ func (t *Transport) Run(ctx context.Context) error {
 	}
 }
 
-// runOnce dials, serves the socket, and returns when it ends. connected reports
-// whether the handshake ever succeeded, which is what tells a dial that failed
-// from a connection that dropped — the two are logged differently and only the
-// second resets the backoff.
-func (t *Transport) runOnce(ctx context.Context) (connected bool, err error) {
+// runOnce dials, serves the socket, and returns when it ends. connectedAt is
+// when the handshake succeeded, and zero if it never did: that tells a dial
+// that failed from a connection that dropped — they are logged differently —
+// and how long the connection lasted, which is what the backoff resets on.
+func (t *Transport) runOnce(ctx context.Context) (connectedAt time.Time, err error) {
 	// The dial's deadline is the dial's alone. coder/websocket applies an
 	// HTTPClient timeout exactly this way — a derived context it cancels the
 	// moment the handshake returns — so cancelling it here does not touch the
@@ -180,11 +233,13 @@ func (t *Transport) runOnce(ctx context.Context) (connected bool, err error) {
 		// The secret travels in a header, never in the URL: a URL is written
 		// to logs, proxies and error messages by everything it passes through.
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + t.cfg.Secret}},
+		HTTPClient: noRedirects,
 	})
 	cancelDial()
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
+	connectedAt = time.Now()
 	// Nothing past this point trusts the relay's framing, so bound what it can
 	// make this process allocate before anything looks at it.
 	ws.SetReadLimit(readLimit)
@@ -197,7 +252,7 @@ func (t *Transport) runOnce(ctx context.Context) (connected bool, err error) {
 
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	s := &socket{ws: ws, out: make(chan outFrame, outboxDepth), ctx: connCtx, cancel: cancel}
+	s := newSocket(connCtx, cancel, ws)
 
 	writerDone := make(chan struct{})
 	go t.runWriter(s, writerDone)
@@ -206,30 +261,44 @@ func (t *Transport) runOnce(ctx context.Context) (connected bool, err error) {
 
 	readErr := t.readLoop(s)
 
-	// Stop the writer and the keepalive and wait for them before saying
-	// goodbye, so the close frame is the last thing on this socket rather than
-	// something a queued frame races.
+	var perr protocolError
+	broke := errors.As(readErr, &perr)
+	if broke {
+		// The relay is not speaking this protocol. Say which rule it broke in
+		// the close frame — 1002 is what the Durable Object closes either leg
+		// with for the same fault — and then reconnect: a Worker that was
+		// mid-deploy is a different thing from a Worker that is hostile, and
+		// neither is this adapter's to adjudicate.
+		//
+		// Written before the writer is stopped, not after. coder/websocket
+		// serialises control frames with data frames on one mutex, so this
+		// queues behind whatever was in flight; cancelling first would race
+		// that write, and a cancelled write context closes the socket outright
+		// (Conn.setupWriteTimeout), taking the close frame with it.
+		t.log.Warn("relay protocol error", "url", t.cfg.URL, "err", readErr)
+		_ = ws.Close(websocket.StatusProtocolError, "protocol error")
+	}
+
 	cancel()
 	<-writerDone
 	<-keepaliveDone
 
-	var perr protocolError
-	switch {
-	case errors.As(readErr, &perr):
-		// The relay is not speaking this protocol. Say which rule it broke in
-		// the close frame — 1002 is what the browser leg is closed with for the
-		// same fault — and reconnect: a Worker that was mid-deploy is a
-		// different thing from a Worker that is hostile, and neither is this
-		// adapter's to adjudicate.
-		t.log.Warn("relay protocol error", "url", t.cfg.URL, "err", readErr)
-		_ = ws.Close(websocket.StatusProtocolError, "protocol error")
-	case ctx.Err() != nil:
-		// A daemon that is shutting down tells the relay so, which is what lets
-		// the Durable Object drop every browser's socket at once instead of
-		// waiting for a keepalive to time out.
-		_ = ws.Close(websocket.StatusNormalClosure, "")
+	// Shutdown gets no close frame, and cannot: the read this loop is parked in
+	// is cancelled by the same context, and a cancelled read context closes the
+	// socket (Conn.setupReadTimeout) before anything could write a goodbye onto
+	// it. Nothing is owed to one either — the Durable Object tears the hub down
+	// identically for a close and an error (relay/src/hub.ts, webSocketClose
+	// and webSocketError), so every browser on it goes down 1012 "daemon gone"
+	// either way.
+
+	if cause := s.failure(); cause != nil && !broke {
+		// The read reports whatever cancellation reached it first, which for
+		// every teardown this adapter started itself is "context canceled" —
+		// true, and useless to whoever is reading the log to find out why the
+		// relay keeps dropping.
+		readErr = cause
 	}
-	return true, readErr
+	return connectedAt, readErr
 }
 
 // readLoop reads until the socket ends or the relay breaks the protocol.
@@ -239,12 +308,18 @@ func (t *Transport) readLoop(s *socket) error {
 		if err != nil {
 			return err
 		}
+		// Any message at all is proof the socket is still two-ended, which is
+		// what the keepalive checks against.
+		s.markRead()
+
 		if typ == websocket.MessageText {
-			if string(data) == relaywire.Pong {
-				// The keepalive answer, from the edge rather than the Durable
-				// Object. Nothing is owed to it: it is proof the socket is
-				// still there, and the socket being still there is what reading
-				// it proved.
+			if string(data) == relaywire.Pong || string(data) == relaywire.Ping {
+				// The keepalives, and nothing is owed to either. A pong is the
+				// edge answering our ping. A ping is a leg exercising a right
+				// the spec gives both of them — the daemon should never see one,
+				// because the Durable Object's auto-response answers it at the
+				// edge, but "should never" is not a rule to close a connection
+				// over when the spec calls both strings keepalives.
 				continue
 			}
 			// The contents are not logged: this is the branch a hostile relay
@@ -279,19 +354,24 @@ func (t *Transport) dispatch(f relaywire.Frame) {
 		// than this daemon, which is an ordinary state during a deploy, and the
 		// frames it is talking about are ones this daemon has no channel for
 		// anyway.
-		t.log.Warn("relay sent a control message this daemon does not understand", "err", err)
+		//
+		// Clipped because the error quotes the discriminator the relay sent,
+		// and that is a string of the relay's choosing up to the read limit.
+		t.log.Warn("relay sent a control message this daemon does not understand",
+			"err", clip(err.Error()), "bytes", len(f.Payload))
 		return
 	}
 
 	switch m := msg.(type) {
 	case *relaywire.Open:
-		t.log.Debug("relay opened a channel", "channel", m.Channel, "origin", m.Origin)
+		t.log.Debug("relay opened a channel", "channel", m.Channel, "origin", clip(m.Origin))
 	case *relaywire.Closed:
 		t.log.Debug("relay closed a channel", "channel", m.Channel)
 	case *relaywire.Pair:
 		// The body carries a live single-use pairing token, so its size is
 		// logged and its contents are not.
-		t.log.Debug("relay forwarded a pairing request", "id", m.ID, "origin", m.Origin, "bytes", len(m.Body))
+		t.log.Debug("relay forwarded a pairing request",
+			"id", m.ID, "origin", clip(m.Origin), "bytes", len(m.Body))
 	default:
 		// close and pairResult are the daemon's own messages coming back at it.
 		t.log.Warn("relay sent a message only a daemon sends", "type", fmt.Sprintf("%T", msg))
@@ -315,8 +395,10 @@ func (t *Transport) runWriter(s *socket, done chan<- struct{}) {
 			cancel()
 			if err != nil {
 				// The socket is gone or wedged. Ending the connection here is
-				// what gets the read loop out and the reconnect started.
-				s.fail()
+				// what gets the read loop out and the reconnect started, and
+				// the error is carried with it because the read loop's own
+				// error will only say that something cancelled it.
+				s.fail(fmt.Errorf("relay: writing to the relay: %w", err))
 				return
 			}
 		case <-s.ctx.Done():
@@ -336,9 +418,18 @@ func (t *Transport) runKeepalive(s *socket, done chan<- struct{}) {
 	defer close(done)
 	tick := time.NewTicker(t.keepalive)
 	defer tick.Stop()
+	stale := staleFactor * t.keepalive
 	for {
 		select {
 		case <-tick.C:
+			if silence := time.Since(s.lastRead()); silence > stale {
+				// Half-open: this end still has a socket and the other end
+				// stopped existing. Nothing else would ever notice — a read
+				// parks indefinitely — so the keepalive that goes unanswered is
+				// what has to say so.
+				s.fail(fmt.Errorf("%w for %s", errRelaySilent, silence.Round(time.Millisecond)))
+				return
+			}
 			if err := s.enqueue(outFrame{text: true, b: []byte(relaywire.Ping)}); err != nil {
 				return
 			}
@@ -397,14 +488,41 @@ type socket struct {
 	out    chan outFrame
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// read is when the last message arrived, in Unix nanoseconds, which the
+	// keepalive reads to tell a quiet relay from an absent one.
+	read atomic.Int64
+
+	mu sync.Mutex
+	// cause is why this socket was torn down, when it was torn down from this
+	// side. The read loop's own error cannot say: cancelling it is how a
+	// teardown reaches it, so all it ever reports is that it was cancelled.
+	cause error
 }
 
-var errSocketClosed = errors.New("relay: socket closed")
+func newSocket(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn) *socket {
+	s := &socket{ws: ws, out: make(chan outFrame, outboxDepth), ctx: ctx, cancel: cancel}
+	// The clock starts at the handshake, not at the epoch: an idle relay must
+	// not look dead the first time the keepalive checks.
+	s.markRead()
+	return s
+}
 
-// errSocketBacklogged is what a producer gets when the relay has stopped
-// draining. The socket is torn down with it: a relay that is this far behind is
-// not slow, it is gone, and every frame queued for it is already stale.
-var errSocketBacklogged = errors.New("relay: the relay is not draining its socket")
+var (
+	errSocketClosed = errors.New("relay: socket closed")
+
+	// errSocketBacklogged is what a producer gets when the relay has stopped
+	// draining. The socket is torn down with it: a relay that is this far
+	// behind is not slow, it is gone, and every frame queued for it is stale.
+	errSocketBacklogged = errors.New("relay: the relay is not draining its socket")
+
+	// errRelaySilent is a socket that is open on this end only.
+	errRelaySilent = errors.New("relay: nothing from the relay")
+)
+
+func (s *socket) markRead() { s.read.Store(time.Now().UnixNano()) }
+
+func (s *socket) lastRead() time.Time { return time.Unix(0, s.read.Load()) }
 
 // enqueue hands a frame to the writer without ever blocking, so no producer
 // ever waits on this socket.
@@ -415,14 +533,40 @@ func (s *socket) enqueue(f outFrame) error {
 	case <-s.ctx.Done():
 		return errSocketClosed
 	default:
-		s.fail()
+		s.fail(errSocketBacklogged)
 		return errSocketBacklogged
 	}
 }
 
-// fail ends this connection. Cancelling the context unblocks the read loop,
-// which runs the ordinary teardown on its way out.
-func (s *socket) fail() { s.cancel() }
+// fail ends this connection, recording why. Cancelling the context unblocks the
+// read loop, which runs the ordinary teardown on its way out.
+//
+// The first cause wins: what went wrong first explains everything that broke
+// after it, and the teardown it starts will break several things.
+func (s *socket) fail(cause error) {
+	s.mu.Lock()
+	if s.cause == nil {
+		s.cause = cause
+	}
+	s.mu.Unlock()
+	s.cancel()
+}
+
+// failure is why this socket was torn down from this side, or nil if it was
+// not.
+func (s *socket) failure() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cause
+}
+
+// clip bounds a string the relay chose on its way into a log line.
+func clip(s string) string {
+	if len(s) <= logStringLimit {
+		return s
+	}
+	return s[:logStringLimit] + "…"
+}
 
 // protocolError marks the faults that are the relay's, not the network's: they
 // close the socket with 1002 rather than simply dropping it, so the other end

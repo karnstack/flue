@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,6 +131,42 @@ func TestTransportRetriesWhenTheRelayRefusesTheSecret(t *testing.T) {
 	r.noConn(t)
 }
 
+func TestTransportRefusesARedirectRatherThanFollowIt(t *testing.T) {
+	t.Parallel()
+	// net/http re-sends Authorization to the same host or a subdomain of it,
+	// and compares hosts without looking at the scheme. A relay that answered
+	// the upgrade with a redirect would therefore be handed the daemon secret
+	// again — over plain http, or at a subdomain someone else owns. A 3xx is
+	// never a valid handshake, so refusing costs nothing.
+	var followed atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/daemon", func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, "/elsewhere", http.StatusFound)
+	})
+	mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("Authorization") != "" {
+			followed.Add(1)
+		}
+		http.Error(w, "no", http.StatusNotFound)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	srv := &stubServer{}
+	tr := New(Config{
+		URL:    "ws" + strings.TrimPrefix(ts.URL, "http") + "/daemon",
+		Secret: "s3cr3t",
+		Origin: "https://relay.example",
+	}, srv, noise.DHKey{}, nil, slog.New(slog.DiscardHandler))
+	runTransport(t, tr)
+
+	// Long enough for the dial to fail, be retried, and fail again.
+	time.Sleep(600 * time.Millisecond)
+	if n := followed.Load(); n != 0 {
+		t.Errorf("the adapter carried the secret through %d redirects", n)
+	}
+}
+
 func TestTransportKeepsTheSocketAlive(t *testing.T) {
 	t.Parallel()
 	r := newFakeRelay(t, "s")
@@ -141,6 +180,33 @@ func TestTransportKeepsTheSocketAlive(t *testing.T) {
 	// the adapter dropped that pong silently rather than treating a text frame
 	// it did not expect as a protocol error.
 	c.expectPing(t)
+
+	// Both keepalives are keepalives. The daemon should never see a flue-ping —
+	// the edge answers those from the Durable Object's auto-response — but the
+	// spec gives either leg the right to send one, so receiving one must not be
+	// the protocol error that closes the socket.
+	c.sendText(t, relaywire.Ping)
+	c.expectPing(t)
+	if !c.stillOpen() {
+		t.Fatal("the adapter closed the socket over an inbound keepalive")
+	}
+}
+
+func TestTransportGivesUpOnASocketNothingAnswers(t *testing.T) {
+	t.Parallel()
+	// A socket that is open on this end only: the daemon's keepalives leave and
+	// nothing ever comes back. Nothing else would notice — a read parks
+	// indefinitely, and the daemon would believe it was reachable while every
+	// browser found it gone.
+	r := newFakeRelay(t, "s")
+	r.deaf = true
+	tr, _ := newTestTransport(t, r, "s", nil)
+	tr.keepalive = 50 * time.Millisecond
+	runTransport(t, tr)
+
+	c := r.accept(t)
+	c.waitClosed(t)
+	r.accept(t)
 }
 
 func TestTransportReconnectsWhenTheRelayDropsTheSocket(t *testing.T) {
@@ -152,12 +218,32 @@ func TestTransportReconnectsWhenTheRelayDropsTheSocket(t *testing.T) {
 	first := r.accept(t)
 	first.kill()
 
-	second := r.accept(t)
-	if second == first {
-		t.Fatal("the relay handed back the socket it had just dropped")
-	}
+	r.accept(t)
 	if n := r.attempts(); n < 2 {
 		t.Errorf("the relay saw %d upgrade attempts, want at least 2", n)
+	}
+}
+
+func TestTransportEscalatesWhenTheRelayKeepsReplacingIt(t *testing.T) {
+	t.Parallel()
+	// The Durable Object gives the daemon leg to the newcomer and closes the
+	// incumbent with 4000 "replaced" (relay/src/hub.ts), so two daemons pointed
+	// at one relay evict each other in a loop. A backoff that reset on every
+	// connect would run that loop at four to eight upgrades a second against a
+	// Worker metered by the request.
+	r := newFakeRelay(t, "s")
+	r.replaceOnConnect = true
+	tr, _ := newTestTransport(t, r, "s", nil)
+	runTransport(t, tr)
+
+	// Four attempts is far enough in for the widest gap to be unmistakably past
+	// the first delay's 250 ms ceiling — the third wait alone is 500 ms to 1 s.
+	// The budget is the escalation's own worst case (250 + 500 + 1000 ms) with
+	// room to spare, since this is the one test that is waiting on the backoff
+	// rather than on the adapter.
+	r.waitAttemptsWithin(t, 4, 8*time.Second)
+	if got := r.longestGap(); got < 400*time.Millisecond {
+		t.Errorf("the widest gap between dials was %v; the backoff is not escalating", got)
 	}
 }
 

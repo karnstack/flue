@@ -38,10 +38,23 @@ type fakeRelay struct {
 	// that is between accepts must not stall the handler.
 	conns chan *relayConn
 
+	// replaceOnConnect makes the relay hand the leg to the newcomer and close
+	// what it just accepted with 4000 "replaced", which is what a Durable
+	// Object already holding a daemon socket does (relay/src/hub.ts) — and what
+	// two daemons sharing one relay do to each other, forever.
+	replaceOnConnect bool
+
+	// deaf makes the relay read the daemon's keepalives and answer nothing, the
+	// way a socket that is open on this end only behaves: the bytes leave, the
+	// edge is not there to answer them, and nothing ever comes back.
+	deaf bool
+
 	mu sync.Mutex
 	// upgrades counts upgrade requests, including the ones refused for a bad
-	// token: it is what "the adapter retried" is measured in.
+	// token: it is what "the adapter retried" is measured in, and when each
+	// arrived is what the escalation between them is measured in.
 	upgrades int
+	at       []time.Time
 	auths    []string
 	live     []*relayConn
 }
@@ -75,6 +88,7 @@ func (r *fakeRelay) serveDaemon(w http.ResponseWriter, req *http.Request) {
 	auth := req.Header.Get("Authorization")
 	r.mu.Lock()
 	r.upgrades++
+	r.at = append(r.at, time.Now())
 	r.auths = append(r.auths, auth)
 	r.mu.Unlock()
 
@@ -92,26 +106,34 @@ func (r *fakeRelay) serveDaemon(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		return
 	}
+	// The handler owns the hijacked connection for its whole life, so it must
+	// not return until the socket is finished with; this is the backstop for
+	// however it ends.
+	defer ws.CloseNow()
+
 	c := &relayConn{
 		ws:   ws,
 		msgs: make(chan relayMsg, 64),
 		done: make(chan struct{}),
+		deaf: r.deaf,
 	}
 	r.mu.Lock()
 	r.live = append(r.live, c)
 	r.mu.Unlock()
+
+	if r.replaceOnConnect {
+		_ = ws.Close(4000, "replaced")
+		c.finish(4000)
+		return
+	}
+
 	select {
 	case r.conns <- c:
 	default:
 		// A test that never accepted this one still gets a socket that behaves:
-		// it stays up until the adapter drops it, which is what ends the
-		// handler below.
+		// it stays up until the adapter drops it, which is what ends the pump.
 	}
-
 	c.pump()
-	// The handler owns the hijacked connection for its whole life; returning
-	// early would close it under the test's feet.
-	ws.CloseNow()
 }
 
 // accept waits for the relay's next daemon socket.
@@ -156,16 +178,38 @@ func (r *fakeRelay) lastAuth(t *testing.T) string {
 	return r.auths[len(r.auths)-1]
 }
 
+// longestGap is the widest interval between two consecutive upgrade requests,
+// which is where a backoff that escalated shows up and a backoff that keeps
+// resetting does not.
+func (r *fakeRelay) longestGap() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var widest time.Duration
+	for i := 1; i < len(r.at); i++ {
+		if gap := r.at[i].Sub(r.at[i-1]); gap > widest {
+			widest = gap
+		}
+	}
+	return widest
+}
+
 // waitAttempts blocks until the relay has seen n upgrade requests.
 func (r *fakeRelay) waitAttempts(t *testing.T, n int) {
 	t.Helper()
-	deadline := time.Now().Add(waitFor)
+	r.waitAttemptsWithin(t, n, waitFor)
+}
+
+// waitAttemptsWithin is waitAttempts for the tests that are waiting on the
+// backoff itself and so need a budget the backoff's own delays fit inside.
+func (r *fakeRelay) waitAttemptsWithin(t *testing.T, n int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
 	for {
 		if got := r.attempts(); got >= n {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the adapter made %d upgrade attempts in %s, want at least %d", r.attempts(), waitFor, n)
+			t.Fatalf("the adapter made %d upgrade attempts in %s, want at least %d", r.attempts(), within, n)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -193,6 +237,7 @@ type relayConn struct {
 	ws   *websocket.Conn
 	msgs chan relayMsg
 	done chan struct{}
+	deaf bool
 
 	// status is the close code the daemon left with, readable once done is
 	// closed. It is how a test asserts that a protocol error closed the socket
@@ -210,8 +255,14 @@ func (c *relayConn) pump() {
 			return
 		}
 		m := relayMsg{text: typ == websocket.MessageText, data: data}
-		if m.text && string(data) == relaywire.Ping {
-			_ = c.ws.Write(ctx, websocket.MessageText, []byte(relaywire.Pong))
+		if m.text && string(data) == relaywire.Ping && !c.deaf {
+			// Bounded, so a daemon that has stopped reading parks this write
+			// rather than this handler: httptest.Server.Close waits on the
+			// handler, and a handler that never returns costs the whole
+			// package its timeout instead of one test its assertion.
+			wctx, cancel := context.WithTimeout(ctx, waitFor)
+			_ = c.ws.Write(wctx, websocket.MessageText, []byte(relaywire.Pong))
+			cancel()
 		}
 		select {
 		case c.msgs <- m:
@@ -232,15 +283,30 @@ func (c *relayConn) finish(status websocket.StatusCode) {
 // expect returns the next message the daemon sent.
 func (c *relayConn) expect(t *testing.T) relayMsg {
 	t.Helper()
+	m, ok := c.next(time.After(waitFor))
+	if !ok {
+		t.Fatalf("no message from the daemon within %s", waitFor)
+	}
+	return m
+}
+
+// next takes the next queued message, waiting until deadline fires or the
+// socket ends. Anything already queued is returned first: a select between a
+// ready msgs and a closed done picks uniformly, so a socket that ended a
+// moment after the daemon spoke would swallow what it said half the time.
+func (c *relayConn) next(deadline <-chan time.Time) (relayMsg, bool) {
 	select {
 	case m := <-c.msgs:
-		return m
+		return m, true
+	default:
+	}
+	select {
+	case m := <-c.msgs:
+		return m, true
 	case <-c.done:
-		t.Fatal("the daemon socket closed while the test was waiting for a message")
-		return relayMsg{}
-	case <-time.After(waitFor):
-		t.Fatalf("no message from the daemon within %s", waitFor)
-		return relayMsg{}
+		return relayMsg{}, false
+	case <-deadline:
+		return relayMsg{}, false
 	}
 }
 
@@ -250,15 +316,12 @@ func (c *relayConn) expectPing(t *testing.T) {
 	t.Helper()
 	deadline := time.After(waitFor)
 	for {
-		select {
-		case m := <-c.msgs:
-			if m.text && string(m.data) == relaywire.Ping {
-				return
-			}
-		case <-c.done:
-			t.Fatal("the daemon socket closed before a keepalive arrived")
-		case <-deadline:
+		m, ok := c.next(deadline)
+		if !ok {
 			t.Fatalf("no %s within %s", relaywire.Ping, waitFor)
+		}
+		if m.text && string(m.data) == relaywire.Ping {
+			return
 		}
 	}
 }
