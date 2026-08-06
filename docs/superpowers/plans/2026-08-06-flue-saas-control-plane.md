@@ -20,6 +20,7 @@
 - **flue.sh runs on custom domains, not workers.dev** (`workers.dev` is on the Public Suffix List — no shared/`__Host-` cookies, every subdomain cross-site). Two custom domains: `app.flue.sh` (control plane), `relay.flue.sh` (relay).
 - **Secrets** (`RELAY_SIGNING_SECRET`, `CODE_HMAC_SECRET`) are Worker secrets, never in `wrangler.jsonc`, never logged, never in the client bundle.
 - **Auth parameters** (from research, defensible against NIST 800-63B-4 / OWASP / Copenhagen): login code = 8 decimal digits from `crypto.getRandomValues`, 10-minute TTL, single-use, HMAC-SHA-256 at rest (never plaintext, never logged), attempt cap 5 per code, new code invalidates prior; anti-enumeration (identical response + timing whether or not the account exists). Session token = 32 random bytes base64url, store `SHA-256(token)` in D1, cookie `__Host-session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/`, rotate on login, 8-hour absolute expiry.
+- **UI uses shadcn/ui, and is meant to be pretty.** Every `app/` screen (and the new daemon `web/` relay screen in Task 13) is built from shadcn components — `Card`/`CardHeader`/`CardContent`, `Button`, `Input` + `Field`/`FieldGroup`/`FieldLabel`, `Badge`, `Table`, `Empty`, `Alert`, `Separator`, `Sonner` toasts — never bare styled `div`s, following the shadcn skill's composition rules (layout via `className`, semantic color tokens, `gap-*` not `space-*`, `size-*` for equal dims, icons via `lucide-react` with `data-icon`). The `app/` package is scaffolded without shadcn, so **Task 6 (the first UI task) initializes shadcn in `app/`** (`pnpm dlx shadcn@latest init`) and ports `web/`'s theme tokens so the two apps look like one product. A dedicated `/design` polish pass over all control-plane screens runs at the end (controller-driven, after the functional flows are built and reviewed) — implementers build with shadcn primitives; the polish pass refines layout, spacing, empty/loading/error states, and responsive behavior.
 - **Commits:** Conventional Commits; terse subject.
 - **Test gate at every task boundary:** `cd app && pnpm test` green; `go test ./...` green when Go changes; `cd relay && pnpm test` green when the relay changes (the Plan 1 suite must stay green). `web/`'s 55 pre-existing failures are not in scope.
 
@@ -506,6 +507,35 @@ export async function renameDevice(deviceId: string, label: string): Promise<voi
 - [ ] **Step 2: Verify** the full gate: `cd app && pnpm test && pnpm build`, `cd relay && pnpm test`, `go test ./...`. Note the manual deploy E2E as a human release gate in SAAS.md (real `wrangler deploy` of both Workers + a real `flue link` against them — never run in CI).
 - [ ] **Step 3: Update `docs/FOLLOW-UPS.md`** — mark the Plan-1 SaaS carry-forwards this plan resolves (§11 disclosure now in the SaaS FAQ; the relay CSP; the signed-token seam) and add anything new (per-session output rate cap still open; real email delivery is the user's remaining task; the per-channel-credit outbox fix (§10) becomes load-bearing now that the relay is multi-tenant — flag it for the next scale pass).
 - [ ] **Step 4: Commit.** `git commit -m "docs: flue.sh operator runbook, custom domains, faq reconciliation"`
+
+### Task 13: Surface relay setup + status in the daemon's `web/` dashboard
+
+Today the daemon's own web UI (`web/`, served on loopback) has no visible relay story — `flue relay setup` is CLI-only and relay status lives only in the `Welcome.relay` field the client already receives (Plan 1, Task 9/12). Make remote access a first-class screen in the daemon dashboard: show whether a relay is configured/connecting/connected, its origin, and guide the user to set one up (or link an account). This is the daemon-side counterpart to the flue.sh device directory — a self-hoster or a soon-to-be-SaaS user manages remote access from the dashboard, not only the terminal.
+
+**Files:**
+- Create: `web/src/routes/remote.tsx` (a "Remote access" screen), and a nav entry for it (read `web/src/components/nav.tsx`)
+- Modify: `web/src/client/client.ts` if the relay status it exposes (`onWelcome`/`relay` getter from Plan 1 Task 12) needs anything more for this screen (read it first — it likely already suffices)
+- Test: `web/src/routes/remote.test.tsx`
+
+**Behavior:**
+- The screen reads `client.relay` (`{status:'off'|'connecting'|'connected', origin?}`) and renders, with shadcn:
+  - **Not configured** (`off`): an `Empty`/`Card` explaining remote access, a `Button` to run setup. Since the browser can't run `flue relay setup` (it's a daemon CLI command), the primary affordance is instructions + a copy-able command (`flue relay setup`) and, forward-looking, a "Connect to flue.sh" path (link to the account flow — wired in the SaaS phase). Use the harness note in CLAUDE.md: the daemon can't be driven from the browser to run a CLI, so this screen *guides* rather than *executes*.
+  - **Connecting:** a `Badge` + spinner, the configured relay URL.
+  - **Connected:** a `Badge` (success) + the origin, a note that devices can now be paired against this address (this is where the Pair-gating from Plan 1 Task 12 becomes reachable), and — forward-looking — a link into the flue.sh device directory when the daemon is account-linked.
+- Re-evaluate on every `onWelcome` (reconnects change status), the same pattern `devices.tsx` uses for Pair gating.
+- Run `/design` conventions and shadcn; match the existing `web/` app-shell look (the sidebar redesign already shipped).
+
+- [ ] **Step 1: Failing tests.** `remote.test.tsx`: with a welcome `status:'off'` → the setup-guidance card + the `flue relay setup` command are on screen; `status:'connected'` with an origin → the connected badge + origin render; the screen re-evaluates when a second welcome flips the status; a nav entry routes to `/remote` (extend `router.test.tsx`'s nav-matches-every-path check). Use the route tests' existing fake-client harness.
+- [ ] **Step 2: Run to verify failure, implement with shadcn components, re-run.** `cd web && pnpm test` (only the pre-existing 55 fail) + `pnpm lint` + `pnpm build`.
+- [ ] **Step 3: Commit.** `git commit -m "feat(web): a remote-access screen showing relay setup and status"`
+
+### Task 14: `/design` polish pass over all control-plane + relay screens
+
+A controller-driven pass (not a fresh-subagent task in the usual sense — the controller runs the `/design` skill over the built screens). Take every screen built in Tasks 5, 6, 8, 10 (`login`, `enroll`, `devices`, `terms`) plus the daemon `web/` `remote` screen (Task 13), and refine to a genuinely polished bar: consistent spacing and typography, proper empty/loading/error/skeleton states, responsive (mobile + desktop) layouts, shadcn `Sonner` toasts for actions (code sent, device revoked, session opened), accessible focus/aria, and a coherent visual identity shared between `app.flue.sh` and the daemon dashboard. Verify against desktop and mobile breakpoints. Keep all behavior and tests green; this pass changes presentation, not logic.
+
+- [ ] **Step 1:** Run `/design` over each screen; apply shadcn refinements.
+- [ ] **Step 2:** Verify `cd app && pnpm test && pnpm build` and `cd web && pnpm test && pnpm build` green; check desktop + mobile.
+- [ ] **Step 3: Commit.** `git commit -m "design: polish the control-plane and remote-access screens"`
 
 ---
 
