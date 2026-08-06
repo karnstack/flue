@@ -26,16 +26,18 @@ import { currentUser } from './sessions'
  * redirect for an RPC, so an expired session lands the visitor on /login in
  * both cases instead of failing silently under a spinner.
  *
- * `href` rather than `to`: `to` is checked against the generated route tree,
- * which has no /login in it until the login route lands (Task 5). `href` is the
- * already-resolved form — it goes straight into the redirect's Location header —
- * and can be swapped for the type-checked `to` once that route exists.
+ * `to`, not `href`: `to` is checked against the generated route tree, so a
+ * typo or a route that gets renamed out from under this fails the build rather
+ * than sending everyone to a 404 the day their session expires. The price is
+ * that the redirect leaves here *unresolved* — no Location header yet; Start's
+ * request handler resolves it against the router on the way out, for a
+ * document navigation and an RPC alike.
  *
  * The handler downstream can treat `context.user` as a fact — there is no path
  * through here that calls `next()` without one.
  */
 export const requireUser = createMiddleware({ type: 'function' }).server(async ({ next }) => {
   const user = await currentUser()
-  if (!user) throw redirect({ href: '/login' })
+  if (!user) throw redirect({ to: '/login' })
   return next({ context: { user } })
 })

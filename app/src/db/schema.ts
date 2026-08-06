@@ -52,6 +52,22 @@ export const loginCodes = sqliteTable(
   (t) => [index('login_codes_email_idx').on(t.email)],
 )
 
+// Fixed-window counters for the paths that must not be free to hammer. Today
+// that is one path — sending a login code, capped per address and per client
+// IP (server/ratelimit.ts) — because the per-code attempt cap in `login_codes`
+// counts *guesses at one code* and issuing a new code starts a fresh five, so
+// without a cap on issuing there is no cap at all.
+//
+// `key` is a digest, not the address or the IP. Every address anyone types into
+// the login form would otherwise land here in the clear, including the ones
+// with no account and no invite — a list of people who tried, which the service
+// has no reason to keep. Hashing makes the row a counter and nothing else.
+export const rateLimits = sqliteTable('rate_limits', {
+  key: text('key').primaryKey(), // SHA-256("<bucket>:<subject>"), hex
+  windowStart: integer('window_start').notNull(), // unix seconds
+  count: integer('count').notNull().default(0),
+})
+
 export const sessions = sqliteTable(
   'sessions',
   {

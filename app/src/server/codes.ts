@@ -94,6 +94,27 @@ export async function issueLoginCode(email: string): Promise<void> {
 }
 
 /**
+ * The cryptography `issueLoginCode` does, with nothing stored and nothing sent.
+ *
+ * The login route calls this on the branch where an address is *not* allowed a
+ * code, so that "we looked you up and found nothing" costs roughly what "we
+ * minted you a code" costs. It lives here, next to the real thing, so that a
+ * change to how a code is derived cannot silently leave the two branches doing
+ * different amounts of work.
+ *
+ * It equalizes the crypto, not the I/O: the real branch also writes two rows
+ * and calls the Sender, and no amount of dummy hashing hides a write. See the
+ * note in server/login.ts about what that leaves on the table.
+ */
+export async function dummyIssueWork(): Promise<void> {
+  // Not `codeSecret()`: this path must not throw when the secret is missing,
+  // or a misconfigured deployment would answer differently on the two
+  // branches — exactly the tell this function exists to remove. HMAC costs the
+  // same under any short key.
+  await hmacHex(env.CODE_HMAC_SECRET ?? 'login-code-timing-equalizer', randomCode8())
+}
+
+/**
  * Check a submitted code. `{ ok: true, email }` exactly once per issued code;
  * `{ ok: false }` for every other reason, without saying which.
  *

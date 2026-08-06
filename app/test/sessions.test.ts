@@ -407,12 +407,14 @@ describe('requireUser', () => {
     const { value } = await route.run()
 
     expect(isRedirect(value.error)).toBe(true)
-    // A Start redirect is a Response carrying the routing options, so both
-    // halves are checked: what the router will navigate to, and the Location a
-    // plain document request would follow.
-    const thrown = value.error as Response & { options: { href?: string } }
-    expect(thrown.options.href).toBe('/login')
-    expect(thrown.headers.get('location')).toBe('/login')
+    // A Start redirect is a Response carrying the routing options. `to` is the
+    // route-typed form — checked against the generated route tree at build
+    // time — so what is asserted here is the target, not a Location header:
+    // the header is filled in by Start's request handler, which resolves the
+    // redirect against the router on the way out (see login-e2e.test.ts, where
+    // a real request is what carries a Location).
+    const thrown = value.error as Response & { options: { to?: string } }
+    expect(thrown.options.to).toBe('/login')
     expect(thrown.status).toBe(307)
     // The guard is a gate, not a warning: the protected body never ran.
     expect(route.seen).toEqual([])
@@ -438,7 +440,7 @@ describe('requireUser', () => {
     const { value } = await route.run(cookie)
 
     expect(isRedirect(value.error)).toBe(true)
-    expect((value.error as Response).headers.get('location')).toBe('/login')
+    expect((value.error as Response & { options: { to?: string } }).options.to).toBe('/login')
     expect(route.seen).toEqual([])
   })
 
