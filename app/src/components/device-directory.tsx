@@ -21,11 +21,19 @@
 // reads, splits or logs that URL — it is handed to `go` whole, which is also
 // what keeps the credential out of a React tree and a console.
 //
-// **"Online" is an inference, and is presented as one.** Nothing here talks to
-// the relay: `last_seen` is a stamp the daemon's connection leaves behind, so a
-// recent one means "was connected a moment ago". The window is `ONLINE_WINDOW_S`
-// and the exact time is shown beside the badge, so the reader can judge for
-// themselves rather than trusting a green dot.
+// **There is no online/offline badge, on purpose.** There was one, derived
+// from `devices.last_seen` — and nothing writes that column. `enroll.ts` sets
+// it to null and no other statement touches it, so the badge said "Never
+// connected" for every machine on every account, including the one the reader
+// had a terminal open on a second earlier. A status control that can only be
+// wrong is worse than none: it is the one thing on this screen somebody would
+// check before deciding a machine was compromised.
+//
+// So the badge says what this database actually knows — enrolled, or switched
+// off — and `lastSeenLabel` renders nothing at all while the stamp is null.
+// The moment a heartbeat writes it (docs/FOLLOW-UPS.md, "last_seen has no
+// writer"), "seen 3h ago" appears beside the badge on its own, and reachability
+// can come back as a claim with something behind it.
 //
 // Links are plain anchors rather than router `Link`s, for the same reason there
 // are no Start imports: this file must render in a bare jsdom. A full document
@@ -124,19 +132,6 @@ export interface DeviceDirectoryProps {
   now?: number
 }
 
-/**
- * How recently a machine must have been seen to count as reachable.
- *
- * Two minutes: a connected daemon stamps `last_seen` while its relay
- * connection is up, and this has to be longer than whatever interval does the
- * stamping (nothing does yet — see the note in the file header) or every
- * machine would flicker between states between page loads. Erring long is the
- * safe direction: the exact time is rendered beside the badge, so a stale
- * "Online" is one glance from being caught, while a jittery badge is just
- * noise.
- */
-export const ONLINE_WINDOW_S = 120
-
 /** What a failed call says when the failure was not the server's answer. */
 const UNAVAILABLE_MESSAGE = 'Something went wrong at our end. Try again in a moment.'
 
@@ -153,7 +148,12 @@ const UNAVAILABLE_MESSAGE = 'Something went wrong at our end. Try again in a mom
 const SWITCHED_OFF_NOTE = 'Switched off by flue and cannot be removed. Contact support.'
 
 /**
- * "seen 2d ago", or nothing at all for a machine that never connected.
+ * "seen 2d ago", or nothing at all where there is no stamp.
+ *
+ * Nothing writes `last_seen` today, so the honest answer is currently always
+ * "nothing at all" — which is why this returns null rather than "never
+ * connected". An absent sentence claims nothing; that one would have claimed
+ * something false about every machine on the service.
  *
  * Coarse on purpose — a device list is not a log. Minutes for the first hour,
  * hours for the first day, days after that; anything finer would rewrite itself
@@ -169,25 +169,22 @@ export function lastSeenLabel(lastSeen: number | null, now: number): string | nu
   return `seen ${Math.floor(ago / 86_400)}d ago`
 }
 
-type Status = 'online' | 'offline' | 'never' | 'disabled'
+type Status = 'enrolled' | 'disabled'
 
 /**
- * Which of four things this machine is.
+ * Which of two things this machine is, which is all this database knows.
  *
- * `disabled` outranks everything: a machine whose kill switch is flipped cannot
- * be minted a token whatever its last stamp says, so showing it as "Online"
- * would offer a button that can only fail.
+ * Not three or four. It used to answer online / offline / never as well, from
+ * `devices.last_seen` — and no statement in this codebase writes that column,
+ * so every machine on every account read "Never connected" whatever it was
+ * doing. See the note at the top of this file.
  */
-function statusOf(device: DeviceSummary, now: number): Status {
-  if (device.disabled) return 'disabled'
-  if (device.lastSeen === null) return 'never'
-  return now - device.lastSeen <= ONLINE_WINDOW_S ? 'online' : 'offline'
+function statusOf(device: DeviceSummary): Status {
+  return device.disabled ? 'disabled' : 'enrolled'
 }
 
 const STATUS_TEXT: Record<Status, string> = {
-  online: 'Online',
-  offline: 'Offline',
-  never: 'Never connected',
+  enrolled: 'Enrolled',
   disabled: 'Disabled',
 }
 
@@ -199,8 +196,6 @@ const STATUS_TEXT: Record<Status, string> = {
  * decision the daemon's own dashboard made for its session list: amber is this
  * product's single accent and it is spent on the one primary button per row.
  * Ten coloured dots beside ten amber buttons leaves the eye nowhere to land.
- * Contrast carries the distinction instead — full strength for a machine that
- * is reachable, faded for one that is not.
  */
 function StatusBadge({ status }: { status: Status }) {
   if (status === 'disabled') {
@@ -208,12 +203,7 @@ function StatusBadge({ status }: { status: Status }) {
   }
   return (
     <Badge variant="outline">
-      <span
-        aria-hidden="true"
-        className={`size-1.5 shrink-0 rounded-full ${
-          status === 'online' ? 'bg-foreground' : 'bg-foreground/30'
-        }`}
-      />
+      <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-foreground" />
       {STATUS_TEXT[status]}
     </Badge>
   )
@@ -387,7 +377,7 @@ function DeviceRow({
   go: (url: string) => void
 }) {
   const [opening, setOpening] = useState(false)
-  const status = statusOf(device, now)
+  const status = statusOf(device)
   const seen = lastSeenLabel(device.lastSeen, now)
 
   async function onOpen() {

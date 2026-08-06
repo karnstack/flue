@@ -14,11 +14,7 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  DeviceDirectory,
-  ONLINE_WINDOW_S,
-  type DeviceSummary,
-} from '../src/components/device-directory'
+import { DeviceDirectory, type DeviceSummary } from '../src/components/device-directory'
 
 // Toasts are a side effect on a singleton, which is exactly the kind of thing
 // a component should not have to own a test double for. Mocked at the module
@@ -126,21 +122,26 @@ describe('DeviceDirectory', () => {
     expect(screen.getByText('b5d05f15398a')).toBeDefined()
   })
 
-  it('says which machines are reachable right now', () => {
+  it('claims nothing about reachability, because nothing writes last_seen', () => {
+    // There was an online/offline/never badge here, derived from
+    // `devices.last_seen` — and no statement in this codebase writes that
+    // column (`enroll.ts` sets it to null and nothing else touches it). So it
+    // read "Never connected" for every machine on every account, including one
+    // the reader had a terminal open on a second earlier, and it is the one
+    // control somebody would check before deciding a machine was compromised.
     setup()
-    // Derived from last-seen: a daemon holds its relay connection open and
-    // stamps the row, so a recent stamp is what "connected" looks like from
-    // here. The window is stated in the component, not guessed at here.
-    expect(NOW - (MAC.lastSeen as number)).toBeLessThan(ONLINE_WINDOW_S)
-    expect(within(rowFor('mac studio')).getByText('Online')).toBeDefined()
-
-    expect(within(rowFor('kitchen pi')).getByText('Offline')).toBeDefined()
-    expect(within(rowFor('kitchen pi')).getByText(/2d ago/)).toBeDefined()
+    expect(within(rowFor('mac studio')).getByText('Enrolled')).toBeDefined()
+    expect(screen.queryByText(/online|offline|never connected/i)).toBeNull()
   })
 
-  it('says so plainly when a machine has never connected', () => {
-    setup({ devices: [{ ...MAC, lastSeen: null }] })
-    expect(screen.getByText(/never connected/i)).toBeDefined()
+  it('shows a last-seen time only once there is one to show', () => {
+    // The other half of the same decision: the stamp is rendered when it
+    // exists, so the day a heartbeat writes it this screen starts telling the
+    // truth on its own — and until then it says nothing rather than something
+    // false.
+    setup({ devices: [{ ...MAC, lastSeen: null }, PI] })
+    expect(within(rowFor('kitchen pi')).getByText(/2d ago/)).toBeDefined()
+    expect(within(rowFor('mac studio')).queryByText(/ago/)).toBeNull()
   })
 
   it('flags a machine whose kill switch has been flipped', () => {

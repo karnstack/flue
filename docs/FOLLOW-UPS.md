@@ -776,6 +776,28 @@ on that nothing in this repository enforces. (The browser-session gaps
 themselves are §14, closed except for the residuals recorded there — SAAS.md's
 session diagram is the shape that was built.)
 
+- **`devices.last_seen` has no writer, and the directory has stopped pretending
+  otherwise.** The column exists (`app/src/db/schema.ts`), `enroll.ts` writes it
+  null on every mint, and no other statement in the codebase touches it. The
+  device directory shipped an online / offline / never-connected badge derived
+  from it, which meant every machine on every account read "Never connected"
+  whatever it was doing — including one the reader had a terminal open on a
+  second earlier. A status control that can only be wrong is worse than none,
+  and this is the one somebody checks before deciding a machine has been taken:
+  so the badge now says enrolled or switched off, which is what the database
+  knows, and `lastSeenLabel` renders nothing while the stamp is null.
+
+  What it wants is a heartbeat the *relay* writes, because the relay is the only
+  part of this system that knows a daemon is connected — the control plane sees
+  a machine once per daemon-token mint, which is every five minutes at best and
+  says nothing about whether the socket that token opened is still up. So:
+  a hub-side call to the control plane when a daemon leg attaches and detaches,
+  or a periodic stamp while one is held, authenticated the way the mint already
+  is. Both cost a request per machine per interval on the relay's hot path,
+  which is the thing to size before writing it. Once something writes the
+  column, "seen 3h ago" appears beside the badge on its own, and the
+  reachability distinction can come back as a claim with something behind it.
+
 - **Email delivery is a placeholder, and it is the one thing left for the
   operator to build.** `app/src/server/email/sender.ts` ships the `Sender`
   interface and `LogSender`, which prints the login code to the Worker's log —
