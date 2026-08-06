@@ -212,13 +212,28 @@ export async function renameDevice(deviceId: string, label: string): Promise<str
  * environment variable, which would be one more thing a deployment can get
  * inconsistent with itself.
  *
- * **The token rides in `?t=`.** That is the parameter Task 9's relay reads off
- * the `/client` upgrade, and the relay origin serves the terminal app itself
- * (its Worker falls through to `ASSETS`), so landing there with `?t=` hands the
- * token to the page that is about to dial. Its cost is stated plainly in
- * channel-token.ts: a URL is the leakiest place to put a credential — history,
- * proxy logs, a screenshot, a shared link — and a 60-second TTL is the whole
- * mitigation.
+ * **The token rides in the fragment (`#t=`), not the query.** This URL is a
+ * *document navigation to another origin*, and where in it the credential sits
+ * decides who else gets a copy:
+ *
+ *   - a query string is sent to the server, so it lands in the relay Worker's
+ *     request logs (Workers Logs is on for that Worker) — a bearer credential
+ *     written into a log store nobody meant to make a credential store;
+ *   - a query string is also what a `Referer` carries onward from that page to
+ *     anything it later requests;
+ *   - a fragment is **never** put on the wire by the browser. It reaches the
+ *     page and nothing else, and the page can strip it from history with
+ *     `history.replaceState` the moment it has read it.
+ *
+ * The relay origin serves the terminal app itself (its Worker falls through to
+ * `ASSETS`), so the page that needs the token is the one and only reader of
+ * that fragment. It presents it on the `/client` upgrade in
+ * `Sec-WebSocket-Protocol` — a header, so that hop stays out of the logs too;
+ * see the contract in the note above `mintClientToken`.
+ *
+ * What a fragment does not fix is stated plainly in channel-token.ts: a URL is
+ * still the leakiest place to put a credential — history, a screenshot, a
+ * pasted link — and the 60-second TTL is the rest of the mitigation.
  *
  * Note what this does *not* do: navigate. The caller decides that (see the
  * route), because "where a browser goes" is not a decision to make on the
@@ -247,7 +262,12 @@ export async function openSession(deviceId: string): Promise<{ url: string }> {
 
   const url = new URL(grant.relayUrl)
   url.protocol = url.protocol === 'ws:' ? 'http:' : 'https:'
-  url.searchParams.set('t', grant.token)
+  // Written through URLSearchParams rather than as a bare `#t=${token}`, so the
+  // fragment is a parameter list with the encoding rules of one — the page on
+  // the other side reads it with `new URLSearchParams(location.hash.slice(1))`,
+  // and a second parameter can be added one day without inventing a syntax.
+  // (A channel token is base64url and a dot, so nothing is escaped today.)
+  url.hash = new URLSearchParams({ t: grant.token }).toString()
 
   // Not logged, here or anywhere: `url` contains a bearer credential. What is
   // worth recording is that a session was opened, and by whom.

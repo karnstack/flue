@@ -51,7 +51,8 @@ import { currentUser } from './sessions'
  *
  * One minute is enough to carry a token from a click on "open a session" to a
  * WebSocket upgrade, and it is the only bound on replaying one that leaked —
- * through a URL (the relay reads `?t=`), a proxy log, a screenshot, a shared
+ * through a URL (`openSession` puts it in the *fragment*, which keeps it out of
+ * server logs and referrers but not out of history), a screenshot, a shared
  * link. The browser asks for a new one per dial; nothing caches these.
  */
 export const CLIENT_TOKEN_TTL_S = 60
@@ -131,6 +132,20 @@ function relayUrl(): string {
  * composes `requireUser` on top — that is what turns an expired session into a
  * redirect rather than an error — but a guard that lives only in the wiring is
  * a guard the next caller can forget to wire.
+ *
+ * **Where this token is allowed to travel**, because it is a bearer credential
+ * and every hop that writes it down is a copy of one. `server/devices.ts`
+ * hands the browser `https://<relay>/#t=<token>`; the relay's own Worker
+ * (which serves that page) must complete the other half:
+ *
+ *   - read it from `location.hash`, never from `location.search`;
+ *   - present it on the `/client` upgrade in **`Sec-WebSocket-Protocol`**, not
+ *     as a query parameter — the upgrade *is* a request to the relay, and a
+ *     query parameter on it goes straight into Workers Logs;
+ *   - `history.replaceState` the fragment away as soon as it is read.
+ *
+ * A query string on either hop would put a live credential into a log store,
+ * and on the first hop into the `Referer` of everything that page loads.
  */
 export async function mintClientToken(deviceId: string): Promise<ChannelGrant> {
   // Configuration before authorization: a deployment that cannot sign must

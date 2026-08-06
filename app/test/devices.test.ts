@@ -329,15 +329,43 @@ describe('openSession', () => {
     expect(parsed.protocol).toBe('https:')
     expect(parsed.host).toBe(new URL(RELAY_URL).host)
 
-    // `?t=` is the parameter Task 9's relay reads off the `/client` upgrade;
-    // the page served from that origin passes it straight through.
-    const token = parsed.searchParams.get('t')
+    // The token is in the **fragment**, and the query is empty. A fragment is
+    // never put on the wire by the browser: not in the relay's request logs
+    // (Workers Logs is on there), not in a `Referer` the relay's page sends
+    // onward. Asserting both halves, because "it is in the hash" and "it is
+    // not also in the query" are two different facts and only the second one
+    // is the security property.
+    expect(parsed.search).toBe('')
+    expect(parsed.searchParams.get('t')).toBeNull()
+
+    // Read exactly as the relay's page must read it — the hash is a parameter
+    // list, so `location.hash.slice(1)` through URLSearchParams.
+    const token = new URLSearchParams(parsed.hash.slice(1)).get('t')
     expect(token).toBeTruthy()
     expect(await verifyChannelToken(SECRET, token as string)).toMatchObject({
       acc: user.id,
       dev: device.id,
       role: 'client',
     })
+  })
+
+  it('never writes the token anywhere a server would see it', async () => {
+    // The whole point of the fragment, stated as a property rather than as a
+    // spelling: everything to the left of `#` is what a server is handed, and
+    // the token must not appear in any of it. This is what would fail if
+    // someone "helpfully" added `?t=` back for a client that forgot to read
+    // the hash.
+    const user = await makeUser()
+    const device = await makeDevice(user.id)
+
+    const { url } = await open(device.id, await signIn(user.id))
+    const [beforeHash = '', ...rest] = url.split('#')
+    const token = new URLSearchParams(rest.join('#')).get('t')
+
+    expect(token).toBeTruthy()
+    expect(beforeHash).not.toContain(token as string)
+    // And it is the whole request line: origin + path, nothing else.
+    expect(beforeHash).toBe(`https://${new URL(RELAY_URL).host}/`)
   })
 
   it('refuses a machine the caller does not own', async () => {

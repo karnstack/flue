@@ -57,6 +57,7 @@
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { createServerFn, useServerFn } from '@tanstack/react-start'
 import { EnrollForm } from '../components/enroll-form'
+import { MAX_LABEL_INPUT } from '../lib/label'
 import { requireUser } from '../server/auth'
 import type { StartDeviceAuthInput } from '../server/enroll'
 import {
@@ -74,8 +75,10 @@ import { currentUser } from '../server/sessions'
  * spaces or a stray URL fragment. A public key is 44 base64 characters and a
  * device code 43 base64url ones — both bounded well above that and nowhere
  * near far enough to be worth hashing a megabyte of. The label is the one
- * genuinely free-form field, and 1024 is what `normalizeLabel` reads before it
- * trims to 64.
+ * genuinely free-form field, and its bound is `MAX_LABEL_INPUT` — imported
+ * from lib/label.ts rather than written down again, because the number only
+ * means anything in relation to the `MAX_LABEL` the same module trims to, and
+ * a local copy of one half of a pair is how the pair stops matching.
  *
  * Rejected outright rather than truncated — the first 64 bytes of a megabyte
  * are not what anyone typed, and silently turning one string into a different
@@ -85,7 +88,6 @@ import { currentUser } from '../server/sessions'
 const MAX_USER_CODE = 64
 const MAX_PUBLIC_KEY = 128
 const MAX_DEVICE_CODE = 128
-const MAX_LABEL = 1024
 
 /**
  * Read one field out of whatever the request carried — a `FormData`, which is
@@ -109,7 +111,7 @@ function field(data: unknown, name: string, max: number): string {
 const readUserCode = (data: unknown) => ({ userCode: field(data, 'userCode', MAX_USER_CODE) })
 
 const readStartDeviceAuth = (data: unknown): StartDeviceAuthInput => ({
-  label: field(data, 'label', MAX_LABEL),
+  label: field(data, 'label', MAX_LABEL_INPUT),
   publicKey: field(data, 'publicKey', MAX_PUBLIC_KEY),
 })
 

@@ -63,7 +63,7 @@ function setup(
   } = {},
 ) {
   const openSession = vi.fn(
-    overrides.openSession ?? (async () => ({ ok: true as const, url: 'https://relay.test/?t=tok' })),
+    overrides.openSession ?? (async () => ({ ok: true as const, url: 'https://relay.test/#t=tok' })),
   )
   const revoke = vi.fn(overrides.revoke ?? (async () => ({ ok: true as const })))
   const rename = vi.fn(overrides.rename ?? (async (_id: string, label: string) => ({ ok: true as const, label })))
@@ -159,7 +159,11 @@ describe('opening a session', () => {
     await user.click(within(rowFor('mac studio')).getByRole('button', { name: /open a session/i }))
 
     expect(openSession).toHaveBeenCalledWith('b5d05f15398a')
-    await waitFor(() => expect(go).toHaveBeenCalledWith('https://relay.test/?t=tok'))
+    // The URL verbatim, fragment included. `location.assign` is what carries a
+    // `#t=` across an origin boundary without putting it on the wire, and a
+    // component that trimmed, re-parsed or re-encoded the URL on the way past
+    // would take the credential off the end of it.
+    await waitFor(() => expect(go).toHaveBeenCalledWith('https://relay.test/#t=tok'))
     expect(toast.success).toHaveBeenCalled()
   })
 
@@ -205,7 +209,7 @@ describe('opening a session', () => {
     await user.click(button)
 
     expect(openSession).toHaveBeenCalledTimes(1)
-    release({ ok: true, url: 'https://relay.test/?t=tok' })
+    release({ ok: true, url: 'https://relay.test/#t=tok' })
     await waitFor(() => expect(go).toHaveBeenCalledTimes(1))
   })
 })

@@ -15,8 +15,11 @@
 // the alternative is a screen that quietly disagrees with the database.
 //
 // **A session opens only at a URL the server minted.** The URL carries a
-// 60-second bearer token; constructing one here, or navigating on a refusal,
-// would send somebody to a relay that will turn them away with no explanation.
+// 60-second bearer token in its *fragment* (`#t=…`, see `openSession`);
+// constructing one here, or navigating on a refusal, would send somebody to a
+// relay that will turn them away with no explanation. Nothing in this file
+// reads, splits or logs that URL — it is handed to `go` whole, which is also
+// what keeps the credential out of a React tree and a console.
 //
 // **"Online" is an inference, and is presented as one.** Nothing here talks to
 // the relay: `last_seen` is a stamp the daemon's connection leaves behind, so a
@@ -70,6 +73,12 @@ import {
 import { Field, FieldError, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
+// The one bound on a machine's name, imported rather than restated: a literal
+// here is a second answer to a question `lib/label.ts` already answers, and the
+// two drift the first time either moves. That module is dependency-free (a
+// regex and two numbers), so it costs this component nothing to stay start-free
+// and jsdom-renderable.
+import { MAX_LABEL } from '@/lib/label'
 
 /** One machine, as the directory shows it. Mirrors `server/devices.ts`. */
 export interface DeviceSummary {
@@ -119,9 +128,6 @@ export interface DeviceDirectoryProps {
  * noise.
  */
 export const ONLINE_WINDOW_S = 120
-
-/** The longest name the server will store; the field says so before the trip. */
-const MAX_LABEL_INPUT = 64
 
 /** What a failed call says when the failure was not the server's answer. */
 const UNAVAILABLE_MESSAGE = 'Something went wrong at our end. Try again in a moment.'
@@ -363,6 +369,13 @@ function DeviceRow({
         return
       }
       toast.success(`Opening ${device.label}`, { id: toastId })
+      // A whole-document navigation, fragment and all — `location.assign`
+      // carries `#t=…` across the origin boundary and, being a fragment, the
+      // browser sends it to no server on the way. The relay's page reads it out
+      // of `location.hash` and scrubs it. Nothing here parses the URL: the less
+      // this file knows about the shape of a credential, the fewer places there
+      // are to leave half of one behind.
+      //
       // The navigation leaves this page, so nothing after it runs in practice
       // — but `opening` is cleared in the `finally` regardless, because a
       // browser that refuses the navigation must not leave a dead button.
@@ -510,7 +523,11 @@ function RenameButton({
               name="label"
               autoComplete="off"
               autoFocus
-              maxLength={MAX_LABEL_INPUT}
+              // Typing stops where storage stops. `renameDevice` refuses only
+              // above MAX_LABEL_INPUT (1024) and *trims* to MAX_LABEL (64), so
+              // capping the field at 64 is what keeps a person from typing a
+              // name and being shown a shorter one back.
+              maxLength={MAX_LABEL}
               aria-invalid={failure ? true : undefined}
               value={label}
               onChange={(e) => setLabel(e.target.value)}

@@ -231,7 +231,15 @@ describe('verifyChannelToken', () => {
   it('refuses a token whose signature has been edited', async () => {
     const token = await signChannelToken('s', live())
     const [payload, sig] = token.split('.') as [string, string]
-    expect(await verifyChannelToken('s', `${payload}.${sig.slice(0, -1)}A`)).toBeNull()
+    // The same "flip it to something it is not" the payload case above uses,
+    // and for the same reason: a bare `…slice(0, -1) + 'A'` is not an edit when
+    // the signature already ends in 'A', and it rebuilds the original token. The
+    // last base64url character of a 32-byte HMAC carries only four bits, so it
+    // is one of sixteen — this failed roughly one run in sixteen, and the
+    // failure looked like "the verifier accepts a forged signature".
+    expect(
+      await verifyChannelToken('s', `${payload}.${sig.slice(0, -1)}${sig.endsWith('A') ? 'B' : 'A'}`),
+    ).toBeNull()
     expect(await verifyChannelToken('s', `${payload}.`)).toBeNull()
     expect(await verifyChannelToken('s', `${payload}.${sig}${sig}`)).toBeNull()
     // The signature is raw bytes, base64url — not the hex `hmacHex` returns.

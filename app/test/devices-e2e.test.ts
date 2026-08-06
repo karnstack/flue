@@ -45,6 +45,9 @@ import { inRequest } from './request'
 
 const ORIGIN = 'https://app.flue.sh'
 
+/** The relay the built Worker was told to mint tokens for (vitest.config.ts). */
+const RELAY_URL = env.RELAY_URL
+
 /** Bumped by every helper below, so no two callers in this file collide. */
 let seq = 0
 
@@ -281,6 +284,26 @@ describe('requireUser, over the wire', () => {
   })
 })
 
+describe('opening a session, over HTTP', () => {
+  it('hands the owner a relay URL with the token in the fragment', async () => {
+    // The positive control for the refusal test below: it is what proves those
+    // `not.toContain`s are looking for strings that *do* appear when a token is
+    // handed out, rather than for strings this endpoint could never produce.
+    const user = await makeUser()
+    const deviceId = await makeDevice(user.id, 'reachable')
+
+    const res = await callServerFn('openSessionFn', { deviceId }, { cookie: await signIn(user.id) })
+    expect(res.status).toBe(200)
+
+    const body = await res.text()
+    expect(body).toContain(new URL(RELAY_URL).host)
+    // In the fragment, and only there. `?t=` in this payload would mean the
+    // credential is on a request line the relay's Worker logs.
+    expect(body).toContain('#t=')
+    expect(body).not.toContain('?t=')
+  })
+})
+
 describe('acting on somebody else’s machine, over HTTP', () => {
   it('is refused, and changes nothing', async () => {
     const owner = await makeUser()
@@ -301,8 +324,24 @@ describe('acting on somebody else’s machine, over HTTP', () => {
 
     const opened = await callServerFn('openSessionFn', { deviceId }, { cookie })
     expect(opened.status).toBe(200)
-    // No token, however the refusal is spelled.
-    expect(await opened.text()).not.toContain('wss://')
+
+    // No relay URL and no token, however the refusal is spelled.
+    //
+    // Both halves are named for what they would catch. The relay's *host* is
+    // the assertion that bites: `openSession` is the only thing that puts it
+    // in a response, and it cannot answer a URL without also having minted a
+    // credential to put in it. (An earlier version of this test looked for
+    // `wss://` — which `openSession` rewrites to `https:` on every path, so it
+    // could never have appeared and the test would have stayed green with a
+    // token in the body.) The `t=` half then covers the handoff's own shape,
+    // in either place it could be spelled: `?t=` today, `#t=` after the move to
+    // a fragment, and `%23t=` if a serializer escaped one.
+    const body = await opened.text()
+    expect(body).not.toContain(new URL(RELAY_URL).host)
+    for (const spelling of ['?t=', '#t=', '%23t=', '&t=']) {
+      expect(body).not.toContain(spelling)
+    }
+    expect(await row(deviceId)).toBeDefined()
   })
 })
 
