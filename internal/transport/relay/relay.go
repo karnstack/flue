@@ -1,0 +1,433 @@
+// Package relay is the daemon's leg of the Cloudflare relay: one outbound
+// WebSocket to a Worker, and every browser that reaches this machine
+// multiplexed over it.
+//
+// The direction is the point. The daemon binds 127.0.0.1 and nothing else, so
+// remote reach cannot come from a port on this machine — it comes from a socket
+// this machine opened. Everything the relay carries is defined by
+// spec/relay-protocol.md and framed by internal/relaywire: binary messages are
+// [4-byte channel][payload], the only text messages are the keepalives, and
+// channel 0 carries the JSON control messages the relay and the daemon say to
+// each other in the clear. Channels 1 and up are one browser's Noise session
+// each, opaque here and served by channel.go.
+//
+// The adapter owns exactly one thing: keeping that socket up. It dials, reads,
+// dispatches, pings, and — when the socket dies, as a socket held open across
+// the internet by a hibernating Durable Object regularly does — backs off and
+// dials again, forever, until its context ends.
+package relay
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/rand/v2"
+	"net/http"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/flynn/noise"
+	"github.com/karnstack/flue/internal/crypto"
+	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/relaywire"
+)
+
+const (
+	// readLimit caps one relay frame. It is twice the daemon's own per-client
+	// limit: a channel payload is a Noise ciphertext wrapping a client frame
+	// that was already bounded at 1 MiB, and the doubling leaves room for the
+	// channel header, the kind byte and the AEAD tag without letting a hostile
+	// relay hand us an unbounded allocation.
+	readLimit = 1 << 21
+
+	// writeTimeout bounds one frame write, on the writer goroutine — the same
+	// bound, for the same reason, that the daemon's own connections use. It is
+	// the only place anything ever waits on this socket.
+	writeTimeout = 10 * time.Second
+
+	// outboxDepth is how many frames may be queued for the socket before it is
+	// torn down. It matches the daemon's per-connection outbox: a relay that has
+	// not drained this many frames is not a slow relay, it is a gone one.
+	outboxDepth = 256
+
+	// dialTimeout bounds a handshake, not a connection. Without it a relay that
+	// accepts the TCP connection and then says nothing parks the reconnect loop
+	// indefinitely — no socket, no retry, no log line after the first.
+	dialTimeout = 30 * time.Second
+
+	// defaultKeepalive is how often the daemon sends flue-ping. Cloudflare
+	// closes an idle WebSocket at around 100 s, so this has to be comfortably
+	// under it; the edge answers from the Durable Object's auto-response, so
+	// the cost of being under it is nearly nothing. Tests shorten it.
+	defaultKeepalive = 30 * time.Second
+
+	// Backoff between dials: 250 ms doubling to a 30 s cap, with equal jitter.
+	// These are the web client's numbers (web/src/client/client.ts) because
+	// they answer the same question — how fast may something that lost its
+	// socket come back — and one answer is easier to reason about than two.
+	backoffBase       = 250 * time.Millisecond
+	backoffCap        = 30 * time.Second
+	backoffMaxAttempt = 30
+)
+
+// Config is everything the adapter needs to reach a deployed relay.
+type Config struct {
+	URL    string // wss://flue-relay.<sub>.workers.dev/daemon
+	Secret string // the DAEMON_SECRET set at deploy time
+	Origin string // https origin the relay serves the UI on
+}
+
+// Server is the surface the adapter drives — implemented by *daemon.Server.
+//
+// It is declared here rather than in daemon because it is this package that
+// needs it: the daemon does not know a relay exists. It holds only ServeConn
+// today; PairDevice and SetRelayStatus join it in Tasks 8 and 9, when there is
+// something here that calls them.
+type Server interface {
+	ServeConn(ctx context.Context, mc daemon.MessageConn, meta daemon.ConnMeta)
+}
+
+// Transport dials the relay and serves channels until ctx ends. It reconnects
+// with jittered exponential backoff and only returns when its context is done.
+type Transport struct {
+	cfg Config
+	srv Server
+
+	// identity is the daemon's static Noise key and devices is the paired-device
+	// registry. Both belong to the channel layer — the responder handshake and
+	// the static-key lookup that decides whether a browser is a paired device —
+	// which arrives with channel.go. They are taken now so the constructor's
+	// signature does not change under the code that already calls it.
+	identity noise.DHKey
+	devices  *crypto.DeviceStore
+
+	log *slog.Logger
+
+	// keepalive is the interval between flue-ping frames, a field rather than a
+	// constant so a test can watch a keepalive happen without waiting 30 s for
+	// it.
+	keepalive time.Duration
+}
+
+// New builds a transport. A nil logger discards, so a caller that has not wired
+// one up gets a working adapter rather than a panic on the first log line.
+func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceStore, log *slog.Logger) *Transport {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	return &Transport{
+		cfg:       cfg,
+		srv:       srv,
+		identity:  identity,
+		devices:   devices,
+		log:       log,
+		keepalive: defaultKeepalive,
+	}
+}
+
+// Run dials the relay and keeps it dialled until ctx is done.
+//
+// It returns nil on cancellation: being asked to stop, and stopping, is not an
+// error the caller has to recognise and filter out — the same contract
+// daemon.ListenAndServe keeps. Every other outcome is a reason to try again, so
+// nothing else ever returns from here. A relay that is down, misconfigured, or
+// answering 401 while its operator rotates a secret is a temporary state, and a
+// daemon that gave up on it would never come back without a restart.
+func (t *Transport) Run(ctx context.Context) error {
+	attempt := 0
+	for {
+		connected, err := t.runOnce(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		switch {
+		case connected:
+			// The socket lived, so whatever ended it says nothing about how
+			// long to wait before the next one: start from the base again.
+			attempt = 0
+			t.log.Info("relay connection lost", "url", t.cfg.URL, "err", err)
+		default:
+			t.log.Warn("relay dial failed", "url", t.cfg.URL, "err", err)
+		}
+
+		delay := backoffDelay(attempt)
+		if attempt < backoffMaxAttempt {
+			attempt++
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		}
+	}
+}
+
+// runOnce dials, serves the socket, and returns when it ends. connected reports
+// whether the handshake ever succeeded, which is what tells a dial that failed
+// from a connection that dropped — the two are logged differently and only the
+// second resets the backoff.
+func (t *Transport) runOnce(ctx context.Context) (connected bool, err error) {
+	// The dial's deadline is the dial's alone. coder/websocket applies an
+	// HTTPClient timeout exactly this way — a derived context it cancels the
+	// moment the handshake returns — so cancelling it here does not touch the
+	// connection it produced.
+	dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
+	ws, _, err := websocket.Dial(dialCtx, t.cfg.URL, &websocket.DialOptions{
+		// The secret travels in a header, never in the URL: a URL is written
+		// to logs, proxies and error messages by everything it passes through.
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + t.cfg.Secret}},
+	})
+	cancelDial()
+	if err != nil {
+		return false, err
+	}
+	// Nothing past this point trusts the relay's framing, so bound what it can
+	// make this process allocate before anything looks at it.
+	ws.SetReadLimit(readLimit)
+	// The backstop, not the close: the paths below close with a status where
+	// there is one to send, and this catches the handshake a dead peer will
+	// never complete.
+	defer ws.CloseNow()
+
+	t.log.Info("relay connected", "url", t.cfg.URL)
+
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s := &socket{ws: ws, out: make(chan outFrame, outboxDepth), ctx: connCtx, cancel: cancel}
+
+	writerDone := make(chan struct{})
+	go t.runWriter(s, writerDone)
+	keepaliveDone := make(chan struct{})
+	go t.runKeepalive(s, keepaliveDone)
+
+	readErr := t.readLoop(s)
+
+	// Stop the writer and the keepalive and wait for them before saying
+	// goodbye, so the close frame is the last thing on this socket rather than
+	// something a queued frame races.
+	cancel()
+	<-writerDone
+	<-keepaliveDone
+
+	var perr protocolError
+	switch {
+	case errors.As(readErr, &perr):
+		// The relay is not speaking this protocol. Say which rule it broke in
+		// the close frame — 1002 is what the browser leg is closed with for the
+		// same fault — and reconnect: a Worker that was mid-deploy is a
+		// different thing from a Worker that is hostile, and neither is this
+		// adapter's to adjudicate.
+		t.log.Warn("relay protocol error", "url", t.cfg.URL, "err", readErr)
+		_ = ws.Close(websocket.StatusProtocolError, "protocol error")
+	case ctx.Err() != nil:
+		// A daemon that is shutting down tells the relay so, which is what lets
+		// the Durable Object drop every browser's socket at once instead of
+		// waiting for a keepalive to time out.
+		_ = ws.Close(websocket.StatusNormalClosure, "")
+	}
+	return true, readErr
+}
+
+// readLoop reads until the socket ends or the relay breaks the protocol.
+func (t *Transport) readLoop(s *socket) error {
+	for {
+		typ, data, err := s.ws.Read(s.ctx)
+		if err != nil {
+			return err
+		}
+		if typ == websocket.MessageText {
+			if string(data) == relaywire.Pong {
+				// The keepalive answer, from the edge rather than the Durable
+				// Object. Nothing is owed to it: it is proof the socket is
+				// still there, and the socket being still there is what reading
+				// it proved.
+				continue
+			}
+			// The contents are not logged: this is the branch a hostile relay
+			// reaches with a megabyte of its own choosing.
+			return protocolError{fmt.Errorf("relay sent a text frame that is not a keepalive (%d bytes)", len(data))}
+		}
+		f, err := relaywire.Decode(data)
+		if err != nil {
+			return protocolError{err}
+		}
+		t.dispatch(f)
+	}
+}
+
+// dispatch routes one decoded frame.
+//
+// Every branch here is a log line and a drop, because the layer that acts on
+// these frames is channel.go and it does not exist yet. That is deliberate
+// rather than incomplete: this task's job is the socket, and a socket that
+// stays up while the layer above it is missing is exactly what lets the next
+// task be about channels and nothing else.
+func (t *Transport) dispatch(f relaywire.Frame) {
+	if f.Channel != relaywire.ControlChannel {
+		t.log.Debug("relay channel frame dropped: no channel layer yet",
+			"channel", f.Channel, "bytes", len(f.Payload))
+		return
+	}
+
+	msg, err := relaywire.DecodeControl(f.Payload)
+	if err != nil {
+		// Dropped rather than fatal. An unknown discriminator is a relay newer
+		// than this daemon, which is an ordinary state during a deploy, and the
+		// frames it is talking about are ones this daemon has no channel for
+		// anyway.
+		t.log.Warn("relay sent a control message this daemon does not understand", "err", err)
+		return
+	}
+
+	switch m := msg.(type) {
+	case *relaywire.Open:
+		t.log.Debug("relay opened a channel", "channel", m.Channel, "origin", m.Origin)
+	case *relaywire.Closed:
+		t.log.Debug("relay closed a channel", "channel", m.Channel)
+	case *relaywire.Pair:
+		// The body carries a live single-use pairing token, so its size is
+		// logged and its contents are not.
+		t.log.Debug("relay forwarded a pairing request", "id", m.ID, "origin", m.Origin, "bytes", len(m.Body))
+	default:
+		// close and pairResult are the daemon's own messages coming back at it.
+		t.log.Warn("relay sent a message only a daemon sends", "type", fmt.Sprintf("%T", msg))
+	}
+}
+
+// runWriter is the only goroutine that writes to the socket, so frames leave in
+// the order they were queued and no write can overlap another.
+//
+// A lock would not do here, for the reason the daemon's own writer documents:
+// serialising on a mutex bounds each write but not the wait for it, so a peer
+// parked in a ten-second write holds up everything queued behind it for all
+// ten. The queue removes the wait rather than shortening it.
+func (t *Transport) runWriter(s *socket, done chan<- struct{}) {
+	defer close(done)
+	for {
+		select {
+		case f := <-s.out:
+			ctx, cancel := context.WithTimeout(s.ctx, writeTimeout)
+			err := s.ws.Write(ctx, f.messageType(), f.b)
+			cancel()
+			if err != nil {
+				// The socket is gone or wedged. Ending the connection here is
+				// what gets the read loop out and the reconnect started.
+				s.fail()
+				return
+			}
+		case <-s.ctx.Done():
+			return
+		}
+	}
+}
+
+// runKeepalive queues a flue-ping every interval.
+//
+// It is a producer into the outbox rather than a second writer: one goroutine
+// owns the socket. The interval is well under the ~100 s at which Cloudflare
+// closes an idle WebSocket, and the edge answers from the Durable Object's
+// auto-response, so an idle terminal costs a matched string at the edge rather
+// than a woken — and billed — Durable Object.
+func (t *Transport) runKeepalive(s *socket, done chan<- struct{}) {
+	defer close(done)
+	tick := time.NewTicker(t.keepalive)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			if err := s.enqueue(outFrame{text: true, b: []byte(relaywire.Ping)}); err != nil {
+				return
+			}
+		case <-s.ctx.Done():
+			return
+		}
+	}
+}
+
+// backoffDelay is how long to wait before attempt+1: the base doubled per
+// attempt to a cap, then equal jitter — half the delay fixed, half random.
+//
+// The jitter is not decoration. Every browser holding a session on this daemon
+// lost its socket at the same instant the daemon did, and they all come back
+// through their own retry paths; a fixed delay would aim all of it at the same
+// millisecond. The fixed half keeps a floor under the retry rate so a relay
+// that is merely restarting is not hammered either.
+func backoffDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	if attempt > backoffMaxAttempt {
+		attempt = backoffMaxAttempt
+	}
+	// Capped before the shift, so a long outage cannot overflow the exponent
+	// into a delay of nothing.
+	ceiling := min(backoffBase<<attempt, backoffCap)
+	return ceiling/2 + rand.N(ceiling/2)
+}
+
+// outFrame is one queued message. text says which half of the protocol it
+// belongs to: the keepalives are text, and everything channel-framed is binary.
+type outFrame struct {
+	text bool
+	b    []byte
+}
+
+func (f outFrame) messageType() websocket.MessageType {
+	if f.text {
+		return websocket.MessageText
+	}
+	return websocket.MessageBinary
+}
+
+// socket is one live relay connection: the WebSocket, the outbox every producer
+// hands frames to, and the context that ends all of it at once.
+//
+// It exists as a value distinct from Transport because a Transport outlives any
+// number of sockets. Each reconnect gets a fresh one, and the channel table the
+// next task hangs off it dies with the socket it belonged to — which is what
+// spec/relay-protocol.md requires: a daemon reconnect invalidates every live
+// channel, because the Noise state that made them readable was in this
+// process's memory and this socket's lifetime.
+type socket struct {
+	ws     *websocket.Conn
+	out    chan outFrame
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+var errSocketClosed = errors.New("relay: socket closed")
+
+// errSocketBacklogged is what a producer gets when the relay has stopped
+// draining. The socket is torn down with it: a relay that is this far behind is
+// not slow, it is gone, and every frame queued for it is already stale.
+var errSocketBacklogged = errors.New("relay: the relay is not draining its socket")
+
+// enqueue hands a frame to the writer without ever blocking, so no producer
+// ever waits on this socket.
+func (s *socket) enqueue(f outFrame) error {
+	select {
+	case s.out <- f:
+		return nil
+	case <-s.ctx.Done():
+		return errSocketClosed
+	default:
+		s.fail()
+		return errSocketBacklogged
+	}
+}
+
+// fail ends this connection. Cancelling the context unblocks the read loop,
+// which runs the ordinary teardown on its way out.
+func (s *socket) fail() { s.cancel() }
+
+// protocolError marks the faults that are the relay's, not the network's: they
+// close the socket with 1002 rather than simply dropping it, so the other end
+// learns it broke the protocol instead of guessing at a connection reset.
+type protocolError struct{ err error }
+
+func (e protocolError) Error() string { return e.err.Error() }
+func (e protocolError) Unwrap() error { return e.err }
