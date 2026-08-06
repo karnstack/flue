@@ -10,6 +10,7 @@ import { FlueClientProvider } from '@/client/provider'
 import { AppShell } from '@/components/app-shell'
 import { DevicesRoute } from '@/routes/devices'
 import { PairRoute } from '@/routes/pair'
+import { RemoteRoute } from '@/routes/remote'
 import { SessionsRoute } from '@/routes/sessions'
 import { TerminalRoute } from '@/routes/terminal'
 import { UnpairedRoute } from '@/routes/unpaired'
@@ -139,6 +140,18 @@ const devicesRoute = createRoute({
   component: DevicesRoute,
 })
 
+/**
+ * Remote access, inside the shell unlike /pair: this is a screen for the
+ * browser that is already paired with the daemon, read while the app's own
+ * chrome is up, and its whole subject is the state of a leg the daemon reports
+ * on the connection that chrome is riding.
+ */
+const remoteRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/remote',
+  component: RemoteRoute,
+})
+
 const settingsRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/settings',
@@ -204,7 +217,7 @@ const pairRoute = createRoute({
 })
 
 const routeTree = rootRoute.addChildren([
-  shellRoute.addChildren([indexRoute, sessionsRoute, devicesRoute, settingsRoute]),
+  shellRoute.addChildren([indexRoute, sessionsRoute, devicesRoute, remoteRoute, settingsRoute]),
   terminalRoute,
   pairRoute,
 ])

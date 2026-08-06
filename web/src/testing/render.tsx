@@ -24,7 +24,14 @@ export async function renderWithRouter(ui: ReactNode, initialPath = '/sessions')
   // item matches. TanStack marks a Link active on its own whenever the router
   // is on that link's route, so a nav test run at /sessions cannot tell our
   // active-state logic from the router's.
-  const paths = ['/', '/sessions', '/devices', '/settings', '/d/$deviceId/s/$sessionId']
+  const paths = [
+    '/',
+    '/sessions',
+    '/devices',
+    '/remote',
+    '/settings',
+    '/d/$deviceId/s/$sessionId',
+  ]
   const routeTree = rootRoute.addChildren(
     paths.map((path) =>
       createRoute({ getParentRoute: () => rootRoute, path, component: () => null }),

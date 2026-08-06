@@ -125,7 +125,7 @@ describe('createFlueRouter', () => {
   })
 
   it('renders management routes inside the app shell', () => {
-    for (const path of ['/', '/sessions', '/devices', '/settings']) {
+    for (const path of ['/', '/sessions', '/devices', '/remote', '/settings']) {
       expect(routeIds(path).some((id) => id.includes('shell'))).toBe(true)
     }
   })
@@ -229,7 +229,7 @@ describe('createFlueRouter', () => {
     // Served by a relay to a browser that kept no daemon key. There is no
     // handshake to be had on any of these screens, so none of them may render
     // the app's own chrome and sit at "reconnecting" for ever.
-    for (const path of ['/', '/sessions', '/devices', '/settings']) {
+    for (const path of ['/', '/sessions', '/devices', '/remote', '/settings']) {
       const view = await renderUnpaired(path)
       expect(screen.getByRole('heading', { name: 'Not paired with a daemon yet' })).toBeTruthy()
       expect(screen.queryByRole('navigation')).toBeNull()
@@ -270,5 +270,19 @@ describe('createFlueRouter', () => {
       // match, so a real hit is more than one.
       expect(routeIds(item.to).length).toBeGreaterThan(1)
     }
+  })
+
+  it('reaches remote access from the nav', async () => {
+    // The loop above is only as strong as the list it reads, so the one item
+    // this route exists for is named. Relay setup and status were terminal-only
+    // until this screen, and a screen nothing links to is one nobody finds.
+    const { NAV_ITEMS } = await import('./components/nav')
+    const item = NAV_ITEMS.find((i) => i.to === '/remote')
+    expect(item?.label).toBe('Remote access')
+
+    await renderAt('/remote')
+
+    expect(screen.getByRole('link', { name: 'Remote access' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Remote access' })).toBeTruthy()
   })
 })
