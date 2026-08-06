@@ -1,10 +1,12 @@
-# flue ships as one binary with the UI compiled into it, so almost everything
-# here depends on `web`: `//go:embed all:dist` in web/embed.go will not compile
-# until web/dist exists, and that is true of `go build`, `go test` and `go vet`
+# flue ships as one binary with the UI *and* the relay Worker compiled into it,
+# so almost everything here depends on `web` and `relay`: the `//go:embed`
+# directives in web/embed.go and relay/embed.go will not compile until web/dist
+# and relay/dist exist, and that is true of `go build`, `go test` and `go vet`
 # alike. Encoding the ordering here is what keeps "I only ran go test" from
 # meaning "I could not build at all".
 #
-# web/dist is gitignored on purpose and must stay that way — see web/embed.go.
+# Both dist directories are gitignored on purpose and must stay that way — see
+# web/embed.go and relay/embed.go.
 
 .PHONY: all web relay build run web-dev test test-go test-web test-relay lint clean site-dev site-deploy
 
@@ -13,12 +15,13 @@ all: build
 web:
 	cd web && pnpm install --frozen-lockfile && pnpm build
 
-# relay/ is a standalone Cloudflare Worker package: nothing embeds it, so its
-# tests and lint only need deps installed — no build step.
+# relay/ is a Cloudflare Worker package, bundled by esbuild into a single ESM
+# file that relay/embed.go compiles into the flue binary — that is what lets
+# `flue relay setup` deploy it with no Node on the user's machine.
 relay:
-	cd relay && pnpm install --frozen-lockfile
+	cd relay && pnpm install --frozen-lockfile && pnpm build
 
-build: web
+build: web relay
 	mkdir -p bin
 	go build -o bin/flue ./cmd/flue
 
@@ -35,7 +38,7 @@ web-dev:
 
 test: test-go test-web test-relay
 
-test-go: web
+test-go: web relay
 	go test ./...
 
 test-web:
@@ -53,7 +56,7 @@ lint: web relay
 	cd relay && pnpm lint
 
 clean:
-	rm -rf bin web/dist
+	rm -rf bin web/dist relay/dist
 
 # The landing site (site/) has no build step; these targets exist for the
 # one moving part: install.sh's canonical source is scripts/install.sh (the

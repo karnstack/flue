@@ -7,10 +7,12 @@ project_name: flue
 
 before:
   hooks:
-    # web/dist must exist before any go build: //go:embed all:dist in
-    # web/embed.go does not compile without it. Depend on the Makefile
-    # target, never an inline copy of its steps.
+    # web/dist and relay/dist must both exist before any go build: the
+    # //go:embed directives in web/embed.go and relay/embed.go do not compile
+    # without them. Depend on the Makefile targets, never an inline copy of
+    # their steps.
     - make web
+    - make relay
 
 builds:
   - id: flue

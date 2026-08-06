@@ -108,8 +108,11 @@ make web-dev   # terminal 2: Vite with hot reload on 127.0.0.1:5173
 ```
 
 `make run` compiles with the `dev` build tag, which swaps the embedded UI
-for a redirect to Vite (`web/dev.go`) — `web/dist` need not exist and Node
-never runs. It passes `--open`, so the browser opens itself: the one-time
+for a redirect to Vite (`web/dev.go`) and the embedded relay Worker for
+nothing at all (`relay/dev.go`) — neither `web/dist` nor `relay/dist` need
+exist and Node never runs. (`flue relay setup` refuses to deploy from a dev
+build, since it has no Worker to deploy.) It passes `--open`, so the browser
+opens itself: the one-time
 link plants the auth cookie and lands you on the Vite server, no clicking
 race. Vite proxies `/api` and `/ws` back to the daemon and rewrites the
 Origin so its checks pass; the cookie rides along because cookies ignore
@@ -128,8 +131,10 @@ make build && bin/flue serve
 and without the dev tag) plus a TypeScript typecheck. Use pnpm, never npm —
 the web workspace pins it, and `mise.toml` pins the exact go/node/pnpm
 versions CI uses. One ordering rule remains for untagged Go commands:
-nothing compiles until `web/dist` exists (`//go:embed` in `web/embed.go`),
-and the Makefile sequences that for you.
+nothing compiles until `web/dist` and `relay/dist` both exist (`//go:embed`
+in `web/embed.go` and `relay/embed.go`), so a bare `go build ./cmd/flue`
+wants `cd web && pnpm build` and `cd relay && pnpm build` first — or just
+use `make build`, which sequences all of it for you.
 
 Layout, briefly: `cmd/flue` is the CLI, `internal/daemon` the HTTP/WebSocket
 server, `internal/session` the PTYs and scrollback, `internal/service` the

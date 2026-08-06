@@ -82,6 +82,8 @@ func main() {
 		err = cmdDisable()
 	case "status":
 		err = cmdStatus()
+	case "relay":
+		err = cmdRelay(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -99,6 +101,8 @@ const usageText = `flue — your terminal, as a browser tab
   flue enable             install the login service, start the daemon, open the UI
   flue disable            remove the login service
   flue status             daemon, login service, and session diagnostics
+  flue relay setup        deploy a relay to your own Cloudflare account
+  flue relay status       show the configured relay
   flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N] [--open]   run the daemon in the foreground
 `

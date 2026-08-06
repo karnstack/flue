@@ -57,11 +57,22 @@ var contentTypes = map[string]string{
 	"manifest.webmanifest": "application/manifest+json",
 }
 
+// Dist is the built app as a filesystem rooted where the app is served from:
+// index.html at the top, not under a "dist/" prefix.
+//
+// It is exported for `flue relay setup`, which uploads these exact files to the
+// user's own Cloudflare account as the relay's static assets. Same build, same
+// bytes, one app — a relay serving a UI assembled some other way would be a
+// second frontend to keep in step with the daemon's wire protocol.
+func Dist() (fs.FS, error) {
+	return fs.Sub(dist, "dist")
+}
+
 // Handler serves the built app. Unknown paths fall back to index.html so
 // client-side routes such as /d/local/s/<id> resolve — a bookmarked session
 // tab must open, not 404.
 func Handler() http.Handler {
-	sub, err := fs.Sub(dist, "dist")
+	sub, err := Dist()
 	if err != nil {
 		return brokenBuild("flue: UI not built; run `make web`")
 	}

@@ -13,6 +13,8 @@
 package web
 
 import (
+	"errors"
+	"io/fs"
 	"net/http"
 	"os"
 )
@@ -24,6 +26,13 @@ func devOrigin() string {
 		return o
 	}
 	return "http://127.0.0.1:5173"
+}
+
+// Dist reports that there is no built app in this binary. A dev build carries
+// none — Vite owns the app — so `flue relay setup` from `make run` has nothing
+// to upload, and says so rather than deploying a relay with no UI on it.
+func Dist() (fs.FS, error) {
+	return nil, errors.New("web: this is a dev build; the UI is not compiled in — build with `make build` and run the release binary")
 }
 
 // Handler redirects to the Vite dev server, keeping path and query — ?cwd=
