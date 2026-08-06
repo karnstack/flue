@@ -3,6 +3,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
   "assets": {
+    // Response headers for these assets are NOT configurable here — wrangler's
+    // schema rejects any key but the four below. They live in ./public/_headers,
+    // which wrangler strips out of the upload and sends as a string in the
+    // script metadata instead. `flue relay setup` sends the same document from
+    // relayAssetHeaders (cmd/flue/relay.go), and a test keeps the two byte for
+    // byte identical; edit both or neither.
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",

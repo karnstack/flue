@@ -16,6 +16,7 @@ import (
 
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
+	"github.com/karnstack/flue/internal/daemon"
 	relaybundle "github.com/karnstack/flue/relay"
 	"github.com/karnstack/flue/web"
 )
@@ -37,6 +38,25 @@ const (
 // letting the asset router answer from the bundle: the two WebSocket legs and
 // the pairing API.
 var relayRunWorkerFirst = []string{"/daemon", "/client", "/api/*"}
+
+// relayAssetHeaders is the `_headers` document the relay serves its static
+// assets with — the same security headers the daemon wraps its own responses in
+// (internal/daemon.securityHeaders), so the one origin of the two that is
+// reachable from the internet is not the one without them.
+//
+// `daemon.RelayCSP` rather than the daemon's own policy: the loopback WebSocket
+// entries in `connect-src` are wildcard ports and mean nothing on an https
+// origin whose socket is same-origin `wss://`. The constant says the rest.
+//
+// It travels in the script upload's metadata, not as a file among the assets.
+// Dropping a `_headers` file into the bundle would publish it at `/_headers`
+// and change nothing — see cloudflare.assetsConfig.Headers. Its twin for
+// `wrangler dev` is relay/public/_headers, which is a real file because that is
+// the only form wrangler reads; TestRelayAssetHeadersMatchTheWranglerCopy keeps
+// the two identical.
+var relayAssetHeaders = "/*\n" +
+	"  Referrer-Policy: no-referrer\n" +
+	"  Content-Security-Policy: " + daemon.RelayCSP + "\n"
 
 const (
 	// daemonSecretName is the Worker secret the daemon authenticates its
@@ -176,6 +196,12 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 			DOBindings:           map[string]string{relayDOBinding: relayDOClass},
 			Assets:               assets,
 			AssetsRunWorkerFirst: relayRunWorkerFirst,
+			// Without this the relay serves the same bundle the daemon does,
+			// from the internet, with none of the daemon's security headers —
+			// including the `script-src 'self'` that web/src/crypto/keys.ts
+			// names as the reason it is willing to keep a raw private key in
+			// IndexedDB.
+			AssetHeaders: relayAssetHeaders,
 			// Not optional, and its absence is invisible until the Worker is
 			// live: the relay calls env.ASSETS.fetch itself for everything that
 			// is not one of the run-worker-first paths, and without this binding
@@ -325,6 +351,16 @@ func webAssets() ([]cloudflare.Asset, error) {
 			return err
 		}
 		if d.IsDir() {
+			return nil
+		}
+		// `_headers` and `_redirects` are configuration, not content:
+		// Cloudflare's asset router reads them out of the script metadata
+		// (relayAssetHeaders) and never from the bundle, so one that reached the
+		// upload would be published at its own URL and applied to nothing.
+		// Nothing in web/dist emits either today; this is here so that a
+		// well-meant web/public/_headers cannot quietly become a public
+		// document that also fails to do its job.
+		if p == "_headers" || p == "_redirects" {
 			return nil
 		}
 		body, err := fs.ReadFile(dist, p)

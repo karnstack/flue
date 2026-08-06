@@ -101,6 +101,49 @@ describe('the relay Worker routes', () => {
   })
 })
 
+/**
+ * The relay serves the same bundle the daemon does, from an origin that is
+ * reachable from the internet rather than from loopback, and for a while it
+ * served it with none of the daemon's security headers — including the
+ * `script-src 'self'` that web/src/crypto/keys.ts names as its reason for
+ * being willing to keep a raw private key in IndexedDB.
+ *
+ * The policy is a `_headers` document, which is configuration rather than an
+ * asset: public/_headers is what `wrangler dev` and this suite read, and
+ * `flue relay setup` sends the identical string in the script metadata
+ * (cmd/flue/relay.go, checked byte for byte by
+ * TestRelayAssetHeadersMatchTheWranglerCopy). The literal below is spelled out
+ * rather than imported so that a change to it has to be made twice, in two
+ * languages, on purpose.
+ */
+describe('the security headers on served assets', () => {
+  const CSP =
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data:; connect-src 'self'; " +
+    "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+
+  it('serves the app shell under the same CSP the daemon does, minus the loopback sockets', async () => {
+    const res = await SELF.fetch(`${BASE}/`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Content-Security-Policy')).toBe(CSP)
+    expect(res.headers.get('Referrer-Policy')).toBe('no-referrer')
+  })
+
+  it('covers the SPA fallback the Worker itself reaches for', async () => {
+    // /api/* is run-worker-first, so a GET lands in the Worker and falls
+    // through to env.ASSETS.fetch — a different path to the same bytes, and
+    // the one a `_headers` file would miss if the binding did not apply it.
+    const res = await SELF.fetch(`${BASE}/api/pair`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Content-Security-Policy')).toBe(CSP)
+  })
+
+  it('does not publish the header document as an asset', async () => {
+    const res = await SELF.fetch(`${BASE}/_headers`)
+    expect(await res.text()).not.toContain('Content-Security-Policy')
+  })
+})
+
 describe('authorizeDaemon', () => {
   // The SELF worker always has DAEMON_SECRET bound (vitest.config.ts), so the
   // unbound-secret case is a direct unit test: with no secret in the env,

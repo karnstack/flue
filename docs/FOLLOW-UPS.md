@@ -113,6 +113,13 @@ terminal see a login shell under the login service too.
   the daemon's own socket; the wildcard ports would let an injected script reach
   every loopback service. Defence in depth only, given `script-src 'self'`.
 
+  **Half done** — the relay origin, which is the one reachable from the internet,
+  no longer carries them: `daemon.RelayCSP` is `LocalCSP` without that clause,
+  and the two are composed from a shared head and tail so the rest cannot drift.
+  The daemon's own origin still carries the wildcards, because `'self'` really
+  does not cover `ws://127.0.0.1:7717` from an `http://127.0.0.1:7717` page —
+  narrowing it needs the port, which the daemon knows and this constant does not.
+
 ## Crypto and pairing
 
 Carried out of the crypto+pairing milestone (Noise IK, the device registry, the
@@ -352,6 +359,12 @@ secret so the only thing after it is a local file write. What is left:
   developer and a user running different relays, silently. A test that parses the
   `.jsonc` and compares would close it; the extension permits comments that
   `encoding/json` chokes on, so it needs a tolerant reader or a stripped copy.
+
+  One twin *is* enforced now, and it shows the shape the rest wants: the
+  `_headers` document exists as `relay/public/_headers` for wrangler and as
+  `relayAssetHeaders` for setup, and `TestRelayAssetHeadersMatchTheWranglerCopy`
+  reads the file and compares. That was easy only because the copy is a plain
+  file rather than a key inside the `.jsonc`.
 - **Re-running setup against a *different* account orphans the old relay.** The
   account is chosen fresh on every run, and nothing looks at what the previous run
   deployed. Pick account B the second time and account A is left holding a live
@@ -408,18 +421,35 @@ documented promise depends on.
   Worker and Noise is the confidentiality boundary. A multi-tenant relay has to
   verify a signed token on `/client` and route to the right hub by account and
   daemon id. The seam is deliberately in place and the implementation is Plan 2.
-- **Relay-served assets carry none of the daemon's security headers.** The
+- ~~**Relay-served assets carry none of the daemon's security headers.** The
   daemon wraps every response in `securityHeaders`
   (`internal/daemon/server.go`) — `Referrer-Policy: no-referrer` and a CSP with
   `script-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`. The
-  Worker serves the *same bundle* through `env.ASSETS.fetch(req)` with neither.
-  Nothing in the app depends on the CSP for correctness, so this is defence in
-  depth — but it is the same defence, dropped for the one origin that is
-  reachable from the internet. A `_headers` file uploaded with the assets is the
-  cheap fix; wrapping the ASSETS response in the Worker is the other. The
-  daemon's exact policy needs one edit for a relay origin: the
-  `ws://127.0.0.1:*` and `ws://localhost:*` entries in `connect-src` are
-  loopback-shaped and `'self'` already covers a same-origin `wss://`.
+  Worker serves the *same bundle* through `env.ASSETS.fetch(req)` with neither.~~
+
+  **Done.** More than defence in depth, as it turned out: `web/src/crypto/keys.ts`
+  names that CSP as the compensating control for holding a raw private key in
+  IndexedDB, and the origin missing it was the internet-facing one.
+
+  The "cheap fix" above is a trap worth recording. A `_headers` file dropped
+  into the assets directory is **not** uploaded as an asset — wrangler strips it
+  out of the manifest and sends its *contents* as a string in the script
+  metadata's `assets.config._headers`. Doing the obvious thing would have
+  published a public `/_headers` document that Cloudflare never reads and that
+  applied to nothing. So `flue relay setup` sends that field
+  (`cloudflare.DeployInput.AssetHeaders`, built from `daemon.RelayCSP` in
+  `cmd/flue/relay.go`), `relay/public/_headers` is the real file `wrangler dev`
+  needs — there is no `wrangler.jsonc` key for this — and a test pins the two
+  byte for byte. `webAssets` now also skips a stray `_headers`/`_redirects`
+  rather than publishing one. The policy applies to asset-router responses
+  *including* the ones the Worker asks for through `env.ASSETS.fetch`, which
+  `relay/test/routing.test.ts` checks on both paths.
+
+  The one edit for a relay origin was made: `RelayCSP` drops `connect-src`'s
+  loopback wildcards, since the relay's own socket is a same-origin `wss://`.
+  The field is absent from Cloudflare's published multipart-metadata reference,
+  which documents only `html_handling` and `not_found_handling`; it is what
+  every `wrangler deploy` sends, which is as attested as this API gets.
 - **`channel_closed` says how much, never how long.** The hub logs frames and
   bytes per direction when a channel closes, and `opened` sits in the
   attachment unlogged — so a channel's lifetime has to be reconstructed from

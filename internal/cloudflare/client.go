@@ -357,6 +357,16 @@ type DeployInput struct {
 	Assets               []Asset
 	AssetsRunWorkerFirst []string // ["/daemon", "/client", "/api/*"]
 
+	// AssetHeaders is a `_headers` document — response headers for the static
+	// assets, in the file format Cloudflare's asset router parses. Empty sends
+	// no header config at all. See assetsConfig.Headers for why this travels in
+	// the script metadata rather than as a file among the assets.
+	//
+	// It applies to responses the asset router produces, including the ones a
+	// Worker asks for through its assets binding, and not to responses the
+	// Worker constructs itself.
+	AssetHeaders string
+
 	// AssetsBinding is the name the Worker reads its static assets off env
 	// under — "ASSETS" for the relay, matching `assets.binding` in
 	// relay/wrangler.jsonc. It is emitted as a binding of type "assets".
@@ -428,6 +438,25 @@ type assetsConfig struct {
 	HTMLHandling     string   `json:"html_handling"`
 	NotFoundHandling string   `json:"not_found_handling"`
 	RunWorkerFirst   []string `json:"run_worker_first,omitempty"`
+
+	// Headers is the contents of a `_headers` file, verbatim — newlines and
+	// all — and it is how response headers are attached to static assets.
+	//
+	// The indirection is worth stating, because the obvious thing does not
+	// work. A `_headers` file placed in the assets directory is **not** an
+	// asset: wrangler strips it out of the manifest and sends its bytes here
+	// instead, and an uploader that skipped this field would have published a
+	// public `/_headers` document that Cloudflare never reads. The field name
+	// keeps the leading underscore because the API is named after the file.
+	//
+	// It is absent from Cloudflare's published multipart-metadata reference,
+	// which documents only html_handling and not_found_handling. It is
+	// nonetheless what every `wrangler deploy` of an assets directory
+	// containing a `_headers` file sends (wrangler's AssetConfigMetadata), so
+	// it is as well attested as this API gets — but it stays `omitempty`, so a
+	// deploy with nothing to say sends nothing rather than an empty string a
+	// stricter server could reject.
+	Headers string `json:"_headers,omitempty"`
 }
 
 // Deploy uploads the assets, then PUTs the script with its metadata.
@@ -484,6 +513,7 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 				HTMLHandling:     htmlHandling,
 				NotFoundHandling: notFoundHandling,
 				RunWorkerFirst:   in.AssetsRunWorkerFirst,
+				Headers:          in.AssetHeaders,
 			},
 		}
 	}

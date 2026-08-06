@@ -61,7 +61,9 @@ flue relay status    # what is configured
 Setup needs a token from the **"Edit Cloudflare Workers"** template. It verifies
 the token, picks the account (asking when there is more than one), uploads the
 Worker with its Durable Object migration and the whole web bundle as the
-Worker's static assets, enables the `workers.dev` subdomain, sets a fresh
+Worker's static assets — served under the same `Referrer-Policy` and
+`Content-Security-Policy` the daemon serves its own UI with, minus the loopback
+sockets a relay origin has no use for — enables the `workers.dev` subdomain, sets a fresh
 32-byte `DAEMON_SECRET` on the script, and writes `relay.json` (mode 0600) into
 flue's config directory — `$XDG_CONFIG_HOME/flue`, or `~/.config/flue`. The API
 token is never stored: its whole life is that one command, and you can delete it

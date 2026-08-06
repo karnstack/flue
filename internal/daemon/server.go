@@ -387,13 +387,47 @@ func methodPolicy(next http.Handler) http.Handler {
 	})
 }
 
+// The Content-Security-Policy the UI is served under, in the two shapes the two
+// origins that can serve it need.
+//
+// It is not decoration on either. The browser's static Noise key lives in
+// IndexedDB as raw bytes (web/src/crypto/keys.ts — a non-extractable CryptoKey
+// cannot feed a userland Noise implementation), so a stored key is a standing
+// grant to a shell and an injected script would be key theft. `script-src
+// 'self'` is the compensating control that file names, and it has to hold on
+// every origin that serves the bundle, not only on the one that is already
+// unreachable from the internet.
+//
+// The two differ in one directive, and that difference is why there are two.
+// The daemon serves the UI over http on loopback and the socket the UI opens is
+// `ws://127.0.0.1:7717`, which `'self'` does not cover; a relay serves it over
+// https and the socket is a same-origin `wss://`, which `'self'` does. Those
+// loopback entries carry wildcard ports — an injected script could reach every
+// other service on the machine through them (docs/FOLLOW-UPS.md §6) — so an
+// internet-facing origin must not inherit them just because the daemon needs
+// them. Composed rather than written twice, so the shared half cannot drift.
+const (
+	cspHead = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data:; connect-src 'self'"
+	cspTail = "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+
+	// cspLoopbackSockets is the daemon-only addition: its own WebSocket, which
+	// is not same-origin under CSP's rules because the scheme differs.
+	cspLoopbackSockets = " ws://127.0.0.1:* ws://localhost:*"
+
+	// LocalCSP is what this daemon serves its own UI under.
+	LocalCSP = cspHead + cspLoopbackSockets + cspTail
+
+	// RelayCSP is what a relay origin serves the same bundle under. It is
+	// carried to the deploy as the `_headers` file the Worker's static assets
+	// are served with — see cmd/flue/relay.go.
+	RelayCSP = cspHead + cspTail
+)
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "+
-				"img-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; "+
-				"object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", LocalCSP)
 		next.ServeHTTP(w, r)
 	})
 }

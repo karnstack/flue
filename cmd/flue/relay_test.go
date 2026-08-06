@@ -20,6 +20,7 @@ import (
 
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
+	"github.com/karnstack/flue/internal/daemon"
 	relaybundle "github.com/karnstack/flue/relay"
 	"github.com/karnstack/flue/web"
 )
@@ -63,6 +64,7 @@ type wireMetadata struct {
 			HTMLHandling     string   `json:"html_handling"`
 			NotFoundHandling string   `json:"not_found_handling"`
 			RunWorkerFirst   []string `json:"run_worker_first"`
+			Headers          string   `json:"_headers"`
 		} `json:"config"`
 	} `json:"assets"`
 	Observability *struct {
@@ -567,6 +569,63 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 // it again has to work. The fake refuses the second deploy's migration exactly
 // as Cloudflare does, which is what a real re-run meets — the second run must
 // come out the far side with a fresh secret the worker and relay.json agree on.
+// TestRunRelaySetupSendsTheSecurityHeaders: the relay serves the same bundle
+// the daemon does, from the internet rather than from loopback, and until this
+// existed it served it with none of the daemon's security headers — including
+// the `script-src 'self'` that web/src/crypto/keys.ts names as the reason it is
+// willing to hold a raw private key in IndexedDB.
+//
+// Asserted off the wire, because the mechanism is easy to get wrong in a way
+// that looks right: a `_headers` file among the assets would upload cleanly,
+// serve itself at /_headers, and apply to nothing.
+func TestRunRelaySetupSendsTheSecurityHeaders(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+
+	var out bytes.Buffer
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client()); err != nil {
+		t.Fatalf("runRelaySetup: %v", err)
+	}
+	if f.meta.Assets == nil {
+		t.Fatal("no assets in the script metadata")
+	}
+	got := f.meta.Assets.Config.Headers
+	if !strings.Contains(got, "Content-Security-Policy: "+daemon.RelayCSP) {
+		t.Errorf("assets._headers does not carry the relay CSP:\n%q", got)
+	}
+	if !strings.Contains(got, "Referrer-Policy: no-referrer") {
+		t.Errorf("assets._headers does not carry Referrer-Policy:\n%q", got)
+	}
+	// The loopback sockets are the one directive the relay must not inherit:
+	// wildcard ports on an origin whose own socket is a same-origin wss.
+	if strings.Contains(got, "127.0.0.1") || strings.Contains(got, "localhost") {
+		t.Errorf("assets._headers carries the daemon's loopback connect-src:\n%q", got)
+	}
+	// And nothing uploaded the document as an asset, which is the failure this
+	// whole mechanism exists to avoid.
+	for path := range f.manifest {
+		if path == "/_headers" || path == "/_redirects" {
+			t.Errorf("%s was uploaded as a static asset; it would be published and applied to nothing", path)
+		}
+	}
+}
+
+// TestRelayAssetHeadersMatchTheWranglerCopy is the drift guard the two-config
+// deploy needs (docs/FOLLOW-UPS.md §12). `wrangler dev` reads a real file and
+// has no config key for this; `flue relay setup` sends a string. A developer
+// and a user must not end up on different policies, and neither side fails
+// loudly on its own.
+func TestRelayAssetHeadersMatchTheWranglerCopy(t *testing.T) {
+	path := filepath.Join("..", "..", "relay", "public", "_headers")
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if string(onDisk) != relayAssetHeaders {
+		t.Errorf("relay/public/_headers and relayAssetHeaders differ\n--- file ---\n%s\n--- constant ---\n%s", onDisk, relayAssetHeaders)
+	}
+}
+
 func TestRunRelaySetupIsSafeToRerun(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	f := newFakeCloudflare(t, oneAccount(), "karn")

@@ -51,6 +51,7 @@ func deployFixture() DeployInput {
 		DOBindings:           map[string]string{"HUB": "DaemonHub"},
 		Assets:               []Asset{assetHTML, assetJS, assetCSS},
 		AssetsRunWorkerFirst: []string{"/daemon", "/client", "/api/*"},
+		AssetHeaders:         "/*\n  X-Fixture: yes\n",
 		AssetsBinding:        "ASSETS",
 		Observability:        true,
 	}
@@ -961,6 +962,67 @@ func TestDeployOmitsObservabilityWhenOff(t *testing.T) {
 		}
 		if _, ok := m["observability"]; ok {
 			t.Errorf("metadata carries observability with it turned off: %s", meta.Body)
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+
+	if err := f.client().Deploy(context.Background(), in); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+}
+
+// TestDeployCarriesTheAssetHeadersVerbatim: a `_headers` document is a file
+// format, so the bytes have to arrive as written — newlines, two-space
+// indentation and all. It is also the only route there is: dropping the same
+// file into the assets directory publishes it at /_headers and configures
+// nothing.
+func TestDeployCarriesTheAssetHeadersVerbatim(t *testing.T) {
+	in := deployFixture()
+	in.AssetHeaders = "/*\n  Content-Security-Policy: default-src 'self'\n  Referrer-Policy: no-referrer\n"
+
+	f := deployServer(t, nil, func(w http.ResponseWriter, parts []part) {
+		meta := partNamed(t, parts, "metadata")
+		var m struct {
+			Assets struct {
+				Config struct {
+					Headers string `json:"_headers"`
+				} `json:"config"`
+			} `json:"assets"`
+		}
+		if err := json.Unmarshal(meta.Body, &m); err != nil {
+			t.Fatalf("decoding metadata: %v", err)
+		}
+		if got := m.Assets.Config.Headers; got != in.AssetHeaders {
+			t.Errorf("assets.config._headers = %q, want %q", got, in.AssetHeaders)
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+
+	if err := f.client().Deploy(context.Background(), in); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+}
+
+// TestDeployOmitsAssetHeadersWhenUnset: the field is undocumented in
+// Cloudflare's multipart-metadata reference, so a deploy with nothing to say
+// says nothing rather than sending an empty document at a server whose
+// validation we cannot read.
+func TestDeployOmitsAssetHeadersWhenUnset(t *testing.T) {
+	in := deployFixture()
+	in.AssetHeaders = ""
+
+	f := deployServer(t, nil, func(w http.ResponseWriter, parts []part) {
+		meta := partNamed(t, parts, "metadata")
+		var m struct {
+			Assets struct {
+				Config map[string]any `json:"config"`
+			} `json:"assets"`
+		}
+		if err := json.Unmarshal(meta.Body, &m); err != nil {
+			t.Fatalf("decoding metadata: %v", err)
+		}
+		if _, ok := m.Assets.Config["_headers"]; ok {
+			t.Errorf("metadata carries _headers with none set: %s", meta.Body)
 		}
 		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
 	})

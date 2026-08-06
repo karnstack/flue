@@ -5,6 +5,14 @@
  * key cannot feed a userland Noise implementation anyway. The compensating
  * control is the strict CSP on every origin that serves the UI — a stored
  * key is a persistent grant to a shell, and XSS would be key theft.
+ *
+ * "Every origin" is two, and they carry the policy by different means: the
+ * daemon sets it as a response header (`internal/daemon`, `LocalCSP` through
+ * `securityHeaders`), and a relay serves the bundle from Cloudflare's asset
+ * router, which is configured with the `_headers` document `flue relay setup`
+ * sends (`RelayCSP`, cmd/flue/relay.go). The relay origin is the one reachable
+ * from the internet, so it is the one where this sentence has to be true rather
+ * than aspirational — relay/test/routing.test.ts is where that is checked.
  */
 import { x25519 } from '@noble/curves/ed25519.js'
 
