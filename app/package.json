@@ -10,7 +10,8 @@
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
-    "db:migrate:local": "wrangler d1 migrations apply flue --local"
+    "db:migrate:local": "wrangler d1 migrations apply flue --local",
+    "cf-typegen": "wrangler types"
   },
   "dependencies": {
     "@tanstack/react-router": "^1.170.0",

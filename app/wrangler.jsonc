@@ -5,6 +5,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "main": "@tanstack/react-start/server-entry",
   "observability": { "enabled": true },
+  // Bindings declared here are typed by worker-configuration.d.ts, which is
+  // generated: after adding or renaming one, run `pnpm cf-typegen`.
   // database_id "local" is a placeholder for dev; the real id is filled at
   // deploy time (`wrangler d1 create flue`).
   "d1_databases": [
