@@ -3,9 +3,11 @@
 //
 // The configPath points at the BUILT worker (`pnpm build` writes
 // dist/server/wrangler.json, main: index.js, plus the client assets), not at
-// ./wrangler.jsonc: the pool cannot resolve that file's
-// `main: "@tanstack/react-start/server-entry"`, a bare specifier only the
-// tanstackStart vite plugin's build graph can materialize. Running the built
+// ./wrangler.jsonc: the pool cannot materialize what that file's `main`
+// names. It is `./src/server.ts` (Task 10 added a `scheduled` export beside
+// Start's fetch handler), and that module's graph is the tanstackStart vite
+// plugin's — the route tree, the server-function manifest, the virtual entry
+// aliases — none of which the pool's own bundler builds. Running the built
 // worker keeps SELF.fetch exercising the real SSR entry. `pnpm build` must
 // run before `pnpm test`; the Makefile's test-app target encodes that.
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers'

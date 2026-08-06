@@ -412,10 +412,12 @@ describe('rate_limits: the sweep', () => {
     expect(await counterFor('login-code:email', live)).toHaveLength(1)
   })
 
-  it('rides on requestCode, so the table collects itself with no cron', async () => {
-    // There is no scheduled handler in this application yet, and a table that
-    // only ever grows is the kind of thing that is fine until it is a page.
-    // The sweep is a coin flip on the same traffic that fills the table.
+  it('rides on requestCode, so the table collects itself without a cron', async () => {
+    // The cron (src/server.ts) is what collects these tables in production;
+    // this coin flip on ordinary traffic is what collects them where no cron is
+    // running — `vite dev`, a `wrangler dev` session, a self-hosted control
+    // plane whose operator never set the trigger. A table that only ever grows
+    // is the kind of thing that is fine until it is a page.
     const stale = freshEmail('swept-by-traffic')
     await ask({ email: stale })
     await expire('login-code:email', stale)
