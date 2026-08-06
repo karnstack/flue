@@ -453,12 +453,41 @@ describe('DevicesRoute', () => {
     expect(screen.getByText(EXPLAINER)).toBeTruthy()
   })
 
+  it('ties the shut Pair button to the sentence that explains it', async () => {
+    // Proximity is not a relationship: the button and its explanation sit on
+    // opposite sides of one flex row, so a keyboard reader who lands on the
+    // shut button hears "Pair device, dimmed" and nothing else unless the two
+    // are linked.
+    const { sock } = await mountDevices({ relay: { status: 'off' } })
+    listed(sock, [])
+
+    const describedBy = pairButton().getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy as string)?.textContent).toContain(
+      EXPLAINER,
+    )
+  })
+
+  it('sends the reader to the screen that can do something about the gate', async () => {
+    // The explainer names a command; /remote is where that command is
+    // explained, and it is the only screen in the app with anything to say
+    // about a relay.
+    const { sock } = await mountDevices({ relay: { status: 'off' } })
+    listed(sock, [])
+
+    expect(
+      screen.getByRole('link', { name: /set up remote access/i }).getAttribute('href'),
+    ).toBe('/remote')
+  })
+
   it('offers pairing while the relay is connected, and says nothing else about it', async () => {
     const { sock } = await mountDevices({ relay: RELAY_UP })
     listed(sock, [])
 
     expect(pairButton().hasAttribute('disabled')).toBe(false)
     expect(screen.queryByText(EXPLAINER)).toBeNull()
+    // And nothing left to point at, so the button describes nothing.
+    expect(pairButton().getAttribute('aria-describedby')).toBeNull()
   })
 
   it('re-evaluates the gate on the welcome each reconnect brings', async () => {

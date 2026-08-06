@@ -15,6 +15,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
+import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 
 /**
@@ -76,7 +77,8 @@ function connectionNotice(status: ConnStatus): string | null {
 }
 
 /**
- * One command, ready to be taken to a terminal.
+ * One string the reader wants somewhere else — a command, or the address the
+ * relay carries this machine at — with a button that puts it there.
  *
  * **This screen guides; it does not act.** The daemon takes `flue relay setup`
  * and `flue link` from a shell on the machine it runs on, and nothing a browser
@@ -96,7 +98,7 @@ function connectionNotice(status: ConnStatus): string | null {
  * another window, and a confirmation that had vanished by the time they looked
  * back would leave them wondering whether the click landed at all.
  */
-function Command({ command }: { command: string }) {
+function Copyable({ text, breakable = false }: { text: string; breakable?: boolean }) {
   const [said, setSaid] = useState('')
 
   function copy() {
@@ -105,7 +107,7 @@ function Command({ command }: { command: string }) {
       setSaid(BY_HAND)
       return
     }
-    void clipboard.writeText(command).then(
+    void clipboard.writeText(text).then(
       () => setSaid(COPIED),
       () => setSaid(BY_HAND),
     )
@@ -114,21 +116,30 @@ function Command({ command }: { command: string }) {
   return (
     <div>
       {/*
-        The command sits on a tinted strip rather than in a bordered box: it is
-        a quotation from a terminal, and the card around it is already doing the
-        containing. It scrolls sideways on its own so a narrow phone shows a
-        long command whole rather than wrapping it into something that would be
-        pasted with a line break in it.
+        The string sits on a tinted strip rather than in a bordered box: it is a
+        quotation — from a terminal, or from the relay — and the card around it
+        is already doing the containing.
+
+        A command scrolls sideways on its own so a narrow phone shows a long one
+        whole rather than wrapping it into something that would be pasted with a
+        line break in it. An address is the opposite: it is read, not pasted
+        into a shell, and a relay origin on a workers.dev subdomain is longer
+        than a phone is wide, so it wraps at any character.
       */}
       <div className="flex items-center gap-x-2 rounded-lg bg-zinc-950/5 py-1 pr-1 pl-2.5 dark:bg-white/5">
-        <code className="min-w-0 flex-1 overflow-x-auto font-mono text-xs/6 whitespace-nowrap text-zinc-950 select-all dark:text-white">
-          {command}
+        <code
+          className={cn(
+            'min-w-0 flex-1 font-mono text-sm/6 text-zinc-950 select-all sm:text-xs/6 dark:text-white',
+            breakable ? 'break-all' : 'overflow-x-auto whitespace-nowrap',
+          )}
+        >
+          {text}
         </code>
         {/*
-          Named after the command it copies: a screen reader announcing "Copy"
-          twice, once per card, says nothing about which one is which.
+          Named after what it copies: a screen reader announcing "Copy" three
+          times on one screen says nothing about which one is which.
         */}
-        <Button variant="ghost" size="icon-sm" aria-label={`Copy ${command}`} onClick={copy}>
+        <Button variant="ghost" size="icon-sm" aria-label={`Copy ${text}`} onClick={copy}>
           <ClipboardIcon aria-hidden="true" />
         </Button>
       </div>
@@ -147,8 +158,29 @@ function Command({ command }: { command: string }) {
   )
 }
 
-/** The relay leg's state, in one word, in the colour that word deserves. */
-function StatusBadge({ status }: { status: RelayInfo['status'] }) {
+/** A command, ready to be taken to a terminal. */
+function Command({ command }: { command: string }) {
+  return <Copyable text={command} />
+}
+
+/**
+ * The relay leg's state, in one word, in the colour that word deserves.
+ *
+ * `null` is not one of the daemon's answers — it is the absence of one. The
+ * relay rides a welcome, so a tab that has not been greeted yet knows nothing,
+ * and `client.relay` folds that into the same `{status:'off'}` a daemon with no
+ * relay sends. Rendering "Not configured" from it would put the loudest claim
+ * on this screen on the page before anything had said it.
+ */
+function StatusBadge({ status }: { status: RelayInfo['status'] | null }) {
+  if (status === null) {
+    return (
+      <Badge variant="outline" className="shrink-0">
+        <ArrowPathIcon aria-hidden="true" className="motion-safe:animate-spin" />
+        Checking
+      </Badge>
+    )
+  }
   if (status === 'connected') {
     // The screen's one amber element, taking it from --primary rather than
     // naming a colour — the same treatment the single primary button gets.
@@ -298,13 +330,14 @@ function Reachable({ origin }: { origin: string }) {
       </CardHeader>
       <CardContent className="flex flex-col gap-y-4">
         {/*
-          `select-all` and breakable, as the pairing URL on Devices is: this is
-          a string somebody may want to send to themselves, and a relay origin
-          on a workers.dev subdomain is longer than a phone is wide.
+          Copyable, and breakable, as the pairing URL on Devices is: this is a
+          string somebody may want to send to themselves, and a relay origin on
+          a workers.dev subdomain is longer than a phone is wide. It gets the
+          same strip the commands above it get, because it is the same kind of
+          thing — a quotation the page hands over rather than something it
+          says.
         */}
-        <p className="font-mono text-base/6 break-all text-zinc-950 select-all sm:text-sm/6 dark:text-white">
-          {origin}
-        </p>
+        <Copyable text={origin} breakable />
         <div className="flex flex-wrap items-center gap-3">
           {/*
             The one filled control on the screen, taking its amber from
@@ -360,13 +393,31 @@ export function RemoteRoute() {
   // Seeded for the same reason: onStatus reports only changes, and a screen
   // reached by navigating mounts into a connection that is already up.
   const [conn, setConn] = useState<ConnStatus>(() => client.status)
+  /**
+   * Whether anything has actually said what the relay is doing.
+   *
+   * `client.relay` cannot answer this — a daemon with no relay and a tab that
+   * has not been greeted yet both read `{status:'off'}`, deliberately, so that
+   * consumers do not fold three spellings of "no relay" into one. The
+   * distinction only matters here, on the one screen whose whole subject is
+   * that field, so it is kept here rather than added to the client.
+   *
+   * Seeded from the connection state: a socket that is already up was greeted
+   * on the way, since the daemon sends its welcome as the first frame of every
+   * connection it accepts. A cold load starts at `connecting`, which is exactly
+   * the window this exists to cover.
+   */
+  const [greeted, setGreeted] = useState(() => client.status === 'open')
 
   useEffect(() => {
     const offs = [
       // Every welcome, not only the first: the relay state is a snapshot each
       // connection carries, so a reconnect is the only thing that ever
       // refreshes it — the same reason the Pair gate on Devices listens here.
-      client.onWelcome(() => setRelay(client.relay)),
+      client.onWelcome(() => {
+        setRelay(client.relay)
+        setGreeted(true)
+      }),
       client.onStatus(setConn),
     ]
     return () => {
@@ -409,12 +460,66 @@ export function RemoteRoute() {
             {connectionNotice(conn)}
           </p>
         </div>
-        <StatusBadge status={status} />
+        <StatusBadge status={greeted ? status : null} />
       </div>
 
-      {status === 'off' && <NotConfigured />}
-      {status === 'connecting' && <Dialling />}
-      {status === 'connected' && <Reachable origin={origin} />}
+      {!greeted && <AwaitingWelcome connecting={conn === 'connecting'} />}
+      {greeted && status === 'off' && <NotConfigured />}
+      {greeted && status === 'connecting' && <Dialling />}
+      {greeted && status === 'connected' && <Reachable origin={origin} />}
     </div>
+  )
+}
+
+/**
+ * The first moment of a cold load: the socket is being opened and the daemon
+ * has not said anything yet.
+ *
+ * A skeleton of the card that is about to arrive rather than a spinner or, as
+ * this screen used to do, the not-configured state — which is the loudest claim
+ * it can make ("nothing outside this computer can reach these sessions") and
+ * was being made before anything had said so. On a machine with a working relay
+ * that flashed a paragraph of setup instructions at the reader every time they
+ * opened the page.
+ *
+ * `aria-hidden`, because the header's live region already says "Connecting to
+ * the flue daemon…" and grey rectangles add nothing to it.
+ */
+function AwaitingWelcome({ connecting }: { connecting: boolean }) {
+  if (!connecting) {
+    // The first attempt has already failed, so this is no longer a moment — it
+    // is a state, and a skeleton that shimmers through it would read as a page
+    // still loading rather than a daemon that has not answered. What the reader
+    // can do about it is nothing, and saying so is better than a placeholder
+    // that implies otherwise.
+    return (
+      <Empty className="border border-dashed border-zinc-950/10 py-8 dark:border-white/10">
+        <EmptyHeader className="max-w-[48ch]">
+          <EmptyMedia variant="icon">
+            <GlobeAltIcon aria-hidden="true" />
+          </EmptyMedia>
+          <EmptyTitle className="text-base/6 sm:text-sm/6">
+            Waiting for the flue daemon
+          </EmptyTitle>
+          <EmptyDescription className={PROSE}>
+            Whether anything outside this computer can reach these sessions is something only the
+            daemon can say, and it has not said it yet. This page keeps trying; nothing here needs
+            doing.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+  return (
+    <Card aria-hidden="true" className="max-w-3xl">
+      <CardHeader>
+        <Skeleton className="h-5 w-48" />
+      </CardHeader>
+      <CardContent className="flex flex-col gap-y-3">
+        <Skeleton className="h-4 w-full" />
+        <Skeleton className="h-4 w-4/5" />
+        <Skeleton className="h-8 w-full" />
+      </CardContent>
+    </Card>
   )
 }

@@ -91,6 +91,44 @@ describe('RemoteRoute', () => {
     expect(screen.getByText(LINK)).toBeTruthy()
   })
 
+  it('claims nothing about the relay until the daemon has said something', async () => {
+    // The relay rides a welcome, and `client.relay` reports a tab that has not
+    // been greeted yet as `{status:'off'}` — the same value a daemon with no
+    // relay sends. Rendering the not-configured state from that would flash
+    // "nothing outside this computer can reach these sessions", a paragraph of
+    // setup instructions and all, at every reader whose relay is perfectly
+    // fine, on every cold load.
+    const { client, sockets } = fakeClient()
+    await renderWithRouter(
+      <FlueClientProvider client={client}>
+        <RemoteRoute />
+      </FlueClientProvider>,
+      '/remote',
+    )
+    const sock = sockets[0]!
+    act(() => sock.open())
+
+    expect(screen.getByText('Checking')).toBeTruthy()
+    expect(screen.queryByText('Not configured')).toBeNull()
+    expect(screen.queryByText(SETUP)).toBeNull()
+
+    // And the moment it has said something, it is said.
+    welcomed(sock)
+    expect(screen.getByText('Not configured')).toBeTruthy()
+    expect(screen.getByText(SETUP)).toBeTruthy()
+  })
+
+  it('copies the address the relay carries this machine at', async () => {
+    // Copyable for the same reason the commands are: this is a string somebody
+    // sends to themselves, and it is longer than a phone is wide.
+    const user = userEvent.setup()
+    await mountRemote({ relay: RELAY_UP })
+
+    await user.click(copyButton('https://flue-relay.example'))
+
+    expect(await navigator.clipboard.readText()).toBe('https://flue-relay.example')
+  })
+
   it('says it cannot run either command itself', async () => {
     // The whole honesty of the screen. A browser cannot drive the daemon's CLI,
     // so a page that showed a "Set up" button would be offering a click that

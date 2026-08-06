@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { QrCodeIcon } from '@heroicons/react/16/solid'
+import { Link } from '@tanstack/react-router'
 import { generate } from 'lean-qr'
 
 import type { ConnStatus } from '@/client/client'
@@ -56,6 +57,17 @@ const REFUSALS: Record<string, string> = {
  */
 const UNREACHABLE =
   "Remote devices can't reach 127.0.0.1. Run flue relay setup to give this daemon an address, then pair."
+
+/**
+ * The id tying the sentence above to the button it explains.
+ *
+ * `aria-describedby` rather than trusting proximity: the Pair button and its
+ * explanation are on opposite sides of a flex row, so a reader who lands on the
+ * shut button by keyboard hears "Pair device, dimmed" and nothing else unless
+ * the two are linked. One id, because only one of these headers is ever on
+ * screen.
+ */
+const UNREACHABLE_ID = 'pair-unreachable'
 
 /**
  * How long ago, in the coarsest unit that still says something.
@@ -571,8 +583,23 @@ export function DevicesRoute() {
             reader interrupt with it on every welcome that reaffirms it.
           */}
           {!reachable && (
-            <p className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
-              {UNREACHABLE}
+            <p
+              id={UNREACHABLE_ID}
+              className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400"
+            >
+              {UNREACHABLE}{' '}
+              {/*
+                Where the command is explained, and the only screen that can do
+                anything about this one. A router Link, never a plain anchor: a
+                page load would tear down the tab's one socket, and this daemon
+                is what that socket is to.
+              */}
+              <Link
+                to="/remote"
+                className="font-medium text-zinc-950 underline underline-offset-4 dark:text-white"
+              >
+                Set up remote access
+              </Link>
             </p>
           )}
         </div>
@@ -588,7 +615,16 @@ export function DevicesRoute() {
           a pairing that succeeds against 127.0.0.1 is worse than one refused:
           it mints a device that can never connect.
         */}
-        <Button size="sm" className="shrink-0" disabled={!connected || !reachable} onClick={pair}>
+        <Button
+          size="sm"
+          className="shrink-0"
+          disabled={!connected || !reachable}
+          // Only when that is the reason it is shut. A button held shut by a
+          // socket that is down is already explained by the live region above,
+          // and pointing at a paragraph that is not on the page names nothing.
+          aria-describedby={!reachable ? UNREACHABLE_ID : undefined}
+          onClick={pair}
+        >
           <QrCodeIcon data-icon="inline-start" aria-hidden="true" />
           Pair device
         </Button>
