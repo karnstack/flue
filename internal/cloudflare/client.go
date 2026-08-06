@@ -80,6 +80,17 @@ const htmlHandling = "auto-trailing-slash"
 // surviving an upload that meant to replace it.
 var keptBindingTypes = []string{"secret_text"}
 
+// maxResponseBytes bounds one API response before anything parses it. Four
+// mebibytes is orders of magnitude past the largest thing this client asks for
+// and is a bound rather than a budget.
+const maxResponseBytes = 4 << 20
+
+// maxAPIMessageChars bounds a Cloudflare error message on its way to the user's
+// terminal. Long enough that migrationAlreadyApplied still sees the wording it
+// matches on, short enough that a hostile or broken response cannot write four
+// mebibytes into a screen.
+const maxAPIMessageChars = 512
+
 // scriptAPIDate pins the Worker subdomain endpoint's contract. Cloudflare
 // versions that endpoint by date and current wrangler sends this same value;
 // without it the meaning of previews_enabled is whatever the account's default
@@ -214,20 +225,37 @@ func (c *Client) callWithInfo(ctx context.Context, a apiCall) (json.RawMessage, 
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
+	// One byte past the cap, so a body that is exactly at it still parses and
+	// anything longer is detectable rather than silently truncated into
+	// unparseable JSON. Nothing this client asks for is large — the biggest is
+	// an upload session's list of content hashes — so the cap is far above any
+	// real answer and exists to stop a wrong endpoint, a captive portal or a
+	// broken edge from being read into memory without limit.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, nil, fmt.Errorf("cloudflare: reading %s %s: %w", a.method, a.path, err)
+	}
+	if len(raw) > maxResponseBytes {
+		return nil, nil, fmt.Errorf("cloudflare: %s %s: response ran past %d bytes (HTTP %d)", a.method, a.path, maxResponseBytes, resp.StatusCode)
 	}
 
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		// Cloudflare's edge answers some failures with HTML. Report the status,
-		// not the body: the body is unbounded and can echo the request.
+		// not the body: it is bounded now but it is still the server's own bytes
+		// and can echo the request.
 		return nil, nil, fmt.Errorf("cloudflare: %s %s: unexpected response (HTTP %d)", a.method, a.path, resp.StatusCode)
 	}
 	if !env.Success {
 		if len(env.Errors) > 0 {
-			return nil, nil, &APIError{Code: env.Errors[0].Code, Message: env.Errors[0].Message}
+			// Bounded for the reason the body is: this string reaches the user's
+			// terminal through APIError.Error, and every byte of it was chosen by
+			// the server. The bound is generous enough to leave
+			// migrationAlreadyApplied's two words in place.
+			return nil, nil, &APIError{
+				Code:    env.Errors[0].Code,
+				Message: bounded(env.Errors[0].Message, maxAPIMessageChars),
+			}
 		}
 		return nil, nil, fmt.Errorf("cloudflare: %s %s failed without an error message (HTTP %d)", a.method, a.path, resp.StatusCode)
 	}
@@ -645,6 +673,47 @@ func (c *Client) SetSecret(ctx context.Context, accountID, script, name, value s
 		contentType: "application/json",
 		body:        body,
 	})
+	// This is the one request in the package whose body *is* a credential, and
+	// the one place a Cloudflare validation error could quote it back. That
+	// error goes to the user's terminal verbatim (`flue relay setup` wraps and
+	// prints it), so it is checked rather than trusted.
+	return withoutSecret(err, value)
+}
+
+// secretEchoRun is how much of a secret has to appear in a message for the
+// message to be dropped.
+//
+// A whole-string match is not the bound worth setting: a server that echoes
+// what it rejected may truncate, quote, or wrap it, and any of those slips past
+// an equality test while still putting most of a credential on a screen. Eight
+// characters is long enough that a base64 secret cannot produce one by
+// coincidence and short enough that a partial echo does not get through.
+const secretEchoRun = 8
+
+// withoutSecret returns err with Cloudflare's own message removed if any run of
+// the secret appears in it.
+//
+// All or nothing, deliberately. Substituting the matched run would leave the
+// rest of the message — including whatever else of the credential the server
+// chose to quote — and would report a redaction that had not actually covered
+// what it claimed to. Cloudflare's error *code* survives wherever there was
+// one, which is the part a user can look up; losing the sentence on the rare
+// request that echoes a secret is the cheaper half of that trade.
+func withoutSecret(err error, secret string) error {
+	if err == nil || len(secret) < secretEchoRun {
+		return err
+	}
+	msg := err.Error()
+	for i := 0; i+secretEchoRun <= len(secret); i++ {
+		if !strings.Contains(msg, secret[i:i+secretEchoRun]) {
+			continue
+		}
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			return &APIError{Code: apiErr.Code, Message: "error message withheld: it quoted the secret being set"}
+		}
+		return errors.New("cloudflare: setting the secret failed, and the error message is withheld because it quoted the secret")
+	}
 	return err
 }
 

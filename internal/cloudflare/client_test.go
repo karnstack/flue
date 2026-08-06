@@ -1489,6 +1489,106 @@ func TestSetSecretPutsASecretTextBinding(t *testing.T) {
 	}
 }
 
+// TestSetSecretNeverEchoesTheSecret: this is the one request in the package
+// whose body is a credential, and Cloudflare's validation errors quote what
+// they rejected. The error goes to the user's terminal verbatim, so a message
+// carrying the secret — whole, or the fragment a truncating server would quote
+// — must not survive the call.
+func TestSetSecretNeverEchoesTheSecret(t *testing.T) {
+	const secret = "Zm91cnRlZW4tY2hhcnMtb2YtZGFlbW9uLXNlY3JldA"
+
+	for name, message := range map[string]string{
+		"the whole secret":  fmt.Sprintf("invalid value %q for text", secret),
+		"a quoted fragment": "invalid value " + secret[:20] + "… for text",
+		"a bare fragment":   secret[10:30],
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+				writeAPIError(w, http.StatusBadRequest, 10021, message)
+			})
+
+			err := f.client().SetSecret(context.Background(), "acct-123", "flue-relay", "DAEMON_SECRET", secret)
+			if err == nil {
+				t.Fatal("SetSecret = nil, want the rejection")
+			}
+			// Every run of the secret, not just the whole string: the point is
+			// that no usable piece of it reaches a screen.
+			for i := 0; i+8 <= len(secret); i++ {
+				if strings.Contains(err.Error(), secret[i:i+8]) {
+					t.Fatalf("error carries %q, a run of the secret: %v", secret[i:i+8], err)
+				}
+			}
+			// The code survives, because it is the part a user can act on.
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.Code != 10021 {
+				t.Errorf("error = %#v, want an *APIError still carrying code 10021", err)
+			}
+		})
+	}
+}
+
+// TestSetSecretKeepsAnUnrelatedMessage is the other half: withholding is for
+// the message that quoted the secret, not for every failure of this endpoint.
+func TestSetSecretKeepsAnUnrelatedMessage(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		writeAPIError(w, http.StatusNotFound, 10007, "workers.api.error.script_not_found")
+	})
+
+	err := f.client().SetSecret(context.Background(), "acct-123", "flue-relay", "DAEMON_SECRET", "hunter2hunter2hunter2")
+	if err == nil {
+		t.Fatal("SetSecret = nil, want the rejection")
+	}
+	if !strings.Contains(err.Error(), "script_not_found") {
+		t.Errorf("error %q dropped a message that never mentioned the secret", err)
+	}
+}
+
+// TestCallBoundsTheResponseBody: a wrong endpoint, a captive portal or a broken
+// edge must not be read into memory without limit — and the refusal must name
+// the size rather than quoting bytes the server chose.
+func TestCallBoundsTheResponseBody(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Valid JSON that never ends inside the cap, so a client that read it
+		// all would succeed and one that truncated blindly would report a
+		// parse failure instead of a size one.
+		_, _ = io.WriteString(w, `{"success":true,"result":"`)
+		chunk := strings.Repeat("A", 64<<10)
+		for written := 0; written < maxResponseBytes+(1<<20); written += len(chunk) {
+			_, _ = io.WriteString(w, chunk)
+		}
+		_, _ = io.WriteString(w, `"}`)
+	})
+
+	_, err := f.client().Accounts(context.Background())
+	if err == nil {
+		t.Fatal("Accounts against an endless body = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "ran past") {
+		t.Errorf("error %q does not report the body running past the cap", err)
+	}
+	if strings.Contains(err.Error(), "AAAA") {
+		t.Errorf("error quotes the body back: %v", err)
+	}
+}
+
+// TestAPIErrorMessageIsBounded: the message reaches a terminal and every byte
+// of it was chosen by the server.
+func TestAPIErrorMessageIsBounded(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		writeAPIError(w, http.StatusBadRequest, 1000, strings.Repeat("x", 4<<20))
+	})
+
+	err := f.client().VerifyToken(context.Background())
+	if err == nil {
+		t.Fatal("VerifyToken = nil, want the rejection")
+	}
+	if len(err.Error()) > maxAPIMessageChars+200 {
+		t.Errorf("error is %d bytes; the server's message was not bounded", len(err.Error()))
+	}
+}
+
 // ------------------------------------------------------------ EnableSubdomain
 
 func TestEnableSubdomainComposesTheHost(t *testing.T) {

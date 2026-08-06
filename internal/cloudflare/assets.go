@@ -102,15 +102,19 @@ func hashOf(a Asset) string {
 	return hex.EncodeToString(sum[:])[:32]
 }
 
-// bounded caps a server-supplied string on its way into an error message. A
-// hash is 32 characters; anything longer is a response worth truncating.
-func bounded(s string) string {
-	const max = 64
+// bounded caps a server-supplied string at max on its way into an error
+// message. Nothing Cloudflare sends is trusted to be a length a terminal can
+// take.
+func bounded(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
 	return s[:max] + "..."
 }
+
+// maxHashChars is the bound for a content hash quoted back at the user. A hash
+// is 32 characters; anything longer is a response worth truncating.
+const maxHashChars = 64
 
 // manifestEntry describes one file to the upload session.
 type manifestEntry struct {
@@ -209,7 +213,7 @@ func (c *Client) uploadBucket(ctx context.Context, accountID, sessionJWT string,
 			// h came off the wire, so it is quoted and bounded before it reaches
 			// a terminal: a broken or hostile response should not be able to
 			// write arbitrary bytes into the user's screen.
-			return "", fmt.Errorf("cloudflare: the upload session asked for hash %q, which is not in this deploy's manifest", bounded(h))
+			return "", fmt.Errorf("cloudflare: the upload session asked for hash %q, which is not in this deploy's manifest", bounded(h, maxHashChars))
 		}
 		// The field name and filename are both the hash: this endpoint is
 		// addressed by content, and the body is base64 because the request
