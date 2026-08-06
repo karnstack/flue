@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "flue-app",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "@tanstack/react-start/server-entry",
+  "observability": { "enabled": true },
+  // database_id "local" is a placeholder for dev; the real id is filled at
+  // deploy time (`wrangler d1 create flue`).
+  "d1_databases": [
+    { "binding": "DB", "database_name": "flue", "database_id": "local", "migrations_dir": "migrations" }
+  ]
+}

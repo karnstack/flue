@@ -1,0 +1,13 @@
+# pnpm 11 refuses to finish an install that silently skipped a package's build
+# script (see web/pnpm-workspace.yaml for the long version), and it no longer
+# reads the "pnpm" key in package.json. esbuild's postinstall links the
+# platform binary; workerd's does the same for the runtime wrangler, the
+# cloudflare vite plugin and the vitest workers pool run tests inside.
+allowBuilds:
+  esbuild: true
+  workerd: true
+minimumReleaseAgeExclude:
+  - '@cloudflare/vite-plugin@1.51.0'
+  - '@cloudflare/vitest-pool-workers@0.20.2'
+  - miniflare@5.20260801.0-alpha
+  - wrangler@4.119.0
