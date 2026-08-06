@@ -144,15 +144,26 @@ function keyFromLink(text: string): Uint8Array | null {
   return key !== null && key.length === KEY_BYTES ? key : null
 }
 
-/**
- * How much of a plain-text refusal is worth repeating.
- *
- * The daemon's own is two words. Anything much longer, or anything carrying a
- * tag or a line break, is not a message written for a person — it is a proxy's
- * error page, and this endpoint now has intermediaries in front of it that can
- * produce one.
- */
+/** Longer than any refusal written for a person; the daemon's own is two
+ *  words. */
 const MAX_QUOTED = 200
+
+/**
+ * Whether a refusal is a message this page will repeat to a user.
+ *
+ * Anything much longer than a sentence, or anything carrying a tag or a line
+ * break, was not written for a person — it is a proxy's error page or a stack
+ * trace, and this endpoint has intermediaries in front of it that can produce
+ * either. React would escape it and it would still be the wire on the screen
+ * where a sentence belongs.
+ *
+ * Applied to the relay's JSON envelope as well as to bare text, because only
+ * one end of that envelope is the daemon: the relay writes its own refusals
+ * into the same shape, and the page cannot tell whose words it is holding.
+ */
+function quotable(text: string): boolean {
+  return text !== '' && text.length <= MAX_QUOTED && !/[<>\n]/.test(text)
+}
 
 /**
  * What the far end said about a refusal, in words a person can read.
@@ -180,10 +191,12 @@ async function refusalText(res: Response): Promise<string> {
   try {
     parsed = JSON.parse(body)
   } catch {
-    return body.length <= MAX_QUOTED && !/[<>\n]/.test(body) ? body : ''
+    return quotable(body) ? body : ''
   }
   const said = (parsed as { error?: unknown } | null)?.error
-  return typeof said === 'string' ? said.trim() : ''
+  if (typeof said !== 'string') return ''
+  const trimmed = said.trim()
+  return quotable(trimmed) ? trimmed : ''
 }
 
 /**

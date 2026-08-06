@@ -279,6 +279,30 @@ describe('PairRoute', () => {
     expect(pairButton()).toBeTruthy()
   })
 
+  it('does not put a proxy’s error page on the screen', async () => {
+    // A relay origin has intermediaries in front of the daemon, and an edge
+    // that is having a bad day answers with HTML. React would escape it and it
+    // would still be a page of markup where a sentence belongs — in either
+    // wrapping, so the JSON envelope is held to the same rule.
+    const html = '<html><body><h1>502 Bad Gateway</h1></body></html>'
+    fetchMock.mockResolvedValueOnce(answer({ ok: false, status: 502, text: html }))
+    const first = await renderPair(LINK)
+
+    await userEvent.click(await armedPairButton())
+    expect(await screen.findByText(/502/)).toBeTruthy()
+    expect(status()).not.toContain('Bad Gateway')
+    first.unmount()
+
+    fetchMock.mockResolvedValueOnce(
+      answer({ ok: false, status: 403, text: JSON.stringify({ error: html }) }),
+    )
+    await renderPair(LINK)
+
+    await userEvent.click(await armedPairButton())
+    expect(await screen.findByText(/refused the pairing/)).toBeTruthy()
+    expect(status()).not.toContain('Bad Gateway')
+  })
+
   it('names the status when a refusal carried nothing worth quoting', async () => {
     // A 502 with an empty body: the relay could not make sense of what its
     // upstream said. There is nothing to repeat, so the page says only what it

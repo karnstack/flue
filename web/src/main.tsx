@@ -25,13 +25,12 @@ if (cleaned !== location.href) history.replaceState(null, '', cleaned)
 /**
  * What this tab can reach, when the page did not come from the daemon.
  *
- * The socket at /ws is the daemon on loopback and a Cloudflare Worker on a
- * relay origin, and the two need different things underneath them: the first is
- * already private and already authenticated by a cookie the daemon set, and the
- * second is a hop through infrastructure that must be able to read none of it.
- * So a relay origin gets a client whose transport is a Noise channel to the
- * daemon this browser pinned at pairing time — see src/relay/socket.ts, which
- * FlueClient cannot tell apart from a WebSocket.
+ * On loopback the socket at /ws is the daemon: already private, and already
+ * authenticated by a cookie the daemon itself set. On a relay origin there is
+ * no /ws at all — there is a Worker at /client that forwards bytes it must not
+ * be able to read. So a relay origin gets a client whose transport is a Noise
+ * channel to the daemon this browser pinned at pairing time; see
+ * src/relay/socket.ts, which FlueClient cannot tell apart from a WebSocket.
  *
  * With no pinned key there is nothing to build: the tab has no daemon, and the
  * router is told to say so rather than to connect on a loop with no credential
