@@ -114,7 +114,25 @@ export class DaemonHub extends DurableObject<Env> {
       bytesToDaemon: 0,
       bytesToClient: 0,
     } satisfies ClientAttachment)
-    daemon.send(controlFrame({ type: 'open', channel, origin: new URL(req.url).origin }))
+    try {
+      daemon.send(controlFrame({ type: 'open', channel, origin: new URL(req.url).origin }))
+    } catch {
+      // The leg died between the check at the door and this send. Unwrapped,
+      // this threw out of the handler: the browser got a 500 where it asked for
+      // a 101, and the socket accepted two lines above stayed attached to a
+      // channel the daemon had never heard of until the handshake alarm reaped
+      // it 30 s later. Undo the accept instead and answer what a client that
+      // arrives with no daemon at all is answered — `notifyDaemon` false,
+      // because there is nothing to tell a daemon about a channel it was never
+      // told existed.
+      this.retireClient(pair[1], false)
+      try {
+        pair[1].close(1013, 'daemon offline')
+      } catch {
+        // Already closing.
+      }
+      return offline()
+    }
     return new Response(null, { status: 101, webSocket: pair[0] })
   }
 
@@ -368,6 +386,18 @@ export class DaemonHub extends DurableObject<Env> {
   private clientMessage(ws: WebSocket, buf: ArrayBuffer): void {
     const att = ws.deserializeAttachment() as ClientAttachment | null
     if (!att || att.done) return // retired; the close frame is still in flight
+    // Refused here rather than forwarded, for the reason MAX_CLIENT_MESSAGE
+    // gives: one socket dies, the same blast radius the text-frame refusal
+    // above has, instead of the whole machine's.
+    if (buf.byteLength > MAX_CLIENT_MESSAGE) {
+      this.retireClient(ws, true)
+      try {
+        ws.close(1009, 'message too big')
+      } catch {
+        // Already closing.
+      }
+      return
+    }
     const daemon = this.daemon()
     if (!daemon) {
       // The daemon fan-out will not reach this socket twice: retire quiet now.
@@ -487,6 +517,26 @@ export class DaemonHub extends DurableObject<Env> {
 /** Concurrent client sockets one hub will hold — the DoS bound on the
  * credential-less leg (spec/relay-protocol.md, Auth). */
 const MAX_CLIENTS = 64
+
+/**
+ * The largest binary frame a client may send — the per-message DoS bound on the
+ * credential-less client leg (spec/relay-protocol.md, Auth).
+ *
+ * This is where an oversized frame's blast radius is decided, and it has to be
+ * decided here. The Durable Object itself accepts up to 32 MiB, and the daemon
+ * reads its end with one read limit over the *shared* socket that carries every
+ * browser on that machine — coder/websocket enforces `SetReadLimit` by killing
+ * the connection, not the message. A single 2.5 MiB frame forwarded from here
+ * would therefore drop the daemon leg, 1012 every other browser, and repeat on
+ * every redial. Refusing it confines the fault to the one socket that sent it,
+ * which is the blast radius the daemon's own WebSocket transport already has.
+ *
+ * The ordering matters and must not be inverted: 1 MiB here sits **below** the
+ * daemon's 2 MiB `readLimit` (internal/transport/relay/relay.go), so a frame an
+ * honest Worker forwards — this payload plus the four-byte channel header —
+ * can never trip it. Raising this above that limit re-opens the fault.
+ */
+const MAX_CLIENT_MESSAGE = 1 << 20
 
 /** The handshake deadline when HANDSHAKE_TIMEOUT_MS is unbound (production). */
 const HANDSHAKE_TIMEOUT_MS = 30_000

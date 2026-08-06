@@ -229,6 +229,53 @@ describe('daemon loss and takeover', () => {
   })
 })
 
+describe('the message-size cap', () => {
+  /** Mirrors MAX_CLIENT_MESSAGE in src/hub.ts. */
+  const CAP = 1 << 20
+
+  it('closes only the client that sent an oversized frame: 1009, socket kept', async () => {
+    const hub = freshHub()
+    const daemon = await dial(hub, '/daemon')
+    const fat = await dial(hub, '/client')
+    const other = await dial(hub, '/client')
+    expect((await daemon.nextControl()).channel).toBe(1)
+    expect((await daemon.nextControl()).channel).toBe(2)
+
+    fat.ws.send(new Uint8Array(CAP + 1))
+    expect(await within(fat.closed, 'the oversized client to close')).toEqual({
+      code: 1009,
+      reason: 'message too big',
+    })
+    // The daemon hears the channel go and nothing else — the payload itself was
+    // never forwarded, which is the whole point: forwarding it would trip the
+    // adapter's read limit and take the shared socket down.
+    expect(await daemon.nextControl()).toEqual({ type: 'closed', channel: 1 })
+
+    // The daemon leg and every other browser on it carry on.
+    other.ws.send(Uint8Array.of(7))
+    const f = await daemon.nextFrame()
+    expect(f.channel).toBe(2)
+    expect(Array.from(f.payload)).toEqual([7])
+    daemon.ws.send(frame(2, Uint8Array.of(8)))
+    expect(bytes(await other.next('the payload after the refusal'))).toEqual([8])
+  })
+
+  it('forwards a frame exactly at the cap', async () => {
+    const hub = freshHub()
+    const daemon = await dial(hub, '/daemon')
+    const client = await dial(hub, '/client')
+    await daemon.nextControl()
+
+    const payload = new Uint8Array(CAP)
+    payload[CAP - 1] = 0x5a
+    client.ws.send(payload)
+    const f = await daemon.nextFrame()
+    expect(f.channel).toBe(1)
+    expect(f.payload.byteLength).toBe(CAP)
+    expect(f.payload[CAP - 1]).toBe(0x5a)
+  })
+})
+
 describe('the channel cap', () => {
   it('refuses the 65th concurrent client: 503 relay full', async () => {
     const hub = freshHub()

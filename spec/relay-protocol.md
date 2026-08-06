@@ -176,8 +176,21 @@ credential would add none — an attacker who could open a channel still cannot
 complete an IK handshake against a daemon that has not paired their key, and one
 who could complete it would not have needed the credential. What an
 unauthenticated `/client` does expose is denial of service, so the Durable
-Object bounds it directly: a cap on concurrent channels and a deadline on
-completing the handshake, after which the channel is closed. `POST /api/pair`
+Object bounds it directly: a cap on concurrent channels, a deadline on
+completing the handshake, after which the channel is closed, and a cap on the
+size of one client message.
+
+The size cap is **1 MiB**, and it is the relay's to enforce rather than the
+daemon's. A client frame over it closes that socket alone with `1009`
+`message too big` and is never forwarded. That matters because the daemon reads
+its leg — the socket carrying *every* browser on that machine — with a single
+2 MiB read limit that its WebSocket library enforces by dropping the connection
+rather than the message: an oversized frame passed through would take every
+channel on the machine down with it and do so again on every redial. The two
+numbers are ordered deliberately (relay 1 MiB < daemon 2 MiB) so that a frame an
+honest relay forwards, header and all, can never reach the daemon's limit.
+
+`POST /api/pair`
 is credential-less for the same reason and bounded the same way: a cap on the
 body's size, a deadline the parked request answers `504` at, and a cap on
 concurrent parked requests — over it the relay answers `429`

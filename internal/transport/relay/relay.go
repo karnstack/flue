@@ -41,6 +41,14 @@ const (
 	// that was already bounded at 1 MiB, and the doubling leaves room for the
 	// channel header, the kind byte and the AEAD tag without letting a hostile
 	// relay hand us an unbounded allocation.
+	//
+	// The relay enforces that 1 MiB itself — MAX_CLIENT_MESSAGE in
+	// relay/src/hub.ts, mirroring conn.go's readLimit — and the ordering is
+	// load-bearing rather than tidy. coder/websocket answers an over-limit read
+	// by closing the connection, and this connection is shared by every browser
+	// on this machine, so a frame that trips it costs all of them at once and
+	// again on the next dial. Keeping the relay's cap strictly under this one is
+	// what makes an honest relay unable to do that; do not invert them.
 	readLimit = 1 << 21
 
 	// writeTimeout bounds one frame write, on the writer goroutine — the same
