@@ -45,11 +45,19 @@ Two properties of that picture are the whole reason it looks like this:
 
   A fragment is whatever the link someone clicked put there, so the tab checks
   `k` against `d` before it pins anything (`namesItsOwnKey`,
-  `web/src/relay/session.ts`): `d` is the hash of `k`, so the handoff proves
-  itself and a mismatch is refused outright. A link that skipped that check
-  could pin a wrong key under a victim's device id — that machine then
-  reconnect-loops in that browser forever — or, carrying the attacker's own key
-  *and* id, open a terminal into their machine on the real relay origin.
+  `web/src/relay/session.ts`): `d` is the hash of `k`, so an inconsistent pair
+  is refused outright. That closes *poisoning* — a link that pins a wrong key
+  under a victim's device id, leaving that machine reconnect-looping in that
+  browser forever. It does not close *substitution*: a link carrying the
+  attacker's own key *and* id is self-consistent and passes, and with a live
+  token minted for that machine it opens one dial into a terminal the attacker
+  owns, on the real relay origin. One dial rather than a session — the
+  victim's next refresh names a device their cookie does not own and is
+  answered 403 — but the residual is open
+  ([`FOLLOW-UPS.md`](FOLLOW-UPS.md) item 14, "Left standing"). Closing it
+  means not taking `k` from the fragment at all: fetch the named device's key
+  from the control plane under the session cookie, which answers only for
+  machines the caller owns, so a link cannot name a machine the user does not.
 - **The token is fetched per dial, not captured once.** It lives sixty seconds.
   A tab that captured one at open time was refused at its first reconnect past
   a minute — a laptop lid, a tunnel — and never recovered. Each re-dial asks

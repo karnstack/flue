@@ -108,18 +108,18 @@ describe('resolveRelaySession, from a handoff', () => {
 
   it('refuses a key that does not hash to the id it arrived with, and pins nothing', async () => {
     // A fragment is whatever the link someone clicked put there, and `k` and
-    // `d` used to be adopted without ever being compared. Two things that buys,
-    // both of them real:
-    //
-    //   - **poisoning.** `d` is the victim's machine and `k` is anything at
-    //     all: the record for that machine is overwritten in this browser, and
-    //     every later session with it builds its IK handshake against the wrong
-    //     static. The socket closes like an outage and the tab reconnects into
-    //     the identical failure, silently, until the store is cleared.
-    //   - **substitution.** `k` and `d` are both the *attacker's* machine, on
-    //     the genuine `relay.flue.sh` origin with its genuine TLS — so one dial
-    //     opens a terminal into a machine they own, from a page that looks
-    //     exactly like the real thing.
+    // `d` used to be adopted without ever being compared. What comparing them
+    // closes is **poisoning**: `d` is the victim's machine and `k` is anything
+    // else, the record for that machine is overwritten in this browser, and
+    // every later session with it builds its IK handshake against the wrong
+    // static — the socket closes like an outage and the tab reconnects into
+    // the identical failure, silently, until the store is cleared. What it
+    // does NOT close is **substitution**: a `k` and `d` that are both the
+    // *attacker's* machine hash consistently and sail through, so a crafted
+    // link with a live token for that machine still opens one dial into a
+    // terminal they own on the genuine `relay.flue.sh` origin. That residual
+    // is open — `namesItsOwnKey` (session.ts) and docs/FOLLOW-UPS.md item 14
+    // say so — and what this test pins is only the half the check can reach.
     //
     // The id is `hex(sha256(k))[:12]`, so the fragment carries its own proof
     // and the check costs one hash.

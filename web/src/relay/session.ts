@@ -195,31 +195,38 @@ export function channelTokenSource(
  *
  * A device id *is* `hex(sha256(publicKey))[:12]` — `DeviceID` in
  * internal/crypto/devices.go, `deviceIdFor` in app/src/lib/device-id.ts, and
- * this. So a handoff carries its own proof, and checking it costs one hash.
+ * this. So a handoff carries its own proof that `k` and `d` are one machine's
+ * pair, and checking it costs one hash.
  *
- * **Why it has to be checked.** `k` and `d` arrive in the fragment, which is
- * whatever the link someone clicked put there. Taken on trust they buy two
- * things:
+ * **What the check closes: poisoning.** `k` and `d` arrive in the fragment,
+ * which is whatever the link someone clicked put there. Taken on trust, a `d`
+ * naming the victim's machine beside a `k` that is anything else overwrites the
+ * pinned record for that machine — deliberately, and for good reasons
+ * (crypto/keys.ts) — and every later session with it builds its Noise IK
+ * handshake against a static the daemon cannot prove. `readMessageB` throws,
+ * the socket reports an ordinary close, and the tab reconnects into the
+ * identical failure for as long as it is open, with nothing on screen to say
+ * why. A crafted link becomes a lasting denial of service for one machine in
+ * one browser. That inconsistent pair is exactly what this refuses.
  *
- *   - **poisoning.** `d` names the victim's machine and `k` is anything at all.
- *     The pinned record for that machine is overwritten — deliberately, and for
- *     good reasons (crypto/keys.ts) — and every later session with it builds
- *     its Noise IK handshake against a static the daemon cannot prove.
- *     `readMessageB` throws, the socket reports an ordinary close, and the tab
- *     reconnects into the identical failure for as long as it is open, with
- *     nothing on screen to say why. A crafted link becomes a lasting denial of
- *     service for one machine in one browser.
- *   - **substitution**, which is worse. `k` and `d` are both the *attacker's*
- *     machine. The handshake then succeeds, on the genuine `relay.flue.sh`
- *     origin with its genuine certificate, and the user is typing into a shell
- *     on a box somebody else owns while every signal on the screen says flue.sh
- *     is at the other end. The relay refuses the attacker's token for anyone
- *     else's device, so this costs them a machine of their own and buys them
- *     one dial — and one dial is all it takes.
+ * **What it does NOT close: substitution.** A `k` and `d` that are both the
+ * *attacker's* machine pass this check, because the pair is self-consistent — a
+ * real machine's key under that key's real name. With a live `t` the real
+ * control plane minted for that machine, such a link opens one dial into a box
+ * somebody else owns, on the genuine `relay.flue.sh` origin with its genuine
+ * certificate, while every signal on the screen says flue.sh is at the other
+ * end. One dial rather than a session: the victim's next refresh names a device
+ * their cookie does not own and is answered 403 (app/src/server/
+ * refresh-token.ts), so nothing re-mints — but one dial is all a shell needs.
+ * That residual is OPEN, and docs/FOLLOW-UPS.md item 14 ("Left standing")
+ * carries it. Closing it means not taking `k` from the fragment at all: fetch
+ * the named device's public key from the control plane under the session
+ * cookie, which answers only for machines the caller owns, so a link can no
+ * longer name a machine the user does not.
  *
- * Neither is reachable through the control plane: `openSession` reads `k` and
- * `d` out of the same row, so they cannot disagree. The check is not about
- * distrusting it; it is about the fragment being an input like any other.
+ * Neither half goes wrong through the control plane itself: `openSession` reads
+ * `k` and `d` out of the same row, so they cannot disagree. The check is not
+ * about distrusting it; it is about the fragment being an input like any other.
  *
  * Compared exactly, and in lower case, over the whole string. An id is twelve
  * hex characters in lower case everywhere it is written — the daemon computes

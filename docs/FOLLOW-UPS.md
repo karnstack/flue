@@ -554,19 +554,20 @@ a few tabs nobody is watching spend the account's whole budget and 429 the
 session the person *is* watching. `refresh-token:user` survives as an
 account-wide ceiling at 6000/15min — the per-machine bucket bounds a loop, but
 the caller names the machine and can name a new one every request, so without a
-ceiling one stolen session cookie is an unbounded supply of tokens and of
-counter rows. The ceiling is counted only after the per-machine bucket passes,
-so a tab that has exhausted its own machine's share stops spending the
-account's.
+ceiling one stolen session cookie is an unbounded supply of tokens. (Tokens,
+not counter rows — the per-machine row is written before the ceiling is
+consulted, so rows it does not bound; see "Left standing" below.) The ceiling
+is counted only after the per-machine bucket passes, so a tab that has
+exhausted its own machine's share stops spending the account's.
 
 The browser checks the handoff against itself before it believes any of it: a
 device id **is** `hex(sha256(publicKey))[:12]`, so `namesItsOwnKey`
 (`web/src/relay/session.ts`) refuses a fragment whose `k` does not hash to its
-`d`, on adopt and again on the way out of the key store. Without it a crafted
-link could either poison the pinned record for a victim's machine (that machine
-then reconnect-loops in that browser forever, silently) or, with the attacker's
-own key *and* id, open one terminal into a machine they own on the genuine
-`relay.flue.sh` origin.
+`d`, on adopt and again on the way out of the key store. What that closes is
+*poisoning*: without it a crafted link could pin a wrong key under a victim's
+machine's id, and that machine then reconnect-loops in that browser forever,
+silently. What it does not close is *substitution* — an attacker's own key
+*and* id hash consistently and pass — which stays open, below.
 
 A reload works too, which it never did: the tab remembers the device id and the
 control plane in `sessionStorage` (neither is a secret; the token deliberately
@@ -594,6 +595,38 @@ or disabled machine, which is a fact about that machine and not about load), or
 telling the tab to stop looping at all. The latter is item 15's territory —
 there is still no UI for "this machine was revoked" — and the two want doing
 together.
+
+**Left standing: a self-consistent handoff can still name the attacker's own
+machine — the substitution residual is OPEN.** `namesItsOwnKey` proves `k` and
+`d` are one machine's pair; it cannot prove they are a machine of the *user's*.
+An attacker who enrolls a box of their own holds a `k` and `d` that hash
+correctly, and the real control plane mints them a live `t` for it — so a
+crafted link opens one dial into the attacker's machine on the genuine
+`relay.flue.sh` origin with its genuine certificate, and everything on screen
+says flue.sh. One dial rather than a session: the victim's next refresh names a
+device their cookie does not own, `POST /api/relay-token` answers 403, and
+nothing re-mints — but one dial is all a shell needs. The real fix is to stop
+accepting `k` from the fragment at all: the tab holds a session cookie, so it
+can fetch the named device's public key from the authenticated control plane,
+which answers only for machines the caller owns — then a link cannot name a
+machine the user does not own, and a `d` alone in the fragment is inert.
+
+**Left standing: the account ceiling bounds tokens, not `rate_limits` rows —
+and the ordering is paid on the reconnect hot path.** `withinLimit` writes
+before it answers (every call counts, refused ones included — ratelimit.ts),
+and `refreshClientToken` consults the per-machine bucket first, the ceiling
+second — so the per-device counter row exists before the ceiling is ever asked.
+An authenticated caller, or a stolen cookie, inventing a fresh device id per
+request (any string up to 64 characters — the route bounds length, and
+existence is only checked at the mint, after both counters) writes one new row
+per request, past 6000 and for as long as it cares to, bounded only by the
+fifteen-minute sweep (`sweepRateLimits`: the cron, plus the one-in-a-hundred
+fallback). It needs a valid session and the rows die with the window, so this
+is a cost and DoS amplifier rather than a hole — but it is real, and neither
+the ceiling's comment nor this file claims otherwise any more. The other half
+of the same ledger entry: every refresh — every reconnect of every healthy tab
+— now costs two sequential D1 upserts before the mint. Both accepted for now;
+recorded so the bill is not a surprise.
 
 ## 15. What the SaaS kill switch reaches
 

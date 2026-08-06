@@ -102,9 +102,15 @@ export const TOKENS_REFRESHED_PER_DEVICE = 600
  * The per-machine bucket bounds a *loop*; it does not bound a *caller*, who
  * names the machine and can therefore name a new one on every request and buy a
  * fresh 600 each time. Without a ceiling that is an unbounded number of mint
- * attempts, an unbounded number of counter rows, and — for the machines the
- * caller does own — an unbounded supply of bearer credentials from one stolen
- * session cookie. So the ceiling is what bounds what that cookie is worth.
+ * attempts and — for the machines the caller does own — an unbounded supply of
+ * bearer credentials from one stolen session cookie. So the ceiling bounds what
+ * that cookie is worth in *tokens*. What it does not bound is `rate_limits`
+ * rows: the per-machine counter is written before this one is consulted (every
+ * call counts, refused or not — ratelimit.ts), so an invented device id per
+ * request is a new row per request until the sweep collects them. A cost and
+ * DoS amplifier rather than a hole — it needs a live session, and the rows die
+ * with the window — and docs/FOLLOW-UPS.md item 14 ("Left standing") carries
+ * it.
  *
  * Ten times the per-machine cap, which is thirty-three tabs all reconnecting
  * flat out at once (180 a window each). Well above anyone's real fleet, well
