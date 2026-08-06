@@ -726,10 +726,20 @@ function RevokeDialog({
           {/* Named, because "are you sure?" over a list of machines is a
               question about which one. */}
           <AlertDialogTitle>Revoke {device.label}?</AlertDialogTitle>
+          {/* What this promises is what the system does, which took a
+              correction: it used to say open sessions "close within a minute
+              or two". Nothing closes them. The relay verifies a channel token
+              at the upgrade and never re-reads it (server/kill-switch.ts, and
+              the same sentence in /terms), so revoking stops the next dial and
+              the next credential and leaves a terminal that is already open
+              alone. Saying otherwise offered a security guarantee that would
+              have been believed at exactly the wrong moment. */}
           <AlertDialogDescription>
-            This machine stops being able to reach your account. Sessions already open close within
-            a minute or two, and the daemon drops the next time it reconnects. Run{' '}
-            <code className="font-mono">flue link</code> on it again to bring it back.
+            No new sessions can be opened on this machine, and it cannot renew the short-lived
+            credential it needs to stay reachable. A terminal that is already open ends when it is
+            closed or when the machine next reconnects — to cut one now, stop the daemon on the
+            machine itself. Run <code className="font-mono">flue link</code> on it again to bring it
+            back.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

@@ -279,6 +279,24 @@ describe('revoking a machine', () => {
     expect(revoke).not.toHaveBeenCalled()
   })
 
+  it('does not promise that open terminals close, because they do not', async () => {
+    // It used to say "sessions already open close within a minute or two".
+    // Nothing closes them: the relay verifies a channel token at the upgrade
+    // and never re-reads it (app/src/server/kill-switch.ts), so a terminal
+    // somebody already has open survives until it is closed or the machine
+    // reconnects. A person revoking a stolen laptop reads that sentence at the
+    // one moment they most need it to be true.
+    const { user } = setup()
+
+    await user.click(await menuItem(user, 'mac studio', 'Revoke'))
+    const dialog = await screen.findByRole('alertdialog')
+
+    expect(dialog.textContent).not.toMatch(/minute or two/i)
+    expect(dialog.textContent).toMatch(/already open/i)
+    // And it says the one thing that does end a session now.
+    expect(dialog.textContent).toMatch(/stop the daemon/i)
+  })
+
   it('does nothing when the question is answered no', async () => {
     const { revoke, user } = setup()
 
