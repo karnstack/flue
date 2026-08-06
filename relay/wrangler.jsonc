@@ -16,6 +16,21 @@
   //                         exactly two Workers, app/ and this one.
   //
   // See spec/relay-protocol.md, Auth.
+  //
+  // The custom domain is for the **hosted** deploy of this Worker (flue.sh),
+  // and it has to be under the same registrable domain as the control plane:
+  // the browser tab lives on this origin and refreshes its 60-second channel
+  // token against `app.flue.sh` with credentials, and the session cookie is
+  // `SameSite=Lax`, which rides a cross-*origin* request only between hosts
+  // that are same-*site*. `relay.flue.sh` + `app.flue.sh` are; a relay on
+  // workers.dev in front of app.flue.sh is not, and every session there dies
+  // at its first reconnect. docs/SAAS.md is the runbook.
+  //
+  // Self-hosting does not read this file at all — `flue relay setup` builds
+  // its own deploy request in cmd/flue/relay.go and leaves that relay on
+  // workers.dev, which is correct there: one daemon, one origin, no cookie
+  // and no control plane.
+  "routes": [{ "pattern": "relay.flue.sh", "custom_domain": true }],
   "assets": {
     // Response headers for these assets are NOT configurable here — wrangler's
     // schema rejects any key but the four below. They live in ./public/_headers,

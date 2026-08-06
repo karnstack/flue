@@ -1,4 +1,7 @@
-// The control plane's whole database. Six tables, one D1 binding (`DB`).
+// The control plane's whole database. Seven tables, one D1 binding (`DB`) —
+// and the count is load-bearing outside this file: docs/faq.md answers "what
+// does flue.sh store?" by listing every one of them, so a table added here is
+// a paragraph owed there.
 //
 // Conventions that hold everywhere below:
 //   - timestamps are unix *seconds* in an INTEGER column, never ISO strings and

@@ -7,6 +7,24 @@
   // exports only `fetch`, and this Worker also needs `scheduled` (the sweeps in
   // src/server/sweep.ts). That file re-exports Start's fetch handler verbatim.
   "main": "./src/server.ts",
+  // A custom domain, not workers.dev, and it is a correctness requirement
+  // rather than a preference. Two of them:
+  //
+  //   1. `workers.dev` is on the Public Suffix List, so every `*.workers.dev`
+  //      host is cross-*site* with every other one and a cookie set there is
+  //      shared with nothing. The session cookie is `__Host-session;
+  //      SameSite=Lax` (src/server/sessions.ts).
+  //   2. The relay must sit under the SAME registrable domain as this Worker
+  //      (`relay.flue.sh` ↔ `app.flue.sh`), or the credentialed refresh at
+  //      POST /api/relay-token arrives with no cookie, is answered 401, and
+  //      every browser session dies at its first reconnect past 60 seconds —
+  //      after a first minute that looks perfect. See docs/SAAS.md.
+  //
+  // Deploying this requires flue.sh to be a zone on the same Cloudflare
+  // account; wrangler creates the DNS record and the certificate. A different
+  // deployment (staging, a fork) edits the pattern — it is the one line in
+  // this file that names a specific service.
+  "routes": [{ "pattern": "app.flue.sh", "custom_domain": true }],
   "observability": { "enabled": true },
   // Hourly, off the hour — the top of the hour is when every cron on the
   // platform fires. What runs is `scheduled` in src/server.ts: four ranged

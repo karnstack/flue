@@ -3,8 +3,9 @@
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size. Items 7–9 are the same exercise for the
 crypto+pairing milestone, items 10–13 for the relay, item 14 for the SaaS
-control plane's browser leg, and item 15 for what its kill switch does and does
-not reach.
+control plane's browser leg, item 15 for what its kill switch does and does
+not reach, and item 16 for what standing the hosted service up depends on that
+nothing enforces.
 
 ## Done
 
@@ -346,6 +347,22 @@ refusing to run a bundle whose digest changed — a different worker, and one th
 has to be right about updates or it bricks the app offline. The FAQ now says
 plainly that the PWA is an offline cache and a speed-up rather than a defence.
 
+**Restated rather than resolved by the hosted service — and now the default
+case, so `docs/faq.md` says it in its own words.** flue.sh does not run the
+pairing ceremony at all: a machine joins an account with `flue link`, and the
+browser is handed that machine's public key by the control plane along with the
+session ([`SAAS.md`](SAAS.md)). So the move described above is not the hosted
+attack. The hosted one is shorter and worse: the origin serves the page that
+holds the browser's Noise keys, runs the handshake and decrypts every frame, so
+a modified bundle reads the plaintext where the plaintext already is, with no
+device to pair and no window to wait for. That is not a new finding — it is
+item 8's original observation with the pairing step deleted — but it stops
+being a footnote the moment anyone takes an invite, which is why the FAQ's
+first answer now states it for the hosted case directly instead of leaving it
+attached to a sentence about pairing. The fixes are unchanged and still
+unbuilt: a native client, an integrity-pinned bundle, or a published and
+attested digest (§13, last bullet).
+
 The other half of the same problem *is* fixed: the loopback QR that started this
 work — Pair, over a `local`-only daemon, printing a `127.0.0.1` URL no other
 device could follow — is gone (`791b07d`). The Devices screen now holds the Pair
@@ -410,6 +427,16 @@ documented promise depends on.
   touches it — which is what the month of counters in the same document is for.
   Distinct from §10, which is the daemon's own outbound queue rather than the
   relay's.
+
+  **Still open, and it changes character on a hosted relay.** Self-hosted, the
+  person streaming `yes` and the person holding the Cloudflare account are the
+  same person, so the missing cap costs them their own free tier and nothing
+  else. On flue.sh one Worker's allowance is shared by everybody: one account's
+  runaway session is spent against every other account's availability as well
+  as against the operator's bill. Nothing about a multi-tenant relay makes the
+  cap harder to write — it makes it the first thing the scale pass has to do,
+  and the counters that would size it now have to be read off a deployment
+  rather than off a dogfooding month.
 - **`POST /api/pair` is credential-less and internet-reachable, and nothing
   rate limits it.** It has to be credential-less — the device presenting a
   pairing token is by definition a device holding no credential — and the
@@ -425,12 +452,23 @@ documented promise depends on.
   use. Doing it in the Worker instead would mean per-IP state in the Durable
   Object, which is a hibernation cost paid on every request to save one the edge
   can refuse for nothing.
-- **The browser leg has no auth, and the SaaS needs one.**
+- ~~**The browser leg has no auth, and the SaaS needs one.**
   `authorizeClient` (`relay/src/index.ts`) returns `true` and `hubIdFor` returns
   `idFromName('hub')` — correct for self-hosting, where one daemon owns the
   Worker and Noise is the confidentiality boundary. A multi-tenant relay has to
   verify a signed token on `/client` and route to the right hub by account and
-  daemon id. The seam is deliberately in place and the implementation is Plan 2.
+  daemon id. The seam is deliberately in place and the implementation is Plan
+  2.~~
+
+  **Done** (Plan 2, Task 9) — the seam was filled where it was left.
+  `authorizeClient`, `authorizeDaemon` and `authorizePair` all run
+  `authorizeToken` when `RELAY_SIGNING_SECRET` is bound (its presence *is* the
+  mode selector), which verifies the control plane's HMAC offline —
+  `relay/src/channel-auth.ts`, a port of `app/src/lib/tokens.ts` pinned to it
+  by a shared vector both suites read — and `hubIdFor` names the hub from the
+  verified claims' account and device rather than from a constant. Self-host is
+  untouched: with no secret bound the Worker is Plan 1's relay, and its whole
+  suite still runs as its own vitest project.
 - ~~**Relay-served assets carry none of the daemon's security headers.** The
   daemon wraps every response in `securityHeaders`
   (`internal/daemon/server.go`) — `Referrer-Policy: no-referrer` and a CSP with
@@ -694,6 +732,75 @@ known workaround, the second is the intended behaviour written down.
   account rather than the machine — which is what `disableUser` is for. The
   same-key path — delete the row from the dashboard, re-enroll, get a clean flag
   — is closed.
+
+## 16. Standing flue.sh up
+
+Carried out of the deploy runbook ([`SAAS.md`](SAAS.md)), the custom-domain
+routes now in both wrangler configs, and the FAQ reconciliation. None of these
+is a defect in code that shipped; each is something a hosted deployment depends
+on that nothing in this repository enforces. (The browser-session gaps
+themselves are §14, closed except for the residuals recorded there — SAAS.md's
+session diagram is the shape that was built.)
+
+- **Email delivery is a placeholder, and it is the one thing left for the
+  operator to build.** `app/src/server/email/sender.ts` ships the `Sender`
+  interface and `LogSender`, which prints the login code to the Worker's log —
+  the only place a plaintext code is written anywhere. Deliberate: the plan
+  refused to commit a half-integration nobody could test. It is also exactly
+  the shape of thing that gets forgotten, because the *operator's own* sign-in
+  works fine from `wrangler tail`. Until a real `Sender` comes back from
+  `sender()`, anyone who can read the logs can sign in as anyone, and no invite
+  should go out. SAAS.md step 6 is the whole of what it takes.
+
+- **The hosted relay's assets directory is populated by hand.** `relay/public/`
+  holds a one-line placeholder `index.html` beside the `_headers` document, and
+  `flue relay setup` reads neither — it uploads the bundle compiled into the
+  binary. A `wrangler deploy` of the hosted relay uploads whatever is in that
+  directory, so the runbook's `cp -R dist/. ../relay/public/` is load-bearing,
+  and skipping it is a deploy that *succeeds* and then serves that placeholder
+  to every session. The fix is to make it a build step — a `make` target, or a
+  CI check that the directory holds an `index.html` naming a hashed bundle —
+  and what exists is a documented `cp`. `relay/.gitignore` at least keeps the
+  copy out of the repository.
+
+- **Nothing enforces that the two Workers hold the same
+  `RELAY_SIGNING_SECRET`.** It is the entire authorization of a bridge, it is
+  set twice by hand, and a mismatch raises nothing anywhere: every dial from
+  every browser and every daemon is refused at the upgrade, and it reads as a
+  network fault. SAAS.md warns twice and the release checklist catches it,
+  which is not the same as the system catching it. The cheap version is a
+  health path on the relay that verifies a token the control plane minted for
+  the purpose and answers yes or no; there is nowhere for one to live today,
+  and it would want to be unauthenticated-but-useless-to-a-stranger, which is
+  the part that needs thinking about.
+
+- **§12's twin configuration is now deployed from both copies.** `flue relay
+  setup` builds its deploy request in `cmd/flue/relay.go`; `relay/wrangler.jsonc`
+  is what `wrangler deploy` sends for flue.sh. Until now the second was
+  development-only, so drift between them was a developer/user split. It is now
+  a self-host/hosted split — two populations running relays configured from two
+  files nothing compares — and the custom-domain route added here is the first
+  key that deliberately exists in one and not the other. The test §12 asks for
+  — one that parses the `.jsonc` and compares the keys the two copies share —
+  still does not exist, and is worth more than it was.
+
+- **§10's blast radius is unchanged by multi-tenancy; its frequency is not.** A
+  daemon's outbound socket carries only its own machine's channels, and the
+  hosted relay names one Durable Object per (account, device), so the
+  whole-socket fate-sharing §10 describes cannot spill across accounts — it
+  stays inside one machine's browsers. What changes is how often it happens
+  (more sessions, more networks, more lids closing) and who hears about it: a
+  self-hoster who loses a socket debugs their own Worker, while the same event
+  on flue.sh is a support conversation that looks from outside like the service
+  dropping sessions. Per-channel outbound credit is still the fix, still
+  unwritten, and now belongs to the same scale pass as the rate cap in §13.
+
+- **The kill switch is a recipe, not a tool.** No admin UI, deliberately — an
+  endpoint that can disable any account is an endpoint worth attacking — so an
+  incident is an operator pasting SQL out of SAAS.md at three in the morning.
+  Both statements are idempotent and the flag goes first, which is the whole of
+  the safety net; the failure mode is a typo in a `where` clause. Fine for one
+  operator, and the thing to revisit when there is a second.
 
 ## Things worth knowing before touching this code
 

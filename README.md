@@ -20,9 +20,12 @@
 > account, and the daemon dials it. It has not yet been through its manual
 > end-to-end gate against a real account
 > ([docs/RELAY.md](docs/RELAY.md)), so treat it as ready to try rather than
-> ready to rely on. Tailscale is still designed, not built. No release is
-> tagged yet — the pipeline is live, and the first tag ships binaries, a brew
-> formula, and the installer.
+> ready to rely on. The hosted control plane behind flue.sh is built too —
+> invites, email-code sign-in, `flue link`, the device directory — and is not
+> open: email delivery is still a placeholder and its own end-to-end gate
+> ([docs/SAAS.md](docs/SAAS.md)) has not been run. Tailscale is still designed,
+> not built. No release is tagged yet — the pipeline is live, and the first tag
+> ships binaries, a brew formula, and the installer.
 
 ## Install
 
@@ -72,6 +75,7 @@ flue disable      # remove it
 flue status       # version, daemon state, session count
 flue open [path]  # spawn a session here — handy from a shell prompt
 flue relay setup  # deploy a relay to your own Cloudflare account (see below)
+flue link         # link this machine to a flue.sh account (see below)
 ```
 
 ## Remote access
@@ -83,6 +87,7 @@ the UI orders them by what you already have.
 |---|---|---|---|
 | local | nothing, always on | none | works |
 | Cloudflare | a Cloudflare account, free tier is enough | your own Worker, ciphertext only | works — `flue relay setup` |
+| flue.sh | an invite, and nothing to deploy | our Worker, ciphertext only | built, not yet open — `flue link` |
 | Tailscale | Tailscale on each device | none, often direct peer-to-peer | designed |
 | Cloudflare + your domain | a domain on Cloudflare | your own Worker | designed |
 
@@ -104,12 +109,39 @@ hostile origin could actually do with it is spelled out plainly in the
 [FAQ](docs/faq.md), along with the bundle digest you can recompute from this
 source and exactly what it does and does not prove today.
 
-**There is no hosted service today.** No flue account, no flue server, no
-billing: every remote path runs on infrastructure you own, and
-[flue.sh](https://flue.sh) is docs and downloads, never part of the data path.
-A hosted relay is on the roadmap — invite-only, metadata only, ciphertext
-through it, and one option among several rather than a requirement
-([FAQ](docs/faq.md)).
+### The flue.sh path
+
+The hosted option, for when deploying a Worker is not the part you wanted to
+do. It is two Cloudflare Workers and a database: a control plane holding
+accounts, invites and a directory of your machines, and a relay that bridges a
+browser tab to one of them. Same daemon, same web app, same protocol —
+terminal traffic across it is the same Noise ciphertext, and the hosted relay
+holds no key for it either.
+
+**It is built and not yet open.** The whole of it is in this repository (`app/`
+is the control plane, `relay/` the relay) and it is deployable today, but email
+delivery is still a placeholder, no invites have gone out, and it has not been
+through its manual end-to-end gate — the same caveat the self-hosted relay
+carries. The operator runbook, for us or for anyone who would rather run the
+hosted stack themselves, is [docs/SAAS.md](docs/SAAS.md).
+
+What it is, once it opens — four steps, and no configuration on any machine:
+
+```sh
+# 1. sign in at app.flue.sh with your invite; a login code arrives by email
+# 2. on each machine you want to reach:
+flue link
+# 3. type the short code it prints into app.flue.sh and approve the machine
+# 4. open a session on any of them from the directory — that is the terminal
+```
+
+What you trade for not deploying anything is the origin that serves your
+browser its JavaScript. That is the one thing end-to-end encryption does not
+fix, and it is no better for being our origin: on flue.sh the page that holds
+your keys and decrypts your terminal is served by us. The [FAQ](docs/faq.md)
+says so plainly rather than in a footnote, which is also why self-hosting comes
+first in this README. No billing, either — there is nothing to pay for and
+nothing that takes a card.
 
 ## Building from source
 
@@ -155,8 +187,9 @@ A production-like run — the embedded UI, exactly what a user gets — is:
 make build && bin/flue serve
 ```
 
-`make test` runs all three suites (Go, the web app, the Worker); `make lint` is `go vet` (with
-and without the dev tag) plus a TypeScript typecheck. Use pnpm, never npm —
+`make test` runs all four suites (Go, the web app, the relay Worker, the
+control plane); `make lint` is `go vet` (with
+and without the dev tag) plus a TypeScript typecheck of each package. Use pnpm, never npm —
 the web workspace pins it, and `mise.toml` pins the exact go/node/pnpm
 versions CI uses. One ordering rule remains for untagged Go commands:
 nothing compiles until `web/dist` and `relay/dist` both exist (`//go:embed`
@@ -167,7 +200,9 @@ use `make build`, which sequences all of it for you.
 Layout, briefly: `cmd/flue` is the CLI, `internal/daemon` the HTTP/WebSocket
 server, `internal/session` the PTYs and scrollback, `internal/service` the
 launchd/systemd integration, `web/` the React app, `site/` the flue.sh page,
-`relay/` the Cloudflare Worker, `docs/RELAY.md` the relay runbook,
+`relay/` the Cloudflare Worker, `app/` the hosted control plane (its own
+package, deployed on its own — nothing embeds it in the binary),
+`docs/RELAY.md` the relay runbook, `docs/SAAS.md` the hosted one,
 `docs/faq.md` the honest answers, and `docs/FOLLOW-UPS.md` the known rough
 edges — worth reading before touching the code.
 
