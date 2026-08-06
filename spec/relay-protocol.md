@@ -44,8 +44,20 @@ below; any other text message is a protocol error and closes the connection.
 
 Channel `0` is the control channel (below). Channels `1` and up each carry one
 browser's Noise session, opaque to the daemon's framing layer. The Durable
-Object assigns ids from its own storage, so they survive hibernation and daemon
-reconnects, and it never reuses one within a DO's lifetime.
+Object assigns ids from a **counter it keeps in its own storage**: the counter
+survives hibernation and daemon reconnects, so no id is ever reused within a
+DO's lifetime.
+
+The *channels* do not survive a reconnect — only the counter does. The daemon
+holds each channel's Noise responder state in memory, so a daemon that comes
+back has no key for any channel opened before the break, and re-announcing one
+would not help either: the browser's half of the IK handshake is already spent.
+A daemon reconnect therefore **invalidates every live channel**. When the daemon
+leg drops, the Durable Object closes every live client socket with close code
+`1012` and reason `daemon gone`. It sends no `closed` for them — there is no
+daemon left to read it — and it never re-announces a channel with `open`.
+Browsers reconnect through their ordinary retry path, handshake again, and are
+assigned fresh ids that the persisted counter guarantees are new.
 
 ## The browser leg
 
