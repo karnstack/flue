@@ -88,15 +88,16 @@ function TermsPage() {
             if the service itself is at risk.
           </p>
           <p>
-            What that does, precisely: no new session can be opened and no connected machine can
-            renew its credentials, immediately. A session that is already open stops within a few
-            minutes, when the short-lived credential behind it expires. Signed-in browser sessions
-            are dropped at once, and switching an account back on does not restore them — you sign
-            in again.
+            What that does, precisely: signed-in browser sessions are dropped at once, no new
+            terminal session can be opened, and no connected machine can renew the short-lived
+            credential it needs to stay reachable. Switching an account back on does not restore the
+            browser sessions — you sign in again. A terminal that is already open ends when it is
+            closed or when the machine next reconnects, whichever comes first.
           </p>
           <p>
             You can do the same thing yourself at any time: remove a machine from the dashboard, and
-            it can no longer be reached.
+            it can no longer be reached. To end a session that is open right now, stop the flue
+            daemon on that machine.
           </p>
         </Section>
 

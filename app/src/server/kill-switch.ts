@@ -19,11 +19,16 @@
 //   - `requestCode` (server/login.ts) refuses a disabled address a login code
 //     at all, invite or no invite.
 //
-// The one thing it cannot do is cut a channel that is already open: the relay
-// verifies a channel token offline and bridges whoever the claims name, so a
-// token in flight stays good until it expires. That window is 60 seconds for a
-// browser and 300 for a daemon, and it is the revocation latency of the whole
-// system.
+// **What it cannot do is cut a channel that is already open.** The relay
+// verifies a channel token *at the upgrade* and then bridges the two sockets;
+// nothing re-reads the claims, or this table, for the life of that connection.
+// So switching an account off stops the next dial (immediately) and the next
+// refresh (within one token TTL — 60 seconds for a browser, 300 for a daemon),
+// while a terminal somebody already has open stays open until it is closed or
+// the daemon reconnects. The certain way to end one *now* is to stop the daemon
+// on the machine. Closing that gap means revocation the relay can hear about —
+// a hub-side check, or a channel that expires with its token — and it is
+// recorded as a follow-up rather than half-built here.
 //
 // **What this file adds** is the half a flag cannot do: deleting the sessions.
 // Without that, disabling gates the *read* while the rows stay, so re-enabling

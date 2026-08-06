@@ -22,7 +22,10 @@
 // either one stops the *next* mint immediately. What it cannot do is cut a
 // live channel: a token already in flight stays valid until it expires, which
 // is why the TTLs below are 60 and 300 seconds and not an hour. That window is
-// the revocation latency of the whole system, stated in one place.
+// how long a revoked subject can still *open* a channel — and, because the
+// relay verifies at the upgrade and never again, a channel opened inside it
+// outlives the token. See the note in server/kill-switch.ts for what that means
+// for an operator with an incident on their hands.
 //
 // **The daemon never holds the signing secret.** It holds an enrollment token
 // and asks for a channel token; `RELAY_SIGNING_SECRET` exists on exactly two
