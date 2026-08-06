@@ -51,6 +51,20 @@ const (
 	// outboxDepth is how many frames may be queued for the socket before it is
 	// torn down. It matches the daemon's per-connection outbox: a relay that has
 	// not drained this many frames is not a slow relay, it is a gone one.
+	//
+	// The two directions are not symmetric, and the asymmetry is the thing to
+	// know before touching this number. Inbound is per-channel: every browser
+	// has its own inboxDepth queue (channel.go), so one that will not drain
+	// loses itself and nothing else. Outbound is *shared* — every channel's
+	// writes funnel through this one queue via socket.enqueue — so a single
+	// channel that produces faster than the socket drains fills it, and
+	// enqueue's answer to a full outbox is s.fail(errSocketBacklogged), which
+	// tears down the socket and with it every other browser on this machine.
+	// 256 frames is not much cover: one browser attached to a high-rate session
+	// can put that many frames in flight in milliseconds, so a TCP write stall
+	// of that length is enough. The honest fix is per-channel outbound credit
+	// rather than a bigger shared queue; it is a design change, and it is
+	// recorded as such in docs/FOLLOW-UPS.md ("relay carry-forwards").
 	outboxDepth = 256
 
 	// dialTimeout bounds a handshake, not a connection. Without it a relay that
@@ -103,12 +117,19 @@ const (
 	minStableConn = 5 * time.Second
 )
 
-// Config is everything the adapter needs to reach a deployed relay.
+// Config is everything the adapter needs to reach a deployed relay. Every
+// field is required; see New.
 type Config struct {
 	URL    string // wss://flue-relay.<sub>.workers.dev/daemon
 	Secret string // the DAEMON_SECRET set at deploy time
 	Origin string // https origin the relay serves the UI on
 }
+
+// ErrIncompleteConfig is what New answers a Config that is missing a field it
+// cannot invent. Wrapping rather than three sentinels: the caller's decision is
+// the same for all of them — this daemon is not configured for a relay — and
+// the message names which field it was.
+var ErrIncompleteConfig = errors.New("relay: incomplete config")
 
 // Server is the surface the adapter drives — implemented by *daemon.Server.
 //
@@ -171,9 +192,30 @@ var noRedirects = &http.Client{
 	},
 }
 
-// New builds a transport. A nil logger discards, so a caller that has not wired
-// one up gets a working adapter rather than a panic on the first log line.
-func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceStore, log *slog.Logger) *Transport {
+// New builds a transport, or says why the configuration cannot make one. A nil
+// logger discards, so a caller that has not wired one up gets a working adapter
+// rather than a panic on the first log line.
+//
+// All three fields are required, and Origin is required for a reason worth
+// stating: it is not decoration, it is the value every announced open and every
+// forwarded pair is checked against (channel.go). An empty Origin makes both
+// checks vacuous — a relay announcing `origin:""` matches it — and it is also
+// what ConnMeta.Origin carries into the daemon, which is what pairing URLs are
+// built from. A misconfigured field must fail here, at wiring time, rather than
+// quietly disarming the check it exists for.
+//
+// URL and Secret are required for the ordinary reason: without them there is
+// nothing to dial and nothing to authenticate with, so Run would do nothing but
+// fail and back off forever.
+func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceStore, log *slog.Logger) (*Transport, error) {
+	switch {
+	case cfg.URL == "":
+		return nil, fmt.Errorf("%w: no URL", ErrIncompleteConfig)
+	case cfg.Secret == "":
+		return nil, fmt.Errorf("%w: no daemon secret", ErrIncompleteConfig)
+	case cfg.Origin == "":
+		return nil, fmt.Errorf("%w: no origin", ErrIncompleteConfig)
+	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -185,7 +227,7 @@ func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceSto
 		pairings:  make(chan struct{}, maxPairings),
 		log:       log,
 		keepalive: defaultKeepalive,
-	}
+	}, nil
 }
 
 // Run dials the relay and keeps it dialled until ctx is done.

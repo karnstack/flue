@@ -725,6 +725,36 @@ func TestPairSuccessOverHTTPIsUnchanged(t *testing.T) {
 	}
 }
 
+// TestPairOutcomeWithAnUnrenderableStatusFailsLoudly. writePairOutcome renders
+// the two outcomes PairDevice produces, and the refusal is keyed on 403 rather
+// than on "not 200" so that a third outcome added later — a 503, a 429 — cannot
+// be silently relabelled `pairing refused`, which would tell the user their
+// token was rejected when it was not.
+func TestPairOutcomeWithAnUnrenderableStatusFailsLoudly(t *testing.T) {
+	_, srv := newPairServer(t)
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+
+	rec := httptest.NewRecorder()
+	srv.writePairOutcome(rec, PairOutcome{
+		Status: http.StatusServiceUnavailable,
+		Body:   []byte(`{"error":"something else entirely"}`),
+	})
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), pairRefusedText) {
+		t.Errorf("body = %q, which mislabels a non-refusal as a refusal", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "something else entirely") {
+		t.Errorf("body = %q, which leaks the unrendered outcome to the caller", rec.Body.String())
+	}
+	if got := buf.String(); !strings.Contains(got, "cannot render") || !strings.Contains(got, "503") {
+		t.Errorf("log = %q, want it to name the status it could not render", got)
+	}
+}
+
 // TestPairIsNotReachableByGET. Every GET on this daemon is read-only, and
 // pairing is the one state change that lives outside the WebSocket — so it has
 // to refuse the method a redirect can launder, in its own handler.

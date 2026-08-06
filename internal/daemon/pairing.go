@@ -362,9 +362,23 @@ func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
 // /pair page reads and what spec/relay-protocol.md fixes for the local leg. The
 // success body is the same bytes on both, down to the newline json.Encoder used
 // to write here.
+//
+// It renders the two outcomes PairDevice produces and nothing else. The refusal
+// is keyed on 403 rather than on "not 200" deliberately: if a third outcome is
+// ever added — a 503 while the registry is unwritable, a 429 — rendering it as
+// `pairing refused` would tell the user their token was rejected when it was
+// not, and would do so silently. Whoever adds one gets a 500 and a log line
+// instead, which is a bug that announces itself.
 func (s *Server) writePairOutcome(w http.ResponseWriter, out PairOutcome) {
-	if out.Status != http.StatusOK {
+	switch out.Status {
+	case http.StatusOK:
+	case http.StatusForbidden:
 		http.Error(w, pairRefusedText, out.Status)
+		return
+	default:
+		s.logger().Error("pairing produced a status this handler cannot render",
+			"status", out.Status)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

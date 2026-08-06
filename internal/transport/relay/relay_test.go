@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -73,11 +74,14 @@ func newTestTransport(t *testing.T, r *fakeRelay, secret string, log *slog.Logge
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	tr := New(Config{
+	tr, err := New(Config{
 		URL:    r.URL(),
 		Secret: secret,
 		Origin: "https://relay.example",
 	}, srv, noise.DHKey{}, nil, log)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	return tr, srv
 }
 
@@ -108,6 +112,51 @@ func runTransport(t *testing.T, tr *Transport) func() {
 	}
 	t.Cleanup(stop)
 	return stop
+}
+
+func TestNewRefusesAnIncompleteConfig(t *testing.T) {
+	t.Parallel()
+	full := Config{URL: "wss://relay.example/daemon", Secret: "s3cr3t", Origin: "https://relay.example"}
+
+	// Origin is the one worth stating a reason for. It is what every announced
+	// open and every forwarded pair is checked against, so an empty one does
+	// not merely omit a value — it disarms the check, since a relay announcing
+	// `origin:""` then matches. It is also what ConnMeta.Origin carries into
+	// the daemon, which is what pairing URLs are built from.
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"no URL", Config{Secret: full.Secret, Origin: full.Origin}},
+		{"no secret", Config{URL: full.URL, Origin: full.Origin}},
+		{"no origin", Config{URL: full.URL, Secret: full.Secret}},
+		{"nothing at all", Config{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr, err := New(tc.cfg, &stubServer{}, noise.DHKey{}, nil, nil)
+			if err == nil {
+				t.Fatalf("New(%+v) built a transport, want an error", tc.cfg)
+			}
+			if !errors.Is(err, ErrIncompleteConfig) {
+				t.Errorf("New(%+v) = %v, want it to wrap ErrIncompleteConfig", tc.cfg, err)
+			}
+			if tr != nil {
+				t.Errorf("New(%+v) returned a non-nil transport alongside %v", tc.cfg, err)
+			}
+		})
+	}
+
+	t.Run("complete", func(t *testing.T) {
+		t.Parallel()
+		tr, err := New(full, &stubServer{}, noise.DHKey{}, nil, nil)
+		if err != nil {
+			t.Fatalf("New(%+v) = %v, want a transport", full, err)
+		}
+		if tr == nil {
+			t.Fatal("New returned a nil transport and a nil error")
+		}
+	})
 }
 
 func TestTransportDialsTheRelayWithBearerAuth(t *testing.T) {
@@ -159,11 +208,14 @@ func TestTransportRefusesARedirectRatherThanFollowIt(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	srv := &stubServer{}
-	tr := New(Config{
+	tr, err := New(Config{
 		URL:    "ws" + strings.TrimPrefix(ts.URL, "http") + "/daemon",
 		Secret: "s3cr3t",
 		Origin: "https://relay.example",
 	}, srv, noise.DHKey{}, nil, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	runTransport(t, tr)
 
 	// Long enough for the dial to fail, be retried, and fail again.

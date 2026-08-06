@@ -2,7 +2,7 @@
 
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size. Items 7–9 are the same exercise for the
-crypto+pairing milestone.
+crypto+pairing milestone, and item 10 for the relay's daemon leg.
 
 ## Done
 
@@ -227,6 +227,48 @@ local pairing ceremony, the Devices screen and `/pair`). Part 2 is the relay —
   Confirm/Cancel are `h-7` with `gap-x-1`, the smallest touch target in the app,
   on the one irreversible action. Relative last-seen is frozen between pushes —
   no interval tick.
+
+## Relay carry-forwards
+
+Carried out of the `cfrelay` daemon leg (`internal/transport/relay`): the Worker
+socket, the channel layer, and the pairing bridge. Reviewed and deliberately not
+fixed in that milestone, because the fix is a design change rather than a patch.
+
+### 10. The outbound path is whole-socket fate-sharing; the inbound path is not
+
+The two directions are bounded on purpose, and only one of them isolates a
+browser. **Inbound** is per-channel: every browser gets its own `inboxDepth`
+(256) queue, and a channel that will not drain is closed by itself with a
+`close{channel}` while every other channel and the socket carry on
+(`TestRelayChannelBackpressureClosesOneChannelNotTheSocket` pins exactly that).
+**Outbound is shared**: `channelConn.Write` → `socket.enqueue` → one 256-deep
+`out` channel for the whole socket, and `enqueue`'s answer to a full queue is
+`s.fail(errSocketBacklogged)` — which tears the socket down and 1012s every
+browser this machine is carrying.
+
+The trigger is not a hostile peer, it is an ordinary one: a browser attached to a
+high-rate session (a `yes`, a build log, a `cat` of something large) can put 256
+frames in flight in milliseconds, so a TCP write stall of that length — a
+momentarily stalled edge, a wifi handoff, a send buffer that briefly stops
+draining — is enough for one session to end everybody's. Nothing upstream absorbs
+it: `channelConn.Write` never blocks by design, so the daemon's own per-connection
+outbox drains straight through into the shared queue rather than filling first
+and closing just that connection the way it does on loopback. The bound that is
+hit first is the shared one, and the action it takes is the whole socket.
+
+The fix, when it is worth it, is **per-channel outbound credit** rather than a
+deeper shared queue — deepening it only moves the cliff. Give each channel a
+small allowance of in-flight frames on the shared outbox, return credit as the
+writer drains, and when a channel is over its allowance close *that* channel with
+the ordinary `close{channel}` the inbox path already sends. Blocking is available
+too, and cheaper to write: `channelConn.Write` is called from that connection's
+own writer goroutine, so a bounded wait there applies backpressure to exactly one
+browser — but a stalled channel's frames would then sit in the shared queue and
+starve the rest, which is why credit is the shape to reach for. Either way
+`errSocketBacklogged` goes back to meaning what its comment claims — the relay
+has stopped reading — rather than "one browser was briefly noisy". The constant's
+doc comment in `relay.go` states the asymmetry so nobody reads `outboxDepth = 256`
+as the isolation the inbox gives.
 
 ## Things worth knowing before touching this code
 
