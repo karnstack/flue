@@ -103,6 +103,13 @@ export default defineConfig({
 function domProject() {
   return {
     plugins: [viteReact()],
+    // The same `@/*` → `src/*` resolution vite.config.ts gives the app build.
+    // Not optional here: shadcn writes its components with that alias, so
+    // `card.tsx` importing `@/lib/utils` is unresolvable without it and any
+    // test that renders a ui/ component fails to transform. Vite 8 reads the
+    // mapping straight out of tsconfig.json, so there is no second copy of the
+    // paths to keep in step.
+    resolve: { tsconfigPaths: true },
     test: {
       name: 'dom',
       environment: 'jsdom',
