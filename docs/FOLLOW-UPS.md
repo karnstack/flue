@@ -542,11 +542,31 @@ the first dial and every dial after it calls
 preflight), answered only for the relay's origin and the control plane's own.
 A refusal — and a fetch that hangs past ten seconds — is reported as an
 ordinary close, which FlueClient already backs off and retries from. The
-endpoint has its own rate-limit bucket (`refresh-token:user`, 600/15min), not
-`open-session:user`: a reconnect loop legitimately spends far more than a
-person clicking a button does, and `withinLimit` counts refused calls too, so a
-cap a real loop can reach is one it then holds itself over for the rest of the
-window.
+endpoint has its own rate-limit buckets, not `open-session:user`: a reconnect
+loop legitimately spends far more than a person clicking a button does, and
+`withinLimit` counts refused calls too, so a cap a real loop can reach is one it
+then holds itself over for the rest of the window. There are two of them, and
+the first is keyed by **(account, machine)** — `refresh-token:device`,
+600/15min. Per machine rather than per account because a refresh loop is not
+spread evenly over an account's machines: a tab pointed at a laptop that is
+shut, asleep or revoked loops forever and gets nowhere, so on one shared bucket
+a few tabs nobody is watching spend the account's whole budget and 429 the
+session the person *is* watching. `refresh-token:user` survives as an
+account-wide ceiling at 6000/15min — the per-machine bucket bounds a loop, but
+the caller names the machine and can name a new one every request, so without a
+ceiling one stolen session cookie is an unbounded supply of tokens and of
+counter rows. The ceiling is counted only after the per-machine bucket passes,
+so a tab that has exhausted its own machine's share stops spending the
+account's.
+
+The browser checks the handoff against itself before it believes any of it: a
+device id **is** `hex(sha256(publicKey))[:12]`, so `namesItsOwnKey`
+(`web/src/relay/session.ts`) refuses a fragment whose `k` does not hash to its
+`d`, on adopt and again on the way out of the key store. Without it a crafted
+link could either poison the pinned record for a victim's machine (that machine
+then reconnect-loops in that browser forever, silently) or, with the attacker's
+own key *and* id, open one terminal into a machine they own on the genuine
+`relay.flue.sh` origin.
 
 A reload works too, which it never did: the tab remembers the device id and the
 control plane in `sessionStorage` (neither is a secret; the token deliberately
@@ -559,6 +579,21 @@ origin — the same bundle is served three ways and the page cannot tell a
 self-hosted relay from flue.sh by origin alone — and fails there with the
 relay's 401, which is the correct outcome for a page with nothing to pair with.
 SAAS.md says so, and says what a hosted pairing UI would have to do instead.
+
+**Left standing: the account ceiling still couples an account's machines to
+each other, a long way up.** Per-machine bucketing removes the case that
+actually happens — one or two dead tabs taking down a working session — but
+`refresh-token:user` is shared by construction, and a loop spends it whether it
+is refused at the far end or not. At 180 refreshes per window per looping tab,
+6000 is about thirty-three tabs all broken at once: implausible for a person,
+not implausible for a fleet, and the failure is the same one — every session on
+the account answered 429 for the rest of the fixed window, with nothing on
+screen. Closing it properly is not a bigger number; it is either not counting
+refusals that the *control plane itself* refused for a stable reason (a revoked
+or disabled machine, which is a fact about that machine and not about load), or
+telling the tab to stop looping at all. The latter is item 15's territory —
+there is still no UI for "this machine was revoked" — and the two want doing
+together.
 
 ## 15. What the SaaS kill switch reaches
 

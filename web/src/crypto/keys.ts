@@ -145,6 +145,12 @@ export async function loadPinnedDaemonKey(
  * of service for that machine in this browser. What the record buys is a
  * reload: the fragment carrying the key is scrubbed the moment it is read, so
  * without this a refreshed tab would have no key to hand the handshake.
+ *
+ * Which puts the whole weight on the caller: *only* a key that hashes to
+ * `deviceId` may be written here, because a record failing that is exactly the
+ * lasting denial of service the overwrite was meant not to be. `relay/session.ts`
+ * (`namesItsOwnKey`) is where that is checked — before this is called, and
+ * before anything else is written down.
  */
 export async function savePinnedDaemonKeyFor(
   deviceId: string,

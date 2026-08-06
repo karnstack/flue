@@ -9,13 +9,24 @@ import { channelTokenSource, resolveRelaySession } from './session'
 const KEY_A = Uint8Array.from({ length: 32 }, (_, i) => i + 1)
 const KEY_B = Uint8Array.from({ length: 32 }, (_, i) => 200 - i)
 
+/**
+ * The ids those two keys have, written out rather than derived.
+ *
+ * A device id *is* `hex(sha256(publicKey))[:12]`, so deriving them here with
+ * the same function the code under test uses would assert nothing. These are
+ * the values, and the vector test below is what ties the derivation to the two
+ * other codebases that compute it.
+ */
+const ID_A = 'ae216c2ef524'
+const ID_B = '9fa1c26e3f2c'
+
 const base64url = (bytes: Uint8Array) =>
   btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')
 
 const handoff = (over: Partial<RelayHandoff> = {}): RelayHandoff => ({
   token: 'a-channel-token',
   daemonKey: base64url(KEY_A),
-  deviceId: 'aaaaaaaaaaaa',
+  deviceId: ID_A,
   controlPlane: 'https://app.flue.sh',
   ...over,
 })
@@ -48,13 +59,13 @@ describe('resolveRelaySession, from a handoff', () => {
     const session = await resolveRelaySession(handoff(), store)
 
     expect(session).not.toBeNull()
-    expect(session!.deviceId).toBe('aaaaaaaaaaaa')
+    expect(session!.deviceId).toBe(ID_A)
     expect(session!.daemonPub).toEqual(KEY_A)
     expect(session!.controlPlane).toBe('https://app.flue.sh')
     expect(session!.token).toBe('a-channel-token')
     // Pinned, so a reload has a key to hand the handshake — the fragment is
     // scrubbed the moment it is read.
-    expect(await loadPinnedDaemonKeyFor('aaaaaaaaaaaa')).toEqual(KEY_A)
+    expect(await loadPinnedDaemonKeyFor(ID_A)).toEqual(KEY_A)
   })
 
   it('keeps two machines apart, which is the bug this closes', async () => {
@@ -66,14 +77,14 @@ describe('resolveRelaySession, from a handoff', () => {
 
     const a = await resolveRelaySession(handoff(), memoryStore())
     const b = await resolveRelaySession(
-      handoff({ deviceId: 'bbbbbbbbbbbb', daemonKey: base64url(KEY_B) }),
+      handoff({ deviceId: ID_B, daemonKey: base64url(KEY_B) }),
       memoryStore(),
     )
 
     expect(a!.daemonPub).toEqual(KEY_A)
     expect(b!.daemonPub).toEqual(KEY_B)
-    expect(await loadPinnedDaemonKeyFor('aaaaaaaaaaaa')).toEqual(KEY_A)
-    expect(await loadPinnedDaemonKeyFor('bbbbbbbbbbbb')).toEqual(KEY_B)
+    expect(await loadPinnedDaemonKeyFor(ID_A)).toEqual(KEY_A)
+    expect(await loadPinnedDaemonKeyFor(ID_B)).toEqual(KEY_B)
   })
 
   it('never writes the token down', async () => {
@@ -93,6 +104,61 @@ describe('resolveRelaySession, from a handoff', () => {
     for (const daemonKey of ['', 'not base64!!', base64url(new Uint8Array(31)), 'AAAA']) {
       expect(await resolveRelaySession(handoff({ daemonKey }), memoryStore())).toBeNull()
     }
+  })
+
+  it('refuses a key that does not hash to the id it arrived with, and pins nothing', async () => {
+    // A fragment is whatever the link someone clicked put there, and `k` and
+    // `d` used to be adopted without ever being compared. Two things that buys,
+    // both of them real:
+    //
+    //   - **poisoning.** `d` is the victim's machine and `k` is anything at
+    //     all: the record for that machine is overwritten in this browser, and
+    //     every later session with it builds its IK handshake against the wrong
+    //     static. The socket closes like an outage and the tab reconnects into
+    //     the identical failure, silently, until the store is cleared.
+    //   - **substitution.** `k` and `d` are both the *attacker's* machine, on
+    //     the genuine `relay.flue.sh` origin with its genuine TLS — so one dial
+    //     opens a terminal into a machine they own, from a page that looks
+    //     exactly like the real thing.
+    //
+    // The id is `hex(sha256(k))[:12]`, so the fragment carries its own proof
+    // and the check costs one hash.
+    vi.stubGlobal('indexedDB', new IDBFactory())
+
+    for (const deviceId of [
+      ID_B, // A's key filed under B's name: the poisoning above.
+      '', // Nothing at all.
+      ID_A.toUpperCase(), // The right digest, the wrong spelling of it.
+      ID_A.slice(0, 11), // A prefix, which a `startsWith` would wave through.
+      `${ID_A}00`, // And a superset of one.
+    ]) {
+      const store = memoryStore()
+      expect(await resolveRelaySession(handoff({ deviceId }), store)).toBeNull()
+      // Nothing written down, either half of it: refusing after the write
+      // would leave the poisoned record behind and only skip this one session.
+      expect(await loadPinnedDaemonKeyFor(deviceId)).toBeNull()
+      expect(store.getItem('flue.relay.session')).toBeNull()
+    }
+
+    // And the record the attacker was aiming at is untouched.
+    expect(await loadPinnedDaemonKeyFor(ID_B)).toBeNull()
+  })
+
+  it('derives a device id the way the daemon and the control plane do', async () => {
+    // The third copy of a cross-language contract. `DeviceID` in
+    // internal/crypto/devices.go and `deviceIdFor` in app/src/lib/device-id.ts
+    // are the other two, and internal/crypto's `TestDeviceIDVector` and
+    // app/test/enroll.test.ts pin this same key to these same twelve
+    // characters. If this derivation drifted, the check above would start
+    // refusing every genuine handoff — a total outage on the hosted path, with
+    // nothing on screen but the explainer.
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    const key = 'B8SYMazoUcTIYa1PqLyFDhjGEocxvfVjEHaSC8HolBE' // testdata/noise/ik.json
+    const session = await resolveRelaySession(
+      handoff({ daemonKey: key, deviceId: 'b5d05f15398a' }),
+      memoryStore(),
+    )
+    expect(session?.deviceId).toBe('b5d05f15398a')
   })
 
   it('reduces the control plane to an origin, and refuses one that is not a URL', async () => {
@@ -160,7 +226,7 @@ describe('resolveRelaySession, on a reload', () => {
     const session = await resolveRelaySession(null, store)
 
     expect(session).not.toBeNull()
-    expect(session!.deviceId).toBe('aaaaaaaaaaaa')
+    expect(session!.deviceId).toBe(ID_A)
     expect(session!.daemonPub).toEqual(KEY_A)
     expect(session!.controlPlane).toBe('https://app.flue.sh')
     // Nothing at rest holds a token; the first dial mints its own.
@@ -187,17 +253,31 @@ describe('resolveRelaySession, on a reload', () => {
     expect(await resolveRelaySession(null, store)).toBeNull()
   })
 
+  it('is null when the pinned key does not hash to the id it is filed under', async () => {
+    // The same check on the way out of the store as on the way in. `adopt` can
+    // no longer write such a record, so this is about the ones already written
+    // — by a build before that check existed — and it makes the invariant one
+    // sentence rather than two: a key filed under an id always hashes to it.
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    await savePinnedDaemonKeyFor(ID_A, KEY_B)
+    const store = memoryStore({
+      'flue.relay.session': JSON.stringify({ deviceId: ID_A, controlPlane: 'https://app.flue.sh' }),
+    })
+
+    expect(await resolveRelaySession(null, store)).toBeNull()
+  })
+
   it('is null for anything that is not the shape it wrote', async () => {
     vi.stubGlobal('indexedDB', new IDBFactory())
-    await savePinnedDaemonKeyFor('aaaaaaaaaaaa', KEY_A)
+    await savePinnedDaemonKeyFor(ID_A, KEY_A)
 
     for (const raw of [
       'not json',
       '{}',
-      JSON.stringify({ deviceId: 'aaaaaaaaaaaa' }),
+      JSON.stringify({ deviceId: ID_A }),
       JSON.stringify({ controlPlane: 'https://app.flue.sh' }),
       JSON.stringify({ deviceId: 1, controlPlane: 'https://app.flue.sh' }),
-      JSON.stringify({ deviceId: 'aaaaaaaaaaaa', controlPlane: 'javascript:alert(1)' }),
+      JSON.stringify({ deviceId: ID_A, controlPlane: 'javascript:alert(1)' }),
     ]) {
       expect(await resolveRelaySession(null, memoryStore({ 'flue.relay.session': raw }))).toBeNull()
     }
@@ -211,7 +291,7 @@ describe('resolveRelaySession, on a reload', () => {
 
 describe('channelTokenSource', () => {
   const session = {
-    deviceId: 'aaaaaaaaaaaa',
+    deviceId: ID_A,
     daemonPub: KEY_A,
     controlPlane: 'https://app.flue.sh',
     token: 'the-handoff-token' as string | null,

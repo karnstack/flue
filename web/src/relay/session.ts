@@ -15,10 +15,15 @@
  *                       the one in the fragment
  *
  * — and all three arrive in the fragment `openSession` navigated here with
- * (app/src/server/devices.ts). This module turns that handoff into a session,
- * and turns a *reload* of the same tab back into one: the fragment is scrubbed
- * as it is read, so without something remembered a refresh would land on a page
- * with a pinned key it cannot find and no token it can use.
+ * (app/src/server/devices.ts). A fragment is whatever the link someone clicked
+ * put there, so the first two are checked against each other before either is
+ * believed: a device id *is* the hash of the key it names, which makes the
+ * handoff self-proving (`namesItsOwnKey`, and the two attacks it stops).
+ *
+ * This module turns that handoff into a session, and turns a *reload* of the
+ * same tab back into one: the fragment is scrubbed as it is read, so without
+ * something remembered a refresh would land on a page with a pinned key it
+ * cannot find and no token it can use.
  *
  * What is remembered, and where. `sessionStorage`, holding the device id and
  * the control plane's origin — per tab, gone when the tab closes, and neither
@@ -29,12 +34,17 @@
  * credential with a sixty-second life, and a copy of one at rest is a copy that
  * can be replayed. A reload mints a fresh one instead.
  */
+import { sha256 } from '@noble/hashes/sha2.js'
+import { bytesToHex } from '@noble/hashes/utils.js'
 import { loadPinnedDaemonKeyFor, savePinnedDaemonKeyFor } from '@/crypto/keys'
 import type { RelayHandoff } from '@/lib/url'
 import { refreshClientToken } from './control-plane'
 
 /** A Noise X25519 static public key is 32 bytes. Nothing else is one. */
 const KEY_BYTES = 32
+
+/** Twelve hex characters — 48 bits of the digest, as Go slices it. */
+const DEVICE_ID_LENGTH = 12
 
 /**
  * Where the two non-secret facts survive a reload.
@@ -100,6 +110,8 @@ async function adopt(handoff: RelayHandoff, store: Storage | null): Promise<Rela
   const daemonPub = decodeKey(handoff.daemonKey)
   const controlPlane = originOf(handoff.controlPlane)
   if (!daemonPub || !controlPlane) return null
+  // Before anything is written down. See `namesItsOwnKey`.
+  if (!namesItsOwnKey(handoff.deviceId, daemonPub)) return null
 
   await savePinnedDaemonKeyFor(handoff.deviceId, daemonPub)
   try {
@@ -137,6 +149,11 @@ async function restore(store: Storage | null): Promise<RelaySession | null> {
   // tab could not spend.
   const daemonPub = await loadPinnedDaemonKeyFor(saved.deviceId)
   if (!daemonPub) return null
+  // The same check on the way out of the store as on the way in, so the
+  // invariant is one sentence rather than two: a key filed under an id hashes
+  // to that id. `adopt` can no longer write a record that fails this; what it
+  // catches is one written by a build before that check existed.
+  if (!namesItsOwnKey(saved.deviceId, daemonPub)) return null
 
   // No token, on purpose. Nothing at rest holds one, so the first dial after a
   // reload mints its own — which is the same path every reconnect takes.
@@ -171,6 +188,50 @@ export function channelTokenSource(
     }
     return refreshClientToken(session.controlPlane, session.deviceId)
   }
+}
+
+/**
+ * Whether `deviceId` is the name this key actually has.
+ *
+ * A device id *is* `hex(sha256(publicKey))[:12]` — `DeviceID` in
+ * internal/crypto/devices.go, `deviceIdFor` in app/src/lib/device-id.ts, and
+ * this. So a handoff carries its own proof, and checking it costs one hash.
+ *
+ * **Why it has to be checked.** `k` and `d` arrive in the fragment, which is
+ * whatever the link someone clicked put there. Taken on trust they buy two
+ * things:
+ *
+ *   - **poisoning.** `d` names the victim's machine and `k` is anything at all.
+ *     The pinned record for that machine is overwritten — deliberately, and for
+ *     good reasons (crypto/keys.ts) — and every later session with it builds
+ *     its Noise IK handshake against a static the daemon cannot prove.
+ *     `readMessageB` throws, the socket reports an ordinary close, and the tab
+ *     reconnects into the identical failure for as long as it is open, with
+ *     nothing on screen to say why. A crafted link becomes a lasting denial of
+ *     service for one machine in one browser.
+ *   - **substitution**, which is worse. `k` and `d` are both the *attacker's*
+ *     machine. The handshake then succeeds, on the genuine `relay.flue.sh`
+ *     origin with its genuine certificate, and the user is typing into a shell
+ *     on a box somebody else owns while every signal on the screen says flue.sh
+ *     is at the other end. The relay refuses the attacker's token for anyone
+ *     else's device, so this costs them a machine of their own and buys them
+ *     one dial — and one dial is all it takes.
+ *
+ * Neither is reachable through the control plane: `openSession` reads `k` and
+ * `d` out of the same row, so they cannot disagree. The check is not about
+ * distrusting it; it is about the fragment being an input like any other.
+ *
+ * Compared exactly, and in lower case, over the whole string. An id is twelve
+ * hex characters in lower case everywhere it is written — the daemon computes
+ * it, the control plane stores it — so a case-insensitive or prefix comparison
+ * would only widen what counts as a match, and this is the one place where
+ * being generous is the bug.
+ *
+ * ("in lower case" is spelled out because the one-word form is a Tailwind
+ * utility, and prose in a comment compiles — see styles.build.test.ts.)
+ */
+function namesItsOwnKey(deviceId: string, publicKey: Uint8Array): boolean {
+  return deviceId === bytesToHex(sha256(publicKey)).slice(0, DEVICE_ID_LENGTH)
 }
 
 /** base64url (or base64) to a 32-byte key, or null if it is not one. */

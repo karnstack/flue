@@ -42,6 +42,14 @@ Two properties of that picture are the whole reason it looks like this:
   under the device id (`web/src/crypto/keys.ts`,
   `savePinnedDaemonKeyFor`). Self-hosted browsers keep the single per-origin
   pin the `/pair` ceremony writes — there, the origin *is* the machine.
+
+  A fragment is whatever the link someone clicked put there, so the tab checks
+  `k` against `d` before it pins anything (`namesItsOwnKey`,
+  `web/src/relay/session.ts`): `d` is the hash of `k`, so the handoff proves
+  itself and a mismatch is refused outright. A link that skipped that check
+  could pin a wrong key under a victim's device id — that machine then
+  reconnect-loops in that browser forever — or, carrying the attacker's own key
+  *and* id, open a terminal into their machine on the real relay origin.
 - **The token is fetched per dial, not captured once.** It lives sixty seconds.
   A tab that captured one at open time was refused at its first reconnect past
   a minute — a laptop lid, a tunnel — and never recovered. Each re-dial asks
