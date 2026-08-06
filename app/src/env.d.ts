@@ -13,5 +13,24 @@ declare namespace Cloudflare {
   interface Env {
     /** HMAC key for login codes at rest (`server/codes.ts`). */
     CODE_HMAC_SECRET: string
+    /**
+     * The key channel tokens are signed with (`server/channel-token.ts`), and
+     * the one value this Worker shares with another: the relay verifies tokens
+     * offline with the same string. `wrangler secret put RELAY_SIGNING_SECRET`
+     * on *both* Workers, with the same value, or nothing bridges. Rotating it
+     * invalidates every outstanding channel token — blast radius, one TTL.
+     */
+    RELAY_SIGNING_SECRET: string
+    /**
+     * The relay to dial, e.g. `wss://relay.flue.sh`, handed to the caller
+     * alongside every channel token.
+     *
+     * Not a secret, and deliberately not in wrangler.jsonc either: that file's
+     * bindings are typed by the *generated* worker-configuration.d.ts, and a
+     * value declared in both places is one `pnpm cf-typegen` away from a
+     * duplicate declaration. It travels with the secrets instead — one
+     * `.dev.vars` locally, one deploy step in docs/SAAS.md.
+     */
+    RELAY_URL: string
   }
 }

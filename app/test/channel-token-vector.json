@@ -1,0 +1,26 @@
+{
+  "note": "Cross-implementation vector for the relay channel token. app/src/lib/tokens.ts signs these bytes; relay/src/channel-auth.ts must verify them (copy this file into relay/test/ verbatim). exp is 2100-01-01T00:00:00Z so the vector never rots. Derived independently with node:crypto, not from the implementation under test.",
+  "secret": "vector-relay-signing-secret",
+  "vectors": [
+    {
+      "claims": {
+        "acc": "9f0d0b28-7f3e-4a4f-9c8e-2d1f0b3a5c67",
+        "dev": "b5d05f15398a",
+        "role": "daemon",
+        "exp": 4102444800
+      },
+      "payloadJson": "{\"acc\":\"9f0d0b28-7f3e-4a4f-9c8e-2d1f0b3a5c67\",\"dev\":\"b5d05f15398a\",\"role\":\"daemon\",\"exp\":4102444800}",
+      "token": "eyJhY2MiOiI5ZjBkMGIyOC03ZjNlLTRhNGYtOWM4ZS0yZDFmMGIzYTVjNjciLCJkZXYiOiJiNWQwNWYxNTM5OGEiLCJyb2xlIjoiZGFlbW9uIiwiZXhwIjo0MTAyNDQ0ODAwfQ.FXhVnTs_1UD8nl5ynsbzUpgof4Bkl1bro8N1iJ1JfQo"
+    },
+    {
+      "claims": {
+        "acc": "9f0d0b28-7f3e-4a4f-9c8e-2d1f0b3a5c67",
+        "dev": "b5d05f15398a",
+        "role": "client",
+        "exp": 4102444800
+      },
+      "payloadJson": "{\"acc\":\"9f0d0b28-7f3e-4a4f-9c8e-2d1f0b3a5c67\",\"dev\":\"b5d05f15398a\",\"role\":\"client\",\"exp\":4102444800}",
+      "token": "eyJhY2MiOiI5ZjBkMGIyOC03ZjNlLTRhNGYtOWM4ZS0yZDFmMGIzYTVjNjciLCJkZXYiOiJiNWQwNWYxNTM5OGEiLCJyb2xlIjoiY2xpZW50IiwiZXhwIjo0MTAyNDQ0ODAwfQ.FNUPw2iXSUiBgawSvNSsW_DloZ383CFQBcJHkNUciag"
+    }
+  ]
+}

@@ -149,6 +149,15 @@ function workersProject() {
               // recompute a hash and prove the plaintext never reached the
               // database.
               CODE_HMAC_SECRET: 'test-code-hmac-secret',
+              // Also a production secret, and the one value this Worker shares
+              // with another: the relay verifies channel tokens offline under
+              // the same string. Present and stable here so a test can verify
+              // a minted token exactly as the relay would.
+              RELAY_SIGNING_SECRET: 'test-relay-signing-secret',
+              // Not a secret, but it has no default in the code (see
+              // server/channel-token.ts), so the tests supply one and assert
+              // that every mint hands it back.
+              RELAY_URL: 'wss://relay.test.flue.sh',
               // Test-only, like TEST_MIGRATIONS, and deliberately absent from
               // Cloudflare.Env: production code must not be able to look a
               // server function up by name.
