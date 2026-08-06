@@ -54,6 +54,7 @@ import { and, eq, gt, isNotNull, isNull, lt, or, sql } from 'drizzle-orm'
 import { db } from '../db/client'
 import { deviceAuth, devices } from '../db/schema'
 import { decodePublicKey, deviceIdFromKey, encodePublicKey } from '../lib/device-id'
+import { normalizeLabel } from '../lib/label'
 import { randomToken, sha256Hex } from '../lib/tokens'
 import { LONGEST_WINDOW_S, SWEEP_ONE_IN, clientIp, withinLimit } from './ratelimit'
 import { currentUser } from './sessions'
@@ -112,9 +113,6 @@ export const CONFIRMS_PER_USER = 20
  */
 const ENROLL_WINDOW_S = LONGEST_WINDOW_S
 
-/** The longest label kept, and the longest input read before giving up on it. */
-const MAX_LABEL = 64
-const MAX_LABEL_INPUT = 1024
 /** A user code is 8 characters; the slack is for dashes, spaces and paste noise. */
 const MAX_USER_CODE_INPUT = 64
 /** A device code is 43 base64url characters. Nothing longer is worth hashing. */
@@ -201,7 +199,10 @@ export async function startDeviceAuth(input: StartDeviceAuthInput): Promise<Devi
   const bytes = decodePublicKey(input.publicKey.slice(0, 128))
   if (!bytes) throw new DeviceAuthError('enroll: the device key must be 32 bytes, base64', 400)
   const publicKey = encodePublicKey(bytes)
-  const label = normalizeLabel(input.label)
+  // A daemon that sent nothing usable still needs a name in the list: this is
+  // the one endpoint whose caller is a program rather than a person, so an
+  // empty label is a client that did not bother, not somebody to correct.
+  const label = normalizeLabel(input.label) || FALLBACK_LABEL
 
   // Before the write, not after. This endpoint is unauthenticated and every
   // call mints a row, so without a cap the size of `device_auth` is whatever
@@ -544,26 +545,6 @@ export function normalizeUserCode(raw: string): string {
   if (letters.length !== USER_CODE_LENGTH) return ''
   for (const c of letters) if (!USER_CODE_ALPHABET.includes(c)) return ''
   return letters
-}
-
-/**
- * The label, made safe to store and to print.
- *
- * Control characters go first: this string is chosen by whoever runs the
- * daemon, and it is later printed into a terminal by `flue devices` on some
- * other machine — an escape sequence there is somebody else's cursor. Runs of
- * whitespace collapse so the dashboard's list stays a list, and the result is
- * bounded because `devices.label` is shown, not searched.
- */
-function normalizeLabel(raw: string): string {
-  const cleaned = raw
-    .slice(0, MAX_LABEL_INPUT)
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, MAX_LABEL)
-    .trim()
-  return cleaned || FALLBACK_LABEL
 }
 
 /**

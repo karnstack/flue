@@ -89,9 +89,10 @@ export const Route = createFileRoute('/login')({
     // what makes the new cookie observable end to end: the response that sets
     // it is followed by a request that is recognized.
     //
-    // `href` rather than the type-checked `to`: /devices arrives in Task 8, and
-    // `to` is checked against the generated route tree. Swap it then.
-    if (await isSignedIn()) throw redirect({ href: '/devices' })
+    // `to`, not `href`: /devices exists now, so this is checked against the
+    // generated route tree and a rename that moves the screen fails the build
+    // rather than sending every returning visitor to a 404.
+    if (await isSignedIn()) throw redirect({ to: '/devices' })
   },
 })
 
@@ -108,7 +109,10 @@ function LoginPage() {
         // A full document load, not a client-side transition: the session
         // cookie only just came into existence, and everything the server
         // rendered before it did was rendered for a signed-out visitor.
-        void navigate({ href: '/devices', reloadDocument: true })
+        //
+        // `to`, not `href`, for the same reason as the loader above: the
+        // destination is checked against the generated route tree.
+        void navigate({ to: '/devices', reloadDocument: true })
       }}
     />
   )
