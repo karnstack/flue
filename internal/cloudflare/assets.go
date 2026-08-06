@@ -128,6 +128,14 @@ func (c *Client) uploadAssets(ctx context.Context, accountID, script string, ass
 	manifest := make(map[string]manifestEntry, len(assets))
 	byHash := make(map[string]Asset, len(assets))
 	for _, a := range assets {
+		// Manifest keys are the URL paths the files will be served at, and
+		// Cloudflare requires them absolute. Catching this here costs nothing
+		// and beats the alternative: a rejected session whose error names the
+		// API's own validation rule rather than the file that broke it — and
+		// which arrives after the caller has already built the whole bundle.
+		if !strings.HasPrefix(a.Path, "/") {
+			return "", fmt.Errorf("cloudflare: asset path %q must start with %q", a.Path, "/")
+		}
 		h := hashOf(a)
 		manifest[a.Path] = manifestEntry{Hash: h, Size: len(a.Body)}
 		byHash[h] = a

@@ -49,6 +49,14 @@ const migrationTag = "v1"
 // configures.
 const notFoundHandling = "single-page-application"
 
+// htmlHandling is sent explicitly even though it is Cloudflare's default,
+// because "the default" is a server-side decision that can move underneath a
+// deployed Worker. wrangler.jsonc does not set it, so this is the value a
+// wrangler deploy would produce today — pinning it keeps the two tools
+// producing the same router, and keeps a future change to the default from
+// silently altering how /foo, /foo/ and /foo.html resolve for existing users.
+const htmlHandling = "auto-trailing-slash"
+
 // scriptAPIDate pins the Worker subdomain endpoint's contract. Cloudflare
 // versions that endpoint by date and current wrangler sends this same value;
 // without it the meaning of previews_enabled is whatever the account's default
@@ -111,14 +119,25 @@ func (e *APIError) Error() string {
 
 // envelope is the shape every v4 response arrives in.
 type envelope struct {
-	Success bool            `json:"success"`
-	Errors  []envelopeError `json:"errors"`
-	Result  json.RawMessage `json:"result"`
+	Success    bool            `json:"success"`
+	Errors     []envelopeError `json:"errors"`
+	Result     json.RawMessage `json:"result"`
+	ResultInfo *resultInfo     `json:"result_info"`
 }
 
 type envelopeError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// resultInfo is the pagination block list endpoints carry. It is absent on
+// everything else, so callers get a nil.
+type resultInfo struct {
+	Page       int `json:"page"`
+	PerPage    int `json:"per_page"`
+	Count      int `json:"count"`
+	TotalCount int `json:"total_count"`
+	TotalPages int `json:"total_pages"`
 }
 
 // apiCall is one request. Most fields are optional; bearer defaults to the
@@ -139,13 +158,20 @@ type apiCall struct {
 // this package is Deploy's migration re-run, which is a semantic decision the
 // transport layer has no business making.
 func (c *Client) call(ctx context.Context, a apiCall) (json.RawMessage, error) {
+	raw, _, err := c.callWithInfo(ctx, a)
+	return raw, err
+}
+
+// callWithInfo is call, plus the pagination block for the endpoints that
+// return one.
+func (c *Client) callWithInfo(ctx context.Context, a apiCall) (json.RawMessage, *resultInfo, error) {
 	var body io.Reader
 	if a.body != nil {
 		body = bytes.NewReader(a.body)
 	}
 	req, err := http.NewRequestWithContext(ctx, a.method, c.baseURL()+a.path, body)
 	if err != nil {
-		return nil, fmt.Errorf("cloudflare: building %s %s: %w", a.method, a.path, err)
+		return nil, nil, fmt.Errorf("cloudflare: building %s %s: %w", a.method, a.path, err)
 	}
 	bearer := a.bearer
 	if bearer == "" {
@@ -161,28 +187,28 @@ func (c *Client) call(ctx context.Context, a apiCall) (json.RawMessage, error) {
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("cloudflare: %s %s: %w", a.method, a.path, err)
+		return nil, nil, fmt.Errorf("cloudflare: %s %s: %w", a.method, a.path, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("cloudflare: reading %s %s: %w", a.method, a.path, err)
+		return nil, nil, fmt.Errorf("cloudflare: reading %s %s: %w", a.method, a.path, err)
 	}
 
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		// Cloudflare's edge answers some failures with HTML. Report the status,
 		// not the body: the body is unbounded and can echo the request.
-		return nil, fmt.Errorf("cloudflare: %s %s: unexpected response (HTTP %d)", a.method, a.path, resp.StatusCode)
+		return nil, nil, fmt.Errorf("cloudflare: %s %s: unexpected response (HTTP %d)", a.method, a.path, resp.StatusCode)
 	}
 	if !env.Success {
 		if len(env.Errors) > 0 {
-			return nil, &APIError{Code: env.Errors[0].Code, Message: env.Errors[0].Message}
+			return nil, nil, &APIError{Code: env.Errors[0].Code, Message: env.Errors[0].Message}
 		}
-		return nil, fmt.Errorf("cloudflare: %s %s failed without an error message (HTTP %d)", a.method, a.path, resp.StatusCode)
+		return nil, nil, fmt.Errorf("cloudflare: %s %s failed without an error message (HTTP %d)", a.method, a.path, resp.StatusCode)
 	}
-	return env.Result, nil
+	return env.Result, env.ResultInfo, nil
 }
 
 // VerifyToken checks the token is real, active, and usable, so that setup can
@@ -190,9 +216,20 @@ func (c *Client) call(ctx context.Context, a apiCall) (json.RawMessage, error) {
 func (c *Client) VerifyToken(ctx context.Context) error {
 	raw, err := c.call(ctx, apiCall{method: http.MethodGet, path: "/user/tokens/verify"})
 	if err != nil {
-		// Naming the token matters: the underlying message is "Invalid API
+		// Only reword a failure Cloudflare itself reported. An *APIError from
+		// this endpoint means Cloudflare looked at the token and said no, and
+		// naming the token matters there: the underlying message is "Invalid API
 		// Token", which reads like a Cloudflare-side fault unless we say whose
-		// token it is and where it came from.
+		// token it is.
+		//
+		// A transport failure — no DNS, no route, TLS refused, a cancelled
+		// context — says nothing whatsoever about the token, and calling it a
+		// rejection would send the user off to reissue a credential that was
+		// fine while the actual problem (their network) went unmentioned.
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			return err
+		}
 		return fmt.Errorf("cloudflare: the API token was rejected: %w", err)
 	}
 	var result struct {
@@ -210,18 +247,42 @@ func (c *Client) VerifyToken(ctx context.Context) error {
 	return nil
 }
 
+// accountsPerPage is how many accounts one page asks for. Cloudflare's default
+// is 20, and a user with more accounts than that would simply not see the rest
+// — with no error and nothing to suggest the list was cut off, which is the
+// worst way for setup to fail.
+const accountsPerPage = 50
+
+// maxAccountPages bounds the pagination loop. At 50 per page this is 1000
+// accounts, far past anything real; it exists so that a server that keeps
+// claiming there is another page cannot spin here forever.
+const maxAccountPages = 20
+
 // Accounts lists the accounts the token can act on, so setup can ask which one
-// the relay should live in.
+// the relay should live in. It follows pagination to the last page.
 func (c *Client) Accounts(ctx context.Context) ([]Account, error) {
-	raw, err := c.call(ctx, apiCall{method: http.MethodGet, path: "/accounts"})
-	if err != nil {
-		return nil, err
+	var all []Account
+	for page := 1; page <= maxAccountPages; page++ {
+		raw, info, err := c.callWithInfo(ctx, apiCall{
+			method: http.MethodGet,
+			path:   fmt.Sprintf("/accounts?per_page=%d&page=%d", accountsPerPage, page),
+		})
+		if err != nil {
+			return nil, err
+		}
+		var accounts []Account
+		if err := json.Unmarshal(raw, &accounts); err != nil {
+			return nil, fmt.Errorf("cloudflare: could not read the account list: %w", err)
+		}
+		all = append(all, accounts...)
+		// Stop at the last page. An empty page ends the list regardless of what
+		// the pagination block claims, and a response with no pagination block
+		// at all is a single-page answer.
+		if len(accounts) == 0 || info == nil || info.TotalPages <= page {
+			break
+		}
 	}
-	var accounts []Account
-	if err := json.Unmarshal(raw, &accounts); err != nil {
-		return nil, fmt.Errorf("cloudflare: could not read the account list: %w", err)
-	}
-	return accounts, nil
+	return all, nil
 }
 
 // DeployInput is everything one deploy of the relay Worker needs.
@@ -243,6 +304,27 @@ type DeployInput struct {
 	DOBindings           map[string]string // name -> class: {"HUB": "DaemonHub"}
 	Assets               []Asset
 	AssetsRunWorkerFirst []string // ["/daemon", "/client", "/api/*"]
+
+	// AssetsBinding is the name the Worker reads its static assets off env
+	// under — "ASSETS" for the relay, matching `assets.binding` in
+	// relay/wrangler.jsonc. It is emitted as a binding of type "assets".
+	//
+	// This is separate from attaching the assets at all, and the distinction is
+	// easy to get wrong: the completion token in metadata.assets.jwt makes
+	// Cloudflare's *router* serve the files, and that alone is enough for a
+	// Worker that only ever needs static paths served for it. It does not
+	// create env.<name>. A Worker that calls env.ASSETS.fetch(...) itself — as
+	// the relay does, to fall through to the SPA on unmatched /api/* — needs
+	// this binding too, or that call is on undefined at runtime.
+	//
+	// Empty means no binding, which is correct for a router-only deploy.
+	AssetsBinding string
+
+	// Observability turns on Workers Logs for the script, matching
+	// `"observability": {"enabled": true}` in relay/wrangler.jsonc. Without it
+	// a relay deployed by `flue relay setup` would have no logs to debug from
+	// where a wrangler-deployed one would.
+	Observability bool
 }
 
 // scriptMetadata is the `metadata` part of the multipart script upload. Field
@@ -254,12 +336,20 @@ type scriptMetadata struct {
 	Bindings          []binding       `json:"bindings,omitempty"`
 	Migrations        *migrations     `json:"migrations,omitempty"`
 	Assets            *assetsMetadata `json:"assets,omitempty"`
+	Observability     *observability  `json:"observability,omitempty"`
 }
 
+// binding is one entry of metadata.bindings. class_name is omitted when empty
+// because only durable_object_namespace bindings carry one — an assets binding
+// is just a type and a name.
 type binding struct {
 	Type      string `json:"type"`
 	Name      string `json:"name"`
-	ClassName string `json:"class_name"`
+	ClassName string `json:"class_name,omitempty"`
+}
+
+type observability struct {
+	Enabled bool `json:"enabled"`
 }
 
 // migrations is the API's migration object. Note that this is an object with a
@@ -282,6 +372,7 @@ type assetsMetadata struct {
 }
 
 type assetsConfig struct {
+	HTMLHandling     string   `json:"html_handling"`
 	NotFoundHandling string   `json:"not_found_handling"`
 	RunWorkerFirst   []string `json:"run_worker_first,omitempty"`
 }
@@ -312,11 +403,21 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 		})
 	}
 
+	// The assets binding goes after the Durable Object ones, which is the order
+	// wrangler emits, and is only meaningful when there are assets to bind to.
+	if in.AssetsBinding != "" && len(in.Assets) > 0 {
+		meta.Bindings = append(meta.Bindings, binding{Type: "assets", Name: in.AssetsBinding})
+	}
+
 	if len(in.NewSQLiteClasses) > 0 {
 		meta.Migrations = &migrations{
 			NewTag: migrationTag,
 			Steps:  []migrationStep{{NewSQLiteClasses: in.NewSQLiteClasses}},
 		}
+	}
+
+	if in.Observability {
+		meta.Observability = &observability{Enabled: true}
 	}
 
 	if len(in.Assets) > 0 {
@@ -327,6 +428,7 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 		meta.Assets = &assetsMetadata{
 			JWT: jwt,
 			Config: assetsConfig{
+				HTMLHandling:     htmlHandling,
 				NotFoundHandling: notFoundHandling,
 				RunWorkerFirst:   in.AssetsRunWorkerFirst,
 			},
@@ -341,6 +443,20 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 		// deploy is retried once without it. The classes still exist; only the
 		// migration is redundant.
 		meta.Migrations = nil
+
+		// The asset completion token was spent on the PUT that just failed, and
+		// Cloudflare does not document whether it survives a rejected upload.
+		// Rather than bet the whole idempotent-re-run path on it being reusable,
+		// the retry opens a fresh upload session. That session costs one request
+		// and no uploads in the normal case: every file is already stored, so it
+		// comes back with no buckets and its own token is the completion token.
+		if meta.Assets != nil {
+			jwt, refreshErr := c.uploadAssets(ctx, in.AccountID, in.ScriptName, in.Assets)
+			if refreshErr != nil {
+				return fmt.Errorf("cloudflare: re-attaching the assets to retry without the already-applied migration: %w", refreshErr)
+			}
+			meta.Assets.JWT = jwt
+		}
 		err = c.putScript(ctx, in, meta)
 	}
 	return err
@@ -398,6 +514,17 @@ func (c *Client) putScript(ctx context.Context, in DeployInput, meta scriptMetad
 // those, retrying without migrations could succeed, deploying a Worker whose
 // Durable Object was never migrated and burying the real error behind a
 // second request.
+//
+// Known residual: "…already depended on by existing Durable Objects" matches
+// here, and it is the message a genuine re-run produces — but Cloudflare uses
+// wording in that family for a *different* condition too, where the class is
+// already in use with a non-SQLite backend. That case is not an idempotent
+// re-run and dropping the migration would leave the mismatch in place. The two
+// are not separable from the text alone, and closing the gap needs a live
+// signal (the deployed script's migration_tag, read before deploying) that
+// this client does not currently fetch. Left open deliberately: the failure
+// mode is a confusing error on an account that cannot work anyway, not a
+// silently wrong deploy of a fresh one.
 func migrationAlreadyApplied(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {

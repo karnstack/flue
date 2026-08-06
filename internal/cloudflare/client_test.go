@@ -51,6 +51,8 @@ func deployFixture() DeployInput {
 		DOBindings:           map[string]string{"HUB": "DaemonHub"},
 		Assets:               []Asset{assetHTML, assetJS, assetCSS},
 		AssetsRunWorkerFirst: []string{"/daemon", "/client", "/api/*"},
+		AssetsBinding:        "ASSETS",
+		Observability:        true,
 	}
 }
 
@@ -284,6 +286,36 @@ func TestVerifyTokenRejectsAnInactiveToken(t *testing.T) {
 	}
 }
 
+// errRoundTripper fails every request without reaching a server, standing in
+// for no DNS, no route, or a refused connection.
+type errRoundTripper struct{ err error }
+
+func (t errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) { return nil, t.err }
+
+// TestVerifyTokenDoesNotBlameTheTokenForANetworkFailure: "the API token was
+// rejected" is a claim about what Cloudflare said, and Cloudflare says nothing
+// when the request never arrives. Rewording a transport failure that way sends
+// the user off to reissue a credential that was fine, while the real problem —
+// their network — goes unmentioned.
+func TestVerifyTokenDoesNotBlameTheTokenForANetworkFailure(t *testing.T) {
+	c := &Client{
+		Token: testToken,
+		Base:  "https://api.cloudflare.com/client/v4",
+		HTTP:  &http.Client{Transport: errRoundTripper{errors.New("dial tcp: connection refused")}},
+	}
+
+	err := c.VerifyToken(context.Background())
+	if err == nil {
+		t.Fatal("VerifyToken with a dead transport = nil, want an error")
+	}
+	if strings.Contains(err.Error(), "rejected") {
+		t.Errorf("error %q blames the token for a network failure", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("error %q loses the underlying transport failure", err)
+	}
+}
+
 // ------------------------------------------------------------------- Accounts
 
 func TestAccountsListsAccounts(t *testing.T) {
@@ -312,6 +344,80 @@ func TestAccountsListsAccounts(t *testing.T) {
 	}
 	if want := "Bearer " + testToken; req.Auth != want {
 		t.Errorf("Authorization = %q, want %q", req.Auth, want)
+	}
+	// Cloudflare's default page size is 20. Asking for more is the difference
+	// between a user with many accounts seeing theirs and not.
+	if !strings.Contains(req.RawQuery, "per_page=50") {
+		t.Errorf("query = %q, want a per_page above Cloudflare's default of 20", req.RawQuery)
+	}
+}
+
+// TestAccountsFollowsPagination: a token that can reach more accounts than fit
+// on one page must still list all of them. Truncating silently would leave the
+// user unable to pick their account with nothing on screen to say why.
+func TestAccountsFollowsPagination(t *testing.T) {
+	pages := [][]map[string]any{
+		{{"id": "acct-1", "name": "One"}, {"id": "acct-2", "name": "Two"}},
+		{{"id": "acct-3", "name": "Three"}},
+	}
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		page := r.URL.Query().Get("page")
+		idx := 0
+		if page == "2" {
+			idx = 1
+		}
+		raw, err := json.Marshal(pages[idx])
+		if err != nil {
+			t.Fatalf("marshalling page: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"success":true,"errors":[],"result":%s,
+			"result_info":{"page":%s,"per_page":2,"count":%d,"total_count":3,"total_pages":2}}`,
+			raw, page, len(pages[idx]))
+	})
+
+	got, err := f.client().Accounts(context.Background())
+	if err != nil {
+		t.Fatalf("Accounts: %v", err)
+	}
+	want := []Account{
+		{ID: "acct-1", Name: "One"},
+		{ID: "acct-2", Name: "Two"},
+		{ID: "acct-3", Name: "Three"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Accounts = %+v, want %+v", got, want)
+	}
+
+	reqs := f.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("made %d requests (%s), want 2 pages", len(reqs), f.paths())
+	}
+	for i, want := range []string{"page=1", "page=2"} {
+		if !strings.Contains(reqs[i].RawQuery, want) {
+			t.Errorf("request %d query = %q, want %s", i, reqs[i].RawQuery, want)
+		}
+	}
+}
+
+// TestAccountsStopsOnAnEmptyPage: a server that keeps claiming there is another
+// page must not spin this loop forever.
+func TestAccountsStopsOnAnEmptyPage(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"success":true,"errors":[],"result":[],
+			"result_info":{"page":1,"per_page":50,"count":0,"total_count":9999,"total_pages":9999}}`)
+	})
+
+	got, err := f.client().Accounts(context.Background())
+	if err != nil {
+		t.Fatalf("Accounts: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("Accounts = %+v, want empty", got)
+	}
+	if n := len(f.requests()); n != 1 {
+		t.Errorf("made %d requests for an empty first page, want 1", n)
 	}
 }
 
@@ -569,6 +675,13 @@ func TestDeployUploadsAssetsThenPutsTheScript(t *testing.T) {
 	// The metadata part must decode to exactly the golden document.
 	meta := partNamed(t, parts, "metadata")
 	assertGoldenMetadata(t, meta.Body)
+	// Called out separately because the golden would let this regress under a
+	// diff nobody reads closely: the assets binding is what creates env.ASSETS.
+	// The completion token above only makes Cloudflare's router serve the
+	// files — a Worker that calls env.ASSETS.fetch() itself, as the relay does
+	// to fall through to the SPA, needs this binding or that call is on
+	// undefined and every unmatched request 500s.
+	assertAssetsBinding(t, meta.Body, "ASSETS")
 
 	// The module part must arrive byte-identical, named as main_module, and
 	// typed as an ES module.
@@ -605,6 +718,128 @@ func assertGoldenMetadata(t *testing.T, body []byte) {
 		gotPretty, _ := json.MarshalIndent(got, "", "  ")
 		wantPretty, _ := json.MarshalIndent(want, "", "  ")
 		t.Errorf("metadata does not match %s\n--- got ---\n%s\n--- want ---\n%s", goldenPath, gotPretty, wantPretty)
+	}
+}
+
+// bindingsOf decodes metadata.bindings.
+func bindingsOf(t *testing.T, metadata []byte) []map[string]any {
+	t.Helper()
+	var m struct {
+		Bindings []map[string]any `json:"bindings"`
+	}
+	if err := json.Unmarshal(metadata, &m); err != nil {
+		t.Fatalf("decoding metadata: %v (%s)", err, metadata)
+	}
+	return m.Bindings
+}
+
+// assertAssetsBinding fails unless metadata.bindings carries exactly one
+// {"type":"assets","name":name} and no stray class_name on it.
+func assertAssetsBinding(t *testing.T, metadata []byte, name string) {
+	t.Helper()
+	var found []map[string]any
+	for _, b := range bindingsOf(t, metadata) {
+		if b["type"] == "assets" {
+			found = append(found, b)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("got %d assets bindings, want 1: %s", len(found), metadata)
+	}
+	if got := found[0]["name"]; got != name {
+		t.Errorf("assets binding name = %v, want %q", got, name)
+	}
+	// class_name belongs to durable_object_namespace bindings; an empty one
+	// here would be a field the API has no meaning for.
+	if _, ok := found[0]["class_name"]; ok {
+		t.Errorf("assets binding carries a class_name: %v", found[0])
+	}
+}
+
+// TestDeployOmitsTheAssetsBindingWhenUnset: a Worker that only needs its files
+// served by the router does not need env.<name>, and inventing a binding it
+// never asked for would put a name in its environment out of nowhere.
+func TestDeployOmitsTheAssetsBindingWhenUnset(t *testing.T) {
+	in := deployFixture()
+	in.AssetsBinding = ""
+
+	f := deployServer(t, nil, func(w http.ResponseWriter, parts []part) {
+		meta := partNamed(t, parts, "metadata")
+		for _, b := range bindingsOf(t, meta.Body) {
+			if b["type"] == "assets" {
+				t.Errorf("metadata carries an assets binding that was not asked for: %s", meta.Body)
+			}
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+
+	if err := f.client().Deploy(context.Background(), in); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+}
+
+// TestDeployOmitsTheAssetsBindingWithNoAssets: binding a name to an asset store
+// that was never uploaded would hand the Worker a Fetcher over nothing.
+func TestDeployOmitsTheAssetsBindingWithNoAssets(t *testing.T) {
+	in := deployFixture()
+	in.Assets = nil
+
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		meta := partNamed(t, parseParts(t, r.Header.Get("Content-Type"), body), "metadata")
+		for _, b := range bindingsOf(t, meta.Body) {
+			if b["type"] == "assets" {
+				t.Errorf("metadata binds assets with none to bind: %s", meta.Body)
+			}
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+
+	if err := f.client().Deploy(context.Background(), in); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+}
+
+// TestDeployOmitsObservabilityWhenOff: the field is a policy the caller sets,
+// not something this client decides for every Worker it deploys.
+func TestDeployOmitsObservabilityWhenOff(t *testing.T) {
+	in := deployFixture()
+	in.Observability = false
+
+	f := deployServer(t, nil, func(w http.ResponseWriter, parts []part) {
+		meta := partNamed(t, parts, "metadata")
+		var m map[string]any
+		if err := json.Unmarshal(meta.Body, &m); err != nil {
+			t.Fatalf("decoding metadata: %v", err)
+		}
+		if _, ok := m["observability"]; ok {
+			t.Errorf("metadata carries observability with it turned off: %s", meta.Body)
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+
+	if err := f.client().Deploy(context.Background(), in); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+}
+
+// TestDeployRejectsARelativeAssetPath: manifest keys are the URL paths the
+// files are served at and Cloudflare requires them absolute. Failing here names
+// the offending file; failing at the session names only the API's own rule.
+func TestDeployRejectsARelativeAssetPath(t *testing.T) {
+	in := deployFixture()
+	in.Assets = []Asset{assetHTML, {Path: "assets/app.js", Body: []byte("x")}}
+
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		t.Errorf("sent %s %s despite a malformed asset path", r.Method, r.URL.Path)
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "session-jwt", "buckets": [][]string{}})
+	})
+
+	err := f.client().Deploy(context.Background(), in)
+	if err == nil {
+		t.Fatal("Deploy with a relative asset path = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "assets/app.js") {
+		t.Errorf("error %q does not name the offending asset", err)
 	}
 }
 
@@ -762,6 +997,88 @@ func TestDeployRetriesWithoutMigrationsWhenAlreadyApplied(t *testing.T) {
 	delete(withMigrations, "migrations")
 	if !reflect.DeepEqual(withMigrations, without) {
 		t.Errorf("the retry changed more than migrations:\n%s\nvs\n%s", metadatas[0], metadatas[1])
+	}
+}
+
+// TestDeployRefreshesTheAssetTokenBeforeRetrying: the completion token was
+// spent on the PUT that just failed, and Cloudflare does not document whether
+// it survives a rejected upload. Since the retry is the *normal* path for a
+// re-run of `flue relay setup`, it opens a fresh upload session rather than
+// betting the whole re-run flow on a token that may be single-use.
+func TestDeployRefreshesTheAssetTokenBeforeRetrying(t *testing.T) {
+	var jwts []string
+	sessions, puts := 0, 0
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/assets-upload-session") {
+			sessions++
+			// Cloudflare already holds every file by the second session, so it
+			// answers with no buckets and a token of its own.
+			writeEnvelope(t, w, http.StatusOK, map[string]any{
+				"jwt":     fmt.Sprintf("session-jwt-%d", sessions),
+				"buckets": [][]string{},
+			})
+			return
+		}
+		puts++
+		var m struct {
+			Assets struct {
+				JWT string `json:"jwt"`
+			} `json:"assets"`
+		}
+		meta := partNamed(t, parseParts(t, r.Header.Get("Content-Type"), body), "metadata")
+		if err := json.Unmarshal(meta.Body, &m); err != nil {
+			t.Fatalf("decoding metadata: %v", err)
+		}
+		jwts = append(jwts, m.Assets.JWT)
+		if puts == 1 {
+			writeAPIError(w, http.StatusBadRequest, 10061,
+				"Cannot apply new-sqlite-class migration to class DaemonHub that is already depended on by existing Durable Objects")
+			return
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+
+	if err := f.client().Deploy(context.Background(), deployFixture()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if sessions != 2 {
+		t.Errorf("asset upload sessions = %d, want 2 (one per script PUT)", sessions)
+	}
+	want := []string{"session-jwt-1", "session-jwt-2"}
+	if !reflect.DeepEqual(jwts, want) {
+		t.Errorf("assets.jwt per PUT = %v, want %v", jwts, want)
+	}
+}
+
+// TestDeployReportsAFailedAssetRefreshOnRetry: if the fresh session cannot be
+// opened there is no token to attach, and PUTting anyway would deploy a Worker
+// with no UI. The error has to say the retry was where it happened.
+func TestDeployReportsAFailedAssetRefreshOnRetry(t *testing.T) {
+	sessions, puts := 0, 0
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/assets-upload-session") {
+			sessions++
+			if sessions == 1 {
+				writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "session-jwt", "buckets": [][]string{}})
+			} else {
+				writeAPIError(w, http.StatusInternalServerError, 10000, "Internal error")
+			}
+			return
+		}
+		puts++
+		writeAPIError(w, http.StatusBadRequest, 10061,
+			"Cannot apply new-sqlite-class migration to class DaemonHub that is already depended on by existing Durable Objects")
+	})
+
+	err := f.client().Deploy(context.Background(), deployFixture())
+	if err == nil {
+		t.Fatal("Deploy = nil, want the failed asset refresh surfaced")
+	}
+	if !strings.Contains(err.Error(), "10000") {
+		t.Errorf("error %q drops the Cloudflare code from the failed session", err)
+	}
+	if puts != 1 {
+		t.Errorf("script PUTs = %d, want 1: the retry must not go out without a token", puts)
 	}
 }
 
