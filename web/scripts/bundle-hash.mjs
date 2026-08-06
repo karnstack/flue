@@ -7,9 +7,11 @@
  * This is the answer to the one thing end-to-end encryption cannot fix: the
  * JavaScript that holds your keys is served to you by whoever runs the origin
  * you loaded it from (`docs/faq.md`). A digest anyone can recompute from the
- * source is what turns "trust the operator" into "check the operator" — build
- * the tag yourself, run this, and compare with the value published for that
- * release.
+ * source is what turns "trust the operator" into "check the operator". No
+ * release publishes such a value yet (`docs/FOLLOW-UPS.md` §13), so today this
+ * proves a source tree builds to a given bundle; comparing against a digest
+ * you did not produce waits on the release pipeline emitting and attesting
+ * one.
  *
  * Determinism is the whole point, so the digest reads only what a build
  * produces and never how it was produced: no mtimes, no inode order, no
@@ -24,9 +26,13 @@
  * property this script exists to provide, and a decimal length terminated by
  * NUL — which neither a path nor a length can contain — closes it.
  *
- * What determinism still rests on: the same source, the same lockfile, and
- * the same toolchain (`mise.toml` pins go, node and pnpm). Vite's filenames
- * are content-hashed, so the digest changes if and only if the output does.
+ * What determinism still rests on: the same source, the same lockfile, the
+ * same toolchain (`mise.toml` pins go, node and pnpm) — and the same OS and
+ * CPU, which nothing here pins. The lockfile resolves per-platform native
+ * binaries (esbuild, `@tailwindcss/oxide`), so two builds on unlike machines
+ * are not known to agree, and only a build pinned to one image would make the
+ * digest portable. The digest is over file bytes, so anything that changes
+ * what would be served changes it.
  *
  * Usage:
  *   node scripts/bundle-hash.mjs                 hash web/dist
@@ -63,17 +69,27 @@ async function walk(dir, base, found) {
  * byte order for anything outside the BMP. No Vite output has ever contained
  * such a filename; the comparator costs nothing and means the digest does not
  * quietly depend on that staying true.
+ *
+ * Callers pass names already put through `normalize('NFC')`, for the same
+ * reason: macOS hands back a decomposed spelling of a non-ASCII filename where
+ * Linux hands back a composed one, and unnormalized they sort and hash as two
+ * different names for one asset.
  */
 function byBytes(a, b) {
   return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'))
 }
 
 async function bundleHash(dir) {
-  const paths = (await walk(dir, dir, [])).sort(byBytes)
+  // Sorted and hashed under NFC; read back under the spelling the filesystem
+  // actually gave us, because handing a normalized name to `readFile` on a
+  // system that stored the other spelling is how you get an ENOENT.
+  const entries = (await walk(dir, dir, []))
+    .map((onDisk) => ({ onDisk, path: onDisk.normalize('NFC') }))
+    .sort((a, b) => byBytes(a.path, b.path))
   const whole = createHash('sha256')
   const files = []
-  for (const path of paths) {
-    const bytes = await readFile(join(dir, path))
+  for (const { onDisk, path } of entries) {
+    const bytes = await readFile(join(dir, onDisk))
     whole.update(Buffer.from(path, 'utf8'))
     whole.update(NUL)
     whole.update(Buffer.from(String(bytes.byteLength), 'utf8'))
@@ -121,10 +137,11 @@ async function main() {
   try {
     result = await bundleHash(dir)
   } catch (err) {
-    // The overwhelmingly likely cause is a dist that was never built, and a
-    // digest over a directory that is not there would be a lie either way.
     console.error(`bundle-hash: cannot read ${dir}: ${err.message}`)
-    console.error('bundle-hash: run `pnpm build` first')
+    // A directory that is not there is overwhelmingly one that was never
+    // built. Anything else — a permission error, a symlink pointing nowhere —
+    // is a different problem, and the build hint would send you the wrong way.
+    if (err.code === 'ENOENT') console.error('bundle-hash: run `pnpm build` first')
     process.exitCode = 1
     return
   }

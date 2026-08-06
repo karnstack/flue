@@ -71,6 +71,18 @@ describe('bundle-hash', () => {
     expect(digest(a)).toBe(digest(b))
   })
 
+  it('agrees whether a filename arrives composed or decomposed', async () => {
+    // macOS hands back a decomposed spelling of `café` where Linux hands back
+    // a composed one. Same asset, same bytes, and the digest has to say so or
+    // a cross-machine comparison fails for a reason that is not tampering.
+    // Escapes, not literals: the two spellings look identical in an editor,
+    // and this file's own bytes must not decide which one each line holds.
+    const composed = await tree({ ['caf\u00e9.js']: 'one' })
+    const decomposed = await tree({ ['cafe\u0301.js']: 'one' })
+
+    expect(digest(composed)).toBe(digest(decomposed))
+  })
+
   it('changes when one byte does', async () => {
     const a = await tree({ 'a.js': 'one' })
     const b = await tree({ 'a.js': 'onE' })
