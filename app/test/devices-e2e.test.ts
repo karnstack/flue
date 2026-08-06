@@ -318,7 +318,7 @@ describe('when the database breaks', () => {
     const res = await withBrokenDatabase(() => callServerFn('listDevicesFn', {}, { cookie }))
     const body = await res.text()
 
-    expect(body).toContain('could not read')
+    expect(body).toContain('could not be loaded')
     for (const leak of ['D1_ERROR', 'SQLITE', 'Failed query', 'params:', 'select', user.id]) {
       expect(body).not.toContain(leak)
     }

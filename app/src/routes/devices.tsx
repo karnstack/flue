@@ -134,7 +134,7 @@ export const listDevicesFn = createServerFn({ method: 'POST' })
           now: Math.floor(Date.now() / 1000),
         }
       } catch (err) {
-        return refusal(err, 'devices: could not read your machines')
+        return refusal(err, 'Your machines could not be loaded. Try again in a moment.')
       }
     },
   )
@@ -148,7 +148,7 @@ export const revokeDeviceFn = createServerFn({ method: 'POST' })
       await revokeDevice(data.deviceId)
       return { ok: true }
     } catch (err) {
-      return refusal(err, 'devices: could not revoke that machine')
+      return refusal(err, 'That machine could not be revoked. Try again in a moment.')
     }
   })
 
@@ -160,7 +160,7 @@ export const renameDeviceFn = createServerFn({ method: 'POST' })
     try {
       return { ok: true, label: await renameDevice(data.deviceId, data.label) }
     } catch (err) {
-      return refusal(err, 'devices: could not rename that machine')
+      return refusal(err, 'That machine could not be renamed. Try again in a moment.')
     }
   })
 
@@ -182,7 +182,7 @@ export const openSessionFn = createServerFn({ method: 'POST' })
     try {
       return { ok: true, url: (await openSession(data.deviceId)).url }
     } catch (err) {
-      return refusal(err, 'devices: could not open a session')
+      return refusal(err, 'That session could not be opened. Try again in a moment.')
     }
   })
 

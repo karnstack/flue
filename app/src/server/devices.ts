@@ -39,6 +39,20 @@ export { MAX_LABEL } from '../lib/label'
 const MAX_DEVICE_ID_INPUT = 64
 
 /**
+ * The one thing said about a machine this account cannot act on.
+ *
+ * Written once, and used for every such case, because the *sameness* is the
+ * property: a device that does not exist and a device that belongs to somebody
+ * else must be indistinguishable from out here. A single constant is how that
+ * survives someone editing one of the four call sites.
+ *
+ * A sentence rather than a `devices: …` log line, because unlike enrolment's
+ * refusals — which a daemon's operator reads in a terminal — this one is
+ * rendered into a toast beside the machine it is about.
+ */
+const NO_SUCH_MACHINE = 'That machine is no longer on your account.'
+
+/**
  * A refusal the caller is meant to read.
  *
  * Every message on this class is written for the person looking at the screen
@@ -71,7 +85,7 @@ async function requireSession(): Promise<{ id: string }> {
 /** A device id worth spending a query on, or the standard refusal. */
 function readDeviceId(deviceId: string): string {
   if (!deviceId || deviceId.length > MAX_DEVICE_ID_INPUT) {
-    throw new DeviceError('devices: no such machine')
+    throw new DeviceError(NO_SUCH_MACHINE)
   }
   return deviceId
 }
@@ -138,7 +152,7 @@ export async function revokeDevice(deviceId: string): Promise<void> {
 
   // No rows means one of: no such device, or somebody else's. The same
   // sentence for both, on purpose.
-  if (removed.length !== 1) throw new DeviceError('devices: no such machine')
+  if (removed.length !== 1) throw new DeviceError(NO_SUCH_MACHINE)
 
   // Logged because it is the one destructive thing this screen does, and
   // because "my machine vanished" is a support question that needs an answer.
@@ -170,10 +184,10 @@ export async function renameDevice(deviceId: string, label: string): Promise<str
   // rather than turned down, and the dashboard's field caps typing at 64, so a
   // person never meets this path at all.
   if (label.length > MAX_LABEL_INPUT) {
-    throw new DeviceError('devices: that name is too long')
+    throw new DeviceError('That name is too long.')
   }
   const cleaned = normalizeLabel(label)
-  if (!cleaned) throw new DeviceError('devices: a machine needs a name')
+  if (!cleaned) throw new DeviceError('A machine needs a name.')
 
   const renamed = await db()
     .update(devices)
@@ -182,7 +196,7 @@ export async function renameDevice(deviceId: string, label: string): Promise<str
     .returning({ label: devices.label })
 
   const row = renamed[0]
-  if (!row) throw new DeviceError('devices: no such machine')
+  if (!row) throw new DeviceError(NO_SUCH_MACHINE)
   return row.label
 }
 
@@ -226,7 +240,7 @@ export async function openSession(deviceId: string): Promise<{ url: string }> {
     // one; a configuration failure (`RELAY_URL is not set`) is not the caller's
     // to read, and travels on to the route's fixed-string handler.
     if (err instanceof Error && err.message === 'mintClientToken: no such device') {
-      throw new DeviceError('devices: no such machine')
+      throw new DeviceError(NO_SUCH_MACHINE)
     }
     throw err
   }
