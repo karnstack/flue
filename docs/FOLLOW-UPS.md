@@ -336,6 +336,14 @@ having the paired device show what it pinned makes a substituted key something a
 user can see. A native pairing client or an integrity-pinned bundle closes it
 properly; both are larger than the ceremony they protect.
 
+The service worker is **not** one of the options, and `docs/faq.md` used to imply
+it was. `web/src/lib/sw-strategy.ts` is network-first for navigations and fetches
+hash-named assets on a cache miss, so a normal load takes whatever `index.html`
+the origin serves and then the bundle that document names. Pinning would mean
+refusing to run a bundle whose digest changed — a different worker, and one that
+has to be right about updates or it bricks the app offline. The FAQ now says
+plainly that the PWA is an offline cache and a speed-up rather than a defence.
+
 The other half of the same problem *is* fixed: the loopback QR that started this
 work — Pair, over a `local`-only daemon, printing a `127.0.0.1` URL no other
 device could follow — is gone (`791b07d`). The Devices screen now holds the Pair

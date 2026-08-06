@@ -96,12 +96,13 @@ never stored. What it deploys, what it costs, what bounds abuse, and the
 counters it leaves behind are in [docs/RELAY.md](docs/RELAY.md).
 
 Anything through an intermediary is end-to-end encrypted (Noise IK, the
-daemon's key pinned at pairing), so the relay forwards ciphertext and can
-never read your shell. The honest limits of that sentence — the browser loads
-its JavaScript from the relay's origin, and no amount of end-to-end encryption
-fixes that — are answered plainly in the [FAQ](docs/faq.md), along with the
-bundle digest you can recompute from this source and exactly what it does and
-does not prove today.
+daemon's key pinned at pairing), so the relay forwards ciphertext it holds no
+key for and cannot read your shell **out of what crosses it**. That qualifier is
+load-bearing, not throat-clearing — the browser loads its JavaScript from the
+relay's origin, and no amount of end-to-end encryption fixes that. What a
+hostile origin could actually do with it is spelled out plainly in the
+[FAQ](docs/faq.md), along with the bundle digest you can recompute from this
+source and exactly what it does and does not prove today.
 
 **There is no hosted service today.** No flue account, no flue server, no
 billing: every remote path runs on infrastructure you own, and
