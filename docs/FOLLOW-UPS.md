@@ -2,7 +2,8 @@
 
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size. Items 7–9 are the same exercise for the
-crypto+pairing milestone, and items 10–13 for the relay.
+crypto+pairing milestone, items 10–13 for the relay, and item 14 for the SaaS
+control plane's browser leg.
 
 ## Done
 
@@ -482,6 +483,44 @@ documented promise depends on.
   CPU, so a published macOS digest is unfalsifiable from a Linux machine until
   a container-pinned build makes it portable. Publish the platform beside the
   digest at minimum.
+
+## 14. SaaS browser sessions
+
+The gaps between the web client as built — one daemon, one origin, one token
+taken once — and a SaaS relay that is one origin fronting many machines.
+Tracked here for a dedicated task (Task 15 builds them), not fixed piecemeal:
+each one is a small design decision, and two of them need a control-plane
+endpoint that does not exist yet.
+
+- **The pinned daemon key is per-origin; a SaaS relay is one origin for many
+  machines.** `loadPinnedDaemonKey()` (`web/src/crypto/keys.ts`, read by
+  `web/src/relay/mode.ts`) stores exactly ONE pinned daemon static key per
+  origin — the right shape for a self-hosted relay, where the origin *is* the
+  machine. On the SaaS relay every device shares `app.flue.sh`, so opening a
+  session for device B builds the Noise IK handshake against device A's pinned
+  static key: `readMessageB` throws, `shutdown()` reports an ordinary close,
+  and FlueClient reconnects into the same failure forever — a silent loop with
+  no UI. Fix direction: the control plane already stores each device's
+  `publicKey` (the devices table), so "open a session" must hand the browser
+  the TARGET device's public key — in the fragment alongside the channel
+  token, or via a fetch — and the web client must pin per-device (keyed by
+  device id), not per-origin.
+- **SaaS pairing sends no bearer.** `web/src/routes/pair.tsx` POSTs
+  `/api/pair` with only a `Content-Type` header, and the SaaS relay now
+  requires `Authorization: Bearer <client token>` — so SaaS pairing 401s, and
+  because 401 is not `REFUSED_STATUS` the page renders the raw refusal rather
+  than the refusal copy. Possibly moot: SaaS enrollment is `flue enable` and
+  device authorization, not the QR pair flow — but if `/pair` stays reachable
+  on the SaaS origin it must either carry the bearer or say why it cannot.
+- **The channel token lives 60 seconds and is captured once.** `main.tsx`
+  reads the client token from the fragment destructively (`takeChannelToken`
+  scrubs as it reads) and every reconnect through the socket factory presents
+  that same token. It is good for 60 seconds, so the first reconnect past a
+  minute — a laptop lid, a train tunnel — is refused, and the tab dies into an
+  endless silent reconnect loop. Fix direction: a control-plane endpoint the
+  tab calls before each (re)dial to re-mint a fresh client token for the
+  device; the web client refreshes on reconnect instead of reusing the
+  captured token.
 
 ## Things worth knowing before touching this code
 
