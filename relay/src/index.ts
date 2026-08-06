@@ -149,11 +149,22 @@ async function authorizeToken(
  * and if a future edit made one, falling back to the shared `'hub'` would put
  * every account on one Durable Object. A 500 is the correct outcome of that
  * bug; a bridge between strangers is not.
+ *
+ * The separator is checked for the same reason. `${acc}:${dev}` is a
+ * concatenation, and a concatenation is ambiguous the moment a field can
+ * contain the separator: `acc="a:b", dev="c"` and `acc="a", dev="b:c"` are two
+ * different accounts with one hub name. Neither field can hold a colon today —
+ * they are a UUID and twelve hex characters, both assigned by the control
+ * plane — so this cannot fire, and it costs one comparison to make sure a
+ * change over there can never quietly become a bridge over here.
  */
 export function hubIdFor(_req: Request, env: Env, grant: Grant): DurableObjectId {
   if (relaySigningSecret(env) === null) return env.HUB.idFromName('hub')
   const claims = grant.claims
   if (claims === null) throw new Error('saas mode: refusing to route a request with no claims')
+  if (claims.acc.includes(':') || claims.dev.includes(':')) {
+    throw new Error('saas mode: refusing to route claims that could name another hub')
+  }
   return env.HUB.idFromName(`${claims.acc}:${claims.dev}`)
 }
 

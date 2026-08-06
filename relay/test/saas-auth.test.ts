@@ -14,6 +14,7 @@ import { SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 
 import { CLIENT_SUBPROTOCOL, TOKEN_SUBPROTOCOL_PREFIX } from '../src/channel-auth'
+import { hubIdFor, type Env } from '../src/index'
 import { BASE, bytes, encoder, frame, Leg } from './harness'
 import { hmacHex, inSeconds, signChannelToken, vectorFor, VECTOR_SECRET } from './tokens'
 
@@ -275,6 +276,17 @@ describe('the hub a token lands on', () => {
     expect((await dA.nextControl()).type).toBe('open')
     leg(await openClient(await client(accB)))
     expect((await dB.nextControl()).type).toBe('open')
+  })
+
+  it('refuses claims whose fields could spell another hub’s name', async () => {
+    // `${acc}:${dev}` is a concatenation, and a concatenation is ambiguous the
+    // moment a field can hold the separator. Neither can today — the control
+    // plane assigns a UUID and twelve hex characters — so this is a guard
+    // against a change over there, and it fails closed rather than colliding.
+    const req = new Request(`${BASE}/client`, { headers: { Upgrade: 'websocket' } })
+    const env = { RELAY_SIGNING_SECRET: SECRET } as Env
+    const claims = { acc: 'a:b', dev: 'c', role: 'client', exp: inSeconds(60) } as const
+    expect(() => hubIdFor(req, env, { claims, protocol: null })).toThrow(/another hub/)
   })
 
   it('does not replace one account’s daemon with another’s', async () => {
