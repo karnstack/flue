@@ -33,6 +33,12 @@ type fakeRelay struct {
 	ts     *httptest.Server
 	secret string
 
+	// admits replaces the constant-secret compare, for the SaaS tests: there
+	// the credential is a short-lived channel token the daemon minted, so which
+	// strings are acceptable is the test's business rather than one value's.
+	// Set before the transport is started, and read-only after.
+	admits func(auth string) bool
+
 	// conns carries every socket the relay accepted, oldest first. It is
 	// buffered because the adapter reconnects on its own schedule and a test
 	// that is between accepts must not stall the handler.
@@ -84,6 +90,15 @@ func (r *fakeRelay) URL() string {
 	return "ws" + strings.TrimPrefix(r.ts.URL, "http") + "/daemon"
 }
 
+// admit is the relay's authorization: the shared secret unless a test said
+// otherwise.
+func (r *fakeRelay) admit(auth string) bool {
+	if r.admits != nil {
+		return r.admits(auth)
+	}
+	return auth == "Bearer "+r.secret
+}
+
 func (r *fakeRelay) serveDaemon(w http.ResponseWriter, req *http.Request) {
 	auth := req.Header.Get("Authorization")
 	r.mu.Lock()
@@ -92,7 +107,7 @@ func (r *fakeRelay) serveDaemon(w http.ResponseWriter, req *http.Request) {
 	r.auths = append(r.auths, auth)
 	r.mu.Unlock()
 
-	if auth != "Bearer "+r.secret {
+	if !r.admit(auth) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
