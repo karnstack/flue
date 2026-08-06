@@ -92,6 +92,11 @@ type fakeCloudflare struct {
 	secretText       string
 	secretType       string
 	subdomainEnabled bool
+	scriptPuts       int
+	// migrated records that the Durable Object migration has been applied, so
+	// that a second deploy is refused the way the real API refuses one. This is
+	// what a re-run of `flue relay setup` actually meets.
+	migrated bool
 }
 
 func newFakeCloudflare(t *testing.T, accounts []cloudflare.Account, subdomain string) *fakeCloudflare {
@@ -242,6 +247,18 @@ func (f *fakeCloudflare) putScript(w http.ResponseWriter, r *http.Request, body 
 			f.errorf(w, "unexpected script part %q", part.FormName())
 			return
 		}
+	}
+
+	f.mu.Lock()
+	f.scriptPuts++
+	repeat := f.migrated && f.meta.Migrations != nil
+	if f.meta.Migrations != nil {
+		f.migrated = true
+	}
+	f.mu.Unlock()
+	if repeat {
+		writeAPIError(w, "Cannot apply new-sqlite-class migration to class DaemonHub that is already depended on by existing Durable Objects")
+		return
 	}
 	writeResult(w, map[string]string{"id": "flue-relay"})
 }
@@ -520,8 +537,11 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	}
 }
 
-// TestRunRelaySetupIsSafeToRerun: the second run must overwrite, not duplicate,
-// and must leave the daemon and the worker holding the same fresh secret.
+// TestRunRelaySetupIsSafeToRerun is the property everything above rests on:
+// every failure in this flow is recovered from by running it again, so running
+// it again has to work. The fake refuses the second deploy's migration exactly
+// as Cloudflare does, which is what a real re-run meets — the second run must
+// come out the far side with a fresh secret the worker and relay.json agree on.
 func TestRunRelaySetupIsSafeToRerun(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	f := newFakeCloudflare(t, oneAccount(), "karn")
@@ -546,6 +566,12 @@ func TestRunRelaySetupIsSafeToRerun(t *testing.T) {
 	}
 	if second.URL != first.URL || second.Origin != first.Origin {
 		t.Fatalf("the second run changed the address: %+v then %+v", first, second)
+	}
+	// Three PUTs, not two: the second run's first attempt is the one the
+	// already-applied migration rejects. Two would mean the fake never refused
+	// anything and this test proved nothing about re-running.
+	if f.scriptPuts != 3 {
+		t.Fatalf("script PUTs = %d, want 3 (deploy, refused re-deploy, retry without the migration)", f.scriptPuts)
 	}
 }
 

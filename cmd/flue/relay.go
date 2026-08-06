@@ -152,7 +152,7 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 		accounts, err = api.Accounts(ctx)
 		return err
 	}); err != nil {
-		return err
+		return fmt.Errorf("list the Cloudflare accounts this token can reach: %w", err)
 	}
 	account, err := pickAccount(w, in, accounts)
 	if err != nil {
@@ -186,7 +186,7 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 			Observability: true,
 		})
 	}); err != nil {
-		return err
+		return fmt.Errorf("deploy the relay worker: %w", err)
 	}
 	fmt.Fprintf(w, "  ✓ worker deployed: %s\n", relayScriptName)
 	fmt.Fprintf(w, "  ✓ web app uploaded (%d files)\n", len(assets))
@@ -212,7 +212,7 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 		host, err = api.EnableSubdomain(ctx, account.ID, relayScriptName)
 		return err
 	}); err != nil {
-		return err
+		return fmt.Errorf("make the relay reachable on workers.dev: %w", err)
 	}
 	origin := "https://" + host
 	fmt.Fprintf(w, "  ✓ reachable at %s\n", origin)
