@@ -1079,7 +1079,7 @@ describe('FlueClient reconnect', () => {
     expect(sockets).toHaveLength(42)
   })
 
-  it('restarts the backoff after a connection that succeeded', async () => {
+  it('restarts the backoff after a connection that was kept', async () => {
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)
     const { c, sockets } = harness()
@@ -1092,10 +1092,42 @@ describe('FlueClient reconnect', () => {
     await vi.advanceTimersByTimeAsync(250)
     expect(sockets).toHaveLength(3)
 
-    sockets[2]!.open() // a good connection resets the run of failures
+    // Kept for five seconds, which is what "succeeded" has to mean here — see
+    // the flapping test below for why opening is not enough.
+    sockets[2]!.open()
+    await vi.advanceTimersByTimeAsync(5_000)
     sockets[2]!.close()
     await vi.advanceTimersByTimeAsync(125)
     expect(sockets).toHaveLength(4)
+  })
+
+  it('keeps escalating through a channel that opens and dies immediately', async () => {
+    // The bug: the backoff reset on `onopen`, and opening is not the same as
+    // being kept. A channel that establishes and dies — the relay hub handing
+    // the daemon leg to a newcomer and closing the incumbent, a daemon
+    // reconnecting in a loop — reset the exponent every cycle, so the tab sat
+    // at the 125 ms floor forever. On a hosted relay every dial costs a
+    // `POST /api/relay-token`, and the per-machine bucket is 600 per window:
+    // roughly two minutes to spend it, after which every session on that
+    // machine is answered 429 with nothing on screen. The Go transport already
+    // required a socket to have lasted (`minStableConn`); this is the same
+    // rule on the other leg.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    // Four flaps, each one opening and closing within the same instant. The
+    // delays double rather than pinning at the floor.
+    for (const delay of [125, 250, 500, 1000]) {
+      const sock = sockets[sockets.length - 1]!
+      sock.open()
+      sock.close()
+      await vi.advanceTimersByTimeAsync(delay - 1)
+      const before = sockets.length
+      await vi.advanceTimersByTimeAsync(1)
+      expect(sockets).toHaveLength(before + 1)
+    }
   })
 
   it('stops reconnecting when close lands during the backoff wait', async () => {

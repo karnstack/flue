@@ -635,7 +635,19 @@ is refused at the far end or not. At 180 refreshes per window per looping tab,
 6000 is about thirty-three tabs all broken at once: implausible for a person,
 not implausible for a fleet, and the failure is the same one — every session on
 the account answered 429 for the rest of the fixed window, with nothing on
-screen. Closing it properly is not a bigger number; it is either not counting
+screen.
+
+That arithmetic only holds now, and it is worth saying why. It assumes a looping
+tab escalates to the ten-second ceiling; the browser client reset its backoff on
+`onopen`, and opening is not the same as being kept, so a *flapping* channel —
+one that establishes and dies, which is what the hub's "replaced" close and a
+daemon reconnecting in a loop both look like — never left the 125 ms floor. A
+hundred times that rate: the whole per-machine bucket in about two minutes.
+`MIN_STABLE_MS` in `web/src/client/client.ts` now requires a connection to have
+lasted five seconds before the run of failures starts over, which is
+`minStableConn` in `internal/transport/relay` on the other leg.
+
+Closing the ceiling properly is not a bigger number; it is either not counting
 refusals that the *control plane itself* refused for a stable reason (a revoked
 or disabled machine, which is a fact about that machine and not about load), or
 telling the tab to stop looping at all. The latter is item 15's territory —

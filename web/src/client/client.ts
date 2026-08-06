@@ -46,6 +46,28 @@ const BACKOFF_BASE_MS = 250
 const BACKOFF_MAX_MS = 10_000
 
 /**
+ * How long a connection has to last before the backoff forgets it ever failed.
+ *
+ * "Reset on open" is not enough, because opening is not the same as being kept,
+ * and on a hosted relay every dial costs a token. A channel that establishes
+ * and dies immediately — the Durable Object handing the daemon leg to a
+ * newcomer and closing the incumbent with 4000 "replaced" (relay/src/hub.ts), a
+ * daemon that reconnects in a loop, an edge that drops the socket at the
+ * upgrade — used to reset the exponent on every cycle, so the tab sat at the
+ * 125–250 ms floor forever. That is four to eight dials a second, each one a
+ * `POST /api/relay-token` against a bucket of 600 per fixed window
+ * (app/src/server/ratelimit.ts): about two minutes to spend the machine's whole
+ * refresh budget, after which every session on that machine is answered 429
+ * with nothing on screen to say why.
+ *
+ * Requiring the socket to have *lasted* lets a flapping channel escalate to the
+ * ten-second ceiling and sit there instead. Five seconds, and the same five as
+ * `minStableConn` in internal/transport/relay — the two legs of the same relay
+ * meet the same failure and there is no reason for them to disagree about it.
+ */
+const MIN_STABLE_MS = 5_000
+
+/**
  * The most input carried in one frame.
  *
  * The daemon caps a single client frame at 1 MiB (`readLimit` in
@@ -137,6 +159,13 @@ export class FlueClient {
   /** Whether `sock` has opened. Sending before that throws in a browser. */
   private ready = false
   private attempt = 0
+  /**
+   * When the live socket opened, or null while there is none.
+   *
+   * Read once, on close, to decide whether this connection counts as one that
+   * was kept — see `MIN_STABLE_MS`.
+   */
+  private openedAt: number | null = null
   private stopped = true
   private retry: ReturnType<typeof setTimeout> | null = null
   private state: ConnStatus = 'closed'
@@ -341,6 +370,7 @@ export class FlueClient {
     this.stopped = true
     this.clearRetry()
     this.attempt = 0
+    this.openedAt = null
     this.listOwed = false
     this.devicesWanted = false
     this.teardown()
@@ -545,7 +575,9 @@ export class FlueClient {
     sock.onopen = () => {
       if (this.sock !== sock) return
       this.ready = true
-      this.attempt = 0
+      // Noted, not acted on: the backoff is reset on *close*, and only for a
+      // connection that lasted. See `MIN_STABLE_MS`.
+      this.openedAt = Date.now()
       this.setStatus('open')
 
       this.send({ type: 'hello', ver: PROTOCOL_VERSION, caps: [...CAPS] })
@@ -561,6 +593,15 @@ export class FlueClient {
 
     sock.onclose = () => {
       if (this.sock !== sock) return
+      // Before teardown, because this is the only thing that knows how long
+      // the socket was up. A connection that was kept says nothing about how
+      // long to wait for the next one, so the run of failures starts over; one
+      // that was taken away immediately says the opposite and keeps its place
+      // in the escalation.
+      const lasted = this.openedAt === null ? 0 : Date.now() - this.openedAt
+      this.openedAt = null
+      if (lasted >= MIN_STABLE_MS) this.attempt = 0
+
       this.teardown()
       if (this.stopped) {
         this.setStatus('closed')
