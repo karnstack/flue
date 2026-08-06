@@ -37,6 +37,18 @@
 // previous row wholesale: new owner, new label, new token, and the old row's
 // `disabled` and `last_seen` cleared. Anything else would either fail with a
 // constraint error or resurrect a revocation.
+//
+// **But only the account that already owns a device may replace it.** A Noise
+// static public key is not a secret — it is printed in the pairing URL's `k=`
+// parameter and sent in the clear as `DaemonPub` on the wire — so "presents
+// this key" proves nothing, and the upsert above, left unscoped, would let any
+// signed-in stranger who knows a key open a grant for it, confirm with their
+// own session, poll once, and take the row: the victim's daemon silently
+// de-enrolled, its token dead, its id now pointing at somebody else's account.
+// The conflict update therefore carries a `where` (`setWhere` below) that
+// requires the *existing* row's `user_id` to be the incoming one, and a
+// suppressed update is reported to the caller as `conflict`. See the note on
+// the mint itself for the residual this leaves.
 import { getRequestUrl } from '@tanstack/react-start/server'
 import { and, eq, gt, isNotNull, isNull, lt, or, sql } from 'drizzle-orm'
 import { db } from '../db/client'
@@ -139,10 +151,36 @@ export interface DeviceGrant {
 export type PollResult =
   | { status: 'pending' }
   | { status: 'expired' }
+  /**
+   * This key is already some *other* account's device, and nothing was
+   * written. A daemon that sees this should stop and say so: the machine has
+   * to be removed from the account that holds it before it can move.
+   */
+  | { status: 'conflict'; deviceId: string }
   /** `deviceToken` is present on the first approved poll and never again. */
   | { status: 'approved'; deviceId: string; deviceToken?: string }
 
 export type ConfirmResult = { ok: true; deviceId: string; label: string } | { ok: false }
+
+/**
+ * A refusal from `startDeviceAuth`, carrying the status the daemon should see.
+ *
+ * The two ways to be turned away are genuinely different — "that is not a key"
+ * is the caller's bug and retrying is pointless, "too many enrolments from this
+ * address" is temporary and retrying is the whole answer — and a client that
+ * cannot tell them apart either hammers a cap or gives up on a typo. An
+ * ordinary `Error` subclass, so every existing `rejects.toThrow()` still holds
+ * and a caller that does not care can ignore the distinction.
+ */
+export class DeviceAuthError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message)
+    this.name = 'DeviceAuthError'
+  }
+}
 
 /**
  * Open a grant. Unauthenticated: the daemon has no credential yet — that is
@@ -161,7 +199,7 @@ export type ConfirmResult = { ok: true; deviceId: string; label: string } | { ok
  */
 export async function startDeviceAuth(input: StartDeviceAuthInput): Promise<DeviceGrant> {
   const bytes = decodePublicKey(input.publicKey.slice(0, 128))
-  if (!bytes) throw new Error('enroll: the device key must be 32 bytes, base64')
+  if (!bytes) throw new DeviceAuthError('enroll: the device key must be 32 bytes, base64', 400)
   const publicKey = encodePublicKey(bytes)
   const label = normalizeLabel(input.label)
 
@@ -172,7 +210,10 @@ export async function startDeviceAuth(input: StartDeviceAuthInput): Promise<Devi
   // larger target for the guessing that `CONFIRMS_PER_USER` bounds.
   const withinCap = await withinLimit('device-auth:ip', clientIp(), GRANTS_PER_IP, ENROLL_WINDOW_S)
   if (!withinCap) {
-    throw new Error('enroll: too many enrolments from this address — wait a few minutes')
+    throw new DeviceAuthError(
+      'enroll: too many enrolments from this address — wait a few minutes',
+      429,
+    )
   }
 
   // Expired grants are dead the moment their TTL passes, and nothing reads
@@ -225,7 +266,7 @@ export async function startDeviceAuth(input: StartDeviceAuthInput): Promise<Devi
     }
   }
 
-  throw new Error('enroll: could not mint a free user code — try again')
+  throw new DeviceAuthError('enroll: could not mint a free user code — try again', 503)
 }
 
 /**
@@ -313,20 +354,68 @@ export async function pollDeviceAuth(input: { deviceCode: string }): Promise<Pol
         lastSeen: sql`null`,
         disabled: sql`0`,
       },
+      // Who may replace an existing device row: only the account that already
+      // owns it. Inside `do update`, the bare table name is the row already in
+      // the table and `excluded` is the one proposed — so this reads "the
+      // owner is not changing".
+      //
+      // Without it the upsert is an account-takeover primitive. The daemon's
+      // Noise static is a *public* key: it is printed in the pairing URL's
+      // `k=` parameter and sent in the clear as `DaemonPub` during the
+      // handshake, so knowing one proves nothing about owning the machine.
+      // Any signed-in stranger could open a grant for somebody else's key,
+      // confirm it with their own session, poll once, and walk off with the
+      // row — the victim's daemon silently de-enrolled (its token replaced),
+      // its id now resolving to the stranger's account. Noise still keeps the
+      // stranger off the machine, but a working device must not be hijackable
+      // from the registry either.
+      //
+      // The residual, stated plainly: a *first* enrolment of a key nobody has
+      // claimed hits no conflict, so somebody who learns a key before its
+      // owner enrolls can land-grab the id and force the real owner to a
+      // `conflict` — denial of service on a not-yet-enrolled device, not a
+      // takeover of a live one. Closing it needs proof that the caller holds
+      // the private key, and an X25519 static cannot sign; the shapes that
+      // work are a challenge the daemon answers over a Noise handshake, or an
+      // explicit device-transfer flow on the owning account. Both are their
+      // own piece of work — see FOLLOW-UPS in the task report.
+      setWhere: sql`${devices.userId} = excluded.user_id`,
     })
+    // The claim that the mint actually happened. A suppressed conflict update
+    // returns no row, which is the only way to tell it apart from an update
+    // that ran.
+    .returning({ id: devices.id })
 
   const burnGrant = d
     .delete(deviceAuth)
-    .where(and(eq(deviceAuth.userCode, grant.userCode), isNotNull(deviceAuth.approvedUserId)))
+    .where(
+      and(
+        eq(deviceAuth.userCode, grant.userCode),
+        // The same predicate the insert's source carries, term for term. The
+        // two statements have to agree about which grants are mintable, or a
+        // later change that splits them apart could burn a grant — and hand
+        // out its token — for a device that was never written.
+        isNotNull(deviceAuth.approvedUserId),
+        isNotNull(deviceAuth.deviceId),
+        isNotNull(deviceAuth.publicKey),
+        gt(deviceAuth.expiresAt, now),
+      ),
+    )
     .returning({ userCode: deviceAuth.userCode })
 
-  const [, burned] = await d.batch([mintDevice, burnGrant])
+  const [minted, burned] = await d.batch([mintDevice, burnGrant])
 
   // The delete is the claim: whoever removed the row is the one that minted
   // the device in the same transaction, and is the only caller told the token.
   // Zero rows means another poll had already taken it — in which case this
   // batch wrote nothing either, and there is no token here to hand over.
   if (burned.length !== 1) return { status: 'approved', deviceId: grant.deviceId }
+
+  // The grant was ours to burn and the device still did not move: the only
+  // thing that suppresses the write once the delete has matched is `setWhere`,
+  // so this key belongs to another account. Said out loud rather than answered
+  // with a tokenless `approved`, which the daemon would have to guess at.
+  if (minted.length !== 1) return { status: 'conflict', deviceId: grant.deviceId }
 
   return { status: 'approved', deviceId: grant.deviceId, deviceToken }
 }

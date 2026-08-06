@@ -18,7 +18,7 @@ import { describe, expect, it } from 'vitest'
 import { db } from '../src/db/client'
 import { deviceAuth, devices, rateLimits, users } from '../src/db/schema'
 import { sha256Hex } from '../src/lib/tokens'
-import { startDeviceAuth } from '../src/server/enroll'
+import { GRANTS_PER_IP, startDeviceAuth } from '../src/server/enroll'
 import { SESSION_COOKIE, createSession } from '../src/server/sessions'
 import { inRequest } from './request'
 
@@ -61,6 +61,46 @@ function callServerFn(
     body: new URLSearchParams(fields).toString(),
     redirect: 'manual',
   })
+}
+
+/**
+ * POST the way the *daemon* will: no cookie, no `Sec-Fetch-Site`, just an
+ * `Origin`.
+ *
+ * That header is not decoration. start.ts validates CSRF on every server-fn
+ * RPC and refuses a POST carrying no origin signal at all, so a client that
+ * sends none gets 403 — which is what a naive Go http.Post would do. Saying
+ * which origin it is talking to is what a non-browser client offers instead,
+ * and it costs nothing: CSRF exists to stop a *browser* being made to speak
+ * with its user's ambient credential, and these two endpoints have no ambient
+ * credential to borrow.
+ */
+function callAsDaemon(
+  name: string,
+  fields: Record<string, string>,
+  opts: { ip?: string } = {},
+): Promise<Response> {
+  return SELF.fetch(urlFor(name), {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      'x-tsr-serverFn': 'true',
+      origin: ORIGIN,
+      'cf-connecting-ip': opts.ip ?? `203.0.113.${++seq % 256}`,
+    },
+    body: new URLSearchParams(fields).toString(),
+    redirect: 'manual',
+  })
+}
+
+/** The JSON a server function answers with. */
+async function payload(res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text()
+  try {
+    return JSON.parse(text) as Record<string, unknown>
+  } catch {
+    throw new Error(`server fn answered with something that is not JSON: ${text.slice(0, 200)}`)
+  }
 }
 
 const now = () => Math.floor(Date.now() / 1000)
@@ -215,5 +255,132 @@ describe('confirming over HTTP', () => {
     // that reached the lookup would have spent one of this user's attempts.
     const key = await sha256Hex(`device-confirm:user:${user.id}`)
     expect(await db().select().from(rateLimits).where(eq(rateLimits.key, key))).toEqual([])
+  })
+})
+
+// The daemon's half of the handshake, over the transport the daemon will
+// actually use. `startDeviceAuth` and `pollDeviceAuth` are plain functions in
+// server/enroll.ts and enroll.test.ts proves what they decide; what only a
+// request can prove is that they are *reachable* — unauthenticated, from a
+// client that is not a browser, and with the hostile-input handling in front
+// of them that /login's fields get.
+describe('the daemon-facing endpoints', () => {
+  it('are addressable at a URL the daemon can compute for itself', async () => {
+    // Start mints a server function's id as sha256("<file>--<name>_createServerFn_handler"),
+    // which is deterministic but invisible: nothing in the source spells the
+    // URL, and a rename or a move silently changes it. Task 11's daemon has to
+    // hardcode these two paths, so this recomputes them from the derivation
+    // and checks them against the build. Moving either function out of
+    // src/routes/enroll.tsx, or renaming it, breaks a shipped daemon — and now
+    // breaks this test first.
+    const idFor = (file: string, name: string) =>
+      sha256Hex(`${file}--${name}_createServerFn_handler`)
+
+    expect(serverFnUrls.startDeviceAuthFn).toBe(
+      `/_serverFn/${await idFor('src/routes/enroll.tsx', 'startDeviceAuthFn')}`,
+    )
+    expect(serverFnUrls.pollDeviceAuthFn).toBe(
+      `/_serverFn/${await idFor('src/routes/enroll.tsx', 'pollDeviceAuthFn')}`,
+    )
+  })
+
+  it('opens a grant for a caller with no session and no cookie', async () => {
+    const publicKey = freshKey()
+    const res = await callAsDaemon('startDeviceAuthFn', { label: 'a go daemon', publicKey })
+    expect(res.status).toBe(200)
+
+    const grant = (await payload(res)) as unknown as {
+      userCode: string
+      deviceCode: string
+      verificationUrl: string
+      interval: number
+    }
+    expect(grant.userCode).toMatch(/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/)
+    expect(grant.deviceCode).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    // Taken from the request the daemon made, not from a header it supplied:
+    // this string is printed into somebody's terminal.
+    expect(grant.verificationUrl).toBe(`${ORIGIN}/enroll`)
+
+    const row = await grantRow(grant.userCode)
+    expect(row?.label).toBe('a go daemon')
+    expect(row?.publicKey).toBe(publicKey)
+    expect(row?.approvedUserId).toBeNull()
+
+    // And the poll endpoint answers the same unauthenticated caller.
+    const polled = await callAsDaemon('pollDeviceAuthFn', { deviceCode: grant.deviceCode })
+    expect(polled.status).toBe(200)
+    expect(await payload(polled)).toEqual({ status: 'pending' })
+  })
+
+  it('tells a daemon nothing for a device code it did not mint', async () => {
+    const res = await callAsDaemon('pollDeviceAuthFn', { deviceCode: 'a'.repeat(43) })
+    expect(res.status).toBe(200)
+    expect(await payload(res)).toEqual({ status: 'expired' })
+  })
+
+  it('refuses a public key that is not one, and writes nothing', async () => {
+    const before = (await db().select().from(deviceAuth)).length
+    const res = await callAsDaemon('startDeviceAuthFn', { label: 'x', publicKey: 'not-a-key' })
+
+    // 400, not 500: the caller's key is wrong, the server is fine. Nothing
+    // about this caller is enumerable, so the daemon's operator gets an error
+    // they can read rather than a coy one.
+    expect(res.status).toBe(400)
+    const body = await payload(res)
+    expect(body.error).toContain('32 bytes')
+    expect(body.deviceCode).toBeUndefined()
+    expect((await db().select().from(deviceAuth)).length).toBe(before)
+  })
+
+  it('does no work for oversized fields', async () => {
+    // The validator turns anything past its bound into '', and an empty key is
+    // refused before the per-IP cap is even consulted. Without the bound, a
+    // megabyte "public key" is a megabyte of base64 decoding per request, for
+    // free, on an endpoint with no credential in front of it.
+    const ip = '198.51.100.222'
+    const res = await callAsDaemon(
+      'startDeviceAuthFn',
+      { label: 'y'.repeat(50_000), publicKey: 'A'.repeat(50_000) },
+      { ip },
+    )
+    expect(res.status).toBe(400)
+    expect((await payload(res)).deviceCode).toBeUndefined()
+
+    // The proof that it was free: the per-IP counter was never touched.
+    const key = await sha256Hex(`device-auth:ip:${ip}`)
+    expect(await db().select().from(rateLimits).where(eq(rateLimits.key, key))).toEqual([])
+  })
+
+  it('says 429 rather than 400 when a caller is over its cap', async () => {
+    // The one refusal that is worth retrying, told apart from the one that is
+    // not. A daemon that read both as "bad request" would give up on a full
+    // bucket; one that read both as "try again" would spin on a typo.
+    const ip = '198.51.100.223'
+    let last: Response | undefined
+    for (let i = 0; i <= GRANTS_PER_IP; i++) {
+      last = await callAsDaemon(
+        'startDeviceAuthFn',
+        { label: 'flood', publicKey: freshKey() },
+        { ip },
+      )
+    }
+    expect(last?.status).toBe(429)
+  })
+
+  it('refuses a POST that carries no origin signal at all', async () => {
+    // Not a property of these endpoints so much as of the app — but it is the
+    // one thing a Go client will get wrong by default, so it is written down
+    // where the daemon's author will find it.
+    const res = await SELF.fetch(urlFor('startDeviceAuthFn'), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-tsr-serverFn': 'true',
+        'cf-connecting-ip': freshIp(),
+      },
+      body: new URLSearchParams({ label: 'headerless', publicKey: freshKey() }).toString(),
+      redirect: 'manual',
+    })
+    expect(res.status).toBe(403)
   })
 })

@@ -409,30 +409,30 @@ describe('the approving poll', () => {
 describe('re-enrolment', () => {
   it('replaces the device row when the same key enrolls again', async () => {
     // `devices.id` is sha256(pubkey)[:12], so a daemon that enrolls twice —
-    // after a revoke, or onto a second account — collides on the primary key.
-    const first = await makeUser()
-    const second = await makeUser()
+    // after a revoke, after a reinstall — collides on its own primary key.
+    // Same owner both times: that is the case the upsert exists for.
+    const user = await makeUser()
     const publicKey = freshKey()
     const deviceId = await deviceIdFor(publicKey)
 
     const one = await start({ publicKey, label: 'before' })
-    await confirm(one.userCode, await signIn(first.id))
+    await confirm(one.userCode, await signIn(user.id))
     const approvedOnce = await poll(one.deviceCode)
     if (approvedOnce.status !== 'approved') throw new Error('the first enrolment did not approve')
 
     const two = await start({ publicKey, label: 'after' })
-    await confirm(two.userCode, await signIn(second.id))
+    await confirm(two.userCode, await signIn(user.id))
     const approvedTwice = await poll(two.deviceCode)
     if (approvedTwice.status !== 'approved') throw new Error('the second enrolment did not approve')
 
     expect(approvedTwice.deviceId).toBe(deviceId)
     expect(approvedTwice.deviceToken).not.toBe(approvedOnce.deviceToken)
 
-    // One row, not two, and it is the second enrolment's: new owner, new
-    // label, new token. The first token no longer matches anything.
+    // One row, not two, and it is the second enrolment's: new label, new
+    // token. The first token no longer matches anything.
     const rows = await db().select().from(devices).where(eq(devices.id, deviceId))
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({ userId: second.id, label: 'after' })
+    expect(rows[0]).toMatchObject({ userId: user.id, label: 'after' })
     expect(rows[0]?.tokenHash).toBe(await sha256Hex(approvedTwice.deviceToken as string))
 
     const staleHash = await sha256Hex(approvedOnce.deviceToken as string)
@@ -459,5 +459,85 @@ describe('re-enrolment', () => {
     // disabled flag or its last-seen stamp.
     expect(row?.disabled).toBe(false)
     expect(row?.lastSeen).toBeNull()
+  })
+})
+
+describe('a device somebody else already owns', () => {
+  // The upsert that makes re-enrolment work is, unscoped, an account-takeover
+  // primitive: a daemon's Noise static is *public* — it is printed in the
+  // pairing URL's `k=` parameter and sent in the clear as `DaemonPub` — so
+  // "presents this key" proves nothing about owning the machine. Any account
+  // holder could open a grant for a stranger's key, confirm it with their own
+  // session, poll once, and replace the row.
+  it('is not taken over by a stranger who knows its public key', async () => {
+    const victim = await makeUser()
+    const mallory = await makeUser()
+    const publicKey = freshKey()
+    const deviceId = await deviceIdFor(publicKey)
+
+    const honest = await start({ publicKey, label: 'victim mac' })
+    await confirm(honest.userCode, await signIn(victim.id))
+    const enrolled = await poll(honest.deviceCode)
+    if (enrolled.status !== 'approved' || !enrolled.deviceToken) {
+      throw new Error('the victim never enrolled')
+    }
+    // A stamp the mint would clear, so "untouched" below means untouched and
+    // not merely "rewritten with the same values".
+    await db().update(devices).set({ lastSeen: 1_700_000_000 }).where(eq(devices.id, deviceId))
+
+    const attack = await start({ publicKey, label: 'mallory' })
+    await confirm(attack.userCode, await signIn(mallory.id))
+    const result = await poll(attack.deviceCode)
+
+    // Told plainly, and told nothing else: no token, and no tokenless
+    // `approved` for the daemon to misread as success.
+    expect(result).toEqual({ status: 'conflict', deviceId })
+
+    // The victim's row, exactly as it was — same owner, same label, same
+    // token, same last-seen. The daemon on that machine keeps working.
+    const [row] = await db().select().from(devices).where(eq(devices.id, deviceId))
+    expect(row).toMatchObject({
+      userId: victim.id,
+      label: 'victim mac',
+      publicKey,
+      lastSeen: 1_700_000_000,
+      disabled: false,
+    })
+    expect(row?.tokenHash).toBe(await sha256Hex(enrolled.deviceToken))
+
+    // And exactly one row: the stranger's attempt created nothing of its own.
+    expect(await db().select().from(devices).where(eq(devices.publicKey, publicKey))).toHaveLength(
+      1,
+    )
+
+    // The grant is spent either way, so the answer cannot be re-rolled by
+    // polling again.
+    const [grantRow] = await db()
+      .select()
+      .from(deviceAuth)
+      .where(eq(deviceAuth.userCode, attack.userCode.replace('-', '')))
+    expect(grantRow).toBeUndefined()
+  })
+
+  it('leaves the first claim of an unclaimed key alone — the accepted residual', async () => {
+    // Stated as a test rather than left implicit, because it is the price of
+    // the fix above: an X25519 static cannot sign, so there is no cheap proof
+    // that the caller holds the private key, and a *first* enrolment therefore
+    // hits no conflict to check. Whoever gets there first owns the id, and the
+    // real owner is told `conflict` instead of being silently displaced —
+    // denial of service on a machine that was never enrolled, not a takeover
+    // of one that was.
+    const griefer = await makeUser()
+    const owner = await makeUser()
+    const publicKey = freshKey()
+    const deviceId = await deviceIdFor(publicKey)
+
+    const land = await start({ publicKey, label: 'not my machine' })
+    await confirm(land.userCode, await signIn(griefer.id))
+    expect((await poll(land.deviceCode)).status).toBe('approved')
+
+    const real = await start({ publicKey, label: 'my machine' })
+    await confirm(real.userCode, await signIn(owner.id))
+    expect(await poll(real.deviceCode)).toEqual({ status: 'conflict', deviceId })
   })
 })
