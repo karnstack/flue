@@ -6,7 +6,28 @@ import { Input } from '@/components/ui/input'
 import { loadOrCreateDeviceKey, savePinnedDaemonKey, type DeviceKey } from '@/crypto/keys'
 import { cn } from '@/lib/utils'
 
-/** Where the ceremony is completed; `internal/daemon/pairing.go`, PairPath. */
+/**
+ * Where the ceremony is completed; `internal/daemon/pairing.go`, PairPath.
+ *
+ * **This page is for a self-hosted deployment, and only for one.** The
+ * ceremony is a second device scanning a code shown on a first, and the daemon
+ * handing back its static key over the connection the user themselves
+ * established — which is the whole basis of the pin. On flue.sh nothing pairs:
+ * a machine joins an account with `flue link` (device authorization, approved
+ * by a signed-in person at app.flue.sh), and a browser is handed the machine's
+ * key with the session itself, from the control plane that holds the device row
+ * (src/relay/session.ts).
+ *
+ * The page is still *reachable* on a hosted relay's origin, because the daemon,
+ * a self-hosted relay and flue.sh all serve this same bundle and nothing here
+ * can tell the last two apart from the origin alone. What it does there is
+ * fail: the SaaS relay requires `Authorization: Bearer <channel token>` on
+ * `/api/pair` and this POST carries none, so the request is refused before it
+ * reaches any daemon. That is the right outcome — there is nothing on flue.sh
+ * to pair with — but it is a dead end rather than an explanation, and
+ * docs/SAAS.md says so. A hosted UI that ever surfaced pairing would have to
+ * carry the bearer or say why it cannot.
+ */
 const PAIR_ENDPOINT = '/api/pair'
 
 /** A Noise static key, in bytes. Anything else is not one. */

@@ -32,6 +32,42 @@ describe('loadRelayIdentity', () => {
     expect(await loadRelayIdentity()).toBeNull()
   })
 
+  it('takes the daemon key from the session on a hosted relay', async () => {
+    // One origin, every machine on every account: which daemon this tab is for
+    // is a property of the *session*, not of the origin, so the single
+    // per-origin pin is not consulted at all. A browser that had paired with
+    // some other daemon on this origin must not have that key used here.
+    const store = new IDBFactory()
+    vi.stubGlobal('indexedDB', store)
+    await savePinnedDaemonKey(new Uint8Array(32).fill(9))
+
+    const sessionKey = Uint8Array.from({ length: 32 }, (_, i) => i + 40)
+    const identity = await loadRelayIdentity({
+      deviceId: 'b5d05f15398a',
+      daemonPub: sessionKey,
+      controlPlane: 'https://app.flue.sh',
+      token: 'a-channel-token',
+    })
+
+    expect(identity!.daemonPub).toEqual(sessionKey)
+    expect(identity!.deviceKey.privateKey).toEqual((await loadOrCreateDeviceKey()).privateKey)
+  })
+
+  it('is a session even where nothing was ever pinned per origin', async () => {
+    // The /pair ceremony never runs on a hosted relay, so there is no
+    // per-origin key and there never will be. A null here would send every
+    // hosted session to the unpaired explainer.
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    expect(
+      await loadRelayIdentity({
+        deviceId: 'b5d05f15398a',
+        daemonPub: DAEMON_PUB,
+        controlPlane: 'https://app.flue.sh',
+        token: null,
+      }),
+    ).not.toBeNull()
+  })
+
   it('mints no key for a browser that has no daemon to speak to', async () => {
     // A key is a persistent secret in the user's browser. Making one for a tab
     // that cannot reach anything would be storing a credential nobody asked
@@ -53,6 +89,8 @@ describe('loadRelayIdentity', () => {
   })
 
   it('carries the pinned daemon key and this browser’s own key', async () => {
+    // The self-hosted path, unchanged: one origin, one machine, the key the
+    // /pair ceremony left behind.
     const store = new IDBFactory()
     vi.stubGlobal('indexedDB', store)
     await savePinnedDaemonKey(DAEMON_PUB)

@@ -78,20 +78,38 @@ export const RELAY_TOKEN_SUBPROTOCOL_PREFIX = 'flue.token.'
 export interface RelayIdentity {
   /** This browser's static Noise key, from `@/crypto/keys`. */
   deviceKey: DeviceKey
-  /** The daemon's static public key, pinned at pairing time. */
+  /**
+   * The daemon's static public key.
+   *
+   * Pinned at pairing time on a self-hosted relay, and handed over with the
+   * session on a hosted one — where it is per *device*, because one origin
+   * fronts every machine on every account (see ./session).
+   */
   daemonPub: Uint8Array
   /**
-   * The relay channel token, when the control plane handed this tab one
-   * (`takeChannelToken`, from the URL fragment). Null on a self-hosted relay,
+   * How this dial gets its channel token, or null on a self-hosted relay,
    * which authorizes no browser at all — and where offering a subprotocol
    * nobody will echo would break the connection rather than secure it.
    *
-   * Required rather than optional, and explicitly null: a call site that
-   * forgot the field would compile clean and dial a SaaS relay with no
-   * credential, which presents as a silent 401 reconnect loop. Making the
-   * caller write `null` makes the caller decide.
+   * A function, not a string, and that is the whole fix for the second half of
+   * the SaaS bug. A token lives sixty seconds; a captured one covers the first
+   * dial and nothing after it, so the first reconnect past a minute was refused
+   * and the tab reconnected into the identical refusal forever. Asking per dial
+   * is what makes a reconnect an hour later work — and it is also where
+   * revocation lands, since a machine that has been switched off stops being
+   * given tokens (app/src/server/refresh-token.ts).
+   *
+   * A rejection is an ordinary close: the socket never opens, FlueClient backs
+   * off, and the next attempt asks again. That is right for every reason the
+   * call can fail — an expired session, a revoked machine, a network that is
+   * simply down — and telling them apart here would only move the decision.
+   *
+   * Required rather than optional, and explicitly null: a call site that forgot
+   * the field would compile clean and dial a hosted relay with no credential,
+   * which presents as a silent 401 reconnect loop. Making the caller write
+   * `null` makes the caller decide.
    */
-  channelToken: string | null
+  token: (() => Promise<string>) | null
 }
 
 /** The subset of WebSocket this socket drives, so tests can substitute one. */
@@ -116,8 +134,17 @@ export function relaySocket(
   wsFactory: (url: string, protocols?: string[]) => RawSocket = browserSocket,
 ): SocketLike {
   const hs = initiatorHandshake(identity.deviceKey.privateKey, identity.daemonPub)
-  const ws = wsFactory(clientUrl(origin), subprotocols(identity.channelToken))
 
+  /**
+   * Null until the transport exists.
+   *
+   * Which is immediately on a self-hosted relay, and one microtask later on a
+   * hosted one, because that dial has to fetch a token first (see
+   * `identity.token`). Nothing else in this file may assume it is there: a
+   * consumer can `close()` inside the same tick it asked for the socket, and a
+   * React effect cleanup does exactly that.
+   */
+  let ws: RawSocket | null = null
   /** Null until message B verifies; that is also what `onopen` waits for. */
   let channel: NoiseChannel | null = null
   let ping: ReturnType<typeof setInterval> | null = null
@@ -133,7 +160,9 @@ export function relaySocket(
       // FlueClient sends nothing before `onopen`, so reaching this without a
       // channel is a bug in the caller — surfaced, not swallowed into a frame
       // that silently never left.
-      if (!channel) throw new Error('relay socket: send before the Noise handshake completed')
+      if (!channel || !ws) {
+        throw new Error('relay socket: send before the Noise handshake completed')
+      }
       const plain =
         typeof data === 'string'
           ? encodePlain(true, encoder.encode(data))
@@ -165,97 +194,144 @@ export function relaySocket(
    */
   const shutdown = () => {
     stopPing()
-    ws.close()
+    // `dead` before the close, so a `close()` that lands while the token is
+    // still in flight stops `dial` from opening a socket nobody is behind.
+    ws?.close()
     if (dead) return
     dead = true
     wrapper.onclose?.()
   }
 
-  ws.onopen = () => {
-    // The transport is up; the channel is not. Message A goes out now and
-    // `onopen` waits for the answer.
-    try {
-      ws.send(hs.messageA())
-    } catch {
-      shutdown()
-      return
-    }
-    // Armed on the transport rather than on the channel: the ping is a
-    // transport-level text frame the edge answers, and a handshake that stalls
-    // is reaped by the Durable Object's own deadline, not by silence here.
-    lastRead = Date.now()
-    ping = setInterval(() => {
-      // The ping is also the check. Reported as an ordinary close, because
-      // that is the one thing FlueClient already knows how to recover from:
-      // its reconnect is what actually brings the terminal back.
-      if (Date.now() - lastRead > STALE_INTERVALS * KEEPALIVE_MS) {
-        shutdown()
-        return
-      }
-      ws.send(RELAY_PING)
-    }, KEEPALIVE_MS)
-  }
-
-  ws.onclose = () => {
-    stopPing()
+  /**
+   * Open the transport with the credential this dial is to present, and wire
+   * every handler onto it.
+   *
+   * Called once per `relaySocket`, either synchronously or after the token
+   * resolves. It is never called after `shutdown` — the guard is the first
+   * line, because a consumer that gave up while the fetch was in flight would
+   * otherwise get a live socket it has already been told is closed.
+   */
+  const dial = (token: string | null) => {
     if (dead) return
-    dead = true
-    wrapper.onclose?.()
-  }
+    const sock = wsFactory(clientUrl(origin), subprotocols(token))
+    ws = sock
 
-  ws.onmessage = (data) => {
-    if (dead) return
-    // Before the pong is dropped, not after: a pong carries nothing except the
-    // fact that this socket still has two ends, and that fact is the whole
-    // reason the ping was sent.
-    lastRead = Date.now()
-
-    if (typeof data === 'string') {
-      if (data === RELAY_PONG) return
-      // Everything else on this socket is binary. A peer sending text is not
-      // speaking this protocol (spec/relay-protocol.md, the browser leg), and
-      // a base64'd ciphertext read as one would be worse than a dead channel.
-      shutdown()
-      return
-    }
-
-    if (!channel) {
+    sock.onopen = () => {
+      // A socket this wrapper has already given up on. A real WebSocket does
+      // not fire `open` after `close()`, but this is an interface and the
+      // consequence of being wrong is a 30-second interval armed on a dead
+      // socket for the life of the tab — `stopPing` has already run by then.
+      if (dead) return
+      // The transport is up; the channel is not. Message A goes out now and
+      // `onopen` waits for the answer.
       try {
-        channel = hs.readMessageB(new Uint8Array(data))
+        sock.send(hs.messageA())
       } catch {
-        // The daemon could not prove it holds the pinned static key, or the
-        // message was corrupted on the way. Either way this socket carries no
-        // channel and never will: IK spends the initiator's ephemeral on
-        // message A, so there is nothing to retry here — only a new socket.
         shutdown()
         return
       }
-      wrapper.onopen?.()
-      return
+      // Armed on the transport rather than on the channel: the ping is a
+      // transport-level text frame the edge answers, and a handshake that
+      // stalls is reaped by the Durable Object's own deadline, not by silence
+      // here.
+      lastRead = Date.now()
+      ping = setInterval(() => {
+        // The ping is also the check. Reported as an ordinary close, because
+        // that is the one thing FlueClient already knows how to recover from:
+        // its reconnect is what actually brings the terminal back.
+        if (Date.now() - lastRead > STALE_INTERVALS * KEEPALIVE_MS) {
+          shutdown()
+          return
+        }
+        sock.send(RELAY_PING)
+      }, KEEPALIVE_MS)
     }
 
-    let frame: { text: boolean; data: Uint8Array }
-    try {
-      frame = decodePlain(channel.open(new Uint8Array(data)))
-    } catch {
-      // A frame that will not decrypt, or one that decrypts to something that
-      // is not a plain frame. Both mean the stream is out of step with the
-      // daemon's — a nonce cannot be re-tried, and a peer speaking garbage
-      // will keep speaking it — so the channel is dead and FlueClient's
-      // reconnect takes it from here.
-      shutdown()
-      return
+    sock.onclose = () => {
+      stopPing()
+      if (dead) return
+      dead = true
+      wrapper.onclose?.()
     }
 
-    if (frame.text) {
-      wrapper.onmessage?.(decoder.decode(frame.data))
-      return
+    sock.onmessage = (data) => {
+      if (dead) return
+      // Before the pong is dropped, not after: a pong carries nothing except
+      // the fact that this socket still has two ends, and that fact is the
+      // whole reason the ping was sent.
+      lastRead = Date.now()
+
+      if (typeof data === 'string') {
+        if (data === RELAY_PONG) return
+        // Everything else on this socket is binary. A peer sending text is not
+        // speaking this protocol (spec/relay-protocol.md, the browser leg), and
+        // a base64'd ciphertext read as one would be worse than a dead channel.
+        shutdown()
+        return
+      }
+
+      if (!channel) {
+        try {
+          channel = hs.readMessageB(new Uint8Array(data))
+        } catch {
+          // The daemon could not prove it holds the pinned static key, or the
+          // message was corrupted on the way. Either way this socket carries no
+          // channel and never will: IK spends the initiator's ephemeral on
+          // message A, so there is nothing to retry here — only a new socket.
+          shutdown()
+          return
+        }
+        wrapper.onopen?.()
+        return
+      }
+
+      let frame: { text: boolean; data: Uint8Array }
+      try {
+        frame = decodePlain(channel.open(new Uint8Array(data)))
+      } catch {
+        // A frame that will not decrypt, or one that decrypts to something that
+        // is not a plain frame. Both mean the stream is out of step with the
+        // daemon's — a nonce cannot be re-tried, and a peer speaking garbage
+        // will keep speaking it — so the channel is dead and FlueClient's
+        // reconnect takes it from here.
+        shutdown()
+        return
+      }
+
+      if (frame.text) {
+        wrapper.onmessage?.(decoder.decode(frame.data))
+        return
+      }
+      // Copied out of the decrypted buffer, because `frame.data` is a view over
+      // it and FlueClient hands terminal output on to consumers that keep it.
+      const out = new ArrayBuffer(frame.data.byteLength)
+      new Uint8Array(out).set(frame.data)
+      wrapper.onmessage?.(out)
     }
-    // Copied out of the decrypted buffer, because `frame.data` is a view over
-    // it and FlueClient hands terminal output on to consumers that keep it.
-    const out = new ArrayBuffer(frame.data.byteLength)
-    new Uint8Array(out).set(frame.data)
-    wrapper.onmessage?.(out)
+  }
+
+  // Self-host dials in this tick, exactly as it always did: there is no
+  // credential to fetch, and a socket that only appeared a microtask later
+  // would be a behaviour change for a deployment this task must not touch.
+  if (identity.token === null) {
+    dial(null)
+  } else {
+    // `.then(dial).catch(...)`, never `.then(dial, onRejected)`: the two-arm
+    // form does not catch a throw from `dial` itself, and `wsFactory` can throw
+    // — `new WebSocket` raises SyntaxError for a subprotocol value that is not
+    // a token. That would be an unhandled rejection with no `onclose` behind
+    // it, which is the one failure FlueClient cannot recover from: it parks at
+    // `reconnecting` with no socket and no retry armed, for the life of the tab.
+    identity
+      .token()
+      .then(dial)
+      .catch(() => {
+        // No token, no dial. Reported as an ordinary close rather than a
+        // special state, because that is what FlueClient recovers from — and
+        // its next attempt asks for a token again, which is how a tab whose
+        // session outlived a control-plane blip comes back on its own.
+        shutdown()
+      })
   }
 
   return wrapper

@@ -130,14 +130,15 @@ function harness(
     origin?: string
     daemonPriv?: Uint8Array
     pin?: Uint8Array
-    channelToken?: string | null
+    /** What each dial's token source answers, or throws. Null: self-hosted. */
+    token?: (() => Promise<string>) | null
   } = {},
 ) {
   const daemonPriv = opts.daemonPriv ?? DAEMON_PRIV
   const identity: RelayIdentity = {
     deviceKey: { privateKey: DEVICE_PRIV, publicKey: x25519.getPublicKey(DEVICE_PRIV) },
     daemonPub: opts.pin ?? x25519.getPublicKey(daemonPriv),
-    channelToken: opts.channelToken ?? null,
+    token: opts.token ?? null,
   }
   const urls: string[] = []
   const offers: (string[] | undefined)[] = []
@@ -162,12 +163,26 @@ function harness(
     urls,
     offers,
     got,
-    raw: raws[0]!,
+    // Only present once the dial has happened, which on a hosted relay is one
+    // microtask after `relaySocket` returns (the token has to be fetched
+    // first). `dialed()` below is what a test awaits for that.
+    get raw() {
+      return raws[0]!
+    },
     daemon: new FakeDaemon(daemonPriv),
     opens: () => opens,
     closes: () => closes,
   }
 }
+
+/**
+ * Let a token source settle, so the socket under test has actually dialed.
+ *
+ * A timer rather than a microtask: an `async` function that returns a rejected
+ * promise settles several ticks later, and counting them would be a test that
+ * fails when someone adds an `await`.
+ */
+const dialed = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 /** A harness whose handshake has completed: the socket is end-to-end open. */
 function connected(opts: Parameters<typeof harness>[0] = {}) {
@@ -220,16 +235,96 @@ describe('opening the relay socket', () => {
     expect(harness().offers).toEqual([undefined])
   })
 
-  it('presents a channel token as a subprotocol, never in the URL', () => {
+  it('presents a channel token as a subprotocol, never in the URL', async () => {
     // The upgrade is a request to the relay Worker: a token in the query
     // string is a token in its logs. `Sec-WebSocket-Protocol` is the one
     // header a browser's WebSocket constructor can set, so the credential
     // rides there — beside a plain protocol name the relay can echo on the
     // 101 without writing the credential into a response header.
-    const h = harness({ channelToken: 'eyJhY2MiOiJhIn0.c2ln' })
+    const h = harness({ token: async () => 'eyJhY2MiOiJhIn0.c2ln' })
+    await dialed()
+
     expect(h.offers).toEqual([['flue.v1', 'flue.token.eyJhY2MiOiJhIn0.c2ln']])
     expect(h.urls).toEqual(['wss://relay.example/client'])
     for (const url of h.urls) expect(url).not.toContain('c2ln')
+  })
+
+  it('asks for a token per dial, so a reconnect never presents a stale one', async () => {
+    // The second half of the SaaS bug. A client token lives sixty seconds and
+    // the tab used to capture one at open time, so the first reconnect past a
+    // minute was refused at the upgrade — and the tab reconnected into the
+    // identical refusal forever, with nothing on screen to say why.
+    let n = 0
+    const token = async () => `token-${++n}`
+
+    const first = harness({ token })
+    await dialed()
+    expect(first.offers).toEqual([['flue.v1', 'flue.token.token-1']])
+
+    const second = harness({ token })
+    await dialed()
+    expect(second.offers).toEqual([['flue.v1', 'flue.token.token-2']])
+  })
+
+  it('does not dial at all when no token can be had', async () => {
+    // An expired session, a revoked machine, a control plane that is down.
+    // Reported as an ordinary close, because that is the one thing FlueClient
+    // already knows how to back off and retry from — and its next attempt
+    // asks again, which is how a tab comes back from a blip on its own.
+    const h = harness({ token: () => Promise.reject(new Error('403')) })
+    await dialed()
+
+    expect(h.urls).toEqual([])
+    expect(h.opens()).toBe(0)
+    expect(h.closes()).toBe(1)
+  })
+
+  it('reports a close when the dial itself throws', async () => {
+    // `new WebSocket` raises a synchronous SyntaxError for a subprotocol value
+    // that is not an HTTP token. Unhandled, that is a rejection with no
+    // `onclose` behind it — and FlueClient arms its retry from `onclose`, so
+    // the tab would park at `reconnecting` with no socket and no timer.
+    const identity: RelayIdentity = {
+      deviceKey: { privateKey: DEVICE_PRIV, publicKey: x25519.getPublicKey(DEVICE_PRIV) },
+      daemonPub: x25519.getPublicKey(DAEMON_PRIV),
+      token: async () => 'a-token',
+    }
+    let closes = 0
+    const sock = relaySocket('https://relay.example', identity, () => {
+      throw new SyntaxError('invalid subprotocol')
+    })
+    sock.onclose = () => void closes++
+
+    await dialed()
+    expect(closes).toBe(1)
+  })
+
+  it('does not arm the keepalive on a socket it has already given up on', async () => {
+    // `shutdown` runs `stopPing` and then closes the transport. A late `open`
+    // after that would arm a 30-second interval nothing will ever clear.
+    vi.useFakeTimers()
+    const h = harness()
+    h.sock.close()
+    h.raw.open()
+
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(120_000)
+    expect(h.raw.text()).toEqual([])
+  })
+
+  it('does not dial after the consumer has already let go', async () => {
+    // A React effect cleanup lands inside the same tick as the mount. Without
+    // the guard, the socket would open a microtask later — live, credentialed,
+    // and behind a consumer that has been told it is closed.
+    let release = (_: string) => {}
+    const h = harness({ token: () => new Promise<string>((resolve) => (release = resolve)) })
+
+    h.sock.close()
+    release('a-token')
+    await dialed()
+
+    expect(h.urls).toEqual([])
+    expect(h.closes()).toBe(1)
   })
 
   it('sends a bare message A — no channel header, the Worker adds that', () => {
@@ -492,7 +587,7 @@ describe('under FlueClient', () => {
     const identity: RelayIdentity = {
       deviceKey: { privateKey: DEVICE_PRIV, publicKey: x25519.getPublicKey(DEVICE_PRIV) },
       daemonPub: x25519.getPublicKey(DAEMON_PRIV),
-      channelToken: null,
+      token: null,
     }
     const raws: FakeRaw[] = []
     const client = new FlueClient('https://relay.example', (url) =>
@@ -538,7 +633,7 @@ describe('under FlueClient', () => {
     const identity: RelayIdentity = {
       deviceKey: { privateKey: DEVICE_PRIV, publicKey: x25519.getPublicKey(DEVICE_PRIV) },
       daemonPub: x25519.getPublicKey(DAEMON_PRIV),
-      channelToken: null,
+      token: null,
     }
     const raws: FakeRaw[] = []
     const client = new FlueClient('https://relay.example', (url) =>

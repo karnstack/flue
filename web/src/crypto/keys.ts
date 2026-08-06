@@ -35,8 +35,31 @@ const DEVICE_RECORD = 'device-static'
  * daemon by proving it holds the private half — so a record that could be
  * replaced silently would be the whole of the trust decision, made once at
  * pairing time and never asked about again.
+ *
+ * **One record, and that is a statement about the deployment.** A self-hosted
+ * relay is one origin in front of one machine, so "the daemon this browser is
+ * paired to" is a fact about the origin and this is where it lives. A hosted
+ * relay is one origin in front of every machine on every account, where that
+ * sentence is not true of anything — see `DEVICE_RECORD_PREFIX`.
  */
 const DAEMON_RECORD = 'daemon-static'
+
+/**
+ * Where a hosted relay's per-machine keys live: one record per device id.
+ *
+ * The bug this exists to close: with one slot per origin, opening machine B's
+ * session overwrites machine A's pinned key, and A's next session builds its
+ * IK handshake against B's static. `readMessageB` throws, the socket reports
+ * an ordinary close, and FlueClient reconnects into the identical failure for
+ * as long as the tab is open — with nothing on screen to say why.
+ *
+ * The prefix is deliberately *not* the self-host record's own name, so the two
+ * schemes cannot collide: `daemon-static` and `daemon-static:<id>` are
+ * different strings for every id, including the empty one. A browser that
+ * paired with a self-hosted daemon before any of this existed keeps its pin
+ * exactly where it left it, and does not have to pair again.
+ */
+const DEVICE_RECORD_PREFIX = 'daemon-static:'
 
 const openDb = (factory: IDBFactory) =>
   new Promise<IDBDatabase>((resolve, reject) => {
@@ -100,10 +123,56 @@ export async function savePinnedDaemonKey(
 export async function loadPinnedDaemonKey(
   factory: IDBFactory = indexedDB,
 ): Promise<Uint8Array | null> {
+  return read(DAEMON_RECORD, factory)
+}
+
+/**
+ * Pin the static key of one machine, under the id the control plane names it
+ * by.
+ *
+ * The hosted-relay counterpart of `savePinnedDaemonKey`, and it holds its key
+ * on different terms. There, a pin is the *whole* trust decision, made once in
+ * a ceremony the user carried out by hand. Here the key arrives with every
+ * "open a session" — signed-in, over TLS, from the control plane that holds the
+ * device row (`app/src/server/devices.ts`, `openSession`) — so the handoff is
+ * the authority and this is a cache of it, keyed by the id that machine is
+ * addressed by everywhere else.
+ *
+ * Which is why it overwrites without asking. A device id *is*
+ * `hex(sha256(publicKey))[:12]`, so a different key under the same id is not a
+ * second opinion about one machine, it is a 48-bit collision or a stale cache —
+ * and refusing to overwrite would turn a crafted link into a permanent denial
+ * of service for that machine in this browser. What the record buys is a
+ * reload: the fragment carrying the key is scrubbed the moment it is read, so
+ * without this a refreshed tab would have no key to hand the handshake.
+ */
+export async function savePinnedDaemonKeyFor(
+  deviceId: string,
+  publicKey: Uint8Array,
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const db = await openDb(factory)
+  try {
+    await tx(db, 'readwrite', (s) => s.put({ publicKey }, `${DEVICE_RECORD_PREFIX}${deviceId}`))
+  } finally {
+    db.close()
+  }
+}
+
+/** The key pinned for one machine, or null if this browser holds none. */
+export async function loadPinnedDaemonKeyFor(
+  deviceId: string,
+  factory: IDBFactory = indexedDB,
+): Promise<Uint8Array | null> {
+  return read(`${DEVICE_RECORD_PREFIX}${deviceId}`, factory)
+}
+
+/** One record out of the key store, copied out of whatever IndexedDB returned. */
+async function read(record: string, factory: IDBFactory): Promise<Uint8Array | null> {
   const db = await openDb(factory)
   try {
     const existing = await tx<{ publicKey: Uint8Array } | undefined>(db, 'readonly', (s) =>
-      s.get(DAEMON_RECORD),
+      s.get(record),
     )
     // Copied out rather than handed back as it was read: the value structured
     // clone returns is this caller's own, and the next reader deserves the

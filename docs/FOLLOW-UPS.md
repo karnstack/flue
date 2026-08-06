@@ -523,6 +523,43 @@ endpoint that does not exist yet.
   device; the web client refreshes on reconnect instead of reusing the
   captured token.
 
+**Done** (Task 15) — all three, and the shape of the fix is in
+[`SAAS.md`](SAAS.md).
+
+`openSession` now hands the browser the whole session in the fragment:
+`#t=<token>&k=<base64url pubkey>&d=<device id>&a=<control-plane origin>`. The
+tab reads all four at the entry point and scrubs all four (`takeRelayHandoff`,
+not just the secret — a leftover `#d=…&k=…` is the address of somebody's
+machine in every screenshot). The key is pinned under the **device id**
+(`savePinnedDaemonKeyFor`), so two machines are two records and neither can
+overwrite the other; the self-hosted single-key record is untouched and a
+browser that paired before this does not have to pair again.
+
+Tokens are fetched **per dial**. `RelayIdentity.channelToken: string | null`
+became `token: (() => Promise<string>) | null`; the handoff's token is spent on
+the first dial and every dial after it calls
+`POST app.flue.sh/api/relay-token` — credentialed, form-encoded (so it costs no
+preflight), answered only for the relay's origin and the control plane's own.
+A refusal — and a fetch that hangs past ten seconds — is reported as an
+ordinary close, which FlueClient already backs off and retries from. The
+endpoint has its own rate-limit bucket (`refresh-token:user`, 600/15min), not
+`open-session:user`: a reconnect loop legitimately spends far more than a
+person clicking a button does, and `withinLimit` counts refused calls too, so a
+cap a real loop can reach is one it then holds itself over for the rest of the
+window.
+
+A reload works too, which it never did: the tab remembers the device id and the
+control plane in `sessionStorage` (neither is a secret; the token deliberately
+is not there) and re-mints from the key it pinned.
+
+The `/pair` bullet is answered rather than fixed: the QR ceremony is self-host
+only, hosted enrolment is `flue link`, and the browser never pairs on flue.sh
+because the key arrives with the session. `/pair` stays reachable on the hosted
+origin — the same bundle is served three ways and the page cannot tell a
+self-hosted relay from flue.sh by origin alone — and fails there with the
+relay's 401, which is the correct outcome for a page with nothing to pair with.
+SAAS.md says so, and says what a hosted pairing UI would have to do instead.
+
 ## 15. What the SaaS kill switch reaches
 
 Carried out of the control plane's abuse controls (`app/src/server/kill-switch.ts`,
