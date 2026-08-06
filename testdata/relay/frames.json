@@ -1,0 +1,78 @@
+{
+  "channelFrames": [
+    {
+      "name": "control",
+      "channel": 0,
+      "payloadB64": "eyJ0eXBlIjoib3BlbiIsImNoYW5uZWwiOjEsIm9yaWdpbiI6Imh0dHBzOi8vci5leGFtcGxlIn0=",
+      "encodedB64": "AAAAAHsidHlwZSI6Im9wZW4iLCJjaGFubmVsIjoxLCJvcmlnaW4iOiJodHRwczovL3IuZXhhbXBsZSJ9"
+    },
+    {
+      "name": "control-closed",
+      "channel": 0,
+      "payloadB64": "eyJ0eXBlIjoiY2xvc2VkIiwiY2hhbm5lbCI6MX0=",
+      "encodedB64": "AAAAAHsidHlwZSI6ImNsb3NlZCIsImNoYW5uZWwiOjF9"
+    },
+    {
+      "name": "control-pair",
+      "channel": 0,
+      "payloadB64": "eyJ0eXBlIjoicGFpciIsImlkIjo5LCJvcmlnaW4iOiJodHRwczovL3IuZXhhbXBsZSIsImJvZHkiOnsidG9rZW4iOiJabTkxY25SbFpXNHRZMmhoY25NIiwicHVibGljS2V5IjoiM3A3YmZYdDl3YlRUVzJIQzdPUTFOeitEUThoRzZZd2poeVp4YVlRcGI4az0iLCJsYWJlbCI6ImlQaG9uZSJ9fQ==",
+      "encodedB64": "AAAAAHsidHlwZSI6InBhaXIiLCJpZCI6OSwib3JpZ2luIjoiaHR0cHM6Ly9yLmV4YW1wbGUiLCJib2R5Ijp7InRva2VuIjoiWm05MWNuUmxaVzR0WTJoaGNuTSIsInB1YmxpY0tleSI6IjNwN2JmWHQ5d2JUVFcySEM3T1ExTnorRFE4aEc2WXdqaHlaeGFZUXBiOGs9IiwibGFiZWwiOiJpUGhvbmUifX0="
+    },
+    {
+      "name": "control-pair-result",
+      "channel": 0,
+      "payloadB64": "eyJ0eXBlIjoicGFpclJlc3VsdCIsImlkIjo5LCJzdGF0dXMiOjIwMCwiYm9keSI6eyJkZXZpY2VJZCI6ImQxYjJjM2Q0ZTVmNjA3MTgiLCJkYWVtb25QdWIiOiIzcDdiZlh0OXdiVFRXMkhDN09RMU56K0RROGhHNll3amh5WnhhWVFwYjhrPSJ9fQ==",
+      "encodedB64": "AAAAAHsidHlwZSI6InBhaXJSZXN1bHQiLCJpZCI6OSwic3RhdHVzIjoyMDAsImJvZHkiOnsiZGV2aWNlSWQiOiJkMWIyYzNkNGU1ZjYwNzE4IiwiZGFlbW9uUHViIjoiM3A3YmZYdDl3YlRUVzJIQzdPUTFOeitEUThoRzZZd2poeVp4YVlRcGI4az0ifX0="
+    },
+    {
+      "name": "channel-7-bytes",
+      "channel": 7,
+      "payloadB64": "3q2+7w==",
+      "encodedB64": "AAAAB96tvu8="
+    },
+    {
+      "name": "channel-1-empty",
+      "channel": 1,
+      "payloadB64": "",
+      "encodedB64": "AAAAAQ=="
+    },
+    {
+      "name": "channel-max",
+      "channel": 4294967295,
+      "payloadB64": "AP8=",
+      "encodedB64": "/////wD/"
+    }
+  ],
+  "plainFrames": [
+    {
+      "name": "text",
+      "text": true,
+      "dataB64": "eyJ0eXBlIjoibGlzdCJ9",
+      "encodedB64": "AHsidHlwZSI6Imxpc3QifQ=="
+    },
+    {
+      "name": "binary",
+      "text": false,
+      "dataB64": "AQIDBA==",
+      "encodedB64": "AQECAwQ="
+    },
+    {
+      "name": "text-utf8",
+      "text": true,
+      "dataB64": "eyJ0eXBlIjoiaW5wdXQiLCJkYXRhIjoiaMOpbGxvIOKGkiDkuJbnlYwifQ==",
+      "encodedB64": "AHsidHlwZSI6ImlucHV0IiwiZGF0YSI6ImjDqWxsbyDihpIg5LiW55WMIn0="
+    },
+    {
+      "name": "text-empty",
+      "text": true,
+      "dataB64": "",
+      "encodedB64": "AA=="
+    },
+    {
+      "name": "binary-empty",
+      "text": false,
+      "dataB64": "",
+      "encodedB64": "AQ=="
+    }
+  ]
+}
