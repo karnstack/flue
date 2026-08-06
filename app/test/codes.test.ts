@@ -16,7 +16,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { db } from '../src/db/client'
 import { loginCodes } from '../src/db/schema'
 import { base64url, hmacHex, randomCode8, timingSafeEqual } from '../src/lib/tokens'
-import { issueLoginCode, verifyLoginCode } from '../src/server/codes'
+import { MAX_ATTEMPTS, issueLoginCode, verifyLoginCode } from '../src/server/codes'
 import { LogSender, sender } from '../src/server/email/sender'
 
 const SECRET = 'test-code-hmac-secret' // vitest.config.ts binds this
@@ -75,6 +75,19 @@ function rowsFor(email: string) {
   return db().select().from(loginCodes).where(eq(loginCodes.email, email))
 }
 
+// How many characters `body` reads. `timingSafeEqual` is the only thing in
+// these paths that walks a string character by character, so this counts
+// comparisons — see the two tests that use it.
+async function countCharReads(body: () => unknown): Promise<number> {
+  const spy = vi.spyOn(String.prototype, 'charCodeAt')
+  try {
+    await body()
+    return spy.mock.calls.length // mockRestore forgets these
+  } finally {
+    spy.mockRestore()
+  }
+}
+
 const now = () => Math.floor(Date.now() / 1000)
 
 describe('randomCode8', () => {
@@ -94,10 +107,11 @@ describe('randomCode8', () => {
     }
     // The digits come from crypto.getRandomValues, not Math.random...
     expect(drawn).toBeGreaterThanOrEqual(200)
-    // ...and they are not a constant: any collision at all among 200 draws
-    // from 10^8 has probability ~2e-4, so >150 distinct is a formality that
-    // still fails loudly on a stuck generator.
-    expect(codes.size).toBeGreaterThan(150)
+    // ...and they cover the range: over 10^8 a single collision among 200
+    // draws has probability ~2e-4 and two have ~1e-8, so "at most one repeat"
+    // is both effectively non-flaky and tight enough to fail on a generator
+    // drawing from a small space (100 codes would repeat ~150 times).
+    expect(codes.size).toBeGreaterThanOrEqual(199)
   })
 
   it('left-pads a small draw to eight digits', () => {
@@ -160,24 +174,17 @@ describe('timingSafeEqual', () => {
   // strings diverge, or the comparison leaks a prefix oracle one byte at a
   // time. A wall-clock assertion would be flaky, so this counts the character
   // reads instead — the loop's only per-character operation.
-  it('reads every character whether the mismatch is first or last', () => {
+  it('reads every character whether the mismatch is first or last', async () => {
     const a = 'a'.repeat(64)
     const early = `b${'a'.repeat(63)}`
     const late = `${'a'.repeat(63)}b`
 
-    const spy = vi.spyOn(String.prototype, 'charCodeAt')
-    let earlyReads = 0
-    let lateReads = 0
-    try {
-      timingSafeEqual(a, early)
-      earlyReads = spy.mock.calls.length
-      spy.mockClear()
-      timingSafeEqual(a, late)
-      lateReads = spy.mock.calls.length
-    } finally {
-      spy.mockRestore()
-    }
+    const earlyReads = await countCharReads(() => timingSafeEqual(a, early))
+    const lateReads = await countCharReads(() => timingSafeEqual(a, late))
+
     expect(earlyReads).toBe(lateReads)
+    // `a === b` would read nothing at all, and an early return on the first
+    // mismatch would read 1.
     expect(earlyReads).toBeGreaterThanOrEqual(64)
   })
 })
@@ -406,6 +413,33 @@ describe('verifyLoginCode', () => {
     ])
     expect(results.filter((r) => r.ok)).toHaveLength(1)
     expect(await rowsFor('race@example.com')).toHaveLength(0)
+  })
+
+  it('spends the guess before it compares, so parallel guesses cannot beat the cap', async () => {
+    // The attack the cap exists to stop: fire many submissions at once and hope
+    // they all read `attempts` before any increment commits. If the compare
+    // happens against a snapshot, every one of them gets a free shot at the
+    // code and "5 guesses out of 10^8" becomes "as many as you can hold open".
+    //
+    // Counted rather than timed, and calibrated against one known comparison so
+    // the bound does not depend on how many reads a compare costs.
+    const perCompare = await countCharReads(() =>
+      timingSafeEqual('a'.repeat(64), 'b'.repeat(64)),
+    )
+    expect(perCompare).toBeGreaterThan(0)
+
+    const code = await issueCode('burst@example.com')
+    const wrong = code === '00000000' ? '11111111' : '00000000'
+    const reads = await countCharReads(() =>
+      Promise.all(Array.from({ length: 20 }, () => verifyLoginCode('burst@example.com', wrong))),
+    )
+
+    // Five compares, not twenty: the burst bought exactly the attempts the cap
+    // allows. A snapshot-then-increment implementation lets all 20 through.
+    expect(reads).toBeLessThanOrEqual(perCompare * MAX_ATTEMPTS)
+    // ...and the code is dead afterwards, cap reached.
+    expect(await rowsFor('burst@example.com')).toHaveLength(0)
+    expect(await verifyLoginCode('burst@example.com', code)).toEqual({ ok: false })
   })
 
   it('fails closed when the hmac secret is missing', async () => {

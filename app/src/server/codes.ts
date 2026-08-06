@@ -6,15 +6,15 @@
 // guesses, a new code invalidates the previous one, and only an HMAC is stored.
 // They are load-bearing *together* — 10^8 is only a safe keyspace because the
 // attempt cap makes a guessing run 5 shots long, and the cap is only meaningful
-// because the counter lives in SQL where two concurrent guesses cannot both
-// write "1".
+// because a guess is *claimed* in SQL before the code is looked at, so parallel
+// submissions cannot all spend the same attempt (see `verifyLoginCode`).
 //
 // Neither function tells its caller anything about whether the address belongs
 // to an account: `issueLoginCode` never looks. Deciding who is allowed to
 // receive a code (invite gate) and keeping the HTTP responses identical either
 // way is the login route's job.
 import { env } from 'cloudflare:workers'
-import { and, desc, eq, gte, sql } from 'drizzle-orm'
+import { and, eq, gt, gte, inArray, lt, lte, or, sql } from 'drizzle-orm'
 import { db } from '../db/client'
 import { loginCodes } from '../db/schema'
 import { hmacHex, randomCode8, timingSafeEqual } from '../lib/tokens'
@@ -96,61 +96,88 @@ export async function issueLoginCode(email: string): Promise<void> {
 /**
  * Check a submitted code. `{ ok: true, email }` exactly once per issued code;
  * `{ ok: false }` for every other reason, without saying which.
+ *
+ * "Without saying which" is about the return value, not the clock. A guess
+ * against a live code costs a write; a submission for an address with nothing
+ * outstanding costs a read and maybe a sweep, and those differ in wall time.
+ * What that can leak is whether a code is *currently outstanding* for an
+ * address — never whether the address has an account, which this module does
+ * not look up. Keeping the responses themselves indistinguishable is the login
+ * route's job.
  */
 export async function verifyLoginCode(
   email: string,
   code: string,
 ): Promise<{ ok: true; email: string } | { ok: false }> {
   const address = normalizeEmail(email)
-  // Hashed before the lookup, unconditionally: the HMAC is the expensive part
-  // of this function, so doing it first keeps a submission for an address with
-  // no outstanding code from returning visibly sooner than a real guess.
   const submitted = await hmacHex(codeSecret(), code)
-
+  const now = nowSeconds()
   const d = db()
-  // Issuing deletes the previous row, so there is normally exactly one; newest
-  // wins if a stale one ever survives.
-  const [row] = await d
-    .select()
-    .from(loginCodes)
-    .where(eq(loginCodes.email, address))
-    .orderBy(desc(loginCodes.createdAt))
-    .limit(1)
-  if (!row) return { ok: false }
 
-  if (row.expiresAt <= nowSeconds() || row.attempts >= MAX_ATTEMPTS) {
-    // Dead either way — sweep it rather than leave a row that has to be
-    // re-judged on every future submission.
-    await d.delete(loginCodes).where(eq(loginCodes.id, row.id))
+  // Spend the guess BEFORE looking at the code. One statement finds the live
+  // row, increments its counter and hands back the hash, so SQLite serializes
+  // the claim: N submissions consume N distinct attempts and only the first
+  // MAX_ATTEMPTS of them ever see a hash to compare against.
+  //
+  // Reading the row first and incrementing afterwards — the obvious shape —
+  // does not do this. Requests that arrive before the first increment commits
+  // all read `attempts = 0`, all pass the cap check and all get a full compare,
+  // which turns "5 guesses per code" into "as many as you can hold open at
+  // once". That cap is the entire security argument for an 8-digit code.
+  //
+  // The TTL rides in the same predicate so an expired row cannot be claimed
+  // either.
+  const claimed = await d
+    .update(loginCodes)
+    .set({ attempts: sql`${loginCodes.attempts} + 1` })
+    .where(
+      and(
+        eq(loginCodes.email, address),
+        gt(loginCodes.expiresAt, now),
+        lt(loginCodes.attempts, MAX_ATTEMPTS),
+      ),
+    )
+    .returning({
+      id: loginCodes.id,
+      codeHash: loginCodes.codeHash,
+      attempts: loginCodes.attempts,
+    })
+
+  if (claimed.length === 0) {
+    // Nothing live to guess against: no code, an expired one, or one whose
+    // guesses are spent. Sweep the dead row rather than re-judge it on every
+    // future submission — and say nothing about which case it was.
+    await d
+      .delete(loginCodes)
+      .where(
+        and(
+          eq(loginCodes.email, address),
+          or(lte(loginCodes.expiresAt, now), gte(loginCodes.attempts, MAX_ATTEMPTS)),
+        ),
+      )
     return { ok: false }
   }
 
-  if (!timingSafeEqual(submitted, row.codeHash)) {
-    await d.batch([
-      // Incremented in SQL, not read-modify-write: two guesses racing through
-      // JavaScript would both write 1, and the cap that makes an 8-digit code
-      // safe would be worth nothing under exactly the concurrency an attacker
-      // brings.
-      d
-        .update(loginCodes)
-        .set({ attempts: sql`${loginCodes.attempts} + 1` })
-        .where(eq(loginCodes.id, row.id)),
-      // Same batch, so the delete sees the incremented counter: the guess that
-      // reaches the cap is the one that burns the code.
-      d
-        .delete(loginCodes)
-        .where(and(eq(loginCodes.id, row.id), gte(loginCodes.attempts, MAX_ATTEMPTS))),
-    ])
+  // Normally exactly one row — issuing deletes the previous one. A stale
+  // duplicate would have had a guess spent on it too, which is the safe
+  // direction to be wrong in.
+  const match = claimed.find((row) => timingSafeEqual(submitted, row.codeHash))
+
+  if (!match) {
+    // The guess that took the counter to the cap is the one that burns the
+    // code; `attempts` here is the post-increment value the UPDATE returned.
+    const spent = claimed.filter((row) => row.attempts >= MAX_ATTEMPTS).map((row) => row.id)
+    if (spent.length > 0) await d.delete(loginCodes).where(inArray(loginCodes.id, spent))
     return { ok: false }
   }
 
-  // The delete is what grants the login, not the comparison above: two tabs
+  // The burn is what grants the login, not the comparison above: two tabs
   // submitting the same correct code both reach this line, and only the one
   // whose DELETE actually removed a row is told yes. Anything softer makes
   // "single use" a race.
   const burned = await d
     .delete(loginCodes)
-    .where(eq(loginCodes.id, row.id))
+    .where(eq(loginCodes.id, match.id))
     .returning({ id: loginCodes.id })
   if (burned.length !== 1) return { ok: false }
 
