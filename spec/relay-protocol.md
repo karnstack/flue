@@ -170,7 +170,12 @@ complete an IK handshake against a daemon that has not paired their key, and one
 who could complete it would not have needed the credential. What an
 unauthenticated `/client` does expose is denial of service, so the Durable
 Object bounds it directly: a cap on concurrent channels and a deadline on
-completing the handshake, after which the channel is closed.
+completing the handshake, after which the channel is closed. `POST /api/pair`
+is credential-less for the same reason and bounded the same way: a cap on the
+body's size, a deadline the parked request answers `504` at, and a cap on
+concurrent parked requests — over it the relay answers `429`
+`{"error":"too many pairing attempts"}` without spending a `pair` id or waking
+the daemon.
 
 ## What the relay sees
 

@@ -9,6 +9,9 @@ const PAIR_TIMEOUT_MS = 250
 /** The body cap, matching the daemon's own maxPairBytes (internal/daemon/pairing.go). */
 const MAX_BODY = 4096
 
+/** Mirrors MAX_PENDING_PAIRS in src/hub.ts. */
+const MAX_PENDING = 8
+
 /** A pairing POST. Not awaited by the caller until the daemon has answered. */
 function post(
   hub: DurableObjectStub,
@@ -195,6 +198,47 @@ describe('a pairing body that is not JSON', () => {
     expect(pair.type).toBe('pair')
     expect(pair.body).toEqual({ token: 'honest' })
     await honest
+  })
+})
+
+describe('the cap on concurrent pairing attempts', () => {
+  it('refuses the 9th parked attempt with 429, spending neither an id nor a frame', async () => {
+    const hub = freshHub()
+    const daemon = await dial(hub, '/daemon')
+    // Park the cap's worth against a daemon that says nothing yet. Concurrent
+    // POSTs reach the object in whatever order the runtime delivers them, so
+    // each answer is routed back by the id the daemon read for that token
+    // rather than by the order the requests were made in.
+    const parked = Array.from({ length: MAX_PENDING }, (_, i) => post(hub, `{"token":"t${i}"}`))
+    const idFor = new Map<string, number>()
+    for (let i = 1; i <= MAX_PENDING; i += 1) {
+      const pair = await daemon.nextControl()
+      expect(pair.id).toBe(i) // ids are spent in the order the hub reads them
+      idFor.set((pair.body as { token: string }).token, i)
+    }
+    expect(idFor.size).toBe(MAX_PENDING)
+    // The one over the cap. 429, not the 503 a missing daemon gets: the daemon
+    // is right there, and it is the caller's own concurrency that is in the way.
+    const over = await post(hub, '{"token":"over"}')
+    expect(over.status).toBe(429)
+    expect(await over.json()).toEqual({ error: 'too many pairing attempts' })
+    expect(over.headers.get('Content-Type')).toBe('application/json')
+    expect(over.headers.get('Cache-Control')).toBe('no-store')
+    // Let the parked ones go, then prove the refusal never reached the daemon:
+    // the next frame it sees is the honest attempt after it, and it carries the
+    // id the refused one would have spent.
+    for (const [token, id] of idFor) {
+      daemon.ws.send(controlFrame({ type: 'pairResult', id, status: 200, body: { token } }))
+    }
+    for (const [i, res] of (await Promise.all(parked)).entries()) {
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ token: `t${i}` })
+    }
+    const honest = post(hub, '{"token":"honest"}')
+    const pair = await answer(daemon, 200, {})
+    expect(pair.id).toBe(MAX_PENDING + 1)
+    expect(pair.body).toEqual({ token: 'honest' })
+    expect((await honest).status).toBe(200)
   })
 })
 

@@ -92,10 +92,7 @@ export class DaemonHub extends DurableObject<Env> {
     // The cap is the DoS bound the spec leans on for the credential-less
     // client leg (spec/relay-protocol.md, Auth).
     if (this.ctx.getWebSockets('client').length >= MAX_CLIENTS) {
-      return new Response('{"error":"relay full"}', {
-        status: 503,
-        headers: { 'Content-Type': 'application/json' },
-      })
+      return new Response('{"error":"relay full"}', { status: 503, headers: JSON_NO_STORE })
     }
     // The counter lives in storage so ids survive hibernation and daemon
     // reconnects: a channel id is never reused within this hub's lifetime.
@@ -127,8 +124,9 @@ export class DaemonHub extends DurableObject<Env> {
    * channel). The request is parked here while its body travels to the daemon
    * on channel 0 and the daemon's verdict travels back.
    *
-   * The relay refuses what it can judge alone — provenance, size, shape —
-   * before it spends a pair id or the daemon's attention on the request.
+   * The relay refuses what it can judge alone — provenance, size, shape, and
+   * how many attempts it is already holding — before it spends a pair id or
+   * the daemon's attention on the request.
    */
   private async pair(req: Request): Promise<Response> {
     const origin = new URL(req.url).origin
@@ -160,6 +158,13 @@ export class DaemonHub extends DurableObject<Env> {
     }
     const daemon = this.daemon()
     if (!daemon) return offline()
+    // The concurrency bound this leg needs for the reason MAX_CLIENTS bounds
+    // the other credential-less one (spec/relay-protocol.md, Auth): the
+    // deadline alone lets a caller hold N parked requests — N timers, N storage
+    // writes, N control frames at a daemon whose own pairing handler is not
+    // rate limited — for as long as it likes. A human ceremony never has more
+    // than one in flight; the rest of the cap is for retries and second devices.
+    if (this.pending.size >= MAX_PENDING_PAIRS) return tooManyPairs()
     // The counter lives in storage for the reason nextChannel does. The ids it
     // hands out mean nothing across a daemon reconnect, which is why one
     // invalidates every parked request rather than leaving a stale id to be
@@ -181,7 +186,7 @@ export class DaemonHub extends DurableObject<Env> {
     if (outcome === 'timeout') {
       return new Response('{"error":"daemon did not answer"}', {
         status: 504,
-        headers: { 'Content-Type': 'application/json' },
+        headers: JSON_NO_STORE,
       })
     }
     // By the time a pairResult arrives the daemon is trusted infrastructure,
@@ -194,7 +199,7 @@ export class DaemonHub extends DurableObject<Env> {
       // throws, and a daemon's odd choice of status must not take the request
       // down with it.
       NULL_BODY_STATUS.has(status) ? null : JSON.stringify(outcome.body ?? null),
-      { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
+      { status, headers: JSON_NO_STORE },
     )
   }
 
@@ -490,8 +495,18 @@ const PAIR_TIMEOUT_MS = 10_000
  * 32-byte key in base64 and a human label. */
 const MAX_PAIR_BYTES = 4096
 
+/** Parked `POST /api/pair` requests one hub will hold at once — the DoS bound
+ * on the credential-less pairing endpoint (spec/relay-protocol.md, Auth). A
+ * ceremony a human is driving never has more than one in flight. */
+const MAX_PENDING_PAIRS = 8
+
 /** Statuses a `Response` may not carry a body for. */
 const NULL_BODY_STATUS = new Set([204, 205, 304])
+
+/** What every JSON answer this hub writes carries. `no-store` because all of
+ * them are about the state of one live ceremony: a refusal that got cached by
+ * anything in the path would outlive the condition that caused it. */
+const JSON_NO_STORE = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
 
 /** What a daemon socket remembers across hibernation. */
 interface DaemonAttachment {
@@ -612,10 +627,7 @@ function refuseNonUpgrade(req: Request): Response | null {
 }
 
 function offline(): Response {
-  return new Response('{"error":"daemon offline"}', {
-    status: 503,
-    headers: { 'Content-Type': 'application/json' },
-  })
+  return new Response('{"error":"daemon offline"}', { status: 503, headers: JSON_NO_STORE })
 }
 
 /**
@@ -625,15 +637,26 @@ function offline(): Response {
  * be an oracle for the state of the user's live ceremony.
  */
 function pairRefused(): Response {
-  return new Response('{"error":"pairing refused"}', {
-    status: 403,
-    headers: { 'Content-Type': 'application/json' },
-  })
+  return new Response('{"error":"pairing refused"}', { status: 403, headers: JSON_NO_STORE })
 }
 
 function pairTooLarge(): Response {
   return new Response('{"error":"pairing body too large"}', {
     status: 413,
-    headers: { 'Content-Type': 'application/json' },
+    headers: JSON_NO_STORE,
+  })
+}
+
+/**
+ * Too many pairing attempts parked at once (`MAX_PENDING_PAIRS`). 429 rather
+ * than the 503 a missing daemon gets: the daemon is there and the caller's own
+ * concurrency is what is in the way, and a caller told "offline" would retry
+ * the wrong thing. It leaks only how busy this hub is, which a caller filling
+ * the cap itself already knows.
+ */
+function tooManyPairs(): Response {
+  return new Response('{"error":"too many pairing attempts"}', {
+    status: 429,
+    headers: JSON_NO_STORE,
   })
 }
