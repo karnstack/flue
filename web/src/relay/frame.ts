@@ -36,12 +36,15 @@ export function encodePlain(text: boolean, data: Uint8Array): Uint8Array {
  * payload), and guessing would hand FlueClient a frame of the wrong sort.
  */
 export function decodePlain(buf: Uint8Array): { text: boolean; data: Uint8Array } {
-  if (buf.byteLength === 0) {
+  // `undefined` is how an empty buffer answers, so this is the empty check as
+  // well as what narrows the byte for the message below — which must not be
+  // free to report an absent byte as `0x0`, a kind that is perfectly valid.
+  const kind = buf[0]
+  if (kind === undefined) {
     throw new RangeError('relay frame: a plain payload has no kind byte')
   }
-  const kind = buf[0]
   if (kind !== KIND_TEXT && kind !== KIND_BINARY) {
-    throw new RangeError(`relay frame: unknown kind byte 0x${(kind ?? 0).toString(16)}`)
+    throw new RangeError(`relay frame: unknown kind byte 0x${kind.toString(16).padStart(2, '0')}`)
   }
   return { text: kind === KIND_TEXT, data: buf.subarray(1) }
 }

@@ -456,5 +456,48 @@ describe('under FlueClient', () => {
 
     client.close()
     expect(raw.shut).toBe(true)
+    // `close()` reports the close itself rather than waiting for the transport
+    // to say so, and FlueClient must read that as the close it asked for — not
+    // as an outage worth reconnecting from.
+    expect(statuses).toEqual(['connecting', 'open', 'closed'])
+    expect(raws).toHaveLength(1)
+  })
+
+  it('takes a dead channel down as an ordinary outage, and reconnects', () => {
+    vi.useFakeTimers()
+    const identity: RelayIdentity = {
+      deviceKey: { privateKey: DEVICE_PRIV, publicKey: x25519.getPublicKey(DEVICE_PRIV) },
+      daemonPub: x25519.getPublicKey(DAEMON_PRIV),
+    }
+    const raws: FakeRaw[] = []
+    const client = new FlueClient('https://relay.example', (url) =>
+      relaySocket(url, identity, () => {
+        const raw = new FakeRaw()
+        raws.push(raw)
+        return raw
+      }),
+    )
+    const statuses: string[] = []
+    client.onStatus((s) => statuses.push(s))
+
+    client.connect()
+    raws[0]!.open()
+    new FakeDaemon(DAEMON_PRIV).handshake(raws[0]!)
+    raws[0]!.deliver(new Uint8Array(32)) // a frame that will not decrypt
+
+    expect(statuses).toEqual(['connecting', 'open', 'reconnecting'])
+    // The backoff is capped at 10s and jittered; one pass covers every draw.
+    vi.advanceTimersByTime(10_000)
+    expect(raws).toHaveLength(2)
+    // A fresh socket means a fresh handshake: IK spends the initiator's
+    // ephemeral on message A, so a channel is never resumed.
+    raws[1]!.open()
+    expect(raws[1]!.binary()).toHaveLength(1)
+    expect(hex(new FakeDaemon(DAEMON_PRIV).handshake(raws[1]!))).toBe(
+      hex(identity.deviceKey.publicKey),
+    )
+    expect(statuses).toEqual(['connecting', 'open', 'reconnecting', 'open'])
+
+    client.close()
   })
 })
