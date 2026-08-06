@@ -32,6 +32,7 @@
 // load to /enroll costs one navigation on a page nobody visits twice.
 import { useState, type FormEvent } from 'react'
 import {
+  EllipsisIcon,
   MonitorSmartphoneIcon,
   PencilIcon,
   PlugZapIcon,
@@ -50,7 +51,6 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 import {
   Dialog,
@@ -60,8 +60,16 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import {
   Empty,
   EmptyContent,
@@ -131,6 +139,18 @@ export const ONLINE_WINDOW_S = 120
 
 /** What a failed call says when the failure was not the server's answer. */
 const UNAVAILABLE_MESSAGE = 'Something went wrong at our end. Try again in a moment.'
+
+/**
+ * What a machine flue has switched off is told about itself.
+ *
+ * The same fact `server/devices.ts` refuses the delete with, said *before* the
+ * click rather than after it: the delete is scoped `disabled = false`, so a
+ * Revoke offered on one of these rows can only end in a refusal toast. Here it
+ * describes the menu item that is shut, via `aria-describedby`, so the reason
+ * is announced with the item rather than sitting somewhere a screen reader
+ * would reach separately.
+ */
+const SWITCHED_OFF_NOTE = 'Switched off by flue and cannot be removed. Contact support.'
 
 /**
  * "seen 2d ago", or nothing at all for a machine that never connected.
@@ -214,13 +234,28 @@ export function DeviceDirectory({
   const empty = !error && devices.length === 0
 
   return (
-    <main className="mx-auto w-full max-w-4xl px-4 py-10 sm:px-6 sm:py-14 lg:px-8">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div className="flex flex-col gap-1">
-          <h1 className="font-heading text-xl font-medium tracking-tight sm:text-2xl">
-            Your machines
-          </h1>
-          <p className="text-sm text-muted-foreground">
+    <main className="mx-auto w-full max-w-4xl px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-6">
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="font-heading text-xl font-medium tracking-tight sm:text-2xl">
+              Your machines
+            </h1>
+            {/* The count, where the eye already is. Suppressed while the list
+                could not be read: "0" would be a number this screen does not
+                have. */}
+            {error ? null : (
+              <Badge variant="secondary" className="tabular-nums">
+                {devices.length}
+              </Badge>
+            )}
+          </div>
+          {/* Wraps rather than truncates. `min-w-0` on the column above is what
+              keeps a long address from pushing the header's button off a
+              phone, and `break-words` covers an address with no space in it —
+              truncating instead hid two thirds of this sentence at 390px,
+              which is where it is most worth reading. (Measured.) */}
+          <p className="text-base/7 break-words text-pretty text-muted-foreground sm:text-sm/6">
             {email
               ? `Every machine connected to ${email}. Open a session from anywhere.`
               : 'Every machine connected to your account. Open a session from anywhere.'}
@@ -239,7 +274,7 @@ export function DeviceDirectory({
         )}
       </div>
 
-      <div className="mt-8">
+      <div className="mt-6 sm:mt-8">
         {error ? (
           <ListError message={error} />
         ) : empty ? (
@@ -407,9 +442,9 @@ function DeviceRow({
             conversation) — and how long ago the machine was last heard from.
             One paragraph rather than a flex row, so it wraps as *text* does; a
             row of flex children wraps by squeezing each one, which turned
-            "switched off by an operator" into a column of two words at 440px.
-            The text size lives on the block, where a size belongs. */}
-        <p className="text-xs text-muted-foreground">
+            "switched off by flue" into a column of two words at 440px. The
+            text size lives on the block, where a size belongs. */}
+        <p className="text-base/6 text-muted-foreground sm:text-sm/6">
           <span className="font-mono">{device.id}</span>
           {seen ? (
             <>
@@ -417,11 +452,11 @@ function DeviceRow({
               <span className="tabular-nums">{seen}</span>
             </>
           ) : null}
-          {status === 'disabled' ? ' · switched off by an operator' : null}
+          {status === 'disabled' ? ' · switched off by flue' : null}
         </p>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1">
+      <div className="flex shrink-0 items-center gap-2">
         {status === 'disabled' ? null : (
           // `outline`, not the default: amber is this product's single accent
           // and it is spent on the one primary button per screen — the header
@@ -437,24 +472,129 @@ function DeviceRow({
             )}
             Open a session
             {/* Five identical buttons need five different names. */}
-            <span className="sr-only"> on {device.label}</span>
+            <span className="sr-only">on {device.label}</span>
           </Button>
         )}
-        <RenameButton device={device} rename={rename} />
-        <RevokeButton device={device} revoke={revoke} />
+        <DeviceMenu device={device} switchedOff={status === 'disabled'} revoke={revoke} rename={rename} />
       </div>
     </li>
   )
 }
 
-function RenameButton({
+/**
+ * Open a dialog on the tick *after* the menu that asked for it has closed.
+ *
+ * Both overlays manage focus, and a dialog mounted inside the menu item's own
+ * event runs its focus trap while the menu is still restoring focus to its
+ * trigger — the menu wins, because its restore happens on unmount, and the
+ * dialog opens with focus on the button behind it. One tick of daylight puts
+ * the two in the order a reader expects: menu closes, trigger regains focus,
+ * dialog opens and takes it, dialog closes and hands it back to the trigger.
+ */
+function later(open: (next: boolean) => void): void {
+  setTimeout(() => open(true), 0)
+}
+
+/**
+ * Everything a row can do that is not "open a session", behind one control.
+ *
+ * Two icon buttons per row is two unlabelled glyphs multiplied by however many
+ * machines somebody owns; one overflow trigger is one, and it has room for a
+ * sentence next to a shut item — which is what the switched-off case needs.
+ *
+ * The two dialogs are siblings of the menu rather than nested in its items, and
+ * both are controlled from here. A `DialogTrigger` inside a `DropdownMenuItem`
+ * is a dialog that unmounts with the menu it lives in the moment the item is
+ * chosen.
+ */
+function DeviceMenu({
   device,
+  switchedOff,
+  revoke,
   rename,
 }: {
   device: DeviceSummary
+  switchedOff: boolean
+  revoke: (deviceId: string) => Promise<RevokeOutcome>
   rename: (deviceId: string, label: string) => Promise<RenameOutcome>
 }) {
-  const [open, setOpen] = useState(false)
+  const [renaming, setRenaming] = useState(false)
+  const [revoking, setRevoking] = useState(false)
+  const noteId = `switched-off-${device.id}`
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon-sm">
+            <EllipsisIcon />
+            {/* Named after its row: one "More" per machine tells a screen
+                reader nothing about which machine. */}
+            <span className="sr-only">More actions for {device.label}</span>
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-64">
+          <DropdownMenuGroup>
+            {/* Named after its machine with an explicit label rather than a
+                trailing sr-only span: the accessible name is what a screen
+                reader reads out of a menu that has one item per row, and an
+                `aria-label` states it in one string instead of leaving it to
+                however the platform happens to join two text nodes. */}
+            <DropdownMenuItem
+              aria-label={`Rename ${device.label}`}
+              onSelect={() => later(setRenaming)}
+            >
+              <PencilIcon />
+              Rename
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              aria-label={`Revoke ${device.label}`}
+              variant="destructive"
+              // Shut rather than hidden, and shut rather than left to fail:
+              // `revokeDevice` scopes its delete `disabled = false`, so this
+              // click on this row could only ever end in a refusal toast. The
+              // reason is one element away, named below.
+              disabled={switchedOff}
+              aria-describedby={switchedOff ? noteId : undefined}
+              onSelect={() => later(setRevoking)}
+            >
+              <Trash2Icon />
+              Revoke
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+          {switchedOff ? (
+            <>
+              <DropdownMenuSeparator />
+              {/* `text-wrap`, because DropdownMenuLabel is built for a word and
+                  this is a sentence. */}
+              <DropdownMenuLabel
+                id={noteId}
+                className="max-w-64 font-normal text-wrap text-muted-foreground"
+              >
+                {SWITCHED_OFF_NOTE}
+              </DropdownMenuLabel>
+            </>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <RenameDialog device={device} rename={rename} open={renaming} onOpenChange={setRenaming} />
+      <RevokeDialog device={device} revoke={revoke} open={revoking} onOpenChange={setRevoking} />
+    </>
+  )
+}
+
+function RenameDialog({
+  device,
+  rename,
+  open,
+  onOpenChange,
+}: {
+  device: DeviceSummary
+  rename: (deviceId: string, label: string) => Promise<RenameOutcome>
+  open: boolean
+  onOpenChange: (next: boolean) => void
+}) {
   const [label, setLabel] = useState(device.label)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
@@ -479,7 +619,7 @@ function RenameButton({
       // name the database does not have.
       toast.success(`Renamed to ${result.label}`)
       setLabel(result.label)
-      setOpen(false)
+      onOpenChange(false)
     } catch {
       setFailure(UNAVAILABLE_MESSAGE)
     } finally {
@@ -491,7 +631,7 @@ function RenameButton({
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        setOpen(next)
+        onOpenChange(next)
         if (!next) {
           // Reopening starts from what the machine is actually called, not
           // from an abandoned edit.
@@ -500,12 +640,6 @@ function RenameButton({
         }
       }}
     >
-      <DialogTrigger asChild>
-        <Button variant="ghost" size="icon-sm">
-          <PencilIcon />
-          <span className="sr-only">Rename {device.label}</span>
-        </Button>
-      </DialogTrigger>
       <DialogContent>
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
@@ -552,14 +686,17 @@ function RenameButton({
   )
 }
 
-function RevokeButton({
+function RevokeDialog({
   device,
   revoke,
+  open,
+  onOpenChange,
 }: {
   device: DeviceSummary
   revoke: (deviceId: string) => Promise<RevokeOutcome>
+  open: boolean
+  onOpenChange: (next: boolean) => void
 }) {
-  const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
 
   async function onConfirm() {
@@ -574,7 +711,7 @@ function RevokeButton({
         return
       }
       toast.success(`${device.label} was revoked`)
-      setOpen(false)
+      onOpenChange(false)
     } catch {
       toast.error(UNAVAILABLE_MESSAGE)
     } finally {
@@ -583,13 +720,7 @@ function RevokeButton({
   }
 
   return (
-    <AlertDialog open={open} onOpenChange={setOpen}>
-      <AlertDialogTrigger asChild>
-        <Button variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-destructive">
-          <Trash2Icon />
-          <span className="sr-only">Revoke {device.label}</span>
-        </Button>
-      </AlertDialogTrigger>
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
           {/* Named, because "are you sure?" over a list of machines is a

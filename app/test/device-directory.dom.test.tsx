@@ -97,6 +97,24 @@ function rowFor(label: string): HTMLElement {
   return row
 }
 
+/**
+ * A row's overflow menu, opened, and the item named on it.
+ *
+ * Rename and revoke live behind one trigger per row rather than as two loose
+ * icon buttons — see `DeviceMenu`. Every item is named after its own machine,
+ * which is what this asserts by finding it that way: a menu of five "Revoke"s
+ * tells a screen reader nothing about which one is which.
+ */
+async function menuItem(
+  user: ReturnType<typeof userEvent.setup>,
+  label: string,
+  action: 'Rename' | 'Revoke',
+): Promise<HTMLElement> {
+  const trigger = within(rowFor(label)).getByRole('button', { name: `More actions for ${label}` })
+  await user.click(trigger)
+  return await screen.findByRole('menuitem', { name: `${action} ${label}` })
+}
+
 describe('DeviceDirectory', () => {
   it('lists every machine on the account, by name and by id', () => {
     setup()
@@ -132,6 +150,40 @@ describe('DeviceDirectory', () => {
     // And there is nothing to open: a disabled device cannot be minted a token,
     // so offering the button would be offering a click that can only fail.
     expect(within(row).queryByRole('button', { name: /open a session/i })).toBeNull()
+  })
+
+  it('offers no revoke on a machine flue switched off, and says why', async () => {
+    // `revokeDevice` scopes its delete `disabled = false` on purpose — an
+    // operator's revocation outranks its owner's — so a live Revoke here is a
+    // click whose only possible outcome is a refusal toast. It is shut, and
+    // the reason is attached to it rather than left somewhere else on the page.
+    const { revoke, user } = setup({ devices: [{ ...MAC, disabled: true }] })
+
+    const item = await menuItem(user, 'mac studio', 'Revoke')
+    expect(item.getAttribute('data-disabled')).not.toBeNull()
+
+    const describedBy = item.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy as string)?.textContent).toContain(
+      'Contact support',
+    )
+
+    // Pressing it does nothing at all — no call, and so no refusal to explain.
+    await user.click(item)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(revoke).not.toHaveBeenCalled()
+  })
+
+  it('still lets a switched-off machine be renamed', async () => {
+    // The rename is not scoped by `disabled` — only the delete is — so the row
+    // keeps the one action that still works rather than being inert.
+    const { rename, user } = setup({ devices: [{ ...MAC, disabled: true }] })
+
+    await user.click(await menuItem(user, 'mac studio', 'Rename'))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: /save/i }))
+
+    await waitFor(() => expect(rename).toHaveBeenCalledWith('b5d05f15398a', 'mac studio'))
   })
 
   it('points a new account at `flue enable`', () => {
@@ -218,7 +270,7 @@ describe('revoking a machine', () => {
   it('asks before it does anything', async () => {
     const { revoke, user } = setup()
 
-    await user.click(within(rowFor('mac studio')).getByRole('button', { name: /revoke mac studio/i }))
+    await user.click(await menuItem(user, 'mac studio', 'Revoke'))
 
     const dialog = await screen.findByRole('alertdialog')
     // Named, because "are you sure?" over a list of machines is a question
@@ -230,7 +282,7 @@ describe('revoking a machine', () => {
   it('does nothing when the question is answered no', async () => {
     const { revoke, user } = setup()
 
-    await user.click(within(rowFor('mac studio')).getByRole('button', { name: /revoke mac studio/i }))
+    await user.click(await menuItem(user, 'mac studio', 'Revoke'))
     const dialog = await screen.findByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: /cancel/i }))
 
@@ -241,7 +293,7 @@ describe('revoking a machine', () => {
   it('revokes the machine that was asked about, and says so', async () => {
     const { revoke, user } = setup()
 
-    await user.click(within(rowFor('kitchen pi')).getByRole('button', { name: /revoke kitchen pi/i }))
+    await user.click(await menuItem(user, 'kitchen pi', 'Revoke'))
     const dialog = await screen.findByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: /^revoke/i }))
 
@@ -252,7 +304,7 @@ describe('revoking a machine', () => {
   it('reports a refusal rather than claiming the machine is gone', async () => {
     const { user } = setup({ revoke: async () => ({ ok: false, error: 'devices: no such machine' }) })
 
-    await user.click(within(rowFor('mac studio')).getByRole('button', { name: /revoke mac studio/i }))
+    await user.click(await menuItem(user, 'mac studio', 'Revoke'))
     const dialog = await screen.findByRole('alertdialog')
     await user.click(within(dialog).getByRole('button', { name: /^revoke/i }))
 
@@ -265,7 +317,7 @@ describe('renaming a machine', () => {
   it('sends the new name and says so', async () => {
     const { rename, user } = setup()
 
-    await user.click(within(rowFor('mac studio')).getByRole('button', { name: /rename mac studio/i }))
+    await user.click(await menuItem(user, 'mac studio', 'Rename'))
     const dialog = await screen.findByRole('dialog')
     const field = within(dialog).getByLabelText(/name/i)
     await user.clear(field)
@@ -278,7 +330,7 @@ describe('renaming a machine', () => {
 
   it('starts from the name the machine already has', async () => {
     const { user } = setup()
-    await user.click(within(rowFor('mac studio')).getByRole('button', { name: /rename mac studio/i }))
+    await user.click(await menuItem(user, 'mac studio', 'Rename'))
     const dialog = await screen.findByRole('dialog')
     expect((within(dialog).getByLabelText(/name/i) as HTMLInputElement).value).toBe('mac studio')
   })
@@ -288,7 +340,7 @@ describe('renaming a machine', () => {
       rename: async () => ({ ok: false, error: 'devices: a machine needs a name' }),
     })
 
-    await user.click(within(rowFor('mac studio')).getByRole('button', { name: /rename mac studio/i }))
+    await user.click(await menuItem(user, 'mac studio', 'Rename'))
     const dialog = await screen.findByRole('dialog')
     await user.click(within(dialog).getByRole('button', { name: /save/i }))
 

@@ -116,6 +116,11 @@ function domProject() {
       name: 'dom',
       environment: 'jsdom',
       include: ['test/**/*.dom.test.tsx'],
+      // jsdom has no layout engine, so the browser APIs that report a
+      // measurement are absent — and a shadcn component that observes its own
+      // size (InputOTP, every Radix popper) throws out of an effect without
+      // them. See the file: stubs, not polyfills.
+      setupFiles: ['./test/dom-setup.ts'],
     },
   }
 }

@@ -22,7 +22,8 @@
 // to guess at if guessing tells you anything. A form with four friendlier
 // messages would hand back exactly what the server withheld.
 import { useState, type FormEvent } from 'react'
-import { MonitorCheckIcon, PlugZapIcon } from 'lucide-react'
+import { MonitorCheckIcon, MonitorSmartphoneIcon, PlugZapIcon } from 'lucide-react'
+import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -105,8 +106,13 @@ export function EnrollForm({ confirm, initialCode }: EnrollFormProps) {
     setFailure(null)
     try {
       const result = await confirm({ userCode: code })
-      if (result.ok) setConnected({ deviceId: result.deviceId, label: result.label })
-      else setFailure({ kind: 'refused', message: CODE_REJECTED_MESSAGE })
+      if (result.ok) {
+        // Announced as well as rendered. The card below says the same thing at
+        // length and stays put; the toast is what catches the eye of somebody
+        // who pressed the button and looked back at their terminal.
+        toast.success(`${result.label} is connected`)
+        setConnected({ deviceId: result.deviceId, label: result.label })
+      } else setFailure({ kind: 'refused', message: CODE_REJECTED_MESSAGE })
     } catch {
       // The call never landed. That is not a verdict on the code, and is not
       // rendered as one — the field stays valid and the machine stays
@@ -140,19 +146,30 @@ export function EnrollForm({ confirm, initialCode }: EnrollFormProps) {
                 <Badge variant="secondary">
                   <code>{connected.deviceId}</code>
                 </Badge>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setConnected(null)
-                    // The code that got here is spent — the approving poll
-                    // deletes the grant. Leaving it in the field would invite a
-                    // second press that can only fail.
-                    setCode('')
-                    setFailure(null)
-                  }}
-                >
-                  Connect another machine
-                </Button>
+                {/* Two ways on, side by side on anything wider than a phone
+                    and stacked below it — full width there, because a pair of
+                    half-width buttons at 390px is two truncated labels. */}
+                <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+                  <Button asChild className="sm:w-auto">
+                    <a href="/devices">
+                      <MonitorSmartphoneIcon data-icon="inline-start" />
+                      Your machines
+                    </a>
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setConnected(null)
+                      // The code that got here is spent — the approving poll
+                      // deletes the grant. Leaving it in the field would invite
+                      // a second press that can only fail.
+                      setCode('')
+                      setFailure(null)
+                    }}
+                  >
+                    Connect another machine
+                  </Button>
+                </div>
               </EmptyContent>
             </Empty>
           </CardContent>
@@ -231,11 +248,20 @@ export function EnrollForm({ confirm, initialCode }: EnrollFormProps) {
   )
 }
 
-/** The one-card page both states sit in, so switching between them does not move. */
+/**
+ * The one-card page both states sit in, so switching between them does not
+ * move.
+ *
+ * `flex-1`, not `min-h-svh`: the root layout already owns a full-height column
+ * and put a header above this, so claiming the viewport height again here
+ * would make the page one header taller than the window and scroll for
+ * nothing. Same width as the sign-in card — these two screens are seen minutes
+ * apart and a card that changes size between them reads as a different app.
+ */
 function Page({ children }: { children: React.ReactNode }) {
   return (
-    <main className="flex min-h-svh items-center justify-center p-6">
-      <div className="w-full max-w-md">{children}</div>
+    <main className="flex flex-1 items-center justify-center p-4 sm:p-6">
+      <div className="w-full max-w-sm">{children}</div>
     </main>
   )
 }

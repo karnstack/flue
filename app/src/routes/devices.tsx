@@ -39,9 +39,18 @@
 // and the other three are mutations.
 import { createFileRoute, useRouter } from '@tanstack/react-router'
 import { createServerFn, useServerFn } from '@tanstack/react-start'
+import { CloudOffIcon, RotateCwIcon } from 'lucide-react'
 import { DeviceDirectory, type DeviceSummary } from '../components/device-directory'
-import { Spinner } from '../components/ui/spinner'
-import { Toaster } from '../components/ui/sonner'
+import { Button } from '../components/ui/button'
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '../components/ui/empty'
+import { Skeleton } from '../components/ui/skeleton'
 import { requireUser } from '../server/auth'
 import {
   DeviceError,
@@ -221,38 +230,71 @@ function DevicesPage() {
    */
   const reload = () => router.invalidate()
 
+  // The `<Toaster/>` is mounted once, in __root.tsx. Sonner keeps a single
+  // global queue, so a second one here would render every toast twice.
   return (
-    <>
-      <DeviceDirectory
-        devices={loaded.ok ? loaded.devices : []}
-        email={loaded.ok ? loaded.email : undefined}
-        error={loaded.ok ? null : loaded.error}
-        now={loaded.ok ? loaded.now : undefined}
-        openSession={(deviceId) => open({ data: { deviceId } })}
-        revoke={async (deviceId) => {
-          const result = await revoke({ data: { deviceId } })
-          if (result.ok) await reload()
-          return result
-        }}
-        rename={async (deviceId, label) => {
-          const result = await rename({ data: { deviceId, label } })
-          if (result.ok) await reload()
-          return result
-        }}
-      />
-      {/* One per app, and this is the only screen with actions to announce. */}
-      <Toaster />
-    </>
+    <DeviceDirectory
+      devices={loaded.ok ? loaded.devices : []}
+      email={loaded.ok ? loaded.email : undefined}
+      error={loaded.ok ? null : loaded.error}
+      now={loaded.ok ? loaded.now : undefined}
+      openSession={(deviceId) => open({ data: { deviceId } })}
+      revoke={async (deviceId) => {
+        const result = await revoke({ data: { deviceId } })
+        if (result.ok) await reload()
+        return result
+      }}
+      rename={async (deviceId, label) => {
+        const result = await rename({ data: { deviceId, label } })
+        if (result.ok) await reload()
+        return result
+      }}
+    />
   )
 }
 
-/** The client-side navigation case: the loader is in flight. */
+/**
+ * The client-side navigation case: the loader is in flight.
+ *
+ * A skeleton of the screen that is coming rather than a spinner in the middle
+ * of an empty page. Two reasons, and neither is decoration. The layout is
+ * already known — a heading, a button, then rows — so drawing it costs nothing
+ * and the content lands into the shape it was already occupying instead of
+ * shoving a centred spinner off the page. And a spinner alone says "something
+ * is happening"; this says *what*, which on the one screen where "your machines
+ * are gone" is a plausible reading of a blank page is worth saying.
+ *
+ * `aria-hidden` on the bones with one live region above them: a screen reader
+ * gets the sentence, not a description of grey rectangles.
+ */
 function LoadingDevices() {
   return (
-    <main className="flex min-h-svh items-center justify-center p-6">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Spinner />
+    <main className="mx-auto w-full max-w-4xl px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
+      <p role="status" className="sr-only">
         Loading your machines…
+      </p>
+      <div aria-hidden="true" className="flex flex-col gap-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-7 w-44" />
+            <Skeleton className="h-4 w-64" />
+          </div>
+          <Skeleton className="h-8 w-40" />
+        </div>
+        <div className="flex flex-col divide-y divide-foreground/10 border-y border-foreground/10">
+          {[0, 1, 2].map((row) => (
+            <div
+              key={row}
+              className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between"
+            >
+              <div className="flex flex-col gap-2">
+                <Skeleton className="h-5 w-40" />
+                <Skeleton className="h-4 w-52" />
+              </div>
+              <Skeleton className="h-8 w-36" />
+            </div>
+          ))}
+        </div>
       </div>
     </main>
   )
@@ -262,14 +304,36 @@ function LoadingDevices() {
  * The loader threw — which, given the handler catches everything, means the
  * transport itself failed. Not the same as `{ok:false}`, which the screen
  * renders in place.
+ *
+ * Offers the reload rather than describing it: this is the one failure on the
+ * screen that a second attempt genuinely might fix, and the page it would
+ * replace has nothing else on it.
  */
 function DevicesUnavailable() {
   return (
-    <main className="mx-auto flex min-h-svh max-w-md flex-col items-center justify-center gap-2 p-6 text-center">
-      <h1 className="font-heading text-lg font-medium">Your machines could not be loaded</h1>
-      <p className="text-sm text-muted-foreground">
-        Something went wrong at our end. Reload the page in a moment.
-      </p>
+    <main className="mx-auto flex w-full max-w-4xl flex-1 items-center px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
+      <Empty className="w-full border border-dashed">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <CloudOffIcon />
+          </EmptyMedia>
+          {/* A real heading inside EmptyTitle, which is a styled div: this
+              screen renders instead of the whole page, so it owns the h1. */}
+          <EmptyTitle>
+            <h1>Your machines could not be loaded</h1>
+          </EmptyTitle>
+          <EmptyDescription>
+            Something went wrong at our end, and this page never heard back. Nothing has changed on
+            your account — try again in a moment.
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button variant="outline" onClick={() => window.location.reload()}>
+            <RotateCwIcon data-icon="inline-start" />
+            Try again
+          </Button>
+        </EmptyContent>
+      </Empty>
     </main>
   )
 }

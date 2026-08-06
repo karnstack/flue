@@ -22,6 +22,8 @@
 // visitor (which is everyone reading it before they sign up) gets it server-
 // rendered on the first request.
 import { createFileRoute } from '@tanstack/react-router'
+import { ArrowLeftIcon } from 'lucide-react'
+import { Button } from '../components/ui/button'
 import { Separator } from '../components/ui/separator'
 
 /** Where an abuse report goes. Repeated in the copy, so it is written once. */
@@ -34,12 +36,16 @@ export const Route = createFileRoute('/terms')({
 
 function TermsPage() {
   return (
-    <main className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6 sm:py-14">
-      <header className="flex flex-col gap-2">
-        <h1 className="font-heading text-xl font-medium tracking-tight sm:text-2xl">
+    // `max-w-2xl` — a measure, not the page width the other screens use. This is
+    // the one page on the service that is read rather than operated, and a
+    // paragraph run out to the width of a device list is a paragraph nobody
+    // finishes.
+    <main className="mx-auto w-full max-w-2xl px-4 py-8 sm:px-6 sm:py-12">
+      <header className="flex flex-col gap-3">
+        <h1 className="font-heading text-xl font-medium tracking-tight text-balance sm:text-2xl">
           Terms of service
         </h1>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
           flue.sh is small and invite-only. These terms are short, in plain English, and written by
           the people who build it — not a lawyer. Everything they say about switching an account off
           is a description of code that exists.
@@ -48,7 +54,10 @@ function TermsPage() {
 
       <Separator className="my-8" />
 
-      <div className="flex flex-col gap-8 text-sm leading-relaxed">
+      {/* One size for the whole document, set once on the container: 16px on a
+          phone, where these paragraphs are most likely to be read, settling to
+          14px where the measure is wider. */}
+      <div className="flex flex-col gap-8 text-base/7 text-pretty sm:text-sm/6">
         <Section title="What flue.sh does">
           <p>
             flue.sh connects your browser to a terminal on a machine you have connected to your
@@ -151,11 +160,12 @@ function TermsPage() {
 
       <Separator className="my-8" />
 
-      <p className="text-sm text-muted-foreground">
-        <a className="underline underline-offset-4" href="/login">
+      <Button variant="outline" size="sm" asChild>
+        <a href="/login">
+          <ArrowLeftIcon data-icon="inline-start" />
           Back to sign in
         </a>
-      </p>
+      </Button>
     </main>
   )
 }
@@ -164,7 +174,7 @@ function TermsPage() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="flex flex-col gap-3">
-      <h2 className="font-heading text-base font-medium tracking-tight">{title}</h2>
+      <h2 className="font-heading text-base font-medium tracking-tight text-balance">{title}</h2>
       {children}
     </section>
   )
