@@ -109,39 +109,47 @@ export async function requestCode(input: RequestCodeInput): Promise<{ ok: true }
 
 /**
  * Whether this address is allowed a login code: it has an enabled account, or
- * it holds an invite.
+ * — having no account at all — it holds an invite.
  *
- * One statement for all three questions, so the work is the same whichever one
- * answers yes — and so that an address with no account costs exactly what an
- * address with one costs.
+ * One statement for all four questions, so the work is the same whichever one
+ * answers yes, and an address with no account costs exactly what an address
+ * with one costs.
  *
- * A disabled account is not an account here. Its owner cannot complete a login
- * anyway (`submitCode` refuses, and `currentUser` would refuse the session), so
- * sending would be a login email nobody can use — and the kill switch should
- * reach the front door, not just the lock.
+ * A disabled account does not fall through to the invite branch: it is refused
+ * outright, even if some unredeemed invite still names the address. Its owner
+ * could not complete a login anyway (`submitCode` refuses, and `currentUser`
+ * would refuse the session), so a code would be a login email nobody can use —
+ * and a kill switch that leaves the front door answering is half a switch.
  */
 async function addressMayReceiveCode(address: string, invite: string): Promise<boolean> {
-  const rows = await db().all<{ has_user: number; has_invite: number; has_code: number }>(sql`
+  const rows = await db().all<{
+    has_account: number
+    is_enabled: number
+    has_bound_invite: number
+    has_presented_invite: number
+  }>(sql`
     select
+      exists(select 1 from ${users} where ${users.email} = ${address}) as has_account,
       exists(
         select 1 from ${users}
         where ${users.email} = ${address} and ${users.disabled} = 0
-      ) as has_user,
+      ) as is_enabled,
       exists(
         select 1 from ${invites}
         where ${invites.email} = ${address} and ${invites.redeemedBy} is null
-      ) as has_invite,
+      ) as has_bound_invite,
       exists(
         select 1 from ${invites}
         where ${invite} <> '' and ${invites.code} = ${invite}
           and ${invites.redeemedBy} is null
           and (${invites.email} is null or ${invites.email} = ${address})
-      ) as has_code
+      ) as has_presented_invite
   `)
 
   const row = rows[0]
   if (!row) return false
-  return row.has_user === 1 || row.has_invite === 1 || row.has_code === 1
+  if (row.has_account === 1) return row.is_enabled === 1
+  return row.has_bound_invite === 1 || row.has_presented_invite === 1
 }
 
 /**

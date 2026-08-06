@@ -215,6 +215,19 @@ describe('requestCode: who gets a code', () => {
     expect(sent).toEqual([])
   })
 
+  it('sends nothing to a disabled account that still has an invite lying around', async () => {
+    // A disabled account must not fall through to the invite branch and get a
+    // code that way — a kill switch that leaves the front door answering is
+    // half a switch.
+    const user = await makeUser({ disabled: true })
+    await makeInvite(user.email)
+    expect((await ask({ email: user.email })).sent).toEqual([])
+
+    // Nor by presenting a live unbound invite.
+    const spare = await makeInvite()
+    expect((await ask({ email: user.email, invite: spare })).sent).toEqual([])
+  })
+
   it('normalizes the address before it decides anything', async () => {
     const email = freshEmail('mixedcase')
     await makeInvite(email)
