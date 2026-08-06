@@ -57,6 +57,21 @@ export async function hmacHex(secret: string, msg: string): Promise<string> {
 }
 
 /**
+ * SHA-256 of `msg`, lowercase hex.
+ *
+ * Unkeyed on purpose, and only ever used on secrets that are already
+ * unguessable: session tokens and device tokens are 32 bytes from the CSPRNG,
+ * so there is no dictionary to build and nothing a key would add. (Login codes
+ * are 8 digits and therefore use `hmacHex` instead — see above.) What this
+ * buys is that the database stores a *verifier*, not the bearer token: a dump
+ * of `sessions` cannot be pasted into a cookie jar.
+ */
+export async function sha256Hex(msg: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(msg))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
  * Compare two strings without leaking *where* they diverge.
  *
  * `a === b` bails at the first differing character, and that difference is

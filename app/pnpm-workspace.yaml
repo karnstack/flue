@@ -1,3 +1,10 @@
+# This is a one-package workspace, and saying so is load-bearing: with no
+# `packages` key pnpm discovers projects by scanning the directory tree, which
+# picks up the `{"type":"module"}` marker vitest.config.ts writes into dist/
+# (see the comment there) and re-verifies dependencies before every `pnpm run`.
+packages:
+  - .
+
 # pnpm 11 refuses to finish an install that silently skipped a package's build
 # script (see web/pnpm-workspace.yaml for the long version), and it no longer
 # reads the "pnpm" key in package.json. esbuild's postinstall links the
