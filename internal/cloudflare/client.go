@@ -57,6 +57,29 @@ const notFoundHandling = "single-page-application"
 // silently altering how /foo, /foo/ and /foo.html resolve for existing users.
 const htmlHandling = "auto-trailing-slash"
 
+// keptBindingTypes are the binding types a script upload preserves from the
+// already-deployed version rather than replacing.
+//
+// A script PUT does not merge bindings: metadata.bindings *is* the new binding
+// set, and anything the deployed script had that the upload does not name is
+// gone. Secrets are bindings — Cloudflare stores DAEMON_SECRET as a
+// `secret_text` binding — so without this, every deploy of an existing relay
+// unbinds the one credential its daemon authenticates with. That is invisible:
+// the deploy succeeds, and the Worker only starts refusing the daemon later.
+//
+// This is sent on every upload rather than being a DeployInput field, because a
+// field would be a knob with exactly one safe setting whose zero value is the
+// dangerous one — the first caller to forget it takes a working relay down and
+// gets a green deploy for it. It is also what wrangler does: `wrangler deploy`
+// keeps secrets across a redeploy by sending this same key, which is why a
+// Worker deployed from the repo does not lose its secrets either.
+//
+// Only `secret_text` is named. flue creates no other kind of secret, and
+// keeping the list to the types this tool actually depends on means a binding
+// type added here later has to opt in deliberately instead of quietly
+// surviving an upload that meant to replace it.
+var keptBindingTypes = []string{"secret_text"}
+
 // scriptAPIDate pins the Worker subdomain endpoint's contract. Cloudflare
 // versions that endpoint by date and current wrangler sends this same value;
 // without it the meaning of previews_enabled is whatever the account's default
@@ -363,6 +386,7 @@ type scriptMetadata struct {
 	MainModule        string          `json:"main_module"`
 	CompatibilityDate string          `json:"compatibility_date,omitempty"`
 	Bindings          []binding       `json:"bindings,omitempty"`
+	KeepBindings      []string        `json:"keep_bindings,omitempty"`
 	Migrations        *migrations     `json:"migrations,omitempty"`
 	Assets            *assetsMetadata `json:"assets,omitempty"`
 	Observability     *observability  `json:"observability,omitempty"`
@@ -498,6 +522,12 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 // putScript sends the multipart script upload: the metadata part and the
 // module it names.
 func (c *Client) putScript(ctx context.Context, in DeployInput, meta scriptMetadata) error {
+	// Set here, not by the caller: this is the one place a script upload is
+	// built, so no path through Deploy — first attempt or migration retry — can
+	// produce an upload that drops the deployed script's secrets. See
+	// keptBindingTypes.
+	meta.KeepBindings = keptBindingTypes
+
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("cloudflare: encoding the script metadata: %w", err)

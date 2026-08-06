@@ -856,6 +856,54 @@ func assertAssetsBinding(t *testing.T, metadata []byte, name string) {
 	}
 }
 
+// TestDeployKeepsTheDeployedSecretBindings: a script upload replaces the
+// binding set outright, and DAEMON_SECRET is stored as a `secret_text`
+// binding — so an upload that does not ask for secrets to be kept unbinds the
+// only credential the relay's daemon leg authenticates with, and reports
+// success while doing it. Both PUTs are checked, because the second one is the
+// re-run path: that is the deploy that lands on a live relay with a live
+// secret, and the first attempt failing on an already-applied migration is
+// what a real re-run meets.
+//
+// Asserted on the decoded request body rather than on any state a fake keeps,
+// so nothing here can pass because the fake happens not to model the drop.
+func TestDeployKeepsTheDeployedSecretBindings(t *testing.T) {
+	var metadatas [][]byte
+	puts := 0
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		if strings.HasSuffix(r.URL.Path, "/assets-upload-session") {
+			writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "session-jwt", "buckets": [][]string{}})
+			return
+		}
+		puts++
+		metadatas = append(metadatas, partNamed(t, parseParts(t, r.Header.Get("Content-Type"), body), "metadata").Body)
+		if puts == 1 {
+			writeAPIError(w, http.StatusBadRequest, 10061,
+				"Cannot apply new-sqlite-class migration to class DaemonHub that is already depended on by existing Durable Objects")
+			return
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+
+	if err := f.client().Deploy(context.Background(), deployFixture()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(metadatas) != 2 {
+		t.Fatalf("script PUTs = %d, want 2 (the refused deploy and the retry)", len(metadatas))
+	}
+	for i, raw := range metadatas {
+		var m struct {
+			KeepBindings []string `json:"keep_bindings"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("decoding metadata of PUT %d: %v (%s)", i+1, err, raw)
+		}
+		if !reflect.DeepEqual(m.KeepBindings, []string{"secret_text"}) {
+			t.Errorf("PUT %d keep_bindings = %v, want [secret_text]; this upload would unbind DAEMON_SECRET: %s", i+1, m.KeepBindings, raw)
+		}
+	}
+}
+
 // TestDeployOmitsTheAssetsBindingWhenUnset: a Worker that only needs its files
 // served by the router does not need env.<name>, and inventing a binding it
 // never asked for would put a name in its environment out of nowhere.

@@ -191,6 +191,23 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 	fmt.Fprintf(w, "  ✓ worker deployed: %s\n", relayScriptName)
 	fmt.Fprintf(w, "  ✓ web app uploaded (%d files)\n", len(assets))
 
+	// Before the secret, deliberately. Setting the secret is the step that
+	// changes what credential the deployed Worker accepts, and from that moment
+	// until relay.json is written the two can disagree — a daemon presenting the
+	// old secret to a Worker that now wants the new one gets 401s with nothing
+	// to say why. Every remote call that can fail is therefore moved in front of
+	// it, so the only thing left after the secret is set is a local file write.
+	var host string
+	if err := withTimeout(relayStepTimeout, func(ctx context.Context) error {
+		var err error
+		host, err = api.EnableSubdomain(ctx, account.ID, relayScriptName)
+		return err
+	}); err != nil {
+		return fmt.Errorf("make the relay reachable on workers.dev: %w", err)
+	}
+	origin := "https://" + host
+	fmt.Fprintf(w, "  ✓ reachable at %s\n", origin)
+
 	// Fresh on every run, never reused from an existing relay.json. Setup is
 	// also the recovery path for a leaked or half-configured relay, and one that
 	// preserved the old secret would be unable to rotate the one credential the
@@ -206,22 +223,13 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 	}
 	fmt.Fprintln(w, "  ✓ secret set")
 
-	var host string
-	if err := withTimeout(relayStepTimeout, func(ctx context.Context) error {
-		var err error
-		host, err = api.EnableSubdomain(ctx, account.ID, relayScriptName)
-		return err
-	}); err != nil {
-		return fmt.Errorf("make the relay reachable on workers.dev: %w", err)
-	}
-	origin := "https://" + host
-	fmt.Fprintf(w, "  ✓ reachable at %s\n", origin)
-
 	// Last, deliberately. relay.json is what makes the daemon dial, and every
 	// step above can fail; writing it earlier would leave a daemon dialling a
 	// relay that was never finished. Re-running setup is the fix for anything
 	// that failed before this line, and it is safe: the deploy and the secret
-	// are both upserts.
+	// are both upserts, and the deploy keeps the secret already bound to the
+	// Worker (see keptBindingTypes in internal/cloudflare), so a run that dies
+	// part-way leaves an existing relay working rather than credential-less.
 	if err := config.SaveRelay(config.Relay{
 		URL:    "wss://" + host + "/daemon",
 		Secret: secret,

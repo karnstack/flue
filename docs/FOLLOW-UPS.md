@@ -2,7 +2,7 @@
 
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size. Items 7–9 are the same exercise for the
-crypto+pairing milestone, and item 10 for the relay's daemon leg.
+crypto+pairing milestone, and items 10–12 for the relay.
 
 ## Done
 
@@ -230,9 +230,10 @@ local pairing ceremony, the Devices screen and `/pair`). Part 2 is the relay —
 
 ## Relay carry-forwards
 
-Carried out of the `cfrelay` daemon leg (`internal/transport/relay`): the Worker
-socket, the channel layer, and the pairing bridge. Reviewed and deliberately not
-fixed in that milestone, because the fix is a design change rather than a patch.
+Carried out of `cfrelay`: the daemon leg (`internal/transport/relay` — the Worker
+socket, the channel layer, the pairing bridge) and the guided deploy that stands
+one up. Reviewed and deliberately not fixed in that milestone, because the fix is
+a design change rather than a patch.
 
 ### 10. The outbound path is whole-socket fate-sharing; the inbound path is not
 
@@ -295,6 +296,41 @@ already holds `daemonPub`, so showing a short fingerprint of it beside the QR an
 having the paired device show what it pinned makes a substituted key something a
 user can see. A native pairing client or an integrity-pinned bundle closes it
 properly; both are larger than the ceremony they protect.
+
+### 12. `flue relay setup` — the self-host deploy
+
+Carried out of the guided setup flow (`cmd/flue/relay.go`, `internal/cloudflare`).
+The secret-dropping deploy that a review found here is fixed — script uploads now
+send `keep_bindings: ["secret_text"]`, and the subdomain step runs before the
+secret so the only thing after it is a local file write. What is left:
+
+- **The deploy is configured twice and nothing enforces it.** `relay/wrangler.jsonc`
+  is what `wrangler deploy` reads during development; `cmd/flue/relay.go` is what a
+  user's `flue relay setup` sends. Both name the script (`flue-relay`), the
+  compatibility date, the Durable Object class and binding (`DaemonHub`/`HUB`), the
+  assets binding, and the run-worker-first paths — and `internal/cloudflare` holds
+  the migration tag (`v1`) as a third copy. They agree today, checked by hand and
+  noted in a comment over the constants, but a change to either side ships a
+  developer and a user running different relays, silently. A test that parses the
+  `.jsonc` and compares would close it; the extension permits comments that
+  `encoding/json` chokes on, so it needs a tolerant reader or a stripped copy.
+- **Re-running setup against a *different* account orphans the old relay.** The
+  account is chosen fresh on every run, and nothing looks at what the previous run
+  deployed. Pick account B the second time and account A is left holding a live
+  `flue-relay` Worker — deployed, subdomain enabled, and still holding a valid
+  `DAEMON_SECRET`, because the new run's secret goes to B. It serves whoever reaches
+  its workers.dev host until someone deletes it by hand in the dashboard. There is
+  no `flue relay teardown`, and the daemon stops dialling A the moment `relay.json`
+  is rewritten, so nothing on this machine will ever mention it again. Setup could
+  at minimum record the account it deployed into and say something when the next run
+  picks a different one.
+- Smaller, from the same review, deliberately not coded: the token prompt and the
+  account menu go to stdout rather than stderr, so `flue relay setup > log` hides
+  the questions and looks like a hang; `✓ reachable at …` is what setup prints
+  after Cloudflare accepts `enabled: true`, which is not the same as the host
+  answering — nothing fetches it, and a fresh subdomain can lag; and `relayLine()`
+  (`cmd/flue/main.go`) reports only the relay's `url`, never its `origin`, which is
+  the address a user would open in a browser.
 
 ## Things worth knowing before touching this code
 

@@ -12,6 +12,7 @@
       "name": "ASSETS"
     }
   ],
+  "keep_bindings": ["secret_text"],
   "migrations": {
     "new_tag": "v1",
     "steps": [

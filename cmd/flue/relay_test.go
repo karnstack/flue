@@ -50,7 +50,8 @@ type wireMetadata struct {
 		Name      string `json:"name"`
 		ClassName string `json:"class_name"`
 	} `json:"bindings"`
-	Migrations *struct {
+	KeepBindings []string `json:"keep_bindings"`
+	Migrations   *struct {
 		NewTag string `json:"new_tag"`
 		Steps  []struct {
 			NewSQLiteClasses []string `json:"new_sqlite_classes"`
@@ -255,11 +256,28 @@ func (f *fakeCloudflare) putScript(w http.ResponseWriter, r *http.Request, body 
 	if f.meta.Migrations != nil {
 		f.migrated = true
 	}
+	keepsSecrets := false
+	for _, k := range f.meta.KeepBindings {
+		if k == "secret_text" {
+			keepsSecrets = true
+		}
+	}
 	f.mu.Unlock()
 	if repeat {
 		writeAPIError(w, "Cannot apply new-sqlite-class migration to class DaemonHub that is already depended on by existing Durable Objects")
 		return
 	}
+
+	// A script upload replaces the binding set. Secrets are bindings, so an
+	// upload that does not ask to keep `secret_text` leaves the Worker with no
+	// DAEMON_SECRET at all — the API says nothing about it and the deploy
+	// reports success. The fake models that, because a fake that quietly kept
+	// the secret would let exactly this bug through.
+	f.mu.Lock()
+	if !keepsSecrets {
+		f.secretName, f.secretText, f.secretType = "", "", ""
+	}
+	f.mu.Unlock()
 	writeResult(w, map[string]string{"id": "flue-relay"})
 }
 
@@ -439,6 +457,13 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	if f.meta.Observability == nil || !f.meta.Observability.Enabled {
 		t.Fatalf("observability = %+v, want enabled", f.meta.Observability)
 	}
+	// The third setting of this kind, and the one that bites hardest: a script
+	// upload replaces the binding set, DAEMON_SECRET is a `secret_text`
+	// binding, and an upload that does not ask for secrets to be kept unbinds
+	// it — while reporting a successful deploy.
+	if !slicesEqual(f.meta.KeepBindings, []string{"secret_text"}) {
+		t.Fatalf("keep_bindings = %v, want [secret_text]; this deploy would unbind %s", f.meta.KeepBindings, daemonSecretName)
+	}
 
 	if f.meta.Migrations == nil || len(f.meta.Migrations.Steps) != 1 ||
 		len(f.meta.Migrations.Steps[0].NewSQLiteClasses) != 1 ||
@@ -572,6 +597,46 @@ func TestRunRelaySetupIsSafeToRerun(t *testing.T) {
 	// anything and this test proved nothing about re-running.
 	if f.scriptPuts != 3 {
 		t.Fatalf("script PUTs = %d, want 3 (deploy, refused re-deploy, retry without the migration)", f.scriptPuts)
+	}
+	// f.meta is the retry PUT: the upload that lands on a Worker that already
+	// holds a live secret. Asserted on the decoded request, not on the fake's
+	// state, so it cannot pass because of how the fake models a drop.
+	if !slicesEqual(f.meta.KeepBindings, []string{"secret_text"}) {
+		t.Fatalf("the re-run's script upload sent keep_bindings = %v, want [secret_text]", f.meta.KeepBindings)
+	}
+}
+
+// TestRunRelaySetupRerunLeavesALiveRelayWorking is the failure this ordering and
+// keep_bindings exist for. A re-run against a relay that is already serving gets
+// as far as re-deploying the Worker and then fails — the account's workers.dev
+// subdomain is unreachable, say. The relay on the other end must be exactly as
+// it was: same address, same secret, and relay.json still describing it. The
+// unsafe shapes both end here — an upload that dropped the secret bindings would
+// leave the Worker with no DAEMON_SECRET at all, and setting the new secret
+// before the last fallible remote step would leave the Worker holding a secret
+// relay.json has never heard of. Either way the daemon 401s forever, with
+// nothing anywhere saying so.
+func TestRunRelaySetupRerunLeavesALiveRelayWorking(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+
+	var out bytes.Buffer
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client()); err != nil {
+		t.Fatalf("first runRelaySetup: %v", err)
+	}
+	live := loadSavedRelay(t)
+
+	f.reject["/workers/subdomain"] = "computer says no"
+	out.Reset()
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client()); err == nil {
+		t.Fatal("the re-run succeeded despite the subdomain step failing")
+	}
+
+	if f.secretText != live.Secret {
+		t.Fatalf("the worker's %s is %q after a failed re-run, want the live relay's unchanged secret", daemonSecretName, f.secretText)
+	}
+	if got := loadSavedRelay(t); got != live {
+		t.Fatalf("relay.json changed under a failed re-run: %+v, want %+v", got, live)
 	}
 }
 
