@@ -6,12 +6,17 @@
 #
 # web/dist is gitignored on purpose and must stay that way — see web/embed.go.
 
-.PHONY: all web build run web-dev test test-go test-web lint clean site-dev site-deploy
+.PHONY: all web relay build run web-dev test test-go test-web test-relay lint clean site-dev site-deploy
 
 all: build
 
 web:
 	cd web && pnpm install --frozen-lockfile && pnpm build
+
+# relay/ is a standalone Cloudflare Worker package: nothing embeds it, so its
+# tests and lint only need deps installed — no build step.
+relay:
+	cd relay && pnpm install --frozen-lockfile
 
 build: web
 	mkdir -p bin
@@ -28,7 +33,7 @@ run:
 web-dev:
 	cd web && pnpm install --frozen-lockfile && pnpm dev
 
-test: test-go test-web
+test: test-go test-web test-relay
 
 test-go: web
 	go test ./...
@@ -36,12 +41,16 @@ test-go: web
 test-web:
 	cd web && pnpm test
 
-lint: web
+test-relay: relay
+	cd relay && pnpm test
+
+lint: web relay
 	go vet ./...
 	# The dev-tagged build (make run) has no CI job of its own; vetting it
 	# here is what keeps web/dev.go from drifting out of compilability.
 	go vet -tags dev ./...
 	cd web && pnpm lint
+	cd relay && pnpm lint
 
 clean:
 	rm -rf bin web/dist

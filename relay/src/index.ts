@@ -6,6 +6,10 @@ export interface Env {
 
 /** May this request open the daemon leg? Self-host: a bearer secret. */
 export function authorizeDaemon(req: Request, env: Env): boolean {
+  // Fail closed: if the secret was never bound (`wrangler secret put
+  // DAEMON_SECRET` not run), the template compare below would accept the
+  // literal "Bearer undefined". No secret means no daemon leg.
+  if (!env.DAEMON_SECRET) return false
   const h = req.headers.get('Authorization') ?? ''
   const want = `Bearer ${env.DAEMON_SECRET}`
   if (h.length !== want.length) return false

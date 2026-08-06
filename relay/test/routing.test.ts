@@ -1,6 +1,8 @@
 import { SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 
+import { authorizeDaemon, type Env } from '../src/index'
+
 const BASE = 'https://relay.example'
 
 function open(path: string, headers: Record<string, string> = {}): Promise<Response> {
@@ -96,5 +98,24 @@ describe('the relay Worker routes', () => {
     expect(res.status).toBe(200)
     expect(res.headers.get('Content-Type')).toContain('text/html')
     expect(await res.text()).toContain('flue relay')
+  })
+})
+
+describe('authorizeDaemon', () => {
+  // The SELF worker always has DAEMON_SECRET bound (vitest.config.ts), so the
+  // unbound-secret case is a direct unit test: with no secret in the env,
+  // `Bearer ${undefined}` must not become an accepted credential.
+  it('fails closed when DAEMON_SECRET is not bound: Bearer "undefined" is refused', () => {
+    const req = new Request(`${BASE}/daemon`, {
+      headers: { Authorization: 'Bearer undefined', Upgrade: 'websocket' },
+    })
+    expect(authorizeDaemon(req, {} as Env)).toBe(false)
+  })
+
+  it('fails closed on an empty-string secret: "Bearer " is refused', () => {
+    const req = new Request(`${BASE}/daemon`, {
+      headers: { Authorization: 'Bearer ', Upgrade: 'websocket' },
+    })
+    expect(authorizeDaemon(req, { DAEMON_SECRET: '' } as Env)).toBe(false)
   })
 })
