@@ -13,6 +13,26 @@ const PAIR_ENDPOINT = '/api/pair'
 const KEY_BYTES = 32
 
 /**
+ * The one refusal status that means the daemon itself decided.
+ *
+ * It is the whole of the `spent` question. The daemon answers a pairing attempt
+ * with 200 or 403 and nothing else (`writePairOutcome`), and 403 is reached only
+ * after redeem — which closes the window whether the token was right or wrong.
+ * Every other status on this endpoint comes from something in front of the
+ * daemon: 503 when the relay has no daemon leg connected, 504 when it parked the
+ * request until its deadline, 502 when it could not make sense of the answer,
+ * 429 and 413 when it refused the request outright. None of those presented a
+ * token to anything, so none of them spent one.
+ *
+ * The daemon's own 403 for a failed provenance check lands here too, and that
+ * one really did not redeem. It cannot be told apart — the uniformity is
+ * deliberate, see refusePair — and it does not matter here: a second press from
+ * this same page would fail the same provenance check, so there is no working
+ * button being withheld either way.
+ */
+const REFUSED_STATUS = 403
+
+/**
  * The daemon bounds the label it stores at 64 runes and truncates anything
  * longer, so the field says so rather than silently losing the end of a name.
  * `maxLength` counts UTF-16 units, which is the same number for every label
@@ -79,12 +99,13 @@ interface PairAnswer {
 /**
  * A pairing that did not happen, and whether the token went with it.
  *
- * `spent` is the difference between a daemon that answered and one that was
- * never reached. Once it has answered, the window is closed whatever it said —
+ * `spent` is the difference between a daemon that looked at the token and
+ * everything else. Once it has, the window is closed whatever it decided —
  * redeem clears it on a wrong token as readily as on a right one — so offering
  * the button again would be offering a click that cannot work. A request that
- * got no answer spent nothing, and pressing Pair again is a fair thing to
- * offer. Neither case ever retries on its own.
+ * never reached the daemon spent nothing, whether it was never sent or whether
+ * the relay in front of it answered instead, and pressing Pair again is a fair
+ * thing to offer. Neither case ever retries on its own.
  */
 interface Failure {
   text: string
@@ -121,6 +142,48 @@ function keyFromLink(text: string): Uint8Array | null {
   const std = text.replace(/-/g, '+').replace(/_/g, '/')
   const key = fromBase64(std.padEnd(Math.ceil(std.length / 4) * 4, '='))
   return key !== null && key.length === KEY_BYTES ? key : null
+}
+
+/**
+ * How much of a plain-text refusal is worth repeating.
+ *
+ * The daemon's own is two words. Anything much longer, or anything carrying a
+ * tag or a line break, is not a message written for a person — it is a proxy's
+ * error page, and this endpoint now has intermediaries in front of it that can
+ * produce one.
+ */
+const MAX_QUOTED = 200
+
+/**
+ * What the far end said about a refusal, in words a person can read.
+ *
+ * This page is served over two transports and they answer the same refusal
+ * differently. The daemon's own origin writes `pairing refused` as text/plain
+ * (`http.Error`, in writePairOutcome); the relay cannot carry a bare text body
+ * over its control channel and answers `{"error":"pairing refused"}` instead —
+ * spec/relay-protocol.md, `pairResult.body` — as it does for its own refusals
+ * too. So the body is read once and read both ways: as that envelope first, and
+ * as plain text when it is not one.
+ *
+ * Anything else comes back empty and the caller says what it knows instead. A
+ * body with no message in it, and a page of HTML from something in the middle,
+ * are both things the user would be shown raw otherwise — which is showing them
+ * the wire rather than telling them what happened.
+ */
+async function refusalText(res: Response): Promise<string> {
+  const body = await res.text().then(
+    (text) => text.trim(),
+    () => '',
+  )
+  if (body === '') return ''
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return body.length <= MAX_QUOTED && !/[<>\n]/.test(body) ? body : ''
+  }
+  const said = (parsed as { error?: unknown } | null)?.error
+  return typeof said === 'string' ? said.trim() : ''
 }
 
 /**
@@ -268,9 +331,10 @@ export function PairRoute() {
    * The whole exchange as one answer: null when this device is paired, and a
    * Failure when it is not.
    *
-   * The daemon's own words are carried out verbatim. It is the thing that
-   * refused, this page has no better account of why than it does, and a
-   * paraphrase would be this page inventing a reason.
+   * Whatever refused is quoted verbatim, in whichever of the two shapes it
+   * answered in — see refusalText. It is the thing that refused, this page has
+   * no better account of why than it does, and a paraphrase would be this page
+   * inventing a reason.
    *
    * `expected` is the key from the QR, taken as an argument rather than read
    * from the closure so that this function cannot be reached without one.
@@ -295,11 +359,20 @@ export function PairRoute() {
     }
 
     if (!res.ok) {
-      const said = await res.text().then(
-        (body) => body.trim(),
-        () => '',
-      )
-      return { text: said || `The daemon refused the pairing (${res.status}).`, spent: true }
+      const said = await refusalText(res)
+      // The one status that means a token was presented to the daemon and the
+      // window closed behind it — see REFUSED_STATUS. Everything else was
+      // answered by something in front of the daemon, which spent nothing, so
+      // the Pair button stays and the user's window stays theirs.
+      const spent = res.status === REFUSED_STATUS
+      return {
+        text:
+          said ||
+          (spent
+            ? 'The daemon refused the pairing.'
+            : `The pairing did not get through (${res.status}).`),
+        spent,
+      }
     }
 
     const answer = (await res.json().catch(() => null)) as PairAnswer | null

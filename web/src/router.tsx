@@ -1,23 +1,52 @@
 import {
-  createRootRoute,
+  createRootRouteWithContext,
   createRoute,
   createRouter,
   Outlet,
   useRouterState,
 } from '@tanstack/react-router'
+import type { FlueClient } from '@/client/client'
 import { FlueClientProvider } from '@/client/provider'
 import { AppShell } from '@/components/app-shell'
 import { DevicesRoute } from '@/routes/devices'
 import { PairRoute } from '@/routes/pair'
 import { SessionsRoute } from '@/routes/sessions'
 import { TerminalRoute } from '@/routes/terminal'
+import { UnpairedRoute } from '@/routes/unpaired'
 
 /** The pairing page's path. Its own constant because two routing decisions
  *  turn on it: the route below, and whether the tab opens a socket at all. */
 const PAIR_PATH = '/pair'
 
 /**
- * The tab's one client, and the one route that must not have it.
+ * What the entry point has worked out about this page before the router exists,
+ * handed to the route tree as router context.
+ *
+ * Both fields describe the same one thing — how, and whether, this tab can
+ * reach a daemon — and only src/main.tsx is in a position to answer it: the
+ * answer depends on the origin that served the page and on a key store that has
+ * to be awaited. Everything left empty is the daemon's own origin, which is the
+ * app as it has always been.
+ */
+export interface FlueRouterOptions {
+  /**
+   * The tab's client, when the entry point has already built one. It does that
+   * on a relay origin, where the socket has to carry a Noise channel keyed to
+   * the daemon this browser pinned; on loopback this is absent and the provider
+   * below builds the plain /ws client for itself.
+   */
+  client?: FlueClient
+  /**
+   * True when this page came from a relay and this browser holds no key for any
+   * daemon. Every screen but /pair is then an explainer, because there is no
+   * handshake for any of them to attempt.
+   */
+  unpaired?: boolean
+}
+
+/**
+ * The tab's one client, the one route that must not have it, and the case where
+ * there is no client to be had.
  *
  * The provider is here rather than above the router in main.tsx for a single
  * reason: /pair is served to a device that holds no session token — getting one
@@ -31,13 +60,22 @@ const PAIR_PATH = '/pair'
  * navigation, so this is still exactly one client per tab and one socket for
  * sessions, the terminal and Devices alike. Only crossing in or out of /pair
  * changes which branch renders, and nothing in the app links there.
+ *
+ * `unpaired` is answered here rather than per route for the same reason the
+ * provider is: it is one fact about the whole tab. It sits below the /pair
+ * branch deliberately — that page is the only way out of the state, and a flag
+ * that swallowed it would leave the user with an explainer pointing at a screen
+ * the app refuses to render. The URL is left alone rather than redirected, so
+ * the moment a pairing lands, a reload of the same address is the app.
  */
-const rootRoute = createRootRoute({
+const rootRoute = createRootRouteWithContext<FlueRouterOptions>()({
   component: function Root() {
     const pathname = useRouterState({ select: (s) => s.location.pathname })
+    const { client, unpaired } = rootRoute.useRouteContext()
     if (pathname === PAIR_PATH) return <Outlet />
+    if (unpaired === true) return <UnpairedRoute />
     return (
-      <FlueClientProvider>
+      <FlueClientProvider client={client}>
         <Outlet />
       </FlueClientProvider>
     )
@@ -168,8 +206,8 @@ const routeTree = rootRoute.addChildren([
   pairRoute,
 ])
 
-export function createFlueRouter() {
-  return createRouter({ routeTree, defaultPreload: false })
+export function createFlueRouter(options: FlueRouterOptions = {}) {
+  return createRouter({ routeTree, defaultPreload: false, context: options })
 }
 
 declare module '@tanstack/react-router' {

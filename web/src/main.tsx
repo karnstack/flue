@@ -2,7 +2,10 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import './styles.css'
-import { createFlueRouter } from '@/router'
+import { FlueClient } from '@/client/client'
+import { isRelayOrigin, loadRelayIdentity } from '@/relay/mode'
+import { relaySocket } from '@/relay/socket'
+import { createFlueRouter, type FlueRouterOptions } from '@/router'
 import { stripHandoff } from '@/lib/url'
 import { registerServiceWorker } from '@/lib/sw-register'
 
@@ -19,7 +22,44 @@ import { registerServiceWorker } from '@/lib/sw-register'
 const cleaned = stripHandoff(location.href)
 if (cleaned !== location.href) history.replaceState(null, '', cleaned)
 
-const router = createFlueRouter()
+/**
+ * What this tab can reach, when the page did not come from the daemon.
+ *
+ * The socket at /ws is the daemon on loopback and a Cloudflare Worker on a
+ * relay origin, and the two need different things underneath them: the first is
+ * already private and already authenticated by a cookie the daemon set, and the
+ * second is a hop through infrastructure that must be able to read none of it.
+ * So a relay origin gets a client whose transport is a Noise channel to the
+ * daemon this browser pinned at pairing time — see src/relay/socket.ts, which
+ * FlueClient cannot tell apart from a WebSocket.
+ *
+ * With no pinned key there is nothing to build: the tab has no daemon, and the
+ * router is told to say so rather than to connect on a loop with no credential
+ * to offer.
+ */
+async function relayOptions(): Promise<FlueRouterOptions> {
+  const identity = await loadRelayIdentity()
+  if (identity === null) return { unpaired: true }
+  return {
+    // `location.origin` and not a configured one: the page and the relay it
+    // talks to are the same deployment by construction, and a URL from anywhere
+    // else would be a second thing to keep true.
+    client: new FlueClient(location.origin, (origin) => relaySocket(origin, identity)),
+  }
+}
+
+/*
+ * Awaited here, at the entry point, rather than anywhere below it. Reading the
+ * key store is asynchronous and the answer decides which app to mount, so the
+ * alternative is a FlueClient that accepts a promise and has to hold a "not yet
+ * known" state that every one of its methods then answers for. One await in the
+ * one module that is allowed to be slow is cheaper than that everywhere.
+ *
+ * On the daemon's own origin nothing is awaited and nothing is passed: the
+ * router mounts the provider it always did, and that builds the loopback
+ * client itself.
+ */
+const router = createFlueRouter(isRelayOrigin() ? await relayOptions() : {})
 
 const root = document.getElementById('root')
 if (!root) throw new Error('missing #root')

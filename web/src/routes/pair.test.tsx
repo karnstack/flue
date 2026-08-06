@@ -50,6 +50,21 @@ const paired = (over: Record<string, unknown> = {}) =>
 const refused = (body = 'pairing refused\n') => answer({ ok: false, status: 403, text: body })
 
 /**
+ * The same refusal as the relay has to carry it.
+ *
+ * The daemon's own origin answers `pairing refused` as text/plain; the relay
+ * cannot carry a bare text body over its control channel and answers the JSON
+ * envelope instead — see spec/relay-protocol.md, `pairResult.body`. The page is
+ * served over both, so it reads both.
+ */
+const refusedJson = () =>
+  answer({ ok: false, status: 403, text: '{"error":"pairing refused"}' })
+
+/** A relay that never got the request as far as the daemon. */
+const relayFailure = (status: number, error: string) =>
+  answer({ ok: false, status, text: `{"error":"${error}"}` })
+
+/**
  * Mount the real router at /pair.
  *
  * The real one rather than a fixture: the search parameter is read through
@@ -214,6 +229,67 @@ describe('PairRoute', () => {
     expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(await loadPinnedDaemonKey()).toBeNull()
+  })
+
+  it('reads the relay’s refusal as words rather than showing it as JSON', async () => {
+    // Same refusal, different wrapping. A user reading `{"error":"pairing
+    // refused"}` off a phone screen is being shown the wire, not told what
+    // happened.
+    fetchMock.mockResolvedValue(refusedJson())
+    await renderPair(LINK)
+
+    await userEvent.click(await armedPairButton())
+
+    expect(await screen.findByText(/pairing refused/)).toBeTruthy()
+    expect(status()).toContain('pairing refused')
+    expect(status()).not.toContain('{')
+    expect(status()).not.toContain('error"')
+    expect(status()).toContain(EXPIRY_NOTE)
+
+    // A 403 is the daemon's own answer, and presenting the token is what closed
+    // the window — so there is nothing left to press.
+    expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
+  })
+
+  it('keeps the token alive when the relay could not reach the daemon', async () => {
+    // 503 from the Worker: the daemon leg is not connected, so nothing was
+    // presented and nothing was redeemed. The user's two-minute window is still
+    // theirs, and taking the button away would throw it away for them.
+    fetchMock.mockResolvedValue(relayFailure(503, 'daemon offline'))
+    await renderPair(LINK)
+
+    await userEvent.click(await armedPairButton())
+
+    expect(await screen.findByText(/daemon offline/)).toBeTruthy()
+    expect(status()).not.toContain('{')
+    expect(pairButton()).toBeTruthy()
+    expect(await loadPinnedDaemonKey()).toBeNull()
+  })
+
+  it('keeps the token alive when the daemon never answered the relay', async () => {
+    // 504: the request was parked at the Worker until its deadline. The daemon
+    // may never have seen it, and a second press is the user's to make — if the
+    // token really was spent, the daemon will say so itself.
+    fetchMock.mockResolvedValue(relayFailure(504, 'daemon did not answer'))
+    await renderPair(LINK)
+
+    await userEvent.click(await armedPairButton())
+
+    expect(await screen.findByText(/did not answer/)).toBeTruthy()
+    expect(pairButton()).toBeTruthy()
+  })
+
+  it('names the status when a refusal carried nothing worth quoting', async () => {
+    // A 502 with an empty body: the relay could not make sense of what its
+    // upstream said. There is nothing to repeat, so the page says only what it
+    // knows — and leaves the button, because nothing here proves a redeem.
+    fetchMock.mockResolvedValue(answer({ ok: false, status: 502, text: '' }))
+    await renderPair(LINK)
+
+    await userEvent.click(await armedPairButton())
+
+    expect(await screen.findByText(/502/)).toBeTruthy()
+    expect(pairButton()).toBeTruthy()
   })
 
   it('leaves the button in place when the daemon was never reached', async () => {
