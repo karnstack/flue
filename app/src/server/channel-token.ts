@@ -89,6 +89,35 @@ export interface ChannelGrant {
 }
 
 /**
+ * What a *browser* gets, which is the grant plus the identity of the machine
+ * at the other end of it.
+ *
+ * The extra field is not a convenience. A browser reaching a daemon through
+ * the relay speaks Noise IK as the initiator, and IK names the responder's
+ * static public key up front — that key is the entire basis of trusting the
+ * far end. A self-hosted relay is one origin in front of one machine, so a
+ * browser could pin "the daemon's key" per origin and be right. The SaaS relay
+ * is one origin in front of *every* machine on *every* account, where that
+ * same pin means device B's session is built against device A's key: the
+ * handshake fails, the socket closes like any other outage, and the tab
+ * reconnects into the identical failure forever with nothing on screen to say
+ * why. So the key travels with the token, and the browser pins it under the
+ * device id (`openSession`, and web/src/crypto/keys.ts).
+ *
+ * The key is public — it is the half a daemon publishes at enrolment — so
+ * unlike `token` there is nothing here to keep out of a log. `deviceId` rides
+ * along because it is what the browser has to name to come back for the *next*
+ * token (server/refresh-token.ts), and having the service state it is one less
+ * derivation for a browser to get subtly wrong.
+ */
+export interface ClientChannelGrant extends ChannelGrant {
+  /** The device's Noise static public key, exactly as the row holds it. */
+  publicKey: string
+  /** The device the token names, echoed back from the row that matched. */
+  deviceId: string
+}
+
+/**
  * The signing key, read per request (module scope would be `undefined` on
  * Workers).
  *
@@ -152,7 +181,7 @@ function relayUrl(): string {
  * A query string on either hop would put a live credential into a log store,
  * and on the first hop into the `Referer` of everything that page loads.
  */
-export async function mintClientToken(deviceId: string): Promise<ChannelGrant> {
+export async function mintClientToken(deviceId: string): Promise<ClientChannelGrant> {
   // Configuration before authorization: a deployment that cannot sign must
   // say so rather than get as far as a database read and then throw anyway.
   const secret = relaySigningSecret()
@@ -173,8 +202,12 @@ export async function mintClientToken(deviceId: string): Promise<ChannelGrant> {
   // it enabled, and is its owner enabled. There are no foreign keys (see
   // schema.ts), so the join is also what rules out a device whose user row has
   // been deleted — `acc` would name nobody.
+  // `public_key` is selected here and nowhere else on a browser path: the
+  // directory (`listDevices`) names its four columns explicitly so this one
+  // stays out of every dashboard payload. It is public, but it belongs in the
+  // one response that is *about* reaching that machine.
   const [device] = await db()
-    .select({ id: devices.id })
+    .select({ id: devices.id, publicKey: devices.publicKey })
     .from(devices)
     .innerJoin(users, eq(users.id, devices.userId))
     .where(
@@ -195,7 +228,7 @@ export async function mintClientToken(deviceId: string): Promise<ChannelGrant> {
     role: 'client',
     exp: nowSeconds() + CLIENT_TOKEN_TTL_S,
   })
-  return { token, relayUrl: url }
+  return { token, relayUrl: url, publicKey: device.publicKey, deviceId: device.id }
 }
 
 /**

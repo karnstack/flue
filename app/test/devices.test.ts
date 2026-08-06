@@ -22,6 +22,7 @@ import { eq } from 'drizzle-orm'
 import { describe, expect, it, vi } from 'vitest'
 import { db } from '../src/db/client'
 import { devices, users } from '../src/db/schema'
+import { decodePublicKey } from '../src/lib/device-id'
 import { base64url, randomToken, sha256Hex, verifyChannelToken } from '../src/lib/tokens'
 import { mintClientToken } from '../src/server/channel-token'
 import { MAX_LABEL, listDevices, openSession, renameDevice, revokeDevice } from '../src/server/devices'
@@ -389,6 +390,43 @@ describe('openSession', () => {
       dev: device.id,
       role: 'client',
     })
+  })
+
+  it('carries the target machine’s public key and id, so the browser can pin them', async () => {
+    // The fix for the bug this whole path had: a SaaS relay is ONE origin in
+    // front of every machine on every account, so a browser that pinned "the
+    // daemon's key" per origin would build device B's Noise handshake against
+    // device A's static key and fail it silently, forever. The key travels
+    // with the token, and the browser pins it under the device id.
+    const user = await makeUser()
+    const device = await makeDevice(user.id)
+    const stored = (await row(device.id))?.publicKey
+
+    const { url } = await open(device.id, await signIn(user.id))
+    const frag = new URLSearchParams(new URL(url).hash.slice(1))
+
+    expect(frag.get('d')).toBe(device.id)
+    // base64url, so the fragment needs no percent-encoding and the browser
+    // needs no second spelling to understand. Compared as *bytes*: the column
+    // holds whatever the daemon enrolled with, and only the key is the fact.
+    expect(frag.get('k')).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(decodePublicKey(frag.get('k') as string)).toEqual(decodePublicKey(stored as string))
+  })
+
+  it('names the control plane the browser must come back to for a fresh token', async () => {
+    // The tab is on the relay's origin, not this one, and a client token is
+    // good for sixty seconds — so it has to know where to ask for the next
+    // one. The origin of the request that minted this URL, because the service
+    // that can refresh a token is by definition the one that just issued it.
+    const user = await makeUser()
+    const device = await makeDevice(user.id)
+
+    const { url } = await open(device.id, await signIn(user.id))
+    const frag = new URLSearchParams(new URL(url).hash.slice(1))
+
+    // `inRequest` drives https://app.flue.sh/, which is what a browser would
+    // have been talking to.
+    expect(frag.get('a')).toBe('https://app.flue.sh')
   })
 
   it('never writes the token anywhere a server would see it', async () => {

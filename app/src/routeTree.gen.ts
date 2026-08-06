@@ -14,6 +14,7 @@ import { Route as DevicesRouteImport } from './routes/devices'
 import { Route as EnrollRouteImport } from './routes/enroll'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as TermsRouteImport } from './routes/terms'
+import { Route as ApiRelayTokenRouteImport } from './routes/api.relay-token'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -40,6 +41,11 @@ const TermsRoute = TermsRouteImport.update({
   path: '/terms',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiRelayTokenRoute = ApiRelayTokenRouteImport.update({
+  id: '/api/relay-token',
+  path: '/api/relay-token',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -47,6 +53,7 @@ export interface FileRoutesByFullPath {
   '/enroll': typeof EnrollRoute
   '/login': typeof LoginRoute
   '/terms': typeof TermsRoute
+  '/api/relay-token': typeof ApiRelayTokenRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -54,6 +61,7 @@ export interface FileRoutesByTo {
   '/enroll': typeof EnrollRoute
   '/login': typeof LoginRoute
   '/terms': typeof TermsRoute
+  '/api/relay-token': typeof ApiRelayTokenRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -62,13 +70,22 @@ export interface FileRoutesById {
   '/enroll': typeof EnrollRoute
   '/login': typeof LoginRoute
   '/terms': typeof TermsRoute
+  '/api/relay-token': typeof ApiRelayTokenRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/devices' | '/enroll' | '/login' | '/terms'
+  fullPaths:
+    '/' | '/devices' | '/enroll' | '/login' | '/terms' | '/api/relay-token'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/devices' | '/enroll' | '/login' | '/terms'
-  id: '__root__' | '/' | '/devices' | '/enroll' | '/login' | '/terms'
+  to: '/' | '/devices' | '/enroll' | '/login' | '/terms' | '/api/relay-token'
+  id:
+    | '__root__'
+    | '/'
+    | '/devices'
+    | '/enroll'
+    | '/login'
+    | '/terms'
+    | '/api/relay-token'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -77,6 +94,7 @@ export interface RootRouteChildren {
   EnrollRoute: typeof EnrollRoute
   LoginRoute: typeof LoginRoute
   TermsRoute: typeof TermsRoute
+  ApiRelayTokenRoute: typeof ApiRelayTokenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -116,6 +134,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TermsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/relay-token': {
+      id: '/api/relay-token'
+      path: '/api/relay-token'
+      fullPath: '/api/relay-token'
+      preLoaderRoute: typeof ApiRelayTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -125,6 +150,7 @@ const rootRouteChildren: RootRouteChildren = {
   EnrollRoute: EnrollRoute,
   LoginRoute: LoginRoute,
   TermsRoute: TermsRoute,
+  ApiRelayTokenRoute: ApiRelayTokenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

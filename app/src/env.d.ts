@@ -25,6 +25,14 @@ declare namespace Cloudflare {
      * The relay to dial, e.g. `wss://relay.flue.sh`, handed to the caller
      * alongside every channel token.
      *
+     * Read twice, in two schemes, and there is deliberately no second variable
+     * for the other one: `server/devices.ts` swaps `wss:`→`https:` for the
+     * document navigation that opens a session, and `server/refresh-token.ts`
+     * makes the same swap to get the one browser **origin** allowed to call
+     * `/api/relay-token` cross-origin. So this value is also the CORS
+     * allowance: point it at a relay a deployment does not use and the refresh
+     * is refused rather than half-working.
+     *
      * Not a secret, and deliberately not in wrangler.jsonc either: that file's
      * bindings are typed by the *generated* worker-configuration.d.ts, and a
      * value declared in both places is one `pnpm cf-typegen` away from a

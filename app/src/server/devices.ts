@@ -29,11 +29,14 @@
 // turns it into a fixed string — drizzle raises a failed statement as
 // `Failed query: <SQL>\nparams: <every bound value>`, which on these paths is
 // the device id and the account id.
+import { getRequest } from '@tanstack/react-start/server'
 import { and, asc, desc, eq } from 'drizzle-orm'
 import { db } from '../db/client'
 import { devices } from '../db/schema'
+import { decodePublicKey } from '../lib/device-id'
 import { MAX_LABEL_INPUT, normalizeLabel } from '../lib/label'
-import { mintClientToken } from './channel-token'
+import { base64url } from '../lib/tokens'
+import { mintClientToken, type ClientChannelGrant } from './channel-token'
 import { LONGEST_WINDOW_S, SESSIONS_OPENED_PER_USER, withinLimit } from './ratelimit'
 import { currentUser } from './sessions'
 
@@ -114,6 +117,24 @@ export interface DeviceSummary {
   label: string
   lastSeen: number | null
   disabled: boolean
+}
+
+/**
+ * This service's own origin, as the browser that is calling it sees it.
+ *
+ * Read off the request rather than out of a variable, and deliberately: the
+ * only thing it is used for is telling a tab where to come *back* to, and the
+ * host it just talked to is that place by construction. A configured
+ * `APP_URL` would be a third value to keep consistent with the deployment and
+ * with `RELAY_URL`, and the failure when it drifted would be a tab that could
+ * open a session once and never reconnect.
+ *
+ * On Cloudflare the request URL is the public one (custom domain included), so
+ * this is `https://app.flue.sh` in production, `http://localhost:3001` under
+ * `vite dev`, and whatever a test drives.
+ */
+function controlPlaneOrigin(): string {
+  return new URL(getRequest().url).origin
 }
 
 /** The session, or a refusal. Never a caller-supplied user id. */
@@ -274,6 +295,29 @@ export async function renameDevice(deviceId: string, label: string): Promise<str
  * environment variable, which would be one more thing a deployment can get
  * inconsistent with itself.
  *
+ * **The fragment carries four things, not one.** `t` is the credential; the
+ * other three are what a tab on a *shared* origin needs in order to use it:
+ *
+ *   - `k` — the target machine's Noise static public key, base64url. A browser
+ *     reaching a daemon speaks Noise IK as the initiator, which names the
+ *     responder's static key up front; the SaaS relay is one origin in front of
+ *     every machine on every account, so a browser that pinned one key per
+ *     origin would build device B's handshake against device A's key and fail
+ *     it silently, forever. See `ClientChannelGrant`.
+ *   - `d` — the device id that key belongs to, which is the record the browser
+ *     pins it under and the machine it names when it comes back for the next
+ *     token.
+ *   - `a` — this control plane's own origin, taken from the request that asked.
+ *     The tab is on the relay's origin by the time it needs a second token, and
+ *     the service that can refresh one is by definition the one that issued the
+ *     first. Read from the request rather than configured, so a dev server, a
+ *     staging deployment and production each name themselves with nothing to
+ *     keep in step.
+ *
+ * Only `t` is a secret. The other three are public facts about a machine the
+ * caller owns, and they are in the fragment for the same reason `t` is: they
+ * are handed to *this* tab and to nothing on the wire.
+ *
  * **The token rides in the fragment (`#t=`), not the query.** This URL is a
  * *document navigation to another origin*, and where in it the credential sits
  * decides who else gets a copy:
@@ -328,7 +372,7 @@ export async function openSession(deviceId: string): Promise<{ url: string }> {
   // predicate and throws the same undistinguished refusal this module does. The
   // session read above is not redundant with it: it is what makes "no session"
   // a session error rather than a mint error.
-  let grant: { token: string; relayUrl: string }
+  let grant: ClientChannelGrant
   try {
     grant = await mintClientToken(id)
   } catch (err) {
@@ -341,14 +385,32 @@ export async function openSession(deviceId: string): Promise<{ url: string }> {
     throw err
   }
 
+  // The key as the row holds it, re-encoded base64url. The column is whatever
+  // the daemon enrolled with — `encodePublicKey` writes standard base64 — and
+  // standard base64's `+` and `/` are percent-encoded by URLSearchParams, which
+  // would put `%2B` in a fragment for no reason. Decoded first rather than
+  // string-substituted, so a column that is not a 32-byte key is caught here
+  // instead of becoming a pin the browser can never complete a handshake with.
+  const publicKey = decodePublicKey(grant.publicKey)
+  if (!publicKey) {
+    // Not a `DeviceError`: nothing the caller did caused this and there is
+    // nothing they can do about it. The route answers its fixed string.
+    throw new Error('openSession: the device row holds no usable public key')
+  }
+
   const url = new URL(grant.relayUrl)
   url.protocol = url.protocol === 'ws:' ? 'http:' : 'https:'
   // Written through URLSearchParams rather than as a bare `#t=${token}`, so the
   // fragment is a parameter list with the encoding rules of one — the page on
-  // the other side reads it with `new URLSearchParams(location.hash.slice(1))`,
-  // and a second parameter can be added one day without inventing a syntax.
-  // (A channel token is base64url and a dot, so nothing is escaped today.)
-  url.hash = new URLSearchParams({ t: grant.token }).toString()
+  // the other side reads it with `new URLSearchParams(location.hash.slice(1))`.
+  // (A channel token is base64url and a dot, and so is `k`, so nothing is
+  // escaped today; `a` is an origin, and its `//` is.)
+  url.hash = new URLSearchParams({
+    t: grant.token,
+    k: base64url(publicKey),
+    d: grant.deviceId,
+    a: controlPlaneOrigin(),
+  }).toString()
 
   // Not logged, here or anywhere: `url` contains a bearer credential. What is
   // worth recording is that a session was opened, and by whom.
