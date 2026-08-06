@@ -85,6 +85,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/flynn/noise"
+	"github.com/karnstack/flue/internal/controlplane"
 	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
@@ -398,14 +399,31 @@ func methodPolicy(next http.Handler) http.Handler {
 // every origin that serves the bundle, not only on the one that is already
 // unreachable from the internet.
 //
-// The two differ in one directive, and that difference is why there are two.
+// The two differ in `connect-src`, and that difference is why there are two.
+//
 // The daemon serves the UI over http on loopback and the socket the UI opens is
 // `ws://127.0.0.1:7717`, which `'self'` does not cover; a relay serves it over
 // https and the socket is a same-origin `wss://`, which `'self'` does. Those
 // loopback entries carry wildcard ports — an injected script could reach every
 // other service on the machine through them (docs/FOLLOW-UPS.md §6) — so an
 // internet-facing origin must not inherit them just because the daemon needs
-// them. Composed rather than written twice, so the shared half cannot drift.
+// them.
+//
+// A relay origin needs one entry the daemon does not: the control plane. A
+// relay channel token lives sixty seconds and the socket presents one per dial,
+// so every reconnect past the first minute fetches a fresh one from
+// `app.flue.sh` (web/src/relay/control-plane.ts) — a cross-origin request from
+// a document on `relay.flue.sh`, which `'self'` refuses before it reaches the
+// network. Without this entry every hosted session dies at its first reconnect
+// past a minute and reconnects into the identical refusal, silently.
+//
+// Spelled as the exact origin, never as a scheme or a wildcard. It is the outer
+// bound on where a tab's session cookie can be sent: the fragment names the
+// control plane (`a=`, web/src/relay/session.ts), and that name is pinned
+// same-site there for the same reason. Two controls, and this is the one that
+// does not depend on the page's own code being right.
+//
+// Composed rather than written twice, so the shared half cannot drift.
 const (
 	cspHead = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
 		"img-src 'self' data:; connect-src 'self'"
@@ -415,13 +433,25 @@ const (
 	// is not same-origin under CSP's rules because the scheme differs.
 	cspLoopbackSockets = " ws://127.0.0.1:* ws://localhost:*"
 
+	// cspControlPlane is the relay-only addition: the one cross-origin request
+	// the bundle makes, which is the token refresh. The constant rather than a
+	// literal so the policy cannot outlive a move of the control plane.
+	//
+	// A self-hosted relay gets it too, because `flue relay setup` serves this
+	// same string, and there it names an origin that deployment never talks to.
+	// That is a grant with no use rather than a hole — the page it would be
+	// reached from is already `script-src 'self'`, and flue.sh is not an
+	// endpoint an attacker controls — and the alternative is a second policy
+	// and a second thing to keep honest.
+	cspControlPlane = " " + controlplane.DefaultOrigin
+
 	// LocalCSP is what this daemon serves its own UI under.
 	LocalCSP = cspHead + cspLoopbackSockets + cspTail
 
 	// RelayCSP is what a relay origin serves the same bundle under. It is
 	// carried to the deploy as the `_headers` file the Worker's static assets
 	// are served with — see cmd/flue/relay.go.
-	RelayCSP = cspHead + cspTail
+	RelayCSP = cspHead + cspControlPlane + cspTail
 )
 
 func securityHeaders(next http.Handler) http.Handler {

@@ -167,6 +167,13 @@ DNS record and the certificate on the first deploy.
 > the first minute looks perfect**. It is the most expensive way to get this
 > wrong, because nothing is broken until a minute has passed and the failure
 > then looks like flaky networking.
+>
+> The tab now refuses such a pairing outright rather than discovering it a
+> minute later: `originOf` (`web/src/relay/session.ts`) takes the control-plane
+> origin out of the handoff fragment only if it is same-site with the page it
+> is on. That is a security check first — see the substitution residual below —
+> but it also means a cross-site deploy shows the explainer screen immediately
+> instead of a terminal that works until the first reconnect.
 
 `workers.dev` is the second half of the same problem and cannot be worked
 around: it is on the Public Suffix List, so every `*.workers.dev` host is
@@ -425,13 +432,22 @@ Two properties of that picture are the whole reason it looks like this:
   browser forever. It does not close *substitution*: a link carrying the
   attacker's own key *and* id is self-consistent and passes, and with a live
   token minted for that machine it opens one dial into a terminal the attacker
-  owns, on the real relay origin. One dial rather than a session — the
-  victim's next refresh names a device their cookie does not own and is
-  answered 403 — but the residual is open
+  owns, on the real relay origin. That residual is open
   ([`FOLLOW-UPS.md`](FOLLOW-UPS.md) item 14, "Left standing"). Closing it
   means not taking `k` from the fragment at all: fetch the named device's key
   from the control plane under the session cookie, which answers only for
   machines the caller owns, so a link cannot name a machine the user does not.
+
+  It is one dial rather than a session because two checks keep it to one, not
+  because it falls out for free. The victim's next refresh names a device
+  their cookie does not own and is answered 403 — but only if the refresh
+  reaches the *real* control plane, and the crafted link names that too, in
+  `a=`. So `a` must be same-site with the page the tab is on (`originOf`,
+  `web/src/relay/session.ts`), and the hosted relay's `connect-src` names
+  `https://app.flue.sh` and nothing else (`daemon.RelayCSP`,
+  `relay/public/_headers`). Widening either — a scheme, a wildcard, any
+  `https:` origin — turns one dial back into a session that lasts as long as
+  the tab is open.
 - **The token is fetched per dial, not captured once.** It lives sixty seconds.
   A tab that captured one at open time was refused at its first reconnect past
   a minute — a laptop lid, a tunnel — and never recovered. Each re-dial asks

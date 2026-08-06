@@ -31,6 +31,23 @@ const handoff = (over: Partial<RelayHandoff> = {}): RelayHandoff => ({
   ...over,
 })
 
+/**
+ * The relay origin these tests are served from.
+ *
+ * It is passed in rather than read off `location` because it is now part of
+ * what `resolveRelaySession` decides: the control plane the fragment names has
+ * to be same-site with the page (see `originOf`), and jsdom's default location
+ * is same-site with nothing anyone deploys.
+ */
+const HERE = 'https://relay.flue.sh'
+
+/** `resolveRelaySession` as a tab on the hosted relay calls it. */
+const resolve = (
+  handoff: RelayHandoff | null,
+  store: Storage | null = memoryStore(),
+  here: string = HERE,
+) => resolveRelaySession(handoff, store, here)
+
 /** A `sessionStorage` that is only this test's. */
 function memoryStore(seed: Record<string, string> = {}): Storage {
   const map = new Map(Object.entries(seed))
@@ -56,7 +73,7 @@ describe('resolveRelaySession, from a handoff', () => {
     vi.stubGlobal('indexedDB', new IDBFactory())
     const store = memoryStore()
 
-    const session = await resolveRelaySession(handoff(), store)
+    const session = await resolve(handoff(), store)
 
     expect(session).not.toBeNull()
     expect(session!.deviceId).toBe(ID_A)
@@ -75,8 +92,8 @@ describe('resolveRelaySession, from a handoff', () => {
     // outage, and the tab reconnects into the same failure forever.
     vi.stubGlobal('indexedDB', new IDBFactory())
 
-    const a = await resolveRelaySession(handoff(), memoryStore())
-    const b = await resolveRelaySession(
+    const a = await resolve(handoff(), memoryStore())
+    const b = await resolve(
       handoff({ deviceId: ID_B, daemonKey: base64url(KEY_B) }),
       memoryStore(),
     )
@@ -93,7 +110,7 @@ describe('resolveRelaySession, from a handoff', () => {
     vi.stubGlobal('indexedDB', new IDBFactory())
     const store = memoryStore()
 
-    await resolveRelaySession(handoff(), store)
+    await resolve(handoff(), store)
 
     expect(JSON.stringify(store)).not.toContain('a-channel-token')
     expect(store.getItem('flue.relay.session')).not.toContain('a-channel-token')
@@ -102,7 +119,7 @@ describe('resolveRelaySession, from a handoff', () => {
   it('is null for a key that is not a 32-byte Noise static', async () => {
     vi.stubGlobal('indexedDB', new IDBFactory())
     for (const daemonKey of ['', 'not base64!!', base64url(new Uint8Array(31)), 'AAAA']) {
-      expect(await resolveRelaySession(handoff({ daemonKey }), memoryStore())).toBeNull()
+      expect(await resolve(handoff({ daemonKey }), memoryStore())).toBeNull()
     }
   })
 
@@ -133,7 +150,7 @@ describe('resolveRelaySession, from a handoff', () => {
       `${ID_A}00`, // And a superset of one.
     ]) {
       const store = memoryStore()
-      expect(await resolveRelaySession(handoff({ deviceId }), store)).toBeNull()
+      expect(await resolve(handoff({ deviceId }), store)).toBeNull()
       // Nothing written down, either half of it: refusing after the write
       // would leave the poisoned record behind and only skip this one session.
       expect(await loadPinnedDaemonKeyFor(deviceId)).toBeNull()
@@ -154,7 +171,7 @@ describe('resolveRelaySession, from a handoff', () => {
     // nothing on screen but the explainer.
     vi.stubGlobal('indexedDB', new IDBFactory())
     const key = 'B8SYMazoUcTIYa1PqLyFDhjGEocxvfVjEHaSC8HolBE' // testdata/noise/ik.json
-    const session = await resolveRelaySession(
+    const session = await resolve(
       handoff({ daemonKey: key, deviceId: 'b5d05f15398a' }),
       memoryStore(),
     )
@@ -167,7 +184,7 @@ describe('resolveRelaySession, from a handoff', () => {
     // query — and anything that is not http(s) is refused outright.
     vi.stubGlobal('indexedDB', new IDBFactory())
 
-    const withPath = await resolveRelaySession(
+    const withPath = await resolve(
       handoff({ controlPlane: 'https://app.flue.sh/devices?x=1#y' }),
       memoryStore(),
     )
@@ -181,16 +198,71 @@ describe('resolveRelaySession, from a handoff', () => {
       // A credentialed POST over a network anyone can read.
       'http://app.flue.sh',
     ]) {
-      expect(await resolveRelaySession(handoff({ controlPlane }), memoryStore())).toBeNull()
+      expect(await resolve(handoff({ controlPlane }), memoryStore())).toBeNull()
     }
   })
 
   it('allows a plain-http control plane on loopback, for `vite dev`', async () => {
+    // From a page that is itself on loopback: `localhost` and `127.0.0.1` are
+    // separate sites to a browser and one machine to a developer running
+    // `vite dev` beside `wrangler dev`, and a page on loopback fronts no
+    // account for the same-site check to be protecting.
     vi.stubGlobal('indexedDB', new IDBFactory())
     for (const controlPlane of ['http://localhost:3001', 'http://127.0.0.1:3001']) {
-      const session = await resolveRelaySession(handoff({ controlPlane }), memoryStore())
+      const session = await resolve(
+        handoff({ controlPlane }),
+        memoryStore(),
+        'http://localhost:5173',
+      )
       expect(session?.controlPlane).toBe(controlPlane)
     }
+  })
+
+  it('refuses a control plane that is not same-site with the page, and pins nothing', async () => {
+    // The attack: substitution (see `namesItsOwnKey`) opens *one* dial into the
+    // attacker's machine, and the only thing keeping it to one is that the next
+    // token has to come from the real control plane, which answers 403 for a
+    // device this cookie does not own. `#a=https://evil.example` moved that
+    // decision to the attacker — their proxy relays the refresh to the real
+    // control plane and hands back a genuine token for their own machine, so
+    // one dial becomes a session that lasts as long as the tab is open, on the
+    // genuine relay origin with its genuine certificate.
+    vi.stubGlobal('indexedDB', new IDBFactory())
+
+    for (const controlPlane of [
+      'https://evil.example',
+      'https://app.flue.sh.evil.example', // the suffix trick a `endsWith` waves through
+      'https://flue.sh.evil.example',
+      'http://localhost:3001', // loopback, but this page is on the internet
+    ]) {
+      const store = memoryStore()
+      expect(await resolve(handoff({ controlPlane }), store)).toBeNull()
+      // Nothing written down: a refused handoff must not leave a pinned key
+      // behind for the next load to build a session out of.
+      expect(await loadPinnedDaemonKeyFor(ID_A)).toBeNull()
+      expect(store.getItem('flue.relay.session')).toBeNull()
+    }
+  })
+
+  it('allows the cross-origin control plane the deployment actually has', async () => {
+    // Same-*site*, not same-origin: the refresh is `relay.flue.sh` fetching
+    // from `app.flue.sh` and always was. `SameSite=Lax` already forces that
+    // pairing — a control plane on another registrable domain would never see
+    // this account's cookie — so the check costs no working deployment
+    // anything.
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    const session = await resolve(handoff(), memoryStore(), 'https://relay.flue.sh')
+    expect(session?.controlPlane).toBe('https://app.flue.sh')
+  })
+
+  it('refuses a same-site control plane over the wrong scheme', async () => {
+    // SameSite has been schemeful since 2020: `http://app.flue.sh` is
+    // cross-site with an https page, so its refresh would carry no cookie at
+    // all — and it is a credentialed POST over a network anyone can read.
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    expect(
+      await resolve(handoff({ controlPlane: 'http://app.flue.sh' }), memoryStore()),
+    ).toBeNull()
   })
 
   it('still opens the session when sessionStorage refuses to hold anything', async () => {
@@ -201,7 +273,7 @@ describe('resolveRelaySession, from a handoff', () => {
       throw new Error('QuotaExceededError')
     })
 
-    const session = await resolveRelaySession(handoff(), store)
+    const session = await resolve(handoff(), store)
     expect(session?.token).toBe('a-channel-token')
   })
 
@@ -211,7 +283,7 @@ describe('resolveRelaySession, from a handoff', () => {
         throw new Error('the key store is gone')
       },
     })
-    expect(await resolveRelaySession(handoff(), memoryStore())).toBeNull()
+    expect(await resolve(handoff(), memoryStore())).toBeNull()
   })
 })
 
@@ -219,11 +291,11 @@ describe('resolveRelaySession, on a reload', () => {
   it('comes back from what the tab remembered, with no token', async () => {
     vi.stubGlobal('indexedDB', new IDBFactory())
     const store = memoryStore()
-    await resolveRelaySession(handoff(), store)
+    await resolve(handoff(), store)
 
     // The reload: the fragment is gone (it was scrubbed as it was read), so
     // there is no handoff to adopt.
-    const session = await resolveRelaySession(null, store)
+    const session = await resolve(null, store)
 
     expect(session).not.toBeNull()
     expect(session!.deviceId).toBe(ID_A)
@@ -237,7 +309,7 @@ describe('resolveRelaySession, on a reload', () => {
     // A bookmarked hosted-relay URL, or a self-hosted relay, which hands out
     // no session and asks for no token.
     vi.stubGlobal('indexedDB', new IDBFactory())
-    expect(await resolveRelaySession(null, memoryStore())).toBeNull()
+    expect(await resolve(null, memoryStore())).toBeNull()
   })
 
   it('is null when the remembered machine has no pinned key', async () => {
@@ -250,7 +322,7 @@ describe('resolveRelaySession, on a reload', () => {
         controlPlane: 'https://app.flue.sh',
       }),
     })
-    expect(await resolveRelaySession(null, store)).toBeNull()
+    expect(await resolve(null, store)).toBeNull()
   })
 
   it('is null when the pinned key does not hash to the id it is filed under', async () => {
@@ -264,7 +336,7 @@ describe('resolveRelaySession, on a reload', () => {
       'flue.relay.session': JSON.stringify({ deviceId: ID_A, controlPlane: 'https://app.flue.sh' }),
     })
 
-    expect(await resolveRelaySession(null, store)).toBeNull()
+    expect(await resolve(null, store)).toBeNull()
   })
 
   it('is null for anything that is not the shape it wrote', async () => {
@@ -278,14 +350,18 @@ describe('resolveRelaySession, on a reload', () => {
       JSON.stringify({ controlPlane: 'https://app.flue.sh' }),
       JSON.stringify({ deviceId: 1, controlPlane: 'https://app.flue.sh' }),
       JSON.stringify({ deviceId: ID_A, controlPlane: 'javascript:alert(1)' }),
+      // The same-site check on the way out of the store as on the way in.
+      // `adopt` can no longer write this one, so what it catches is a record
+      // written by a build before the check existed.
+      JSON.stringify({ deviceId: ID_A, controlPlane: 'https://evil.example' }),
     ]) {
-      expect(await resolveRelaySession(null, memoryStore({ 'flue.relay.session': raw }))).toBeNull()
+      expect(await resolve(null, memoryStore({ 'flue.relay.session': raw }))).toBeNull()
     }
   })
 
   it('is null in a browser with no sessionStorage at all', async () => {
     vi.stubGlobal('indexedDB', new IDBFactory())
-    expect(await resolveRelaySession(null, null)).toBeNull()
+    expect(await resolve(null, null)).toBeNull()
   })
 })
 

@@ -115,11 +115,22 @@ describe('the relay Worker routes', () => {
  * TestRelayAssetHeadersMatchTheWranglerCopy). The literal below is spelled out
  * rather than imported so that a change to it has to be made twice, in two
  * languages, on purpose.
+ *
+ * `connect-src` is the directive with the interesting history. It read
+ * `'self'` alone, and `'self'` does not cover the one cross-origin request the
+ * bundle makes: a channel token lives sixty seconds, so every reconnect past
+ * the first minute POSTs to the control plane at `app.flue.sh` from a document
+ * on the relay origin. The browser refused it before the network, the dial had
+ * no token, and every hosted session died at its first reconnect past a minute
+ * and retried into the identical silence. Named exactly, and never as `https:`
+ * or a wildcard: this is the outer bound on where a tab's session cookie can
+ * be sent, and the fragment's `a=` is pinned same-site against the same threat
+ * (web/src/relay/session.ts).
  */
 describe('the security headers on served assets', () => {
   const CSP =
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-    "img-src 'self' data:; connect-src 'self'; " +
+    "img-src 'self' data:; connect-src 'self' https://app.flue.sh; " +
     "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
   it('serves the app shell under the same CSP the daemon does, minus the loopback sockets', async () => {
@@ -136,6 +147,19 @@ describe('the security headers on served assets', () => {
     const res = await SELF.fetch(`${BASE}/api/pair`)
     expect(res.status).toBe(200)
     expect(res.headers.get('Content-Security-Policy')).toBe(CSP)
+  })
+
+  it('lets the token refresh through to the control plane, and to nothing else', async () => {
+    // Both halves matter. Without the origin every hosted session dies at its
+    // first reconnect past a minute; with a wildcard the directive stops being
+    // a bound at all, and a crafted `#a=` in the fragment would have somewhere
+    // to send a POST that carries this account's session cookie.
+    const res = await SELF.fetch(`${BASE}/`)
+    const connect = res.headers
+      .get('Content-Security-Policy')!
+      .split('; ')
+      .find((d) => d.startsWith('connect-src '))
+    expect(connect).toBe("connect-src 'self' https://app.flue.sh")
   })
 
   it('does not publish the header document as an asset', async () => {

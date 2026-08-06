@@ -88,10 +88,11 @@ export interface RelaySession {
 export async function resolveRelaySession(
   handoff: RelayHandoff | null,
   store: Storage | null = safeSessionStorage(),
+  here: string = location.origin,
 ): Promise<RelaySession | null> {
   try {
-    if (handoff) return await adopt(handoff, store)
-    return await restore(store)
+    if (handoff) return await adopt(handoff, here, store)
+    return await restore(here, store)
   } catch {
     // A key store that will not open (private browsing, a blocked origin, a
     // refused quota) is not a session, and a rejected promise at the entry
@@ -106,9 +107,13 @@ export async function resolveRelaySession(
  * The key is pinned *before* the tab is remembered, so a store that refuses the
  * write leaves nothing behind claiming there is a session to restore.
  */
-async function adopt(handoff: RelayHandoff, store: Storage | null): Promise<RelaySession | null> {
+async function adopt(
+  handoff: RelayHandoff,
+  here: string,
+  store: Storage | null,
+): Promise<RelaySession | null> {
   const daemonPub = decodeKey(handoff.daemonKey)
-  const controlPlane = originOf(handoff.controlPlane)
+  const controlPlane = originOf(handoff.controlPlane, here)
   if (!daemonPub || !controlPlane) return null
   // Before anything is written down. See `namesItsOwnKey`.
   if (!namesItsOwnKey(handoff.deviceId, daemonPub)) return null
@@ -128,7 +133,7 @@ async function adopt(handoff: RelayHandoff, store: Storage | null): Promise<Rela
 }
 
 /** The session a previous load of this same tab left behind, or null. */
-async function restore(store: Storage | null): Promise<RelaySession | null> {
+async function restore(here: string, store: Storage | null): Promise<RelaySession | null> {
   const raw = store?.getItem(SESSION_KEY)
   if (!raw) return null
 
@@ -140,7 +145,7 @@ async function restore(store: Storage | null): Promise<RelaySession | null> {
   }
   if (typeof saved.deviceId !== 'string' || typeof saved.controlPlane !== 'string') return null
 
-  const controlPlane = originOf(saved.controlPlane)
+  const controlPlane = originOf(saved.controlPlane, here)
   if (!controlPlane) return null
 
   // The key store is the authority on the key, exactly as it is for a
@@ -215,14 +220,19 @@ export function channelTokenSource(
  * control plane minted for that machine, such a link opens one dial into a box
  * somebody else owns, on the genuine `relay.flue.sh` origin with its genuine
  * certificate, while every signal on the screen says flue.sh is at the other
- * end. One dial rather than a session: the victim's next refresh names a device
- * their cookie does not own and is answered 403 (app/src/server/
- * refresh-token.ts), so nothing re-mints — but one dial is all a shell needs.
- * That residual is OPEN, and docs/FOLLOW-UPS.md item 14 ("Left standing")
+ * end. That residual is OPEN, and docs/FOLLOW-UPS.md item 14 ("Left standing")
  * carries it. Closing it means not taking `k` from the fragment at all: fetch
  * the named device's public key from the control plane under the session
  * cookie, which answers only for machines the caller owns, so a link can no
  * longer name a machine the user does not.
+ *
+ * It is one dial rather than a session, and that bound is *enforced* rather
+ * than free. The victim's next refresh names a device their cookie does not own
+ * and is answered 403 (app/src/server/refresh-token.ts) — but only because the
+ * refresh reached the real control plane, which takes both of the checks in
+ * `originOf` and `RelayCSP`. The same link with an `a=` of the attacker's
+ * choosing would have been refreshed by the attacker, and one dial would have
+ * been a session lasting as long as the tab stayed open.
  *
  * Neither half goes wrong through the control plane itself: `openSession` reads
  * `k` and `d` out of the same row, so they cannot disagree. The check is not
@@ -256,7 +266,8 @@ function decodeKey(encoded: string): Uint8Array | null {
 }
 
 /**
- * The origin of a URL the fragment named, or null.
+ * The origin of a URL the fragment named, or null — checked against `here`, the
+ * origin this page was itself served from.
  *
  * Reduced to an origin rather than kept as it arrived, so a handoff carrying a
  * path, a query or a credential in the authority cannot become part of the URL
@@ -267,38 +278,103 @@ function decodeKey(encoded: string): Uint8Array | null {
  * public host, which would be a credentialed POST over a network anyone can
  * read.
  *
- * **What a crafted `#a=` can and cannot do**, since a fragment is whatever a
- * link someone clicked put there. It cannot leak anything of the user's: a
- * cross-origin `fetch` sends the *target* origin's cookies, so a POST to
- * somebody else's control plane carries none of this account's. It cannot open
- * a session anywhere either: whatever token comes back is presented to the real
- * relay, which verifies it against a secret only the real control plane holds
- * (`relay/src/channel-auth.ts`) and refuses anything else. So the worst it buys
- * is a browser making a POST carrying a public device id to a host of the
- * attacker's choosing — which they could have had by serving their own page.
+ * **And it must be same-site with the page.** That is the check that matters,
+ * and it used to be absent — any `https:` origin at all was taken.
  *
- * What is genuinely load-bearing is the *other* direction, and it is not
- * enforced here because it cannot be: the relay and the control plane must be
- * same-site, or the session cookie (`SameSite=Lax`) never rides the refresh at
- * all. That is a deployment fact, and docs/SAAS.md is where it is written down.
+ * The attack it closes runs through the *substitution* residual in
+ * `namesItsOwnKey`. A link naming the attacker's own machine passes every check
+ * above, so it opens one dial into a box they own; the bound on it is that the
+ * *next* token has to come from `app.flue.sh`, which answers 403 for a device
+ * the victim's cookie does not own. A crafted `#a=https://evil.example` moves
+ * that decision to the attacker: their proxy relays the refresh to the real
+ * control plane, hands back a genuine token for their own machine, and one dial
+ * becomes a session that lasts as long as the tab is open — on the genuine
+ * relay origin, with its genuine certificate, with nothing on screen to say so.
+ * The 403 was never the bound; the origin the refresh goes to was.
+ *
+ * Same-*site* rather than same-origin, because the refresh is legitimately
+ * cross-origin: `relay.flue.sh` fetches from `app.flue.sh`. That pairing is
+ * already forced by the cookie — `SameSite=Lax` withholds the session cookie
+ * from a cross-*site* request, so a control plane on another registrable domain
+ * could never have been refreshed from here anyway (docs/SAAS.md). Requiring it
+ * here turns a deployment fact into a check, and costs no working deployment
+ * anything.
+ *
+ * Two controls rather than one, deliberately. `connect-src 'self'
+ * https://app.flue.sh` (internal/daemon.RelayCSP) is the bound that does not
+ * depend on this code being right; this is the bound that does not depend on
+ * the deployment, which matters because a self-hosted relay whose control plane
+ * is its own gets the same policy string and so allows an origin it never uses.
  */
-function originOf(value: string): string | null {
+function originOf(value: string, here: string): string | null {
   let url: URL
+  let page: URL
   try {
     url = new URL(value)
+    page = new URL(here)
   } catch {
     return null
   }
-  if (url.protocol === 'https:') return url.origin
-  // `LOOPBACK` in ./mode is the same list, for the same reason: the daemon
-  // binds loopback and nothing else, so these are the only hosts a local
-  // development control plane can be on.
-  if (url.protocol === 'http:' && LOOPBACK.has(url.hostname)) return url.origin
-  return null
+  if (url.protocol !== 'https:') {
+    // `LOOPBACK` in ./mode is the same list, for the same reason: the daemon
+    // binds loopback and nothing else, so these are the only hosts a local
+    // development control plane can be on.
+    if (url.protocol !== 'http:' || !LOOPBACK.has(url.hostname)) return null
+  }
+  if (!sameSite(url, page)) return null
+  return url.origin
 }
 
 /** Hosts a plain-http control plane may be on. See `originOf`. */
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
+
+/**
+ * Whether two URLs are same-site, in the sense the cookie uses: same scheme,
+ * and hostnames under one registrable domain.
+ *
+ * The scheme is part of it because `SameSite` has been schemeful since 2020 —
+ * `http://app.flue.sh` and `https://relay.flue.sh` are cross-site to a modern
+ * browser, so a check that called them same-site would allow an `a=` whose
+ * refresh could never carry a cookie anyway.
+ *
+ * The registrable domain is the approximation, and it is worth naming as one:
+ * doing it exactly needs the Public Suffix List, which is a megabyte of data
+ * that changes weekly and would be shipped to a terminal emulator to decide one
+ * string comparison. The last two labels are right for `flue.sh` and for every
+ * ordinary domain; they are wrong in one direction for a multi-label suffix
+ * (`a.co.uk` and `b.co.uk` look same-site and are not), which is a gap only for
+ * a self-hoster parked under such a suffix, and only alongside an attacker who
+ * has registered a neighbour under it. On flue.sh itself the CSP is the tighter
+ * of the two bounds and names one origin, so this being generous costs nothing
+ * there.
+ *
+ * Loopback is a special case in the other direction: `localhost` and
+ * `127.0.0.1` are separate sites to a browser, but they are one machine to a
+ * developer running `vite dev` beside `wrangler dev`, and a page on loopback
+ * fronts no account.
+ */
+function sameSite(a: URL, b: URL): boolean {
+  if (a.protocol !== b.protocol) return false
+  if (LOOPBACK.has(a.hostname) && LOOPBACK.has(b.hostname)) return true
+  const site = registrableDomain(a.hostname)
+  return site !== null && site === registrableDomain(b.hostname)
+}
+
+/**
+ * The last two labels of a hostname — its registrable domain, near enough. See
+ * `sameSite` for what "near enough" is doing there.
+ *
+ * An IP literal and a single-label name are their own site: there is nothing to
+ * strip, and slicing two labels off `127.0.0.1` would produce `0.1`, which
+ * several unrelated addresses would agree on.
+ */
+function registrableDomain(hostname: string): string | null {
+  if (!hostname) return null
+  if (hostname.startsWith('[') || /^[0-9.]+$/.test(hostname)) return hostname
+  const labels = hostname.split('.')
+  if (labels.some((l) => l === '')) return null
+  return labels.length < 2 ? hostname : labels.slice(-2).join('.')
+}
 
 /**
  * `sessionStorage`, or null where reading it throws.

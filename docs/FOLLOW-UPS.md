@@ -493,8 +493,15 @@ documented promise depends on.
   *including* the ones the Worker asks for through `env.ASSETS.fetch`, which
   `relay/test/routing.test.ts` checks on both paths.
 
-  The one edit for a relay origin was made: `RelayCSP` drops `connect-src`'s
-  loopback wildcards, since the relay's own socket is a same-origin `wss://`.
+  `RelayCSP` differs from the daemon's policy in `connect-src` alone, in both
+  directions. It drops the loopback wildcards, since the relay's own socket is
+  a same-origin `wss://`; and it adds `https://app.flue.sh`, since the token
+  refresh is a cross-origin POST from a document on the relay origin and
+  `'self'` refused it before the network — which cost every hosted session its
+  first reconnect past a minute until this landed. Named exactly and never as a
+  scheme or a wildcard: it is the outer bound on where a tab's session cookie
+  can be sent, and the fragment's `a=` is pinned same-site against the same
+  threat (item 14).
   The field is absent from Cloudflare's published multipart-metadata reference,
   which documents only `html_handling` and `not_found_handling`; it is what
   every `wrangler deploy` sends, which is as attested as this API gets.
@@ -641,13 +648,27 @@ An attacker who enrolls a box of their own holds a `k` and `d` that hash
 correctly, and the real control plane mints them a live `t` for it — so a
 crafted link opens one dial into the attacker's machine on the genuine
 `relay.flue.sh` origin with its genuine certificate, and everything on screen
-says flue.sh. One dial rather than a session: the victim's next refresh names a
-device their cookie does not own, `POST /api/relay-token` answers 403, and
-nothing re-mints — but one dial is all a shell needs. The real fix is to stop
-accepting `k` from the fragment at all: the tab holds a session cookie, so it
-can fetch the named device's public key from the authenticated control plane,
-which answers only for machines the caller owns — then a link cannot name a
-machine the user does not own, and a `d` alone in the fragment is inert.
+says flue.sh. One dial is all a shell needs. The real fix is to stop accepting
+`k` from the fragment at all: the tab holds a session cookie, so it can fetch
+the named device's public key from the authenticated control plane, which
+answers only for machines the caller owns — then a link cannot name a machine
+the user does not own, and a `d` alone in the fragment is inert.
+
+It is *one dial* and not a session, and that bound is enforced rather than
+free — which is worth spelling out, because it was stated unconditionally here
+and in `SAAS.md` while nothing was enforcing it. The victim's next refresh names
+a device their cookie does not own and `POST /api/relay-token` answers 403, so
+nothing re-mints — but only if the refresh reaches the *real* control plane. The
+same crafted link also carries `a=`, the origin the tab refreshes from, and
+`originOf` (`web/src/relay/session.ts`) took any `https:` origin at all: an
+`a=https://evil.example` relays the refresh through the attacker's proxy to the
+real control plane, which mints them a genuine token for their own machine, and
+one dial becomes a session lasting as long as the tab stays open. Two checks now
+hold the bound. `a` must be same-site with the page (`sameSite`, same file),
+which is the pairing `SameSite=Lax` already forced on any working deployment;
+and `connect-src` on the hosted relay names `https://app.flue.sh` exactly
+(`daemon.RelayCSP`), so the browser refuses any other target before the network.
+Neither is decoration, and neither may be widened to a scheme or a wildcard.
 
 **Left standing: the account ceiling bounds tokens, not `rate_limits` rows —
 and the ordering is paid on the reconnect hot path.** `withinLimit` writes
