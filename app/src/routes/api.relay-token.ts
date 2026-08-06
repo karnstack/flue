@@ -49,8 +49,30 @@ const MAX_DEVICE_ID = 64
  * anything that is not a browser) buys a full `formData()` of whatever the
  * caller felt like sending. 1 KiB is fifty times the real body and nothing at
  * all to refuse.
+ *
+ * **A body that declares no length is refused rather than read.** The bound is
+ * `Content-Length`, and a *missing* header is not a zero-length body — it is a
+ * body sent with `Transfer-Encoding: chunked`, whose length is not knowable
+ * until it has been read, which is the one thing this must not do. Reading the
+ * absence as zero would have been a bound that every caller it exists for could
+ * step around: a browser always declares the length of a form body, so anything
+ * streaming one here is by construction not the client this endpoint is for.
  */
 const MAX_BODY_BYTES = 1024
+
+/**
+ * The declared length of a request body, or null if it did not declare one.
+ *
+ * Parsed strictly rather than with `Number`, which reads `''` as 0, `' 12'` as
+ * 12 and `'1e3'` as 1000 — none of which is a byte count, and the first of
+ * which is the bypass this whole function exists to close. A byte count is
+ * digits.
+ */
+function declaredLength(request: Request): number | null {
+  const raw = request.headers.get('content-length')
+  if (raw === null || !/^\d+$/.test(raw)) return null
+  return Number(raw)
+}
 
 /** How long a browser may cache the preflight. Ten minutes; nothing here
  *  changes between deploys, and a longer window outlives a rollback. */
@@ -160,11 +182,21 @@ export const Route = createFileRoute('/api/relay-token')({
         const origin = allowedOrigin(request)
         if (!origin) return forbiddenOrigin()
 
-        // Before the body is touched. A `Content-Length` a caller lied about
-        // is not a problem here: what this rules out is the honest oversized
-        // body, and Workers caps the rest.
-        const declared = Number(request.headers.get('content-length') ?? '0')
-        if (!Number.isFinite(declared) || declared > MAX_BODY_BYTES) {
+        // Before the body is touched, and both halves matter. A request that
+        // declares no length at all is refused outright — see MAX_BODY_BYTES;
+        // that is the streamed body whose size cannot be known in advance. A
+        // `Content-Length` a caller lied *downward* about is not a problem
+        // here: what the second check rules out is the honest oversized body,
+        // and Workers caps the rest.
+        //
+        // 411 rather than 413 for the first, because nothing about that request
+        // is too large — it simply never said, and `Length Required` is exactly
+        // the answer HTTP defines for refusing it on those grounds.
+        const declared = declaredLength(request)
+        if (declared === null) {
+          return allow(origin, { error: 'That request must declare its length.' }, 411)
+        }
+        if (declared > MAX_BODY_BYTES) {
           return allow(origin, { error: 'That request was too large.' }, 413)
         }
 

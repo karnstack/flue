@@ -18,24 +18,34 @@
 //      next dial. That is the revocation path, and the tests below are what
 //      say it did not get looser on the way through a second entry point.
 //
-//   2. **It has its own rate-limit bucket.** `openSession` counts against
-//      `open-session:user` — 30 in fifteen minutes, a cap sized for a human
-//      clicking a button. A reconnect is not a human: FlueClient's backoff
-//      tops out at ten seconds, so one tab in a bad hour can legitimately ask
-//      for dozens. Sharing the bucket would mean a flaky network locking the
-//      account out of opening *new* sessions, and a tighter cap on reconnects
-//      than the reconnect loop itself produces. Two buckets, two numbers.
+//   2. **It has its own rate-limit buckets, and they are per machine.**
+//      `openSession` counts against `open-session:user` — 30 in fifteen
+//      minutes, a cap sized for a human clicking a button. A reconnect is not a
+//      human: FlueClient's backoff tops out at ten seconds, so one tab in a bad
+//      hour can legitimately ask for dozens. Sharing the bucket would mean a
+//      flaky network locking the account out of opening *new* sessions, and a
+//      tighter cap on reconnects than the reconnect loop itself produces.
+//      And the reconnect bucket is keyed by (account, machine) rather than by
+//      account, because a tab pointed at a machine that is asleep or revoked
+//      loops forever — on one shared bucket that dead tab spends the account's
+//      whole budget and 429s every session the person is actually watching.
+//      An account-wide ceiling sits above it, far enough up that only a caller
+//      inventing machines can reach it.
 //
 // The pool isolates storage per test *file*, not per test: every test mints its
 // own user and device, and nothing may assume an empty table.
 import { env } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 import { db } from '../src/db/client'
-import { devices, users } from '../src/db/schema'
+import { devices, rateLimits, users } from '../src/db/schema'
 import { base64url, randomToken, sha256Hex, verifyChannelToken } from '../src/lib/tokens'
 import { CLIENT_TOKEN_TTL_S } from '../src/server/channel-token'
 import { openSession } from '../src/server/devices'
-import { TOKENS_REFRESHED_PER_USER, refreshClientToken } from '../src/server/refresh-token'
+import {
+  TOKENS_REFRESHED_PER_DEVICE,
+  TOKENS_REFRESHED_PER_USER,
+  refreshClientToken,
+} from '../src/server/refresh-token'
 import { SESSION_COOKIE, createSession } from '../src/server/sessions'
 import { inRequest } from './request'
 
@@ -171,27 +181,35 @@ describe('refreshClientToken', () => {
 })
 
 describe('the refresh rate limit', () => {
-  it('caps refreshes per account, and says so', async () => {
+  it('caps refreshes per machine, and says so', async () => {
     const user = await makeUser()
     const device = await makeDevice(user.id)
     const cookie = await signIn(user.id)
 
-    for (let i = 0; i < TOKENS_REFRESHED_PER_USER; i++) {
+    for (let i = 0; i < TOKENS_REFRESHED_PER_DEVICE; i++) {
       expect((await refresh(device.id, cookie)).token).toBeTruthy()
     }
     await expect(refresh(device.id, cookie)).rejects.toThrow(/too many/i)
   })
 
-  it('is the account’s budget, not the machine’s', async () => {
-    // Named by the session's user, never by the device the caller asked for,
-    // so a second machine cannot be used to buy a second allowance.
+  it('lets one machine’s dead tab starve only itself', async () => {
+    // The bug this bucket shape exists to prevent, and it is an availability
+    // bug rather than a security one. A tab pointed at a machine that is
+    // asleep, offline or revoked reconnect-loops on FlueClient's 5–10s backoff
+    // — 90–180 refreshes per fifteen minutes — and `withinLimit` counts the
+    // refused calls too. On one account-wide bucket a handful of those dead
+    // tabs spend the whole budget and every *healthy* session on the account
+    // is answered 429 at its next reconnect: a machine nobody is watching
+    // takes down the machine somebody is.
     const user = await makeUser()
-    const a = await makeDevice(user.id)
-    const b = await makeDevice(user.id)
+    const dead = await makeDevice(user.id)
+    const healthy = await makeDevice(user.id)
     const cookie = await signIn(user.id)
 
-    for (let i = 0; i < TOKENS_REFRESHED_PER_USER; i++) await refresh(a.id, cookie)
-    await expect(refresh(b.id, cookie)).rejects.toThrow(/too many/i)
+    for (let i = 0; i < TOKENS_REFRESHED_PER_DEVICE; i++) await refresh(dead.id, cookie)
+    await expect(refresh(dead.id, cookie)).rejects.toThrow(/too many/i)
+
+    expect((await refresh(healthy.id, cookie)).token).toBeTruthy()
   })
 
   it('does not spend another account’s allowance', async () => {
@@ -201,9 +219,42 @@ describe('the refresh rate limit', () => {
     const mine = await makeDevice(quiet.id)
 
     const heavyCookie = await signIn(heavy.id)
-    for (let i = 0; i < TOKENS_REFRESHED_PER_USER; i++) await refresh(theirs.id, heavyCookie)
+    for (let i = 0; i < TOKENS_REFRESHED_PER_DEVICE; i++) await refresh(theirs.id, heavyCookie)
 
     expect((await refresh(mine.id, await signIn(quiet.id))).token).toBeTruthy()
+  })
+
+  it('still holds an account-wide ceiling above the per-machine cap', async () => {
+    // The per-machine bucket bounds a reconnect loop; it does not bound a
+    // *caller*, who can name a new machine per request and buy a fresh one
+    // each time. The ceiling is what keeps a stolen session cookie from being
+    // an unbounded token faucet (and an unbounded supply of counter rows).
+    //
+    // Spent by seeding the counter rather than by making six thousand calls:
+    // the key is `sha256(bucket:subject)` (server/ratelimit.ts), so writing the
+    // row directly pins the bucket name *and* the subject shape — the property
+    // under test is that the ceiling is named by the user and by nothing else.
+    // A seed under the wrong name would leave the ceiling unspent and this
+    // test would fail with a token in its hand.
+    const user = await makeUser()
+    const device = await makeDevice(user.id)
+    const cookie = await signIn(user.id)
+
+    await db()
+      .insert(rateLimits)
+      .values({
+        key: await sha256Hex(`refresh-token:user:${user.id}`),
+        windowStart: now(),
+        count: TOKENS_REFRESHED_PER_USER,
+      })
+
+    await expect(refresh(device.id, cookie)).rejects.toThrow(/too many/i)
+  })
+
+  it('is not the machine’s cap in disguise', async () => {
+    // Two numbers, and the ceiling has to be the larger one or the per-machine
+    // bucket would never be the thing that fires.
+    expect(TOKENS_REFRESHED_PER_USER).toBeGreaterThan(TOKENS_REFRESHED_PER_DEVICE)
   })
 
   it('is a different bucket from opening a session', async () => {
@@ -216,7 +267,7 @@ describe('the refresh rate limit', () => {
     const device = await makeDevice(user.id)
     const cookie = await signIn(user.id)
 
-    for (let i = 0; i < TOKENS_REFRESHED_PER_USER; i++) await refresh(device.id, cookie)
+    for (let i = 0; i < TOKENS_REFRESHED_PER_DEVICE; i++) await refresh(device.id, cookie)
     await expect(refresh(device.id, cookie)).rejects.toThrow(/too many/i)
 
     // Refreshes are spent; opening a session still works.

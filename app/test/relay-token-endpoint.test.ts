@@ -304,6 +304,47 @@ describe('POST /api/relay-token', () => {
     expect((await res.json()) as unknown).not.toHaveProperty('token')
   })
 
+  it('refuses a body whose length it was never told', async () => {
+    // The bound above is read off `Content-Length`. A *missing* header used to
+    // read as zero, which passed the check — and the client that omits one is
+    // precisely the client the bound exists for: a browser always declares the
+    // length of a form body, so anything sending `Transfer-Encoding: chunked`
+    // here is not a browser. Streaming the body is how that request is spelled,
+    // and the answer has to come before `formData()` rather than after it.
+    const user = await makeUser()
+    const deviceId = await makeDevice(user.id)
+    const payload = new TextEncoder().encode(`deviceId=${deviceId}&pad=${'a'.repeat(200_000)}`)
+
+    const res = await SELF.fetch(`${ORIGIN}${RELAY_TOKEN_PATH}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        origin: RELAY_ORIGIN,
+        cookie: await signIn(user.id),
+        'cf-connecting-ip': freshIp(),
+      },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(payload)
+          controller.close()
+        },
+      }),
+      // Required for a streamed request body; without it the runtime refuses to
+      // send one at all.
+      duplex: 'half',
+      redirect: 'manual',
+    } as RequestInit)
+
+    // 411 rather than 413: nothing here is too large, the request simply never
+    // said how large it is, and that is the one status HTTP has for it.
+    //
+    // workerd logs `disconnected: read end of pipe was aborted` while this
+    // runs. That is not a failure — it is the runtime saying the handler
+    // answered without draining the stream, which is the property under test.
+    expect(res.status).toBe(411)
+    expect((await res.json()) as unknown).not.toHaveProperty('token')
+  })
+
   it('refuses a GET, whatever it carries', async () => {
     // A credential-minting endpoint that answered a GET would be one an
     // <img src> could reach.

@@ -65,7 +65,7 @@ import { currentUser } from './sessions'
 export const RELAY_TOKEN_PATH = '/api/relay-token'
 
 /**
- * Channel tokens one account may re-mint per window.
+ * Channel tokens one account may re-mint **for one machine** per window.
  *
  * A separate bucket from `open-session:user`, and the separation is the point.
  * That one is sized for a person clicking "open a session": thirty in fifteen
@@ -74,21 +74,49 @@ export const RELAY_TOKEN_PATH = '/api/relay-token'
  * clicks strand every open tab at its next reconnect. (Task 10's rule: a new
  * cap gets a new bucket, never a borrowed one.)
  *
+ * **Per machine rather than per account, and that is an availability
+ * decision.** A refresh loop is not evenly distributed across an account's
+ * machines: a tab pointed at a laptop that is shut, asleep, off the network or
+ * revoked reconnects forever and gets nowhere, and `withinLimit` counts the
+ * refused calls too (deliberately — see ratelimit.ts). On one account-wide
+ * bucket, a few tabs nobody is looking at spend the whole budget and then hold
+ * the account over the line for the rest of the window — so the *healthy*
+ * session on the machine the person is actually using is answered 429 at its
+ * next reconnect, for a reason that has nothing to do with it. Keyed by
+ * (account, machine), a dead tab starves only its own machine.
+ *
  * **The number is arithmetic, not a guess, and the arithmetic has to have
  * slack in it.** FlueClient's backoff is capped at 10s with equal jitter, so a
  * tab reconnecting flat out asks every 5–10s: 90–180 per fifteen minutes, worst
- * case 180. And `withinLimit` counts refused calls too (deliberately — see
- * ratelimit.ts), so a cap a legitimate loop can *reach* is a cap it then holds
- * itself over for the rest of the fixed window: not a slowdown, a total outage
- * for that account until the window rolls. So this has to sit above the
- * worst case for as many tabs as a person plausibly has open. 600 is three of
+ * case 180. A cap a legitimate loop can *reach* is a cap it then holds itself
+ * over for the rest of the fixed window: not a slowdown, a total outage for
+ * that machine until the window rolls. So this sits above the worst case for as
+ * many tabs as a person plausibly has open **on one machine** — 600 is three of
  * them at full tilt.
- *
- * What it still bounds is what a stolen session cookie is worth: each token is
- * one device and sixty seconds, and this is the ceiling on how many of them an
- * eight-hour cookie can buy — 600 a window rather than unbounded.
  */
-export const TOKENS_REFRESHED_PER_USER = 600
+export const TOKENS_REFRESHED_PER_DEVICE = 600
+
+/**
+ * The account-wide ceiling those per-machine budgets sit under.
+ *
+ * The per-machine bucket bounds a *loop*; it does not bound a *caller*, who
+ * names the machine and can therefore name a new one on every request and buy a
+ * fresh 600 each time. Without a ceiling that is an unbounded number of mint
+ * attempts, an unbounded number of counter rows, and — for the machines the
+ * caller does own — an unbounded supply of bearer credentials from one stolen
+ * session cookie. So the ceiling is what bounds what that cookie is worth.
+ *
+ * Ten times the per-machine cap, which is thirty-three tabs all reconnecting
+ * flat out at once (180 a window each). Well above anyone's real fleet, well
+ * below unbounded — and the coupling it does leave between an account's
+ * machines is written down in docs/FOLLOW-UPS.md rather than left to be
+ * rediscovered.
+ *
+ * Counted *after* the per-machine bucket and only when that one passed, so a
+ * dead tab that has already exhausted its own machine's budget stops spending
+ * the account's: it is refused on its own bucket and never reaches this one.
+ */
+export const TOKENS_REFRESHED_PER_USER = TOKENS_REFRESHED_PER_DEVICE * 10
 
 /**
  * The window that cap is measured over.
@@ -99,6 +127,9 @@ export const TOKENS_REFRESHED_PER_USER = 600
  * reset (`withinLimit` refuses one outright).
  */
 const REFRESH_WINDOW_S = LONGEST_WINDOW_S
+
+/** What either cap says. See the two `withinLimit` calls for why it is one. */
+const TOO_MANY_REFRESHES = 'Too many reconnections just now. Wait a few minutes and try again.'
 
 /**
  * A refusal with the status a browser should be told, and a message written to
@@ -172,18 +203,38 @@ export async function refreshClientToken(deviceId: string): Promise<{ token: str
   // Before the mint, exactly as `openSession` counts before its own: what is
   // handed out below is a bearer credential the relay accepts *offline*, so
   // this function is the only thing standing between a session cookie and an
-  // unbounded supply of them. Keyed by `user.id` — resolved from the session,
-  // never taken from the caller — so naming a different machine buys no second
-  // allowance and one account cannot spend another's.
-  const withinCap = await withinLimit(
+  // unbounded supply of them.
+  //
+  // Two counters, in this order, and the order is what keeps the first one's
+  // promise. The per-machine budget is the one a reconnect loop spends, and it
+  // is checked first so a tab that has already exhausted its own machine's
+  // share is refused *there* and never touches the account's. The ceiling
+  // underneath it is what a caller inventing machine names runs into.
+  //
+  // Both subjects start with `user.id` — resolved from the session, never taken
+  // from the caller — so one account cannot spend another's. `deviceId` is the
+  // caller's string, and it is safe to concatenate because a user id is a UUID:
+  // fixed length and no colon in it, so `<uuid>:<deviceId>` splits one way and
+  // no two pairs can be spelled the same.
+  //
+  // One sentence for both, on purpose: which of the two caps a caller hit is a
+  // fact about the account's other machines, and the tab's answer to either is
+  // the same — back off and try again.
+  const withinDeviceCap = await withinLimit(
+    'refresh-token:device',
+    `${user.id}:${deviceId}`,
+    TOKENS_REFRESHED_PER_DEVICE,
+    REFRESH_WINDOW_S,
+  )
+  if (!withinDeviceCap) throw new RefreshRefused(429, TOO_MANY_REFRESHES)
+
+  const withinAccountCap = await withinLimit(
     'refresh-token:user',
     user.id,
     TOKENS_REFRESHED_PER_USER,
     REFRESH_WINDOW_S,
   )
-  if (!withinCap) {
-    throw new RefreshRefused(429, 'Too many reconnections just now. Wait a few minutes and try again.')
-  }
+  if (!withinAccountCap) throw new RefreshRefused(429, TOO_MANY_REFRESHES)
 
   try {
     const { token } = await mintClientToken(deviceId)
