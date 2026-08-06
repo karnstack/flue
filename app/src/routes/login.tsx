@@ -14,6 +14,23 @@ import { requestCode, submitCode } from '../server/login'
 import { currentUser } from '../server/sessions'
 
 /**
+ * The longest thing each field is allowed to be.
+ *
+ * 320 is the RFC 3696 maximum for an address (64 local + @ + 255 domain), so
+ * nothing rejected here was ever deliverable. The other two are generous
+ * bounds on strings this app mints itself: eight digits and an invite code.
+ *
+ * Length is checked because these handlers are unauthenticated and every field
+ * becomes work — an HMAC over the value, then a bound parameter in a D1 query.
+ * A megabyte "address" is not an address; it is a way to make the server spend
+ * a megabyte's worth of hashing per request, for free, before any cap has been
+ * consulted.
+ */
+const MAX_EMAIL = 320
+const MAX_INVITE = 128
+const MAX_CODE = 32
+
+/**
  * Read one field out of whatever the request carried.
  *
  * Two shapes reach here: the JSON payload the client RPC sends, and a FormData
@@ -21,25 +38,31 @@ import { currentUser } from '../server/sessions'
  * urlencoded` for server functions). Anything that is not a string — a number,
  * an object, an array of two values from a repeated form field — becomes the
  * empty string rather than travelling on as a query parameter of unknown type.
+ *
+ * So does anything longer than `max`. Rejected outright rather than truncated:
+ * the first 320 bytes of a megabyte are not what anyone typed, and silently
+ * turning one string into a different one is how a value ends up matching
+ * something it was never meant to. Empty is a value every path below already
+ * handles — it belongs to no account and holds no invite.
  */
-function field(data: unknown, name: string): string {
-  if (data instanceof FormData) {
-    const value = data.get(name)
-    return typeof value === 'string' ? value : ''
-  }
-  const value = (data as Record<string, unknown> | null | undefined)?.[name]
-  return typeof value === 'string' ? value : ''
+function field(data: unknown, name: string, max: number): string {
+  const raw =
+    data instanceof FormData
+      ? data.get(name)
+      : (data as Record<string, unknown> | null | undefined)?.[name]
+  if (typeof raw !== 'string' || raw.length > max) return ''
+  return raw
 }
 
 const readRequestCode = (data: unknown): RequestCodeInput => ({
-  email: field(data, 'email'),
-  invite: field(data, 'invite'),
+  email: field(data, 'email', MAX_EMAIL),
+  invite: field(data, 'invite', MAX_INVITE),
 })
 
 const readSubmitCode = (data: unknown): SubmitCodeInput => ({
-  email: field(data, 'email'),
-  code: field(data, 'code'),
-  invite: field(data, 'invite'),
+  email: field(data, 'email', MAX_EMAIL),
+  code: field(data, 'code', MAX_CODE),
+  invite: field(data, 'invite', MAX_INVITE),
 })
 
 /** POST: send a login code, if the address is allowed one. Always `{ok:true}`. */

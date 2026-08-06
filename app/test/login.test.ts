@@ -29,6 +29,7 @@ import {
   CODE_SENDS_PER_EMAIL,
   CODE_SENDS_PER_IP,
   CODE_SEND_WINDOW_S,
+  sweepRateLimits,
 } from '../src/server/ratelimit'
 import { inRequest } from './request'
 
@@ -141,6 +142,28 @@ function rowsForEmail(email: string) {
 
 function codeRows(email: string) {
   return db().select().from(loginCodes).where(eq(loginCodes.email, email))
+}
+
+/**
+ * The counter row for one bucket/subject, if there is one.
+ *
+ * The table stores a digest, not the address, so a test that wants to know
+ * whether a row was written has to compute the same digest the limiter does.
+ * Asserting on the specific row rather than on a row count keeps these tests
+ * independent of the opportunistic sweep, which may fire on any call.
+ */
+async function counterFor(bucket: string, subject: string) {
+  const key = await sha256Hex(`${bucket}:${subject}`)
+  return db().select().from(rateLimits).where(eq(rateLimits.key, key))
+}
+
+/** Age one counter past the end of its window — the same thing the clock does. */
+async function expire(bucket: string, subject: string) {
+  const key = await sha256Hex(`${bucket}:${subject}`)
+  await db()
+    .update(rateLimits)
+    .set({ windowStart: now() - CODE_SEND_WINDOW_S - 1 })
+    .where(eq(rateLimits.key, key))
 }
 
 describe('requestCode: who gets a code', () => {
@@ -310,6 +333,52 @@ describe('requestCode: rate limits', () => {
     expect((await ask({ email: stranger }, { ip: freshIp() })).sent).toEqual([])
   })
 
+  it('writes no per-address counter once the IP is over its cap', async () => {
+    // The row `withinLimit` writes is keyed by whatever string arrived in
+    // `email` and it is permanent until something sweeps it. If the per-IP cap
+    // only suppressed the *send*, an unauthenticated caller could mint one row
+    // per request, forever, at whatever rate it liked, by inventing a fresh
+    // address each time — the cap would bound the mail and not the table.
+    const ip = freshIp()
+    for (let i = 0; i < CODE_SENDS_PER_IP; i++) {
+      await ask({ email: freshEmail('warmup') }, { ip })
+    }
+
+    const target = freshEmail('after-the-cap')
+    const over = await ask({ email: target }, { ip })
+    expect(over.value).toEqual({ ok: true })
+    expect(over.sent).toEqual([])
+    // Nothing was written for the address, and nothing was read about it.
+    expect(await counterFor('login-code:email', target)).toEqual([])
+
+    // And the same address from an IP under its cap is counted as usual — the
+    // per-email cap still has to bite for a real user asking too often.
+    await ask({ email: target }, { ip: freshIp() })
+    expect(await counterFor('login-code:email', target)).toHaveLength(1)
+  })
+
+  it('answers the same for a gated and an ungated address from one IP under its cap', async () => {
+    // The enumeration rule, re-checked at the point the IP cap now branches on:
+    // the branch is decided by the caller's IP alone, so two addresses asked
+    // about from the same caller are indistinguishable — including in whether a
+    // counter row appeared for them.
+    const ip = freshIp()
+    const invited = freshEmail('one-ip-invited')
+    const stranger = freshEmail('one-ip-stranger')
+    await makeInvite(invited)
+
+    const gated = await ask({ email: invited }, { ip })
+    const ungated = await ask({ email: stranger }, { ip })
+
+    expect(gated.value).toEqual(ungated.value)
+    expect(Object.keys(gated.value)).toEqual(Object.keys(ungated.value))
+    expect(await counterFor('login-code:email', invited)).toHaveLength(1)
+    expect(await counterFor('login-code:email', stranger)).toHaveLength(1)
+    // The only difference is in a mailbox.
+    expect(gated.sent).toHaveLength(1)
+    expect(ungated.sent).toEqual([])
+  })
+
   it('starts again once the window has passed', async () => {
     // The other half of a cap: it has to let go. A counter that only ever goes
     // up is a permanent lockout for anyone who mistypes their address six
@@ -324,6 +393,41 @@ describe('requestCode: rate limits', () => {
       .set({ windowStart: sql`${rateLimits.windowStart} - ${CODE_SEND_WINDOW_S + 1}` })
 
     expect((await ask({ email: user.email })).sent).toHaveLength(1)
+  })
+})
+
+describe('rate_limits: the sweep', () => {
+  it('deletes a counter whose window is over, and keeps a live one', async () => {
+    const stale = freshEmail('stale')
+    const live = freshEmail('live')
+    await ask({ email: stale })
+    await ask({ email: live })
+    await expire('login-code:email', stale)
+
+    await sweepRateLimits()
+
+    expect(await counterFor('login-code:email', stale)).toEqual([])
+    // A row inside its window is a cap somebody is currently under. Deleting it
+    // would hand them a fresh five.
+    expect(await counterFor('login-code:email', live)).toHaveLength(1)
+  })
+
+  it('rides on requestCode, so the table collects itself with no cron', async () => {
+    // There is no scheduled handler in this application yet, and a table that
+    // only ever grows is the kind of thing that is fine until it is a page.
+    // The sweep is a coin flip on the same traffic that fills the table.
+    const stale = freshEmail('swept-by-traffic')
+    await ask({ email: stale })
+    await expire('login-code:email', stale)
+
+    const coin = vi.spyOn(Math, 'random').mockReturnValue(0)
+    try {
+      await ask({ email: freshEmail('passer-by') })
+    } finally {
+      coin.mockRestore()
+    }
+
+    expect(await counterFor('login-code:email', stale)).toEqual([])
   })
 })
 

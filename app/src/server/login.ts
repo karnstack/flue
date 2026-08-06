@@ -21,10 +21,11 @@
 // What is deliberately *not* claimed: constant time. The allowed branch writes
 // two rows and calls the Sender; the refused branch hashes and stops. The dummy
 // HMAC closes the crypto gap, and the rate-limit counters (which are written on
-// every call, allowed or not) put a database round trip on both sides, but a
-// determined attacker with a quiet network could still distinguish them
-// statistically. Closing that properly means sending on a queue so the response
-// leaves before the work does — a change for the day this has a real Sender.
+// every call from an IP that is under its cap, allowed or not) put a database
+// round trip on both sides, but a determined attacker with a quiet network
+// could still distinguish them statistically. Closing that properly means
+// sending on a queue so the response leaves before the work does — a change for
+// the day this has a real Sender.
 import { eq, sql } from 'drizzle-orm'
 import { db } from '../db/client'
 import { invites, users } from '../db/schema'
@@ -35,6 +36,7 @@ import {
   CODE_SENDS_PER_IP,
   CODE_SEND_WINDOW_S,
   clientIp,
+  maybeSweepRateLimits,
   withinLimit,
 } from './ratelimit'
 import { createSession, destroySession } from './sessions'
@@ -61,25 +63,45 @@ export async function requestCode(input: RequestCodeInput): Promise<{ ok: true }
   const address = normalizeEmail(input.email)
   const invite = input.invite?.trim() ?? ''
 
-  // Both counters, always, before any decision — an address that is over its
-  // cap is counted exactly like one that is not, and a stranger is counted
-  // exactly like a member. A limiter that only counted real sends would say
-  // out loud which addresses were real.
-  const withinEmailCap = await withinLimit(
-    'login-code:email',
-    address,
-    CODE_SENDS_PER_EMAIL,
-    CODE_SEND_WINDOW_S,
-  )
+  // The caller's own cap comes first, and alone. Everything below it writes a
+  // row keyed by whatever string arrived in `email`, so an unauthenticated
+  // caller sending a fresh random address each time would otherwise mint one
+  // permanent `rate_limits` row per request, at whatever rate it liked — a cap
+  // that only suppressed the *send* would leave the table itself as the
+  // unbounded resource. Over its cap, this request writes nothing and reads
+  // nothing: it is not counted against the address, and it does not ask the
+  // database about it.
+  //
+  // This costs nothing in enumeration terms, which is the only reason it is
+  // allowed to be an early return. The branch is decided by `clientIp()` —
+  // CF-Connecting-IP, which the edge writes and the caller cannot choose — and
+  // by nothing else. Two addresses from the same caller, one gated and one not,
+  // take exactly the same path here.
   const withinIpCap = await withinLimit(
     'login-code:ip',
     clientIp(),
     CODE_SENDS_PER_IP,
     CODE_SEND_WINDOW_S,
   )
+  if (!withinIpCap) {
+    await maybeSweepRateLimits()
+    return { ok: true }
+  }
+
+  // Under the IP cap, the per-email counter is written before any decision and
+  // whatever the decision turns out to be — an address that is over its cap is
+  // counted exactly like one that is not, and a stranger is counted exactly
+  // like a member. A limiter that only counted real sends would say out loud
+  // which addresses were real.
+  const withinEmailCap = await withinLimit(
+    'login-code:email',
+    address,
+    CODE_SENDS_PER_EMAIL,
+    CODE_SEND_WINDOW_S,
+  )
   const mayReceive = await addressMayReceiveCode(address, invite)
 
-  if (withinEmailCap && withinIpCap && mayReceive) {
+  if (withinEmailCap && mayReceive) {
     try {
       await issueLoginCode(address)
     } catch (err) {
@@ -104,6 +126,11 @@ export async function requestCode(input: RequestCodeInput): Promise<{ ok: true }
     await dummyIssueWork()
   }
 
+  // Both branches, and the capped one above: the rows this endpoint writes are
+  // the ones that need collecting, so the collection rides on the same traffic.
+  // The coin flip is independent of the address, so it is noise on the timing,
+  // not signal.
+  await maybeSweepRateLimits()
   return { ok: true }
 }
 

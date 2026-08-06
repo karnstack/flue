@@ -19,7 +19,8 @@ import { SELF, env } from 'cloudflare:test'
 import { eq } from 'drizzle-orm'
 import { describe, expect, it, vi } from 'vitest'
 import { db } from '../src/db/client'
-import { invites, users } from '../src/db/schema'
+import { invites, rateLimits, users } from '../src/db/schema'
+import { sha256Hex } from '../src/lib/tokens'
 import { issueLoginCode } from '../src/server/codes'
 import { SESSION_COOKIE } from '../src/server/sessions'
 
@@ -206,6 +207,21 @@ describe('signing in over HTTP', () => {
       redirect: 'manual',
     })
     expect(forged.status).toBe(200)
+  })
+
+  it('does no work for an oversized address', async () => {
+    // Every field on this unauthenticated endpoint becomes work — an HMAC over
+    // the value, then a bound parameter in a D1 query, and a permanent counter
+    // row keyed by its digest. 320 is the longest an address can be and still
+    // be deliverable, so anything past it is not an address; the validator
+    // turns it into the empty string before the handler sees it. Without the
+    // bound, every distinct megabyte someone invents is another row.
+    const giant = `${'a'.repeat(400)}@example.com`
+    const res = await callServerFn('requestCodeFn', { email: giant })
+    expect(res.status).toBe(200) // the same answer as everything else
+
+    const key = await sha256Hex(`login-code:email:${giant}`)
+    expect(await db().select().from(rateLimits).where(eq(rateLimits.key, key))).toEqual([])
   })
 
   it('refuses a wrong code without creating anything', async () => {

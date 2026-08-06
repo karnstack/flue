@@ -14,7 +14,7 @@
 // the limit across two adjacent windows) is not worth a second table and a
 // scan. What matters is that the long-run rate is bounded.
 import { getRequestHeaders, getRequestIP } from '@tanstack/react-start/server'
-import { sql } from 'drizzle-orm'
+import { lt, sql } from 'drizzle-orm'
 import { db } from '../db/client'
 import { rateLimits } from '../db/schema'
 import { sha256Hex } from '../lib/tokens'
@@ -35,6 +35,28 @@ export const CODE_SENDS_PER_EMAIL = 5
  * single host stops after twenty.
  */
 export const CODE_SENDS_PER_IP = 20
+
+/**
+ * The longest window any counter in this file measures over. The sweep below
+ * deletes rows older than this, so it has to be the maximum of every window —
+ * a new, longer bucket must raise it or its counters will be swept mid-window
+ * and silently reset.
+ */
+export const LONGEST_WINDOW_S = CODE_SEND_WINDOW_S
+
+/**
+ * Roughly one call to `maybeSweepRateLimits` in this many actually sweeps.
+ *
+ * There is no cron in this application yet, so the sweep rides on the traffic
+ * it is cleaning up after: the more the table is written, the more often it is
+ * swept, and a table nobody is writing to needs no sweeping. 100 is chosen so
+ * the extra DELETE is lost in the noise of a login (it is a single ranged
+ * delete on an integer column, and only the rows it removes are ever touched)
+ * while still firing many times an hour under any load worth worrying about.
+ * When Task 10's scheduled handler exists it should call `sweepRateLimits`
+ * directly and this can go.
+ */
+export const SWEEP_ONE_IN = 100
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 
@@ -105,4 +127,35 @@ export async function withinLimit(
   // login code, failing open costs the cap.
   const count = rows[0]?.count
   return count !== undefined && count <= limit
+}
+
+/**
+ * Delete every counter whose window ended before `now - LONGEST_WINDOW_S`.
+ *
+ * The table is keyed by subject, and a subject is any address anyone ever
+ * typed into the login form — so without this it grows by one permanent row per
+ * distinct string an unauthenticated caller can invent, forever, and the only
+ * thing bounding it is how long a D1 database is allowed to be. Nothing reads a
+ * stale row incorrectly (`withinLimit` rolls an expired window over), so a
+ * deleted row and an expired one are the same row as far as the cap is
+ * concerned: this is storage, and it can run at any time from anywhere.
+ */
+export async function sweepRateLimits(now: number = nowSeconds()): Promise<void> {
+  await db()
+    .delete(rateLimits)
+    .where(lt(rateLimits.windowStart, now - LONGEST_WINDOW_S))
+}
+
+/**
+ * Sweep on roughly one call in `SWEEP_ONE_IN`.
+ *
+ * Deliberately random rather than "every Nth request": there is no shared
+ * counter to keep across isolates, and a coin flip needs none. Callers `await`
+ * it — a floating promise on Workers is a promise the runtime is entitled to
+ * cancel when the response is sent, which would make the sweep a coin flip on
+ * top of a coin flip.
+ */
+export async function maybeSweepRateLimits(): Promise<void> {
+  if (Math.random() * SWEEP_ONE_IN >= 1) return
+  await sweepRateLimits()
 }
