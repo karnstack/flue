@@ -210,9 +210,14 @@ describe('submitCode: the per-IP cap', () => {
     const code = await liveCodeFor(user.email)
     expect(await submit({ email: user.email, code }, ip)).toEqual({ ok: false })
 
-    // The load-bearing half: that submission never reached the verifier, so it
-    // spent none of the code's five attempts and burned nothing. The same code,
-    // from a caller under its own cap, still signs in.
+    // The load-bearing half: that submission never reached the verifier. The
+    // counter on the row is untouched — so a flood from one address cannot burn
+    // a real user's code out from under them, which is what a cap that ran
+    // *after* the verification would do.
+    const [row] = await db().select().from(loginCodes).where(eq(loginCodes.email, user.email))
+    expect(row?.attempts).toBe(0)
+
+    // And the code itself still works, from a caller under its own cap.
     expect(await submit({ email: user.email, code }, freshIp())).toEqual({ ok: true })
   })
 
