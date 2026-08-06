@@ -47,8 +47,15 @@ type Close struct {
 }
 
 // Pair carries an HTTP POST /api/pair the Worker received. Body is the client's
-// JSON verbatim — the daemon's pairing handler parses these bytes itself, so
-// the relay must not reshape them. ID correlates the answer.
+// JSON as it arrived — the daemon's pairing handler parses these bytes itself,
+// so the relay must not reshape them. Decoding preserves them exactly;
+// re-encoding a Pair in Go escapes <, > and & to their \u00xx forms, which
+// every JSON parser reads back identically but which is not byte-for-byte what
+// a Worker's JSON.stringify produced. Only Go re-encodes a Pair, and only in
+// tests: on the wire this message is written once, by the Worker.
+//
+// ID correlates the answer, and is the relay's own: it means nothing across a
+// reconnect.
 //
 // relay -> daemon.
 type Pair struct {
@@ -60,6 +67,11 @@ type Pair struct {
 
 // PairResult answers a Pair with the HTTP status and response body the Worker
 // should write back to the browser.
+//
+// Body must be a JSON value: the relay writes it as an application/json
+// response, and EncodeControl refuses anything else rather than shipping a
+// malformed frame. A refusal therefore travels as JSON — {"error":"pairing
+// refused"} — not as the bare text the daemon's own HTTP handler writes.
 //
 // daemon -> relay.
 type PairResult struct {
@@ -78,17 +90,35 @@ type PairResult struct {
 // round-tripping through a map, which keeps the field order the declarations
 // give — "type" first — so the bytes match what the TypeScript side writes by
 // hand and the shared fixtures can pin them.
+//
+// A nil pointer is an error rather than a panic: this runs on the daemon's
+// relay writer, where a nil message is a bug to report, not one to crash on.
 func EncodeControl(msg any) ([]byte, error) {
 	switch m := msg.(type) {
 	case *Open:
+		if m == nil {
+			return nil, errNil(msg)
+		}
 		return EncodeControl(*m)
 	case *Closed:
+		if m == nil {
+			return nil, errNil(msg)
+		}
 		return EncodeControl(*m)
 	case *Close:
+		if m == nil {
+			return nil, errNil(msg)
+		}
 		return EncodeControl(*m)
 	case *Pair:
+		if m == nil {
+			return nil, errNil(msg)
+		}
 		return EncodeControl(*m)
 	case *PairResult:
+		if m == nil {
+			return nil, errNil(msg)
+		}
 		return EncodeControl(*m)
 	case Open:
 		m.Type = typeOpen
@@ -107,6 +137,12 @@ func EncodeControl(msg any) ([]byte, error) {
 		return json.Marshal(m)
 	}
 	return nil, fmt.Errorf("relaywire: %T is not a control message", msg)
+}
+
+// errNil names the message type that arrived nil, which is more use to whoever
+// has to find the call site than "not a control message" would be.
+func errNil(msg any) error {
+	return fmt.Errorf("relaywire: nil %T", msg)
 }
 
 // DecodeControl parses a control message into its concrete type, returning one

@@ -263,71 +263,33 @@ func TestPairBodyIsVerbatim(t *testing.T) {
 	}
 }
 
-// TestFramesAgainstDisk pins the framing the way testdata/noise/ik.json pins
-// the handshake: the committed base64 is the contract the Worker and the web
-// client are tested against, so a change to either direction fails here first.
-func TestFramesAgainstDisk(t *testing.T) {
-	raw, err := os.ReadFile(fixturePath)
-	if err != nil {
-		t.Fatalf("read fixtures (generate with -update): %v", err)
+// A refusal body is JSON or it is nothing: PairResult.Body is written straight
+// into an HTTP response by the Worker, so the encoder must reject a body that
+// is not a JSON value rather than shipping a frame no parser can read. The
+// daemon's own /api/pair writes the bare text "pairing refused", so the relay
+// path has to wrap it — this is where that gets caught.
+func TestEncodeControlRejectsNonJSONBody(t *testing.T) {
+	if _, err := EncodeControl(&PairResult{ID: 1, Status: 403, Body: json.RawMessage("pairing refused")}); err == nil {
+		t.Fatal("EncodeControl with a non-JSON body err = nil, want an error")
 	}
-	var f fixtureFile
-	if err := json.Unmarshal(raw, &f); err != nil {
-		t.Fatal(err)
+	if _, err := EncodeControl(&PairResult{ID: 1, Status: 403, Body: json.RawMessage(`{"error":"pairing refused"}`)}); err != nil {
+		t.Fatalf("EncodeControl with a JSON body: %v", err)
 	}
-	if len(f.ChannelFrames) == 0 || len(f.PlainFrames) == 0 {
-		t.Fatal("fixture file has no cases")
-	}
-	unb64 := func(s string) []byte {
-		b, err := base64.StdEncoding.DecodeString(s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
+}
 
-	for _, c := range f.ChannelFrames {
-		t.Run("channel/"+c.Name, func(t *testing.T) {
-			payload, encoded := unb64(c.PayloadB64), unb64(c.EncodedB64)
-			if got := Encode(Frame{Channel: c.Channel, Payload: payload}); !bytes.Equal(got, encoded) {
-				t.Fatalf("Encode = % x, want % x", got, encoded)
-			}
-			got, err := Decode(encoded)
-			if err != nil {
-				t.Fatalf("Decode: %v", err)
-			}
-			if got.Channel != c.Channel {
-				t.Fatalf("channel = %d, want %d", got.Channel, c.Channel)
-			}
-			if !bytes.Equal(got.Payload, payload) {
-				t.Fatalf("payload = % x, want % x", got.Payload, payload)
-			}
-		})
-	}
-
-	for _, c := range f.PlainFrames {
-		t.Run("plain/"+c.Name, func(t *testing.T) {
-			data, encoded := unb64(c.DataB64), unb64(c.EncodedB64)
-			if got := EncodePlain(c.Text, data); !bytes.Equal(got, encoded) {
-				t.Fatalf("EncodePlain = % x, want % x", got, encoded)
-			}
-			text, gotData, err := DecodePlain(encoded)
-			if err != nil {
-				t.Fatalf("DecodePlain: %v", err)
-			}
-			if text != c.Text {
-				t.Fatalf("text = %v, want %v", text, c.Text)
-			}
-			if !bytes.Equal(gotData, data) {
-				t.Fatalf("data = % x, want % x", gotData, data)
-			}
-		})
+// A nil message is a caller's bug, and one that would otherwise panic on the
+// daemon's relay writer.
+func TestEncodeControlRejectsNilPointer(t *testing.T) {
+	if _, err := EncodeControl((*Close)(nil)); err == nil {
+		t.Fatal("EncodeControl of a nil *Close err = nil, want an error")
 	}
 }
 
 // TestGenerateFixtures writes testdata/relay/frames.json from this package.
 // The committed file is the artifact; this only regenerates it, and every case
-// it emits is asserted by TestFramesAgainstDisk on every ordinary run.
+// it emits is asserted by TestFramesAgainstDisk on every ordinary run. It is
+// declared before that test so a single `-update` run regenerates and then
+// verifies, the order testdata/noise/ik.json's generator uses.
 func TestGenerateFixtures(t *testing.T) {
 	if !*update {
 		t.Skip("run with -update to regenerate")
@@ -345,14 +307,17 @@ func TestGenerateFixtures(t *testing.T) {
 		channel uint32
 		payload []byte
 	}{
-		// Channel 0: the control channel, carrying the two directions of the
-		// JSON protocol a Worker has to produce and parse.
+		// Channel 0: the control channel, carrying every message of the JSON
+		// protocol a Worker has to produce and parse.
 		{"control", ControlChannel, mustControl(&Open{Channel: 1, Origin: "https://r.example"})},
 		{"control-closed", ControlChannel, mustControl(&Closed{Channel: 1})},
+		{"control-close", ControlChannel, mustControl(&Close{Channel: 1})},
 		{"control-pair", ControlChannel, mustControl(&Pair{ID: 9, Origin: "https://r.example",
 			Body: json.RawMessage(`{"token":"Zm91cnRlZW4tY2hhcnM","publicKey":"3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=","label":"iPhone"}`)})},
 		{"control-pair-result", ControlChannel, mustControl(&PairResult{ID: 9, Status: 200,
 			Body: json.RawMessage(`{"deviceId":"d1b2c3d4e5f60718","daemonPub":"3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k="}`)})},
+		{"control-pair-result-refused", ControlChannel, mustControl(&PairResult{ID: 10, Status: 403,
+			Body: json.RawMessage(`{"error":"pairing refused"}`)})},
 		// Channels >= 1 carry opaque Noise bytes.
 		{"channel-7-bytes", 7, []byte{0xde, 0xad, 0xbe, 0xef}},
 		{"channel-1-empty", 1, nil},
@@ -402,4 +367,89 @@ func TestGenerateFixtures(t *testing.T) {
 	if err := os.WriteFile(fixturePath, append(buf, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestFramesAgainstDisk pins the framing the way testdata/noise/ik.json pins
+// the handshake: the committed base64 is the contract the Worker and the web
+// client are tested against, so a change to either direction fails here first.
+func TestFramesAgainstDisk(t *testing.T) {
+	raw, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read fixtures (generate with -update): %v", err)
+	}
+	var f fixtureFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.ChannelFrames) == 0 || len(f.PlainFrames) == 0 {
+		t.Fatal("fixture file has no cases")
+	}
+
+	for _, c := range f.ChannelFrames {
+		t.Run("channel/"+c.Name, func(t *testing.T) {
+			payload, encoded := unb64(t, c.PayloadB64), unb64(t, c.EncodedB64)
+			if got := Encode(Frame{Channel: c.Channel, Payload: payload}); !bytes.Equal(got, encoded) {
+				t.Fatalf("Encode = % x, want % x", got, encoded)
+			}
+			got, err := Decode(encoded)
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if got.Channel != c.Channel {
+				t.Fatalf("channel = %d, want %d", got.Channel, c.Channel)
+			}
+			if !bytes.Equal(got.Payload, payload) {
+				t.Fatalf("payload = % x, want % x", got.Payload, payload)
+			}
+
+			// Channel 0 payloads are control messages, and the fixture pins
+			// their bytes for the Worker. Re-deriving them here is what makes
+			// a renamed json tag, a reordered field or a changed discriminator
+			// fail in Go rather than only in the TypeScript suite.
+			if c.Channel != ControlChannel {
+				return
+			}
+			msg, err := DecodeControl(payload)
+			if err != nil {
+				t.Fatalf("DecodeControl: %v", err)
+			}
+			reenc, err := EncodeControl(msg)
+			if err != nil {
+				t.Fatalf("EncodeControl: %v", err)
+			}
+			if !bytes.Equal(reenc, payload) {
+				t.Fatalf("re-encoded control payload = %s, want %s", reenc, payload)
+			}
+		})
+	}
+
+	for _, c := range f.PlainFrames {
+		t.Run("plain/"+c.Name, func(t *testing.T) {
+			data, encoded := unb64(t, c.DataB64), unb64(t, c.EncodedB64)
+			if got := EncodePlain(c.Text, data); !bytes.Equal(got, encoded) {
+				t.Fatalf("EncodePlain = % x, want % x", got, encoded)
+			}
+			text, gotData, err := DecodePlain(encoded)
+			if err != nil {
+				t.Fatalf("DecodePlain: %v", err)
+			}
+			if text != c.Text {
+				t.Fatalf("text = %v, want %v", text, c.Text)
+			}
+			if !bytes.Equal(gotData, data) {
+				t.Fatalf("data = % x, want % x", gotData, data)
+			}
+		})
+	}
+}
+
+// unb64 takes the *testing.T of the test that is running, so a corrupt fixture
+// fails the subtest that read it rather than its parent.
+func unb64(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatalf("bad base64 %q: %v", s, err)
+	}
+	return b
 }

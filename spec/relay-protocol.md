@@ -3,7 +3,8 @@
 The relay is a Cloudflare Worker (one Durable Object per daemon) that bridges a
 daemon's single outbound socket to any number of browser tabs. It forwards bytes
 and nothing else: it holds no Noise keys, reads no terminal traffic, and cannot
-tell one keystroke from another.
+tell one keystroke from another. What it *does* see — the control channel is
+cleartext — is set out under "What the relay sees" below.
 
 This document defines the two sockets that meet at the relay and the framing on
 each. It does **not** redefine the wire protocol — `spec/protocol.md` is
@@ -28,8 +29,8 @@ Three layers stack, outermost first:
 ## The daemon leg
 
 The daemon dials `wss://<relay>/daemon` **outbound** — nothing listens on the
-user's machine for the relay's sake — and every message on that socket is a
-**binary** WebSocket frame laid out as:
+user's machine for the relay's sake. Every **binary** WebSocket message on that
+socket is laid out as:
 
 ```
 [4 bytes channel, big-endian][payload]
@@ -37,6 +38,9 @@ user's machine for the relay's sake — and every message on that socket is a
 
 A frame that is exactly a header is well formed and carries an empty payload.
 A frame shorter than four bytes is a protocol error.
+
+The only **text** messages that ever cross this socket are the keepalives
+below; any other text message is a protocol error and closes the connection.
 
 Channel `0` is the control channel (below). Channels `1` and up each carry one
 browser's Noise session, opaque to the daemon's framing layer. The Durable
@@ -51,6 +55,11 @@ unwraps on the browser's behalf: it prefixes the header on the way to the
 daemon and strips it on the way back. A browser therefore sends bare handshake
 messages and bare ciphertexts, and the channel id never appears in client code
 above the relay adapter.
+
+These are **binary** messages too, and the same text rule applies: apart from
+the keepalives, a string message closes the socket with code `1002`. A client
+that base64s its ciphertext into a text frame is not speaking this protocol —
+send the bytes.
 
 ## The control channel (channel 0)
 
@@ -76,6 +85,17 @@ carries the HTTP status and the response body the Worker writes back, and `id`
 correlates the two: pairing is the one part of the ceremony that is an HTTP
 request rather than a WebSocket message (`spec/protocol.md`, Pairing), and the
 relay has to carry it without understanding it.
+
+`pairResult.body` is a **JSON value**, always — the Worker writes it as an
+`application/json` response. The daemon's local handler answers a refusal with
+the bare text `pairing refused`; over the relay the same refusal travels as
+`{"error":"pairing refused"}` with `status` 403.
+
+`pair.id` is assigned by the relay and means nothing outside one relay socket's
+lifetime: a daemon that reconnects must not answer a `pair` it read before the
+break, because the Worker has forgotten the HTTP request it belonged to. Ids
+stay within JavaScript's safe integer range (< 2^53) — the daemon parses them
+as `uint64`, but a Worker's `JSON.parse` would round anything larger.
 
 ## Channels 1 and up
 
@@ -138,6 +158,28 @@ unauthenticated `/client` does expose is denial of service, so the Durable
 Object bounds it directly: a cap on concurrent channels and a deadline on
 completing the handshake, after which the channel is closed.
 
+## What the relay sees
+
+Terminal traffic is Noise ciphertext and the relay has no key for it. Channel 0
+is **not** encrypted, and the honest list of what a relay operator can therefore
+observe is:
+
+- who is connected, when, and for how long;
+- channel ids, message counts and message sizes — enough for traffic analysis
+  of a session, not its content;
+- the whole pairing exchange: the single-use pairing token, the device's public
+  key, and the daemon's.
+
+Public-key material is public by design. The **token is not**: a hostile relay
+could spend a live one with a key of its own and register itself as a paired
+device, which is a real capability and not a theoretical one. Two things bound
+it — the token is single-use and lives two minutes (`spec/protocol.md`,
+Pairing) — and one thing does not: a relay that also serves the `/pair` page
+serves the JavaScript that reads the pinned key, so pinning is no defence
+against it (`docs/FOLLOW-UPS.md` §8). Pairing through a relay is a trust
+decision about that relay's operator. Pair over the daemon's own origin when
+you can.
+
 ## Conformance
 
 `testdata/relay/frames.json` pins both framings as base64, generated from
@@ -149,7 +191,10 @@ role `testdata/noise/ik.json` plays for the handshake and
   must encode `(channel, payload)` to exactly `encoded`, and decode `encoded`
   back to that pair. The cases include an empty payload and channel
   `4294967295`, which a decoder that shifts rather than reading an unsigned
-  32-bit integer gets wrong.
+  32-bit integer gets wrong. The channel-0 cases carry one of every control
+  message, so the JSON a Worker must parse and produce is pinned by the same
+  file (`internal/relaywire` re-derives those payloads from its own encoder on
+  every run, which is what catches a renamed field).
 - `plainFrames` — `{name, text, dataB64, encodedB64}`: the same contract for the
   kind byte, including empty data and multi-byte UTF-8.
 

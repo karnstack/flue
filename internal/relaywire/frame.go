@@ -66,7 +66,9 @@ func Encode(f Frame) []byte {
 }
 
 // Decode parses a framed message. The returned payload aliases b, so a caller
-// that retains it past the read buffer's lifetime must copy it.
+// that retains it past the read buffer's lifetime must copy it. Its capacity is
+// clamped to its length, so appending to it allocates rather than writing into
+// the spare capacity of the caller's read buffer.
 //
 // A frame that is exactly a header is well formed and carries no payload; only
 // a frame too short to hold the header is an error.
@@ -76,7 +78,7 @@ func Decode(b []byte) (Frame, error) {
 	}
 	return Frame{
 		Channel: binary.BigEndian.Uint32(b[:headerLen]),
-		Payload: b[headerLen:],
+		Payload: b[headerLen:len(b):len(b)],
 	}, nil
 }
 
@@ -99,18 +101,19 @@ func EncodePlain(text bool, data []byte) []byte {
 }
 
 // DecodePlain splits a decrypted channel payload into its kind and its bytes.
-// The returned data aliases b. An empty payload, or a kind byte other than 0
-// or 1, is a protocol error: the peer is not speaking this protocol, and
-// guessing would hand the layer above a frame of the wrong sort.
+// The returned data aliases b, with its capacity clamped as Decode's is. An
+// empty payload, or a kind byte other than 0 or 1, is a protocol error: the
+// peer is not speaking this protocol, and guessing would hand the layer above a
+// frame of the wrong sort.
 func DecodePlain(b []byte) (text bool, data []byte, err error) {
 	if len(b) == 0 {
 		return false, nil, ErrEmptyPayload
 	}
 	switch b[0] {
 	case kindText:
-		return true, b[1:], nil
+		return true, b[1:len(b):len(b)], nil
 	case kindBinary:
-		return false, b[1:], nil
+		return false, b[1:len(b):len(b)], nil
 	}
 	return false, nil, fmt.Errorf("relaywire: unknown kind byte %#x", b[0])
 }
