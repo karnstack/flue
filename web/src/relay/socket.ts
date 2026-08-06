@@ -56,11 +56,37 @@ const KEEPALIVE_MS = 30_000
  */
 const STALE_INTERVALS = 3
 
+/**
+ * The subprotocol the relay answers a browser with, and the one the credential
+ * hides beside it.
+ *
+ * A browser cannot set a header on a WebSocket upgrade. It can name
+ * subprotocols — the second argument to `new WebSocket(url, protocols)` — and
+ * those travel as `Sec-WebSocket-Protocol`, which is a header, which is how a
+ * channel token reaches the relay without being in the URL. In the URL it
+ * would be in the request line and therefore in the Worker's logs.
+ *
+ * Two values go out: `flue.v1`, which the relay echoes on the 101 (a browser
+ * that offered subprotocols and is answered without one fails the connection
+ * itself), and `flue.token.<token>`, which it never echoes. Spelled out here
+ * rather than imported because the relay is another package in another
+ * runtime; spec/relay-protocol.md is where the two agree.
+ */
+export const RELAY_SUBPROTOCOL = 'flue.v1'
+export const RELAY_TOKEN_SUBPROTOCOL_PREFIX = 'flue.token.'
+
 export interface RelayIdentity {
   /** This browser's static Noise key, from `@/crypto/keys`. */
   deviceKey: DeviceKey
   /** The daemon's static public key, pinned at pairing time. */
   daemonPub: Uint8Array
+  /**
+   * The relay channel token, when the control plane handed this tab one
+   * (`takeChannelToken`, from the URL fragment). Null on a self-hosted relay,
+   * which authorizes no browser at all — and where offering a subprotocol
+   * nobody will echo would break the connection rather than secure it.
+   */
+  channelToken?: string | null
 }
 
 /** The subset of WebSocket this socket drives, so tests can substitute one. */
@@ -82,10 +108,10 @@ const decoder = new TextDecoder()
 export function relaySocket(
   origin: string,
   identity: RelayIdentity,
-  wsFactory: (url: string) => RawSocket = browserSocket,
+  wsFactory: (url: string, protocols?: string[]) => RawSocket = browserSocket,
 ): SocketLike {
   const hs = initiatorHandshake(identity.deviceKey.privateKey, identity.daemonPub)
-  const ws = wsFactory(clientUrl(origin))
+  const ws = wsFactory(clientUrl(origin), subprotocols(identity.channelToken))
 
   /** Null until message B verifies; that is also what `onopen` waits for. */
   let channel: NoiseChannel | null = null
@@ -240,9 +266,23 @@ function clientUrl(origin: string): string {
   return url.toString()
 }
 
+/**
+ * What to offer as `Sec-WebSocket-Protocol`, or nothing.
+ *
+ * Nothing, and not `['flue.v1']`, when this browser holds no token: a
+ * self-hosted relay (Plan 1) echoes no subprotocol, and by RFC 6455 §4.1 a
+ * client that offered one and was answered without it must fail the
+ * connection. Offering unconditionally would break every self-hosted deployment
+ * to no purpose.
+ */
+function subprotocols(token: string | null | undefined): string[] | undefined {
+  if (!token) return undefined
+  return [RELAY_SUBPROTOCOL, `${RELAY_TOKEN_SUBPROTOCOL_PREFIX}${token}`]
+}
+
 /** The default transport: a real WebSocket, in the shape this file drives. */
-function browserSocket(url: string): RawSocket {
-  const ws = new WebSocket(url)
+function browserSocket(url: string, protocols?: string[]): RawSocket {
+  const ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url)
   ws.binaryType = 'arraybuffer'
   const raw: RawSocket = {
     send: (d) => ws.send(d),

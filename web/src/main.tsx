@@ -6,7 +6,7 @@ import { FlueClient } from '@/client/client'
 import { isRelayOrigin, loadRelayIdentity } from '@/relay/mode'
 import { relaySocket } from '@/relay/socket'
 import { createFlueRouter, type FlueRouterOptions } from '@/router'
-import { stripHandoff } from '@/lib/url'
+import { stripHandoff, takeChannelToken } from '@/lib/url'
 import { registerServiceWorker } from '@/lib/sw-register'
 
 // First, before createFlueRouter() reads the location. The daemon has already
@@ -21,6 +21,24 @@ import { registerServiceWorker } from '@/lib/sw-register'
 // that vector is the daemon's Referrer-Policy: no-referrer.
 const cleaned = stripHandoff(location.href)
 if (cleaned !== location.href) history.replaceState(null, '', cleaned)
+
+/**
+ * The relay channel token, taken from the fragment `app.flue.sh` navigated
+ * here with — and taken *once*, here, before anything else reads the location.
+ *
+ * Read at the entry point rather than inside the socket factory because
+ * reading it is destructive: `takeChannelToken` scrubs the fragment as it
+ * reads, so a second caller would find nothing. FlueClient reconnects through
+ * that factory, and each reconnect presents this same token; it is good for 60
+ * seconds, after which a reconnect is refused and the tab needs a fresh one
+ * from the control plane. That is the revocation window working as designed,
+ * and closing it properly — a token endpoint the tab can call — belongs to the
+ * dashboard, not to this line.
+ *
+ * Empty on the daemon's own origin and on a self-hosted relay: neither hands
+ * out one of these, and neither asks for one.
+ */
+const channelToken = takeChannelToken()
 
 /**
  * What this tab can reach, when the page did not come from the daemon.
@@ -43,7 +61,9 @@ async function relayOptions(): Promise<FlueRouterOptions> {
     // `location.origin` and not a configured one: the page and the relay it
     // talks to are the same deployment by construction, and a URL from anywhere
     // else would be a second thing to keep true.
-    client: new FlueClient(location.origin, (origin) => relaySocket(origin, identity)),
+    client: new FlueClient(location.origin, (origin) =>
+      relaySocket(origin, { ...identity, channelToken }),
+    ),
   }
 }
 

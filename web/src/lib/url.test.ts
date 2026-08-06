@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { stripHandoff, takeCwd } from './url'
+import { stripHandoff, takeChannelToken, takeCwd } from './url'
 
 describe('stripHandoff', () => {
   it('removes the handoff token', () => {
@@ -59,5 +59,58 @@ describe('takeCwd', () => {
     history.replaceState(null, '', '/?cwd=%2Ftmp')
     expect(takeCwd()).toBe('/tmp')
     expect(takeCwd()).toBeNull()
+  })
+})
+
+describe('takeChannelToken', () => {
+  afterEach(() => history.replaceState(null, '', '/'))
+
+  it('reads the token out of the fragment and scrubs it', () => {
+    // app.flue.sh navigates here with `#t=<token>`: a fragment is never put on
+    // the wire, so the credential reaches this page and no server's log
+    // (app/src/server/devices.ts, openSession). What a fragment does not fix
+    // is the history entry, the bookmark and the screenshot — this does.
+    history.replaceState(null, '', '/#t=a-channel-token')
+
+    expect(takeChannelToken()).toBe('a-channel-token')
+    expect(location.hash).toBe('')
+    expect(location.href).not.toContain('a-channel-token')
+  })
+
+  it('takes it exactly once', () => {
+    history.replaceState(null, '', '/#t=a-channel-token')
+    expect(takeChannelToken()).toBe('a-channel-token')
+    expect(takeChannelToken()).toBeNull()
+  })
+
+  it('never reads the token from the query string', () => {
+    // There is no `?t=` and there must not be one: a query parameter is on the
+    // wire and in the relay's logs, which is the whole reason the token is in
+    // the fragment. A fallback "just in case" would re-open it.
+    history.replaceState(null, '', '/?t=a-channel-token')
+    expect(takeChannelToken()).toBeNull()
+    expect(location.search).toBe('?t=a-channel-token')
+  })
+
+  it('returns null and touches nothing when there is no token', () => {
+    history.replaceState(null, '', '/d/local/s/abc?x=1#somewhere')
+    expect(takeChannelToken()).toBeNull()
+    expect(location.hash).toBe('#somewhere')
+    expect(location.search).toBe('?x=1')
+  })
+
+  it('keeps the path, the query and any other fragment parameter', () => {
+    history.replaceState(null, '', '/d/local/s/abc?x=1#t=tok&other=2')
+
+    expect(takeChannelToken()).toBe('tok')
+    expect(location.pathname).toBe('/d/local/s/abc')
+    expect(location.search).toBe('?x=1')
+    expect(location.hash).toBe('#other=2')
+  })
+
+  it('is null for an empty token, and scrubs it anyway', () => {
+    history.replaceState(null, '', '/#t=')
+    expect(takeChannelToken()).toBeNull()
+    expect(location.hash).toBe('')
   })
 })

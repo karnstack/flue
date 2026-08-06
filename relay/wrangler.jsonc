@@ -2,6 +2,20 @@
   "name": "flue-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
+  // Two secrets, neither of them in this file — `wrangler secret put` only,
+  // because anything written here is committed:
+  //
+  //   DAEMON_SECRET         self-host mode: the bearer secret the one daemon
+  //                         this relay serves shares with it.
+  //   RELAY_SIGNING_SECRET  SaaS mode: the HMAC key the control plane signs
+  //                         channel tokens with. **Binding it is what selects
+  //                         SaaS mode** (src/channel-auth.ts): every leg then
+  //                         presents a signed token and lands on a hub named
+  //                         by that token's account and device, and
+  //                         DAEMON_SECRET stops being honoured. It exists on
+  //                         exactly two Workers, app/ and this one.
+  //
+  // See spec/relay-protocol.md, Auth.
   "assets": {
     // Response headers for these assets are NOT configurable here — wrangler's
     // schema rejects any key but the four below. They live in ./public/_headers,

@@ -125,16 +125,26 @@ class FakeDaemon {
 const DEVICE_PRIV = unhex(vectors.initiatorStaticPriv)
 const DAEMON_PRIV = unhex(vectors.responderStaticPriv)
 
-function harness(opts: { origin?: string; daemonPriv?: Uint8Array; pin?: Uint8Array } = {}) {
+function harness(
+  opts: {
+    origin?: string
+    daemonPriv?: Uint8Array
+    pin?: Uint8Array
+    channelToken?: string | null
+  } = {},
+) {
   const daemonPriv = opts.daemonPriv ?? DAEMON_PRIV
   const identity: RelayIdentity = {
     deviceKey: { privateKey: DEVICE_PRIV, publicKey: x25519.getPublicKey(DEVICE_PRIV) },
     daemonPub: opts.pin ?? x25519.getPublicKey(daemonPriv),
+    channelToken: opts.channelToken ?? null,
   }
   const urls: string[] = []
+  const offers: (string[] | undefined)[] = []
   const raws: FakeRaw[] = []
-  const sock = relaySocket(opts.origin ?? 'https://relay.example', identity, (url) => {
+  const sock = relaySocket(opts.origin ?? 'https://relay.example', identity, (url, protocols) => {
     urls.push(url)
+    offers.push(protocols)
     const raw = new FakeRaw()
     raws.push(raw)
     return raw
@@ -150,6 +160,7 @@ function harness(opts: { origin?: string; daemonPriv?: Uint8Array; pin?: Uint8Ar
     sock,
     identity,
     urls,
+    offers,
     got,
     raw: raws[0]!,
     daemon: new FakeDaemon(daemonPriv),
@@ -199,6 +210,26 @@ describe('opening the relay socket', () => {
     expect(harness({ origin: 'http://127.0.0.1:8787' }).urls).toEqual([
       'ws://127.0.0.1:8787/client',
     ])
+  })
+
+  it('offers no subprotocol when this browser holds no channel token', () => {
+    // A self-hosted relay authorizes no browser and echoes no subprotocol, and
+    // a browser that offered one and was answered without it fails the
+    // connection itself (RFC 6455 §4.1). So "no token" means "offer nothing",
+    // not "offer the protocol name alone".
+    expect(harness().offers).toEqual([undefined])
+  })
+
+  it('presents a channel token as a subprotocol, never in the URL', () => {
+    // The upgrade is a request to the relay Worker: a token in the query
+    // string is a token in its logs. `Sec-WebSocket-Protocol` is the one
+    // header a browser's WebSocket constructor can set, so the credential
+    // rides there — beside a plain protocol name the relay can echo on the
+    // 101 without writing the credential into a response header.
+    const h = harness({ channelToken: 'eyJhY2MiOiJhIn0.c2ln' })
+    expect(h.offers).toEqual([['flue.v1', 'flue.token.eyJhY2MiOiJhIn0.c2ln']])
+    expect(h.urls).toEqual(['wss://relay.example/client'])
+    for (const url of h.urls) expect(url).not.toContain('c2ln')
   })
 
   it('sends a bare message A — no channel header, the Worker adds that', () => {
