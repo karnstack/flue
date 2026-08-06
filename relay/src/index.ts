@@ -2,6 +2,9 @@ export interface Env {
   HUB: DurableObjectNamespace
   ASSETS: Fetcher
   DAEMON_SECRET: string
+  /** Handshake deadline in ms — a test seam (vitest binds 50). Unset in
+   * production, where the hub defaults to 30 000. */
+  HANDSHAKE_TIMEOUT_MS?: string | number
 }
 
 /** May this request open the daemon leg? Self-host: a bearer secret. */

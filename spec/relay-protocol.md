@@ -55,7 +55,9 @@ would not help either: the browser's half of the IK handshake is already spent.
 A daemon reconnect therefore **invalidates every live channel**. When the daemon
 leg drops, the Durable Object closes every live client socket with close code
 `1012` and reason `daemon gone`. It sends no `closed` for them — there is no
-daemon left to read it — and it never re-announces a channel with `open`.
+daemon left to read it, or, on a takeover, a late `closed` may still reach the
+replacement daemon; a `closed` for an unknown channel is ignored — and it never
+re-announces a channel with `open`.
 Browsers reconnect through their ordinary retry path, handshake again, and are
 assigned fresh ids that the persisted counter guarantees are new.
 

@@ -8,7 +8,9 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
-      miniflare: { bindings: { DAEMON_SECRET: 'test-secret' } },
+      // HANDSHAKE_TIMEOUT_MS is the hub's test seam: 50 ms here so the alarm
+      // tests run in real time; unset in production, where code defaults to 30 s.
+      miniflare: { bindings: { DAEMON_SECRET: 'test-secret', HANDSHAKE_TIMEOUT_MS: 50 } },
     }),
   ],
 })
