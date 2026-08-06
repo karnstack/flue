@@ -400,6 +400,82 @@ func TestAccountsFollowsPagination(t *testing.T) {
 	}
 }
 
+// TestAccountsPaginatesWithoutTotalPages pins pagination against the shape
+// Cloudflare actually documents for GET /accounts:
+// {count, page, per_page, total_count} — with no total_pages field at all.
+// A loop that decides whether to ask for another page by reading total_pages
+// sees a zero here, concludes the first page was the last, and drops everyone
+// past it without an error. Sixty accounts, fifty on a page: this test fails
+// with 50 if that ever comes back.
+func TestAccountsPaginatesWithoutTotalPages(t *testing.T) {
+	const total = 60
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		page := 1
+		if r.URL.Query().Get("page") == "2" {
+			page = 2
+		}
+		accounts := []map[string]any{}
+		for i := (page - 1) * 50; i < total && i < page*50; i++ {
+			accounts = append(accounts, map[string]any{
+				"id":   fmt.Sprintf("acct-%d", i),
+				"name": fmt.Sprintf("Account %d", i),
+			})
+		}
+		raw, err := json.Marshal(accounts)
+		if err != nil {
+			t.Fatalf("marshalling page: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"success":true,"errors":[],"result":%s,
+			"result_info":{"page":%d,"per_page":50,"count":%d,"total_count":%d}}`,
+			raw, page, len(accounts), total)
+	})
+
+	got, err := f.client().Accounts(context.Background())
+	if err != nil {
+		t.Fatalf("Accounts: %v", err)
+	}
+	if len(got) != total {
+		t.Fatalf("Accounts returned %d accounts, want %d: the pages after the first were dropped", len(got), total)
+	}
+	for i, a := range got {
+		if want := fmt.Sprintf("acct-%d", i); a.ID != want {
+			t.Fatalf("account %d = %q, want %q", i, a.ID, want)
+		}
+	}
+	if n := len(f.requests()); n != 2 {
+		t.Errorf("made %d requests, want 2 (%s)", n, f.paths())
+	}
+}
+
+// TestAccountsPaginatesWithNoResultInfoAtAll: an answer with no pagination
+// block is not automatically a complete one. A full page is a full page, and
+// the list only ends where the results do.
+func TestAccountsPaginatesWithNoResultInfoAtAll(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		accounts := []map[string]any{}
+		n := 50
+		if r.URL.Query().Get("page") == "2" {
+			n = 3
+		}
+		for i := 0; i < n; i++ {
+			accounts = append(accounts, map[string]any{"id": fmt.Sprintf("acct-%s-%d", r.URL.Query().Get("page"), i)})
+		}
+		writeEnvelope(t, w, http.StatusOK, accounts)
+	})
+
+	got, err := f.client().Accounts(context.Background())
+	if err != nil {
+		t.Fatalf("Accounts: %v", err)
+	}
+	if len(got) != 53 {
+		t.Errorf("Accounts returned %d accounts, want 53", len(got))
+	}
+	if n := len(f.requests()); n != 2 {
+		t.Errorf("made %d requests, want 2 (%s)", n, f.paths())
+	}
+}
+
 // TestAccountsStopsOnAnEmptyPage: a server that keeps claiming there is another
 // page must not spin this loop forever.
 func TestAccountsStopsOnAnEmptyPage(t *testing.T) {
@@ -418,6 +494,30 @@ func TestAccountsStopsOnAnEmptyPage(t *testing.T) {
 	}
 	if n := len(f.requests()); n != 1 {
 		t.Errorf("made %d requests for an empty first page, want 1", n)
+	}
+}
+
+// TestAccountsStopsAtThePageBound: a full page is the signal to ask for
+// another one, so a server that answers every page full has to be stopped by
+// something other than the results. That something is maxAccountPages.
+func TestAccountsStopsAtThePageBound(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		accounts := make([]map[string]any, 0, 50)
+		for i := 0; i < 50; i++ {
+			accounts = append(accounts, map[string]any{"id": fmt.Sprintf("acct-%s-%d", r.URL.Query().Get("page"), i)})
+		}
+		writeEnvelope(t, w, http.StatusOK, accounts)
+	})
+
+	got, err := f.client().Accounts(context.Background())
+	if err != nil {
+		t.Fatalf("Accounts: %v", err)
+	}
+	if n := len(f.requests()); n != maxAccountPages {
+		t.Errorf("made %d requests against an endless server, want the %d-page bound", n, maxAccountPages)
+	}
+	if len(got) != maxAccountPages*50 {
+		t.Errorf("Accounts returned %d accounts, want %d", len(got), maxAccountPages*50)
 	}
 }
 
@@ -1076,6 +1176,12 @@ func TestDeployReportsAFailedAssetRefreshOnRetry(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "10000") {
 		t.Errorf("error %q drops the Cloudflare code from the failed session", err)
+	}
+	// The refresh failure is what stopped the retry, but the migration conflict
+	// is why a retry happened at all and is the thing the user can act on.
+	// Reporting only the session error sends them after the wrong problem.
+	if !strings.Contains(err.Error(), "10061") {
+		t.Errorf("error %q drops the Cloudflare code from the deploy that triggered the retry", err)
 	}
 	if puts != 1 {
 		t.Errorf("script PUTs = %d, want 1: the retry must not go out without a token", puts)

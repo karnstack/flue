@@ -275,10 +275,39 @@ func (c *Client) Accounts(ctx context.Context) ([]Account, error) {
 			return nil, fmt.Errorf("cloudflare: could not read the account list: %w", err)
 		}
 		all = append(all, accounts...)
-		// Stop at the last page. An empty page ends the list regardless of what
-		// the pagination block claims, and a response with no pagination block
-		// at all is a single-page answer.
-		if len(accounts) == 0 || info == nil || info.TotalPages <= page {
+
+		// Termination has to hold when the pagination block is partial or
+		// missing. Cloudflare documents this endpoint's result_info as
+		// {count, page, per_page, total_count} — with no total_pages — and
+		// cloudflare-go pages this endpoint by stopping on an empty result,
+		// reading neither count. So the page in hand is the primary signal and
+		// the block may only ever add a reason to keep going, never supply the
+		// only reason to stop. Making total_pages load-bearing would drop every
+		// account past the first page against the documented shape.
+
+		// An empty page ends the list whatever the block claims. This is also
+		// what stops a server that insists there is always another page.
+		if len(accounts) == 0 {
+			break
+		}
+		// A full page means there is plausibly another one behind it. "Full" is
+		// measured against the size the server says it used, when it says:
+		// a server free to cap per_page below what was asked would otherwise
+		// make every page look short and truncate the list at the first one.
+		perPage := accountsPerPage
+		if info != nil && info.PerPage > 0 {
+			perPage = info.PerPage
+		}
+		if len(accounts) >= perPage {
+			continue
+		}
+		// A short page is the last one unless the block explicitly says
+		// otherwise. total_count is deliberately not used to stop early: it is
+		// a number the server can get wrong, and preferring it to the page in
+		// hand is how a list gets silently truncated. The cost of not trusting
+		// it is one extra request when the account count is an exact multiple
+		// of the page size, and maxAccountPages bounds the rest.
+		if info == nil || info.TotalPages <= page {
 			break
 		}
 	}
@@ -453,7 +482,11 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 		if meta.Assets != nil {
 			jwt, refreshErr := c.uploadAssets(ctx, in.AccountID, in.ScriptName, in.Assets)
 			if refreshErr != nil {
-				return fmt.Errorf("cloudflare: re-attaching the assets to retry without the already-applied migration: %w", refreshErr)
+				// Both halves are wrapped. The refresh failure is what stopped
+				// the retry, but the deploy failure is why there was a retry at
+				// all, and dropping it leaves the user with a session error and
+				// no sign that a migration conflict is the thing to fix.
+				return fmt.Errorf("cloudflare: re-attaching the assets to retry without the already-applied migration: %w (the deploy this retried failed with: %w)", refreshErr, err)
 			}
 			meta.Assets.JWT = jwt
 		}
