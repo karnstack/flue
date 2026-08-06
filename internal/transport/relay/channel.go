@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -293,11 +294,24 @@ func (t *Transport) serveChannel(s *socket, ch *channel, origin string) {
 		// Whatever ended this channel, nothing is going to read its inbox
 		// again; closing it releases the dispatcher from queueing for it.
 		ch.close()
+
+		// ServeConn propagates a panic to its caller by design — the deferred
+		// close is what it guarantees, not the recovery — and on the loopback
+		// transport the caller is net/http, which recovers per connection. Here
+		// the caller is this goroutine, and letting it through would end a
+		// process that is holding every local terminal session on this machine
+		// as well. So it is caught, with a stack, and costs one browser its
+		// channel instead of the user their work.
+		if r := recover(); r != nil {
+			t.log.Error("panic while serving a relay channel",
+				"channel", ch.id, "panic", r, "stack", string(debug.Stack()))
+			t.tell(s, relaywire.Close{Channel: ch.id})
+		}
 	}()
 
 	nch, peerStatic, err := t.handshake(s, ch)
 	if err != nil {
-		if errors.Is(err, errChannelGone) {
+		if errors.Is(err, errChannelGone) || errors.Is(err, errSocketClosed) || errors.Is(err, errSocketBacklogged) {
 			// The browser left, or the socket did, mid-handshake. Ordinary, and
 			// there is nobody left to send a close to.
 			t.log.Debug("relay channel ended during its handshake", "channel", ch.id, "err", err)

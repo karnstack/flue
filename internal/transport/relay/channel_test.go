@@ -560,6 +560,43 @@ func TestRelayChannelBackpressureClosesOneChannelNotTheSocket(t *testing.T) {
 	attach(t, c, 2, id.deviceKey, id.key.Public)
 }
 
+// panickingServer stands in for any unhandled failure on the serve path.
+// daemon.ServeConn propagates a panic to its caller by design; on loopback that
+// caller is net/http, which recovers per connection.
+type panickingServer struct{}
+
+func (panickingServer) ServeConn(context.Context, daemon.MessageConn, daemon.ConnMeta) {
+	panic("boom")
+}
+
+func (panickingServer) PairDevice([]byte, string) daemon.PairOutcome {
+	return daemon.PairRefusal()
+}
+
+// TestRelayChannelSurvivesAPanicOnTheServePath: over the relay the caller is a
+// goroutine of this package's own, and a panic escaping it would end a process
+// that is also holding every local terminal session on this machine. One
+// browser loses its channel; nobody loses their work.
+func TestRelayChannelSurvivesAPanicOnTheServePath(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	sink := &syncBuffer{}
+	tr := newChannelTransport(t, r, panickingServer{}, id, slog.New(slog.NewTextHandler(sink, nil)))
+	runTransport(t, tr)
+
+	c := r.accept(t)
+	attach(t, c, 1, id.deviceKey, id.key.Public)
+
+	expectClose(t, c, 1)
+	waitForLog(t, sink, "panic while serving a relay channel")
+	if !c.stillOpen() {
+		t.Fatal("a panic on one channel took the socket down")
+	}
+	// The socket is still serving: another browser attaches on it.
+	attach(t, c, 2, id.deviceKey, id.key.Public)
+}
+
 // TestRelayChannelsAreBounded: an open costs a goroutine and an inbox before
 // anything has proved anything, and opens arrive on a socket whose other end
 // this daemon does not run. The relay caps its own client leg well below this,
