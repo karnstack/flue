@@ -113,12 +113,22 @@ type Config struct {
 // Server is the surface the adapter drives — implemented by *daemon.Server.
 //
 // It is declared here rather than in daemon because it is this package that
-// needs it: the daemon does not know a relay exists. It holds only ServeConn
-// today; PairDevice and SetRelayStatus join it in Tasks 8 and 9, when there is
-// something here that calls them.
+// needs it: the daemon does not know a relay exists. Two calls, because the
+// relay carries two kinds of thing — a browser's connection, and the one part
+// of the ceremony that is an HTTP request rather than a WebSocket message.
 type Server interface {
 	ServeConn(ctx context.Context, mc daemon.MessageConn, meta daemon.ConnMeta)
+	// PairDevice runs the pairing ceremony on a body whose provenance this
+	// package has already checked — the announced origin being the relay this
+	// daemon dialled. It answers the status and JSON body the Worker writes
+	// back to the browser that posted it.
+	PairDevice(body []byte, peer string) daemon.PairOutcome
 }
+
+// The daemon is the implementation, and the compiler is what keeps the two in
+// step: a signature that drifts here fails to build rather than failing to
+// serve.
+var _ Server = (*daemon.Server)(nil)
 
 // Transport dials the relay and serves channels until ctx ends. It reconnects
 // with jittered exponential backoff and only returns when its context is done.
@@ -127,12 +137,15 @@ type Transport struct {
 	srv Server
 
 	// identity is the daemon's static Noise key and devices is the paired-device
-	// registry. Both belong to the channel layer — the responder handshake and
-	// the static-key lookup that decides whether a browser is a paired device —
-	// which arrives with channel.go. They are taken now so the constructor's
-	// signature does not change under the code that already calls it.
+	// registry. Both belong to the channel layer: the responder handshake runs
+	// against the key, and the static key it yields is looked up in the
+	// registry, which is what decides whether a browser is a paired device.
 	identity noise.DHKey
 	devices  *crypto.DeviceStore
+
+	// pairings bounds the pairing ceremonies running at once — a token, not a
+	// count, taken by each and returned when it finishes. See maxPairings.
+	pairings chan struct{}
 
 	log *slog.Logger
 
@@ -169,6 +182,7 @@ func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceSto
 		srv:       srv,
 		identity:  identity,
 		devices:   devices,
+		pairings:  make(chan struct{}, maxPairings),
 		log:       log,
 		keepalive: defaultKeepalive,
 	}
@@ -261,6 +275,14 @@ func (t *Transport) runOnce(ctx context.Context) (connectedAt time.Time, err err
 
 	readErr := t.readLoop(s)
 
+	// The socket is finished, so every channel on it is: their Noise state was
+	// this socket's, and the relay never re-announces a channel across a
+	// reconnect. Closed here rather than after the writer is stopped so the
+	// connections unwind while the teardown below is happening; they are not
+	// waited for, because a browser's own unwinding must not delay the dial
+	// that brings every other browser back.
+	s.closeChannels()
+
 	var perr protocolError
 	broke := errors.As(readErr, &perr)
 	if broke {
@@ -330,21 +352,20 @@ func (t *Transport) readLoop(s *socket) error {
 		if err != nil {
 			return protocolError{err}
 		}
-		t.dispatch(f)
+		t.dispatch(s, f)
 	}
 }
 
-// dispatch routes one decoded frame.
+// dispatch routes one decoded frame, and never blocks.
 //
-// Every branch here is a log line and a drop, because the layer that acts on
-// these frames is channel.go and it does not exist yet. That is deliberate
-// rather than incomplete: this task's job is the socket, and a socket that
-// stays up while the layer above it is missing is exactly what lets the next
-// task be about channels and nothing else.
-func (t *Transport) dispatch(f relaywire.Frame) {
+// That is the whole discipline of this function. It runs on the single read
+// loop every channel on this socket shares, so anything it waited on — a
+// channel's inbox, a pairing ceremony's file write — would be a wait it
+// imposed on every other browser on this machine. Frames go to bounded queues
+// and pairings go to their own goroutine; nothing here does work.
+func (t *Transport) dispatch(s *socket, f relaywire.Frame) {
 	if f.Channel != relaywire.ControlChannel {
-		t.log.Debug("relay channel frame dropped: no channel layer yet",
-			"channel", f.Channel, "bytes", len(f.Payload))
+		t.deliverToChannel(s, f)
 		return
 	}
 
@@ -365,13 +386,19 @@ func (t *Transport) dispatch(f relaywire.Frame) {
 	switch m := msg.(type) {
 	case *relaywire.Open:
 		t.log.Debug("relay opened a channel", "channel", m.Channel, "origin", clip(m.Origin))
+		t.openChannel(s, m)
 	case *relaywire.Closed:
+		// That browser went away. Its inbox is closed, which ends the
+		// connection reading it; no close is sent back, because the socket this
+		// would name is already gone.
 		t.log.Debug("relay closed a channel", "channel", m.Channel)
+		s.closeChannel(m.Channel)
 	case *relaywire.Pair:
 		// The body carries a live single-use pairing token, so its size is
 		// logged and its contents are not.
 		t.log.Debug("relay forwarded a pairing request",
 			"id", m.ID, "origin", clip(m.Origin), "bytes", len(m.Body))
+		t.pair(s, m)
 	default:
 		// close and pairResult are the daemon's own messages coming back at it.
 		t.log.Warn("relay sent a message only a daemon sends", "type", fmt.Sprintf("%T", msg))
@@ -475,19 +502,27 @@ func (f outFrame) messageType() websocket.MessageType {
 }
 
 // socket is one live relay connection: the WebSocket, the outbox every producer
-// hands frames to, and the context that ends all of it at once.
+// hands frames to, the channels multiplexed over it, and the context that ends
+// all of it at once.
 //
 // It exists as a value distinct from Transport because a Transport outlives any
-// number of sockets. Each reconnect gets a fresh one, and the channel table the
-// next task hangs off it dies with the socket it belonged to — which is what
-// spec/relay-protocol.md requires: a daemon reconnect invalidates every live
-// channel, because the Noise state that made them readable was in this
-// process's memory and this socket's lifetime.
+// number of sockets. Each reconnect gets a fresh one, and the channel table
+// dies with the socket it belonged to — which is what spec/relay-protocol.md
+// requires: a daemon reconnect invalidates every live channel, because the
+// Noise state that made them readable was in this process's memory and this
+// socket's lifetime.
 type socket struct {
 	ws     *websocket.Conn
 	out    chan outFrame
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// chMu guards the channel table. channels is every browser this socket is
+	// carrying, by the id the relay assigned; chGone is set by the teardown, so
+	// a channel is never registered after the sweep that would have closed it.
+	chMu     sync.Mutex
+	channels map[uint32]*channel
+	chGone   bool
 
 	// read is when the last message arrived, in Unix nanoseconds, which the
 	// keepalive reads to tell a quiet relay from an absent one.
@@ -501,7 +536,13 @@ type socket struct {
 }
 
 func newSocket(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn) *socket {
-	s := &socket{ws: ws, out: make(chan outFrame, outboxDepth), ctx: ctx, cancel: cancel}
+	s := &socket{
+		ws:       ws,
+		out:      make(chan outFrame, outboxDepth),
+		ctx:      ctx,
+		cancel:   cancel,
+		channels: map[uint32]*channel{},
+	}
 	// The clock starts at the handshake, not at the epoch: an idle relay must
 	// not look dead the first time the keepalive checks.
 	s.markRead()

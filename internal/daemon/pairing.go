@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -222,7 +224,48 @@ func (s *Server) daemonPubParam() string {
 	return base64.RawURLEncoding.EncodeToString(s.identity.Key.Public)
 }
 
-// refusePair answers a rejected pairing attempt.
+// PairOutcome is the transport-neutral answer to a pairing attempt: the HTTP
+// status and the JSON body the request should be answered with.
+//
+// Body is always a JSON value, on every path including refusal. That is the
+// relay leg's requirement rather than a preference: relaywire.PairResult
+// carries the body the Worker writes as an application/json response, and its
+// encoder refuses anything else — a refusal that travelled as the bare text
+// the local handler writes would be a frame the daemon could not send at all,
+// leaving the browser waiting for an answer that never comes. See
+// spec/relay-protocol.md, `pairResult.body`, which fixes both halves of this:
+// JSON over the relay, the bare text over the daemon's own origin.
+type PairOutcome struct {
+	Status int
+	Body   []byte
+}
+
+// pairRefusedText is the body the local HTTP handler answers a refusal with,
+// and pairRefusedJSON is the same refusal as the relay has to carry it. One
+// refusal, two renderings, and no third: everything that is refused is refused
+// in exactly these bytes.
+const pairRefusedText = "pairing refused"
+
+var pairRefusedJSON = []byte(`{"error":"` + pairRefusedText + `"}`)
+
+// PairRefusal is the outcome every refused pairing attempt gets.
+//
+// It is exported for the one caller that has to refuse a pairing request
+// without running the ceremony: the relay adapter, which drops a `pair` whose
+// announced origin is not the relay this daemon dialled. That request must be
+// answered — a Worker holding a parked HTTP request would otherwise wait out
+// its own deadline — and it must be answered without redeeming anything, since
+// a token is spent by any presentation and a relay lying about its origin must
+// not be able to burn the user's window.
+//
+// The body is a fresh copy, so no caller can edit the refusal every other
+// caller is about to send.
+func PairRefusal() PairOutcome {
+	return PairOutcome{Status: http.StatusForbidden, Body: slices.Clone(pairRefusedJSON)}
+}
+
+// refusePair records why a pairing attempt was refused and returns the one
+// answer every refusal gets.
 //
 // One status and one body — the same bytes, every time — with the reason going
 // only to the audit log. Whether a window was open, whether the token was one
@@ -231,10 +274,107 @@ func (s *Server) daemonPubParam() string {
 // token must not be an oracle for it. The uniformity of the answer and the
 // specificity of the log are both pinned by tests, because the two pull in
 // opposite directions and it would be easy to fix one by spoiling the other.
-func (s *Server) refusePair(w http.ResponseWriter, r *http.Request, reason string, args ...any) {
+//
+// peer is whatever the transport can honestly say about where the attempt came
+// from — a socket address over HTTP, "relay" over the relay — and goes to the
+// log alone.
+func (s *Server) refusePair(peer, reason string, args ...any) PairOutcome {
 	s.logger().Warn("pairing refused",
-		append([]any{"peer", r.RemoteAddr, "reason", reason}, args...)...)
-	http.Error(w, "pairing refused", http.StatusForbidden)
+		append([]any{"peer", peer, "reason", reason}, args...)...)
+	return PairRefusal()
+}
+
+// PairDevice runs the pairing ceremony on a request body whose provenance the
+// transport has already checked: shape checks, redeem, register, broadcast.
+//
+// It is everything handlePair used to be from the third check down, moved here
+// so the relay leg answers a browser byte for byte the way the daemon's own
+// origin does. The provenance check itself stays with each transport, because
+// the two have nothing in common: over HTTP it is Host, Origin and fetch
+// metadata; over the relay it is the announced origin matching the relay this
+// daemon dialled.
+//
+// It never returns a body naming a filesystem path or a refusal reason — see
+// refusePair.
+func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
+	if !s.pairingReady() {
+		return s.refusePair(peer, "no pairing identity configured")
+	}
+
+	var req pairRequest
+	// Limited exactly as the HTTP handler limited the request body, so a body
+	// that arrived over the relay cannot buy a larger parse than one that
+	// arrived over loopback.
+	if err := json.NewDecoder(io.LimitReader(bytes.NewReader(body), maxPairBytes)).Decode(&req); err != nil {
+		return s.refusePair(peer, "malformed request", "err", err)
+	}
+	if req.Token == "" {
+		return s.refusePair(peer, "no token")
+	}
+	key, err := base64.StdEncoding.DecodeString(req.PublicKey)
+	if err != nil || len(key) != 32 {
+		return s.refusePair(peer, "malformed public key")
+	}
+
+	if res := s.pairing.redeem(req.Token, time.Now()); res != pairAccepted {
+		// Indistinguishable on purpose in the answer, and deliberately
+		// distinguished in the log: no window, wrong token and expired token
+		// are one 403 to the caller and three different reasons on stderr.
+		return s.refusePair(peer, res.String())
+	}
+
+	dev, err := s.identity.Devices.Add(deviceLabel(req.Label), key)
+	if err != nil {
+		// The window is already spent, so this is not a retry loop the caller
+		// can drive; it is a device that was already paired, or a registry
+		// that could not be written. Both are refusals to the caller and a
+		// line in the log for whoever has to work out which.
+		return s.refusePair(peer, "registry rejected the device", "err", err)
+	}
+
+	s.logger().Info("device paired", "peer", peer, "device", dev.ID, "label", dev.Label)
+
+	// The device was registered on a request the user's other screen never
+	// sees, so the screen has to be told. Broadcast before the answer is
+	// returned: the pairing device is not the one waiting for this.
+	s.broadcastDeviceList()
+
+	// A map rather than a struct, because the encoder sorts a map's keys and
+	// that is the byte order this endpoint has always answered in.
+	answer, err := json.Marshal(map[string]any{
+		"deviceId":  dev.ID,
+		"daemonPub": s.daemonPub(),
+	})
+	if err != nil {
+		// Two strings the daemon chose itself; unreachable short of a broken
+		// encoder. The device is paired either way, so the refusal is about
+		// this answer and the log is where the discrepancy is recorded.
+		return s.refusePair(peer, "could not encode the pairing answer", "err", err)
+	}
+	return PairOutcome{Status: http.StatusOK, Body: answer}
+}
+
+// writePairOutcome writes what PairDevice decided as an HTTP response.
+//
+// The refusal is the one place the two transports deliberately differ. The
+// relay cannot carry the bare text — see PairOutcome — and this endpoint has
+// answered `pairing refused` as text/plain since it existed, which is what the
+// /pair page reads and what spec/relay-protocol.md fixes for the local leg. The
+// success body is the same bytes on both, down to the newline json.Encoder used
+// to write here.
+func (s *Server) writePairOutcome(w http.ResponseWriter, out PairOutcome) {
+	if out.Status != http.StatusOK {
+		http.Error(w, pairRefusedText, out.Status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(out.Status)
+	// Two writes rather than an append: the outcome's body belongs to whoever
+	// built it, and appending to it would write into whatever spare capacity
+	// that allocation happened to have.
+	_, _ = w.Write(out.Body)
+	_, _ = w.Write([]byte{'\n'})
 }
 
 // handlePair registers a device against a live pairing token.
@@ -252,6 +392,10 @@ func (s *Server) refusePair(w http.ResponseWriter, r *http.Request, reason strin
 //     a key that is 32 bytes of base64. A client that fumbles its own request
 //     has not guessed at the secret, so it does not spend the window.
 //  4. Only then redeem, which spends the window whatever the answer.
+//
+// The first two are this transport's, and stay here. The last two are the
+// ceremony itself and live in PairDevice, which the relay leg reaches with its
+// own answer to step 2 — see spec/relay-protocol.md.
 //
 // Nothing here consults the session token, and nothing here may start doing so
 // — a device that could present it would not need to pair.
@@ -274,62 +418,19 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 	// else — non-browser clients never send one — and costs nothing, because
 	// the pairing token remains the credential either way.
 	if err := a.CheckProvenance(r); err != nil {
-		s.refusePair(w, r, "provenance", "err", err)
+		s.writePairOutcome(w, s.refusePair(r.RemoteAddr, "provenance", "err", err))
 		return
 	}
 
-	if !s.pairingReady() {
-		s.refusePair(w, r, "no pairing identity configured")
-		return
-	}
-
-	var req pairRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxPairBytes)).Decode(&req); err != nil {
-		s.refusePair(w, r, "malformed request", "err", err)
-		return
-	}
-	if req.Token == "" {
-		s.refusePair(w, r, "no token")
-		return
-	}
-	key, err := base64.StdEncoding.DecodeString(req.PublicKey)
-	if err != nil || len(key) != 32 {
-		s.refusePair(w, r, "malformed public key")
-		return
-	}
-
-	if res := s.pairing.redeem(req.Token, time.Now()); res != pairAccepted {
-		// Indistinguishable on purpose in the answer, and deliberately
-		// distinguished in the log: no window, wrong token and expired token
-		// are one 403 to the caller and three different reasons on stderr.
-		s.refusePair(w, r, res.String())
-		return
-	}
-
-	dev, err := s.identity.Devices.Add(deviceLabel(req.Label), key)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxPairBytes))
 	if err != nil {
-		// The window is already spent, so this is not a retry loop the caller
-		// can drive; it is a device that was already paired, or a registry
-		// that could not be written. Both are refusals to the caller and a
-		// line in the log for whoever has to work out which.
-		s.refusePair(w, r, "registry rejected the device", "err", err)
+		// The request went away mid-body. Nothing was redeemed, so the window
+		// is untouched; this is only a refusal because there is a response to
+		// write and no request left to pair.
+		s.writePairOutcome(w, s.refusePair(r.RemoteAddr, "unreadable request body", "err", err))
 		return
 	}
-
-	s.logger().Info("device paired",
-		"peer", r.RemoteAddr, "device", dev.ID, "label", dev.Label)
-
-	// The device was registered on an HTTP request the user's other screen
-	// never sees, so the screen has to be told. Broadcast before the response
-	// is written: the pairing device is not the one waiting for this.
-	s.broadcastDeviceList()
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"deviceId":  dev.ID,
-		"daemonPub": s.daemonPub(),
-	})
+	s.writePairOutcome(w, s.PairDevice(body, r.RemoteAddr))
 }
 
 // deviceLabel normalises the device's self-chosen name: trimmed, bounded, and

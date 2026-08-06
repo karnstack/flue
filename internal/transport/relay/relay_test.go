@@ -19,9 +19,9 @@ import (
 	"github.com/karnstack/flue/internal/relaywire"
 )
 
-// stubServer stands in for *daemon.Server. Nothing in this task reaches
-// ServeConn — channels arrive in Task 8 — so it only has to satisfy the
-// interface, and a call to it is a bug this stub records rather than hides.
+// stubServer stands in for *daemon.Server in the tests that are about the
+// socket rather than about what it carries. It counts what reached it, so a
+// test that expects nothing to be served can say so.
 type stubServer struct {
 	mu    sync.Mutex
 	calls int
@@ -31,6 +31,12 @@ func (s *stubServer) ServeConn(context.Context, daemon.MessageConn, daemon.ConnM
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
+}
+
+// PairDevice refuses, because these tests have no identity to pair against and
+// a refusal is the one answer that is always honest.
+func (s *stubServer) PairDevice([]byte, string) daemon.PairOutcome {
+	return daemon.PairRefusal()
 }
 
 func (s *stubServer) served() int {
@@ -286,10 +292,15 @@ func TestTransportClosesOnAProtocolError(t *testing.T) {
 	}
 }
 
-func TestTransportDropsFramesTheChannelLayerWillOwn(t *testing.T) {
+// TestTransportSurvivesFramesItCannotServe: a daemon with no pairing identity
+// has nothing to answer a handshake with, and a channel for a browser it never
+// held is nothing to act on. Every one of these is refused or dropped, and none
+// of them costs the socket — which is the only thing that would take every
+// other browser on this machine down with it.
+func TestTransportSurvivesFramesItCannotServe(t *testing.T) {
 	t.Parallel()
 	r := newFakeRelay(t, "s")
-	tr, _ := newTestTransport(t, r, "s", nil)
+	tr, srv := newTestTransport(t, r, "s", nil)
 	tr.keepalive = 50 * time.Millisecond
 	runTransport(t, tr)
 
@@ -297,13 +308,14 @@ func TestTransportDropsFramesTheChannelLayerWillOwn(t *testing.T) {
 	c.sendControl(t, relaywire.Open{Channel: 1, Origin: "https://relay.example"})
 	c.sendControl(t, relaywire.Pair{ID: 7, Origin: "https://relay.example", Body: json.RawMessage(`{"token":"t"}`)})
 	c.sendControl(t, relaywire.Closed{Channel: 1})
-	c.send(t, 1, []byte("ciphertext the channel layer will decrypt"))
+	c.send(t, 1, []byte("ciphertext for a channel this daemon does not hold"))
 
-	// Task 8 gives all four a home. Until then they are logged and dropped, and
-	// dropping them must not cost the socket.
 	c.expectPing(t)
 	if !c.stillOpen() {
-		t.Fatal("the adapter closed the socket over frames it is meant to drop")
+		t.Fatal("the adapter closed the socket over frames it is meant to refuse")
+	}
+	if n := srv.served(); n != 0 {
+		t.Errorf("a daemon with no identity served %d connections, want 0", n)
 	}
 }
 

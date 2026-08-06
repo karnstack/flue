@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/karnstack/flue/internal/crypto"
+	"github.com/karnstack/flue/internal/relaywire"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
@@ -489,6 +490,238 @@ func TestEveryPairRefusalAnswersTheSameBytes(t *testing.T) {
 			t.Errorf("%s answered %q but %s answered %q; every refusal must answer the same bytes",
 				tc.name, body, firstName, first)
 		}
+	}
+}
+
+// --- PairDevice, the transport-neutral ceremony ---
+
+// pairBody is what the /pair page posts, as bytes: the shape PairDevice is
+// handed by whichever transport carried it.
+func pairBody(t *testing.T, token, publicKey, label string) []byte {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{
+		"token":     token,
+		"publicKey": publicKey,
+		"label":     label,
+	})
+	if err != nil {
+		t.Fatalf("marshal pairing request: %v", err)
+	}
+	return b
+}
+
+// TestPairDeviceRegistersTheDevice is the relay's half of the ceremony: the
+// same redeem-register-broadcast the HTTP handler runs, reached without an
+// *http.Request, answering the status and body the Worker writes back.
+func TestPairDeviceRegistersTheDevice(t *testing.T) {
+	_, srv := newPairServer(t)
+	token, _ := srv.pairing.start(time.Now())
+	key := deviceKey(0x2a)
+
+	out := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(key), "phone"), "relay")
+	if out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200", out.Status, out.Body)
+	}
+	var body struct {
+		DeviceID  string `json:"deviceId"`
+		DaemonPub string `json:"daemonPub"`
+	}
+	if err := json.Unmarshal(out.Body, &body); err != nil {
+		t.Fatalf("PairDevice body %q is not JSON: %v", out.Body, err)
+	}
+	if want := crypto.DeviceID(key); body.DeviceID != want {
+		t.Errorf("deviceId = %q, want %q", body.DeviceID, want)
+	}
+	if want := base64.StdEncoding.EncodeToString(srv.identity.Key.Public); body.DaemonPub != want {
+		t.Errorf("daemonPub = %q, want the daemon's static public key %q", body.DaemonPub, want)
+	}
+
+	list := devices(t, srv)
+	if len(list) != 1 || list[0].Label != "phone" {
+		t.Fatalf("registry = %+v, want the one device just paired", list)
+	}
+	// The token is spent, exactly as it is over HTTP.
+	if again := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(deviceKey(0x3b)), "laptop"), "relay"); again.Status != http.StatusForbidden {
+		t.Errorf("replayed PairDevice = %d, want 403", again.Status)
+	}
+}
+
+// TestPairDeviceAnswersJSONOnEveryPath is the contract that makes the relay leg
+// possible at all: relaywire.PairResult carries body as a JSON value and
+// EncodeControl refuses anything else, so a refusal that answered the bare
+// "pairing refused" text the local handler writes would be a frame the daemon
+// could not send — and a browser left waiting for an answer that never comes.
+func TestPairDeviceAnswersJSONOnEveryPath(t *testing.T) {
+	good := base64.StdEncoding.EncodeToString(deviceKey(0x2a))
+
+	cases := map[string]struct {
+		open  bool
+		body  func(t *testing.T, live string) []byte
+		want  int
+		valid bool // the answer registers a device
+	}{
+		"accepted": {
+			open: true,
+			body: func(t *testing.T, live string) []byte { return pairBody(t, live, good, "phone") },
+			want: http.StatusOK,
+		},
+		"wrong token against a live window": {
+			open: true,
+			body: func(t *testing.T, _ string) []byte { return pairBody(t, "Zm91cnRlZW4tY2hhcnM", good, "phone") },
+			want: http.StatusForbidden,
+		},
+		"no window": {
+			body: func(t *testing.T, _ string) []byte { return pairBody(t, "Zm91cnRlZW4tY2hhcnM", good, "phone") },
+			want: http.StatusForbidden,
+		},
+		"malformed key": {
+			open: true,
+			body: func(t *testing.T, live string) []byte { return pairBody(t, live, "not base64 at all!!", "phone") },
+			want: http.StatusForbidden,
+		},
+		"not JSON at all": {
+			open: true,
+			body: func(*testing.T, string) []byte { return []byte("{{{") },
+			want: http.StatusForbidden,
+		},
+		"empty body": {
+			open: true,
+			body: func(*testing.T, string) []byte { return nil },
+			want: http.StatusForbidden,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, srv := newPairServer(t)
+			live := ""
+			if tc.open {
+				live, _ = srv.pairing.start(time.Now())
+			}
+			out := srv.PairDevice(tc.body(t, live), "relay")
+			if out.Status != tc.want {
+				t.Fatalf("PairDevice = %d, want %d", out.Status, tc.want)
+			}
+			if !json.Valid(out.Body) {
+				t.Fatalf("PairDevice body %q is not a JSON value; the relay cannot carry it", out.Body)
+			}
+			// The wire encoder is the actual gate, so it is the actual
+			// assertion: a body it refuses is a pairing the relay drops.
+			if _, err := relaywire.EncodeControl(relaywire.PairResult{
+				ID: 7, Status: out.Status, Body: out.Body,
+			}); err != nil {
+				t.Fatalf("the relay could not encode this outcome: %v", err)
+			}
+			if tc.want != http.StatusOK {
+				if got, want := string(out.Body), `{"error":"pairing refused"}`; got != want {
+					t.Errorf("refusal body = %q, want %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestPairDeviceRefusalsAreLoggedApart: moving the ceremony off the HTTP
+// handler moved the audit log with it, and the log is the only place the three
+// refusals are ever told apart.
+func TestPairDeviceRefusalsAreLoggedApart(t *testing.T) {
+	good := base64.StdEncoding.EncodeToString(deviceKey(0x2a))
+
+	for name, tc := range map[string]struct {
+		open  time.Duration
+		token func(live string) string
+		want  string
+	}{
+		"no window": {
+			token: func(string) string { return "Zm91cnRlZW4tY2hhcnM" },
+			want:  pairNoWindow.String(),
+		},
+		"wrong token against a live window": {
+			open:  time.Second,
+			token: func(string) string { return "Zm91cnRlZW4tY2hhcnM" },
+			want:  pairWrongToken.String(),
+		},
+		"expired window": {
+			open:  PairingTTL + time.Second,
+			token: func(live string) string { return live },
+			want:  pairExpired.String(),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, srv := newPairServer(t)
+			buf := &syncBuffer{}
+			srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+
+			live := ""
+			if tc.open != 0 {
+				live, _ = srv.pairing.start(time.Now().Add(-tc.open))
+			}
+			out := srv.PairDevice(pairBody(t, tc.token(live), good, "phone"), "relay-peer")
+			if out.Status != http.StatusForbidden {
+				t.Fatalf("PairDevice = %d, want 403", out.Status)
+			}
+			if !logLineContains(buf, "pairing refused", "reason="+strconv.Quote(tc.want)) {
+				t.Errorf("no refusal logged with reason %q; log:\n%s", tc.want, buf.String())
+			}
+			if !logLineContains(buf, "pairing refused", `peer=relay-peer`) {
+				t.Errorf("the refusal did not name the peer it came from; log:\n%s", buf.String())
+			}
+			if strings.Contains(string(out.Body), tc.want) {
+				t.Errorf("the answer leaked the refusal reason: %q", out.Body)
+			}
+		})
+	}
+}
+
+// TestPairRefusalOverHTTPStaysBareText pins the one place the two transports
+// deliberately answer differently. spec/relay-protocol.md fixes both halves:
+// the local handler answers the bare text it always has, and the relay carries
+// the same refusal as JSON because that leg has nowhere to put anything else.
+func TestPairRefusalOverHTTPStaysBareText(t *testing.T) {
+	ts, srv := newPairServer(t)
+	srv.pairing.start(time.Now())
+
+	resp := pairPost(t, ts, ts.URL, "Zm91cnRlZW4tY2hhcnM", base64.StdEncoding.EncodeToString(deviceKey(0x2a)), "phone")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("pair = %d, want 403", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if got, want := string(body), "pairing refused\n"; got != want {
+		t.Errorf("refusal body = %q, want %q", got, want)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
+		t.Errorf("refusal Content-Type = %q, want text/plain", got)
+	}
+}
+
+// TestPairSuccessOverHTTPIsUnchanged: PairDevice builds the success body now,
+// and the handler still writes it with the headers and the trailing newline the
+// /pair page has always read.
+func TestPairSuccessOverHTTPIsUnchanged(t *testing.T) {
+	ts, srv := newPairServer(t)
+	token, _ := srv.pairing.start(time.Now())
+
+	resp := pairPost(t, ts, ts.URL, token, base64.StdEncoding.EncodeToString(deviceKey(0x2a)), "phone")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pair = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	want := `{"daemonPub":"` + base64.StdEncoding.EncodeToString(srv.identity.Key.Public) +
+		`","deviceId":"` + crypto.DeviceID(deviceKey(0x2a)) + "\"}\n"
+	if string(body) != want {
+		t.Errorf("success body = %q, want %q", body, want)
 	}
 }
 
