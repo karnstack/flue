@@ -5,12 +5,15 @@
 // props, so nothing here boots Start, a router or a database — what is under
 // test is what the visitor sees and what the form asks for, which is exactly
 // the surface the anti-enumeration rule lives on in the client.
+//
+// Unmounting between tests is dom-setup.ts's job, not this file's: it has to
+// happen *and then be waited on*, because input-otp leaves timers running that
+// no unmount can cancel. See the note there. `cleanup` is still imported for
+// the one test below that renders twice.
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { CODE_SENT_MESSAGE, LoginForm } from '../src/components/login-form'
-
-afterEach(cleanup)
 
 function setup(
   overrides: {
