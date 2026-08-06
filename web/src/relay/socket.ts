@@ -85,8 +85,13 @@ export interface RelayIdentity {
    * (`takeChannelToken`, from the URL fragment). Null on a self-hosted relay,
    * which authorizes no browser at all — and where offering a subprotocol
    * nobody will echo would break the connection rather than secure it.
+   *
+   * Required rather than optional, and explicitly null: a call site that
+   * forgot the field would compile clean and dial a SaaS relay with no
+   * credential, which presents as a silent 401 reconnect loop. Making the
+   * caller write `null` makes the caller decide.
    */
-  channelToken?: string | null
+  channelToken: string | null
 }
 
 /** The subset of WebSocket this socket drives, so tests can substitute one. */
@@ -275,7 +280,7 @@ function clientUrl(origin: string): string {
  * connection. Offering unconditionally would break every self-hosted deployment
  * to no purpose.
  */
-function subprotocols(token: string | null | undefined): string[] | undefined {
+function subprotocols(token: string | null): string[] | undefined {
   if (!token) return undefined
   return [RELAY_SUBPROTOCOL, `${RELAY_TOKEN_SUBPROTOCOL_PREFIX}${token}`]
 }

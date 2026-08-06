@@ -492,6 +492,7 @@ describe('under FlueClient', () => {
     const identity: RelayIdentity = {
       deviceKey: { privateKey: DEVICE_PRIV, publicKey: x25519.getPublicKey(DEVICE_PRIV) },
       daemonPub: x25519.getPublicKey(DAEMON_PRIV),
+      channelToken: null,
     }
     const raws: FakeRaw[] = []
     const client = new FlueClient('https://relay.example', (url) =>
@@ -537,6 +538,7 @@ describe('under FlueClient', () => {
     const identity: RelayIdentity = {
       deviceKey: { privateKey: DEVICE_PRIV, publicKey: x25519.getPublicKey(DEVICE_PRIV) },
       daemonPub: x25519.getPublicKey(DAEMON_PRIV),
+      channelToken: null,
     }
     const raws: FakeRaw[] = []
     const client = new FlueClient('https://relay.example', (url) =>

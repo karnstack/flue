@@ -57,8 +57,13 @@ export function isRelayOrigin(loc: { hostname: string } = location): boolean {
  * quota refused — lands on the same null. There is no identity to be had either
  * way, and the alternative is a rejected promise at the entry point, which
  * mounts no app and tells the user even less than the explainer does.
+ *
+ * The channel token is deliberately not here: it arrives in the URL fragment,
+ * not the key store, and the entry point is the one place allowed to take it
+ * (the read is destructive). Hence the `Omit` — the caller who assembles the
+ * full `RelayIdentity` must supply `channelToken` itself, explicitly.
  */
-export async function loadRelayIdentity(): Promise<RelayIdentity | null> {
+export async function loadRelayIdentity(): Promise<Omit<RelayIdentity, 'channelToken'> | null> {
   try {
     const daemonPub = await loadPinnedDaemonKey()
     if (daemonPub === null) return null
