@@ -454,6 +454,21 @@ Two properties of that picture are the whole reason it looks like this:
   `POST /api/relay-token` for a new one, which is also where revocation lands:
   a machine or an account that has been switched off stops being given tokens,
   so an open tab loses its terminal at its next reconnect.
+- **Both origins serve security headers, and the control plane's are the ones
+  that were missing.** The relay had a CSP from the start, because
+  `web/src/crypto/keys.ts` names `script-src 'self'` as the reason it is
+  willing to hold a raw private key in IndexedDB. `app.flue.sh` had none — and
+  it is the origin that holds the session cookie and mints channel tokens, so a
+  script running there *is* an account. It now serves a policy of its own from
+  a global request middleware (`app/src/server/security-headers.ts`, the
+  directives in `app/src/lib/csp.ts`): `script-src 'self'` with a per-response
+  nonce, `frame-ancestors 'none'`, `base-uri 'none'`, `form-action 'self'`,
+  plus `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`.
+  A middleware rather than a `_headers` file because `_headers` covers what the
+  asset router serves and nothing the Worker writes — which is every response
+  that matters here. The nonce is what keeps `script-src 'self'` from breaking
+  the app: Start's SSR emits one inline script, and without it hydration never
+  runs.
 
 ## Two deployment constraints
 
