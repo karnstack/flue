@@ -1,4 +1,4 @@
-// Enrolling a daemon: the device-authorization handshake behind `flue enable`.
+// Enrolling a daemon: the device-authorization handshake behind `flue link`.
 //
 // The shape is RFC 8628's, because the situation is the one it was written
 // for: a program on a machine with no browser needs a credential from a
@@ -11,6 +11,14 @@
 //   3. `pollDeviceAuth`   — the daemon, unauthenticated, every few seconds.
 //      `pending` until step 2, and then, exactly once, the device's id and its
 //      enrollment token.
+//
+// And one call after the handshake is over, for the life of the machine:
+//
+//   4. `daemonChannelToken` — the daemon, presenting the enrollment token it
+//      kept. Hands back a short-lived `role: 'daemon'` channel token to dial
+//      the relay with. It lives here rather than beside the mint it wraps
+//      because it is the daemon's door, and the daemon's doors — their caps,
+//      their bounds, their undistinguished refusals — are this file's subject.
 //
 // Three properties are load-bearing, and each is a line you can point at.
 //
@@ -63,6 +71,7 @@ import { deviceAuth, devices } from '../db/schema'
 import { decodePublicKey, deviceIdFromKey, encodePublicKey } from '../lib/device-id'
 import { normalizeLabel } from '../lib/label'
 import { randomToken, sha256Hex } from '../lib/tokens'
+import { DAEMON_TOKEN_TTL_S, mintDaemonToken } from './channel-token'
 import { LONGEST_WINDOW_S, SWEEP_ONE_IN, clientIp, withinLimit } from './ratelimit'
 import { currentUser } from './sessions'
 
@@ -102,6 +111,29 @@ export const USER_CODE_LENGTH = 8
 export const GRANTS_PER_IP = 30
 
 /**
+ * Daemon channel tokens one address may mint per window.
+ *
+ * Its own bucket rather than `GRANTS_PER_IP`'s, because the two calls have
+ * nothing in common but their caller: linking a machine happens once and
+ * writes a row, refreshing a token happens for the life of the machine and
+ * writes nothing. One counter would have a laptop that reconnects a lot spend
+ * the budget for enrolling a new one.
+ *
+ * Bucketed on the **IP**, deliberately, and not on the device id the caller
+ * names. A device id is `sha256(publicKey)[:12]` over a key that is printed in
+ * every pairing URL — so a per-device counter would be a counter a stranger
+ * can fill, and filling it would take somebody else's machine off the relay
+ * for fifteen minutes. The IP is the one subject here a caller cannot choose
+ * for itself (see `clientIp`).
+ *
+ * 120 in fifteen minutes against a daemon that needs one token per 300-second
+ * TTL — three per window, a few more across reconnects — leaves room for a
+ * household or an office of machines behind one NAT and still bounds what an
+ * unauthenticated caller can make this endpoint hash and look up.
+ */
+export const DAEMON_TOKENS_PER_IP = 120
+
+/**
  * Codes one signed-in user may try per window.
  *
  * The other half of RFC 8628 §5.1. Twenty is more wrong guesses than anyone
@@ -124,6 +156,10 @@ const ENROLL_WINDOW_S = LONGEST_WINDOW_S
 const MAX_USER_CODE_INPUT = 64
 /** A device code is 43 base64url characters. Nothing longer is worth hashing. */
 const MAX_DEVICE_CODE_INPUT = 128
+/** A device id is 12 hex characters; nothing longer is worth a query. */
+const MAX_DEVICE_ID_INPUT = 64
+/** An enrollment token is 43 base64url characters. Nothing longer is hashed. */
+const MAX_ENROLLMENT_TOKEN_INPUT = 128
 
 /** How many user codes to draw before giving up on finding a free one. */
 const USER_CODE_TRIES = 5
@@ -518,6 +554,86 @@ export async function confirmDeviceAuth(input: { userCode: string }): Promise<Co
   const row = claimed[0]
   if (!row) return { ok: false }
   return { ok: true, deviceId, label: row.label }
+}
+
+/** What a linked daemon gets back: the token, where to present it, and for how long. */
+export interface DaemonTokenGrant {
+  /** A `role: 'daemon'` channel token. Bearer credential — never logged. */
+  token: string
+  /** The relay to dial, e.g. `wss://relay.flue.sh`. */
+  relayUrl: string
+  /**
+   * Seconds until the token stops verifying.
+   *
+   * Sent rather than left implicit because the daemon refreshes *ahead* of
+   * expiry and cannot read the token to find out when that is: the token is
+   * opaque to it by design — only the control plane and the relay share the
+   * key — so without this it would either hardcode a TTL this service is free
+   * to change, or dial with a dead credential and learn about it as a 401.
+   */
+  expiresIn: number
+}
+
+/**
+ * The fourth call, and the only one a *linked* daemon makes: swap the
+ * enrollment token in its relay.json for a short-lived channel token, and dial
+ * the relay with that.
+ *
+ * `mintDaemonToken` (server/channel-token.ts) is the whole authorization
+ * decision — the token's digest against the device row it names, and both kill
+ * switches, in one SQL predicate. What this adds is the two things a *door* has
+ * to add: a cap on how fast an unauthenticated caller may knock, and a refusal
+ * that says nothing.
+ *
+ * The 401 is one string for every way to be turned away: no such device, the
+ * wrong token, the right token for a different device, a revoked machine, a
+ * disabled or deleted owner. A daemon does the same thing about all of them —
+ * stop, and tell its operator to run `flue link` again — and distinguishing
+ * them would answer questions for whoever is holding a token they should not
+ * have.
+ *
+ * The 429 is deliberately *not* that string. It is the one refusal worth
+ * retrying, and a daemon that read a full bucket as "your enrollment is dead"
+ * would tell its operator to re-link a machine that was working fine.
+ */
+export async function daemonChannelToken(input: {
+  deviceId: string
+  enrollmentToken: string
+}): Promise<DaemonTokenGrant> {
+  // Before the cap, so that an absent or oversized field costs nothing and —
+  // more to the point — cannot spend the budget of whoever shares its address.
+  // The route's validator already turns anything past these bounds into '';
+  // this is what makes the property hold for a caller that does not go through
+  // it.
+  const { deviceId, enrollmentToken } = input
+  if (!deviceId || deviceId.length > MAX_DEVICE_ID_INPUT) throw notEnrolled()
+  if (!enrollmentToken || enrollmentToken.length > MAX_ENROLLMENT_TOKEN_INPUT) throw notEnrolled()
+
+  const withinCap = await withinLimit(
+    'daemon-token:ip',
+    clientIp(),
+    DAEMON_TOKENS_PER_IP,
+    ENROLL_WINDOW_S,
+  )
+  if (!withinCap) {
+    throw new DeviceAuthError(
+      'enroll: too many token requests from this address — wait a few minutes',
+      429,
+    )
+  }
+
+  const grant = await mintDaemonToken(deviceId, enrollmentToken)
+  if (!grant) throw notEnrolled()
+
+  return { token: grant.token, relayUrl: grant.relayUrl, expiresIn: DAEMON_TOKEN_TTL_S }
+}
+
+/** The one refusal `daemonChannelToken` makes, whatever the reason. */
+function notEnrolled(): DeviceAuthError {
+  return new DeviceAuthError(
+    'enroll: this machine is not enrolled, or its enrolment was revoked — run `flue link` again',
+    401,
+  )
 }
 
 /** Delete every grant whose ten minutes are up. Safe from anywhere, any time. */

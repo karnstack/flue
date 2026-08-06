@@ -1,38 +1,47 @@
-// /enroll — where a person approves a machine, and the three endpoints the
-// handshake runs on.
+// /enroll — where a person approves a machine, and the four endpoints the
+// enrolment runs on.
 //
 // The policy is in server/enroll.ts; this file is the wire, and its job is the
 // part a wire can get wrong. Three things live here and nowhere else.
 //
-// **The guard, on exactly one of the three.** Confirming binds a daemon to *the
-// account this page was loaded with*, so it is the one call in the enrolment
-// flow that needs a session. Three layers say so: the loader sends a signed-out
-// visitor to /login rather than rendering a form that cannot work, `requireUser`
-// middleware stops the mutation underneath it, and `confirmDeviceAuth` resolves
-// the session itself and throws without one. The middleware is what turns an
-// expired session into a redirect instead of an error; the check inside the
-// handler is what survives this file being rewired.
+// **The guard, on exactly one of the four.** Confirming binds a daemon to *the
+// account this page was loaded with*, so it is the one call here that needs a
+// session. Three layers say so: the loader sends a signed-out visitor to /login
+// rather than rendering a form that cannot work, `requireUser` middleware stops
+// the mutation underneath it, and `confirmDeviceAuth` resolves the session
+// itself and throws without one. The middleware is what turns an expired
+// session into a redirect instead of an error; the check inside the handler is
+// what survives this file being rewired.
 //
-// **And deliberately not on the other two.** `startDeviceAuth` and
-// `pollDeviceAuth` are the daemon's half, and the daemon has no credential yet
-// — getting one is what it is here for. They are exposed without `requireUser`
-// for that reason, and everything that would otherwise be an authorization
-// check is somewhere else: a per-IP cap on opening grants, a 256-bit device
-// code as the only key to a poll, and (server/enroll.ts) an upsert that will
-// not move a device between accounts.
+// **And deliberately not on the other three.** `startDeviceAuth`,
+// `pollDeviceAuth` and `daemonChannelToken` are the daemon's half, and a daemon
+// never has a session — the first two run before it has any credential at all,
+// and the third authenticates with the enrollment token in its body.
+// `requireUser` on any of them would mean a machine could only reach this
+// service through a browser. Everything that would otherwise be an
+// authorization check is somewhere else: a per-IP cap on opening grants and
+// another on minting tokens, a 256-bit device code as the only key to a poll,
+// a 256-bit enrollment token matched by digest against the device row it names,
+// and (server/enroll.ts) an upsert that will not move a device between
+// accounts.
 //
 // **The validators.** `data` arrives over HTTP and is hostile until it has been
 // read as a string of bounded length — the same treatment /login gives its
-// fields, for the same reason, and it matters more here: two of these three are
-// unauthenticated, so every unbounded field is free work for anyone.
+// fields, for the same reason, and it matters more here: three of these four
+// are unauthenticated, so every unbounded field is free work for anyone.
 //
-// A note for the daemon (Task 11), because it is the one caller that is not a
-// browser. Three things it has to get right, none of which it can guess:
+// A note for the daemon (Go: internal/controlplane), because it is the one
+// caller that is not a browser. Three things it has to get right, none of which
+// it can guess:
 //
 //   1. **The URL.** These are Start server functions, so their URLs are
 //      `/_serverFn/<id>` where the id is
 //      `sha256("<file>--<name>_createServerFn_handler")` — deterministic, and
-//      pinned by `enroll-e2e.test.ts` so a rename cannot move one silently.
+//      written down in `test/server-fn-ids.json`, which `enroll-e2e.test.ts`
+//      checks against the build and Go's `internal/controlplane` checks against
+//      the paths it derives. Renaming or moving `startDeviceAuthFn`,
+//      `pollDeviceAuthFn` or `daemonTokenFn` breaks every installed daemon, so
+//      it has to break both test suites first.
 //
 //   2. **`Origin: https://<the host it is talking to>`.** start.ts installs
 //      CSRF middleware over every server-fn RPC, which refuses a POST carrying
@@ -63,6 +72,7 @@ import type { StartDeviceAuthInput } from '../server/enroll'
 import {
   DeviceAuthError,
   confirmDeviceAuth,
+  daemonChannelToken,
   pollDeviceAuth,
   startDeviceAuth,
 } from '../server/enroll'
@@ -88,6 +98,8 @@ import { currentUser } from '../server/sessions'
 const MAX_USER_CODE = 64
 const MAX_PUBLIC_KEY = 128
 const MAX_DEVICE_CODE = 128
+const MAX_DEVICE_ID = 64
+const MAX_ENROLLMENT_TOKEN = 128
 
 /**
  * Read one field out of whatever the request carried — a `FormData`, which is
@@ -117,6 +129,11 @@ const readStartDeviceAuth = (data: unknown): StartDeviceAuthInput => ({
 
 const readDeviceCode = (data: unknown) => ({
   deviceCode: field(data, 'deviceCode', MAX_DEVICE_CODE),
+})
+
+const readDaemonToken = (data: unknown) => ({
+  deviceId: field(data, 'deviceId', MAX_DEVICE_ID),
+  enrollmentToken: field(data, 'enrollmentToken', MAX_ENROLLMENT_TOKEN),
 })
 
 /**
@@ -194,6 +211,29 @@ export const pollDeviceAuthFn = createServerFn({ method: 'POST' })
       return json(await pollDeviceAuth(data))
     } catch (err) {
       return refusal(err, 'enroll: could not read the grant')
+    }
+  })
+
+/**
+ * POST: swap an enrollment token for a relay channel token, as a linked
+ * daemon. Unauthenticated in the session sense — the enrollment token in the
+ * body *is* the credential.
+ *
+ * The one endpoint of the four whose successful response is itself a bearer
+ * credential, which is why nothing about it is cached, logged or echoed: the
+ * body carries the token the caller presented and the answer carries the one it
+ * is about to present. `refusal` is what keeps a database failure underneath
+ * from answering with drizzle's `Failed query: <SQL>\nparams: …` — on this path
+ * the device id and the `sha256(enrollmentToken)` digest — exactly as
+ * server/channel-token.ts's note asks whoever exposed it to.
+ */
+export const daemonTokenFn = createServerFn({ method: 'POST' })
+  .validator(readDaemonToken)
+  .handler(async ({ data }) => {
+    try {
+      return json(await daemonChannelToken(data))
+    } catch (err) {
+      return refusal(err, 'enroll: could not mint a daemon token')
     }
   })
 

@@ -17,10 +17,12 @@ import { eq } from 'drizzle-orm'
 import { describe, expect, it } from 'vitest'
 import { db } from '../src/db/client'
 import { deviceAuth, devices, rateLimits, users } from '../src/db/schema'
-import { sha256Hex } from '../src/lib/tokens'
-import { GRANTS_PER_IP, startDeviceAuth } from '../src/server/enroll'
+import { randomToken, sha256Hex, verifyChannelToken } from '../src/lib/tokens'
+import { DAEMON_TOKEN_TTL_S } from '../src/server/channel-token'
+import { DAEMON_TOKENS_PER_IP, GRANTS_PER_IP, startDeviceAuth } from '../src/server/enroll'
 import { SESSION_COOKIE, createSession } from '../src/server/sessions'
 import { inRequest } from './request'
+import serverFnIds from './server-fn-ids.json'
 
 const ORIGIN = 'https://app.flue.sh'
 
@@ -116,8 +118,8 @@ async function payload(res: Response): Promise<Record<string, unknown>> {
 }
 
 /**
- * Run `fn` with `device_auth` renamed out from under the running Worker, so the
- * next statement against it fails the way a real outage does.
+ * Run `fn` with `table` renamed out from under the running Worker, so the next
+ * statement against it fails the way a real outage does.
  *
  * A genuine `D1_ERROR: no such table: device_auth: SQLITE_ERROR` raised from
  * inside the handler is the only honest way to test the "something broke that
@@ -126,12 +128,12 @@ async function payload(res: Response): Promise<Record<string, unknown>> {
  * rather than dropped, and restored in a `finally`, so the file's other tests
  * (and their rows) are untouched either way.
  */
-async function withBrokenDatabase<T>(fn: () => Promise<T>): Promise<T> {
-  await env.DB.exec('ALTER TABLE device_auth RENAME TO device_auth_gone')
+async function withBrokenTable<T>(table: string, fn: () => Promise<T>): Promise<T> {
+  await env.DB.exec(`ALTER TABLE ${table} RENAME TO ${table}_gone`)
   try {
     return await fn()
   } finally {
-    await env.DB.exec('ALTER TABLE device_auth_gone RENAME TO device_auth')
+    await env.DB.exec(`ALTER TABLE ${table}_gone RENAME TO ${table}`)
   }
 }
 
@@ -168,6 +170,33 @@ async function start() {
     { ip: freshIp() },
   )
   return value
+}
+
+/**
+ * One machine, enrolled the whole way: a grant opened, a person approving it,
+ * and the single poll that mints the device and hands back its enrollment
+ * token.
+ *
+ * Written as the real handshake rather than an INSERT because what the daemon
+ * presents to `daemonTokenFn` is whatever *this* flow produced — a hand-built
+ * `devices` row would prove the mint accepts a token this test wrote, not the
+ * one the daemon is actually going to hold.
+ */
+async function enroll(): Promise<{ deviceId: string; deviceToken: string }> {
+  const user = await makeUser()
+  const grant = await start()
+  await callServerFn(
+    'confirmDeviceAuthFn',
+    { userCode: grant.userCode },
+    { cookie: await signIn(user.id) },
+  )
+  const polled = (await payload(
+    await callAsDaemon('pollDeviceAuthFn', { deviceCode: grant.deviceCode }),
+  )) as { status?: string; deviceId?: string; deviceToken?: string }
+  if (polled.status !== 'approved' || !polled.deviceId || !polled.deviceToken) {
+    throw new Error(`enroll helper: the approving poll answered ${JSON.stringify(polled)}`)
+  }
+  return { deviceId: polled.deviceId, deviceToken: polled.deviceToken }
 }
 
 /** The grant row behind a formatted user code. */
@@ -297,23 +326,34 @@ describe('confirming over HTTP', () => {
 // client that is not a browser, and with the hostile-input handling in front
 // of them that /login's fields get.
 describe('the daemon-facing endpoints', () => {
-  it('are addressable at a URL the daemon can compute for itself', async () => {
+  it('are addressable at the URLs server-fn-ids.json pins, in both languages', async () => {
     // Start mints a server function's id as sha256("<file>--<name>_createServerFn_handler"),
     // which is deterministic but invisible: nothing in the source spells the
-    // URL, and a rename or a move silently changes it. Task 11's daemon has to
-    // hardcode these two paths, so this recomputes them from the derivation
-    // and checks them against the build. Moving either function out of
-    // src/routes/enroll.tsx, or renaming it, breaks a shipped daemon — and now
-    // breaks this test first.
+    // URL, and a rename or a move silently changes it. The daemon hardcodes
+    // these paths — internal/controlplane derives them in Go from the same two
+    // strings — so a rename here breaks every flue already installed.
+    //
+    // server-fn-ids.json is the one written-down copy, and the assertions run
+    // in the order that makes the coupling impossible to forget: the *build*
+    // has to match the pinned literal (so a rename fails here first), and the
+    // pinned literal has to match the derivation (so fixing the file means
+    // spelling the new name, which is what the Go test then disagrees with
+    // until its own constants are updated).
     const idFor = (file: string, name: string) =>
       sha256Hex(`${file}--${name}_createServerFn_handler`)
 
-    expect(serverFnUrls.startDeviceAuthFn).toBe(
-      `/_serverFn/${await idFor('src/routes/enroll.tsx', 'startDeviceAuthFn')}`,
-    )
-    expect(serverFnUrls.pollDeviceAuthFn).toBe(
-      `/_serverFn/${await idFor('src/routes/enroll.tsx', 'pollDeviceAuthFn')}`,
-    )
+    for (const [name, pinned] of Object.entries(serverFnIds.functions)) {
+      expect(serverFnUrls[name], `${name} moved or was renamed`).toBe(pinned.path)
+      expect(pinned.path).toBe(`/_serverFn/${await idFor(pinned.file, name)}`)
+    }
+
+    // Named individually as well, so that emptying the JSON — or renaming a
+    // key in it — cannot make the loop above vacuously pass.
+    expect(Object.keys(serverFnIds.functions).sort()).toEqual([
+      'daemonTokenFn',
+      'pollDeviceAuthFn',
+      'startDeviceAuthFn',
+    ])
   })
 
   it('opens a grant for a caller with no session and no cookie', async () => {
@@ -440,7 +480,7 @@ describe('the daemon-facing endpoints', () => {
     // — the exact shape these endpoints return raw `Response`s to avoid. And
     // the message inside it is D1's, naming our storage engine and our table
     // to a caller with no session.
-    const res = await withBrokenDatabase(() =>
+    const res = await withBrokenTable('device_auth', () =>
       callAsDaemon('startDeviceAuthFn', { label: 'a go daemon', publicKey: freshKey() }),
     )
 
@@ -465,7 +505,7 @@ describe('the daemon-facing endpoints', () => {
     // The call the daemon makes every five seconds for ten minutes, so it is
     // the likeliest of the three to be in flight when the database has a bad
     // moment — and it had no try/catch at all until this was written.
-    const res = await withBrokenDatabase(() =>
+    const res = await withBrokenTable('device_auth', () =>
       callAsDaemon('pollDeviceAuthFn', { deviceCode: 'a'.repeat(43) }),
     )
 
@@ -475,6 +515,39 @@ describe('the daemon-facing endpoints', () => {
     const body = await payload(res)
     expect(body).toEqual({ error: 'enroll: could not read the grant' })
     expect(JSON.stringify(body)).not.toContain('D1_ERROR')
+  })
+
+  it('takes the exact request internal/controlplane builds', async () => {
+    // The one thing the Go package's own tests cannot prove. They run against a
+    // fake control plane in process, so they check that the client sends what
+    // this repository believes Start requires — and every belief in that list
+    // was arrived at by reading Start's source. This posts the *literal* header
+    // set `(*controlplane.Client).post` sets, against the built Worker, so a
+    // wrong one is a failure here rather than a 400 on somebody's laptop.
+    //
+    // Kept in step by hand, and deliberately spelled out rather than shared
+    // with `callAsDaemon`: the point is the exact list, so a header quietly
+    // added on one side has to be added here too.
+    const res = await SELF.fetch(urlFor('startDeviceAuthFn'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Origin: ORIGIN,
+        // Go canonicalizes header names, so this is the spelling that actually
+        // goes on the wire for `req.Header.Set("X-TSR-ServerFn", "true")`.
+        'X-Tsr-Serverfn': 'true',
+        Accept: 'application/json',
+        'User-Agent': 'Go-http-client/2.0',
+        'cf-connecting-ip': freshIp(),
+      },
+      body: new URLSearchParams({ label: 'a go daemon', publicKey: freshKey() }).toString(),
+      redirect: 'manual',
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-tss-serialized')).toBeNull()
+    const grant = (await payload(res)) as { deviceCode?: string }
+    expect(grant.deviceCode).toMatch(/^[A-Za-z0-9_-]{43}$/)
   })
 
   it('refuses a POST that carries no origin signal at all', async () => {
@@ -492,5 +565,159 @@ describe('the daemon-facing endpoints', () => {
       redirect: 'manual',
     })
     expect(res.status).toBe(403)
+  })
+})
+
+// The fourth call, and the only one a *linked* daemon ever makes: swap the
+// enrollment token stored in relay.json for a short-lived `role: 'daemon'`
+// channel token, and dial the relay with it.
+//
+// `mintDaemonToken` (server/channel-token.ts) is the authorization decision and
+// channel-token.test.ts drives it directly. What only a request can prove is
+// that it is *reachable* by a program with no session and no cookie, over the
+// same form-encoded/`Origin`/raw-JSON wire the other two daemon endpoints use —
+// and that the credential in the body cannot be spent faster than a daemon
+// needs it.
+describe('the daemon token endpoint', () => {
+  it('hands an enrolled daemon a token the relay will accept', async () => {
+    const device = await enroll()
+
+    const res = await callAsDaemon('daemonTokenFn', {
+      deviceId: device.deviceId,
+      enrollmentToken: device.deviceToken,
+    })
+    expect(res.status).toBe(200)
+
+    const body = (await payload(res)) as { token: string; relayUrl: string; expiresIn: number }
+    // Where to present it, and how long it is good for. The daemon refreshes
+    // ahead of `expiresIn`, so a response without it would leave the daemon
+    // guessing at the TTL of a credential it did not mint.
+    expect(body.relayUrl).toBe(env.RELAY_URL)
+    expect(body.expiresIn).toBe(DAEMON_TOKEN_TTL_S)
+
+    // Verified exactly as the relay verifies it — same secret, same function —
+    // so this is the claim that a daemon holding this token can open its leg.
+    const claims = await verifyChannelToken(env.RELAY_SIGNING_SECRET, body.token)
+    expect(claims?.role).toBe('daemon')
+    expect(claims?.dev).toBe(device.deviceId)
+
+    // The enrollment token is not consumed: the daemon presents the same one
+    // every five minutes for the life of the machine.
+    expect(
+      (
+        await callAsDaemon('daemonTokenFn', {
+          deviceId: device.deviceId,
+          enrollmentToken: device.deviceToken,
+        })
+      ).status,
+    ).toBe(200)
+  })
+
+  it('refuses every wrong credential with one undistinguished 401', async () => {
+    // A daemon does the same thing about all of them — stop, and tell its
+    // operator to link again — and a refusal that said *which* would answer
+    // questions for whoever is holding a token they should not have.
+    const device = await enroll()
+    const other = await enroll()
+
+    const refusals = await Promise.all(
+      [
+        { deviceId: device.deviceId, enrollmentToken: randomToken() },
+        { deviceId: device.deviceId, enrollmentToken: other.deviceToken },
+        { deviceId: other.deviceId, enrollmentToken: device.deviceToken },
+        { deviceId: 'ffffffffffff', enrollmentToken: device.deviceToken },
+        { deviceId: '', enrollmentToken: device.deviceToken },
+        { deviceId: device.deviceId, enrollmentToken: '' },
+      ].map(async (fields) => {
+        const res = await callAsDaemon('daemonTokenFn', fields)
+        return { status: res.status, body: await payload(res) }
+      }),
+    )
+
+    for (const refusal of refusals) {
+      expect(refusal.status).toBe(401)
+      expect(refusal.body).toEqual(refusals[0]?.body)
+      expect(refusal.body.token).toBeUndefined()
+    }
+  })
+
+  it('stops minting for a revoked machine', async () => {
+    // The kill switch, at the door the daemon knocks on. `mintDaemonToken`
+    // states it in its own predicate; this is the proof it is still stated
+    // once the call is behind an HTTP handler.
+    const device = await enroll()
+    expect((await callAsDaemon('daemonTokenFn', {
+      deviceId: device.deviceId,
+      enrollmentToken: device.deviceToken,
+    })).status).toBe(200)
+
+    await db().update(devices).set({ disabled: true }).where(eq(devices.id, device.deviceId))
+
+    expect((await callAsDaemon('daemonTokenFn', {
+      deviceId: device.deviceId,
+      enrollmentToken: device.deviceToken,
+    })).status).toBe(401)
+  })
+
+  it('does no work for oversized fields', async () => {
+    // The validator turns anything past its bound into '', and an empty field
+    // is refused before the per-IP cap is consulted. Without the bound, a
+    // megabyte "enrollment token" is a megabyte of hashing per request, for
+    // free, on an endpoint with no session in front of it.
+    const ip = '198.51.100.224'
+    const res = await callAsDaemon(
+      'daemonTokenFn',
+      { deviceId: 'y'.repeat(50_000), enrollmentToken: 'z'.repeat(50_000) },
+      { ip },
+    )
+    expect(res.status).toBe(401)
+
+    // The proof that it was free: the per-IP counter was never touched.
+    const key = await sha256Hex(`daemon-token:ip:${ip}`)
+    expect(await db().select().from(rateLimits).where(eq(rateLimits.key, key))).toEqual([])
+  })
+
+  it('says 429 rather than 401 when a caller is over its cap', async () => {
+    // Its own bucket, not `device-auth:ip`'s: linking a machine happens once
+    // and refreshing a token happens forever, so one cap cannot serve both.
+    // And the two refusals have to stay distinguishable — a daemon that read a
+    // full bucket as "your enrollment is dead" would tell its operator to
+    // re-link a machine that was fine.
+    const ip = '198.51.100.225'
+    const device = await enroll()
+    let last: Response | undefined
+    for (let i = 0; i <= DAEMON_TOKENS_PER_IP; i++) {
+      last = await callAsDaemon(
+        'daemonTokenFn',
+        { deviceId: device.deviceId, enrollmentToken: device.deviceToken },
+        { ip },
+      )
+    }
+    expect(last?.status).toBe(429)
+  })
+
+  it('answers a broken database in JSON, and says nothing about it', async () => {
+    // The call a linked daemon makes forever, so it will be in flight when the
+    // database has a bad moment. A throw that escapes would be Start's seroval
+    // envelope — unreadable to Go — carrying drizzle's `Failed query: <SQL>
+    // params: <every bound value>`, which on this path is the device id and
+    // the sha256 of the daemon's enrollment token.
+    const device = await enroll()
+    const res = await withBrokenTable('devices', () =>
+      callAsDaemon('daemonTokenFn', {
+        deviceId: device.deviceId,
+        enrollmentToken: device.deviceToken,
+      }),
+    )
+
+    expect(res.status).toBe(500)
+    expect(res.headers.get('x-tss-serialized')).toBeNull()
+
+    const body = await payload(res)
+    expect(body).toEqual({ error: 'enroll: could not mint a daemon token' })
+    const text = JSON.stringify(body)
+    expect(text).not.toContain('D1_ERROR')
+    expect(text).not.toContain('SQLITE')
+    expect(text).not.toContain(device.deviceToken)
   })
 })

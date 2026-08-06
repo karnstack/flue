@@ -1,0 +1,17 @@
+{
+  "note": "The URLs of the three server functions the flue daemon calls, pinned across two languages. TanStack Start addresses a server function at /_serverFn/<id>, where <id> is sha256('<source file>--<exported name>_createServerFn_handler') in lowercase hex. Nothing in either codebase spells those URLs, and a rename or a move changes them silently — which breaks every daemon already installed, because the Go client hardcodes what it computes from the same two strings. So this file is the one written-down copy: app/test/enroll-e2e.test.ts asserts the built Worker serves exactly these paths, and Go's internal/controlplane TestServerFunctionPathsMatchTheApp asserts it derives exactly these paths from its own constants. Renaming a function fails the app test first, and updating this file then fails the Go test, which is the only order in which the coupling cannot be forgotten. Derived with: printf 'src/routes/enroll.tsx--startDeviceAuthFn_createServerFn_handler' | shasum -a 256",
+  "functions": {
+    "startDeviceAuthFn": {
+      "file": "src/routes/enroll.tsx",
+      "path": "/_serverFn/c35a8f2c42d27479930cf4c680f912de3e36a1e0086f50ca3cc4da268f9890e3"
+    },
+    "pollDeviceAuthFn": {
+      "file": "src/routes/enroll.tsx",
+      "path": "/_serverFn/637745f91c71182b05e09e8a7b81c70f64123af77b33b1c795bee29809e0e736"
+    },
+    "daemonTokenFn": {
+      "file": "src/routes/enroll.tsx",
+      "path": "/_serverFn/4bc914db76340ee1bdfd29417b69b85f005fa95ce4f3a60e27d87b2872604aae"
+    }
+  }
+}

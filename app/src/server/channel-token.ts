@@ -35,9 +35,10 @@
 // **Nothing here logs a token.** Not the enrollment token it is given, not the
 // channel token it returns. They are bearer credentials; a log line is a copy.
 //
-// One requirement for whoever exposes these over HTTP (the dashboard's "open a
-// session" in Task 8, the daemon's token endpoint in Task 11): wrap the call
-// the way routes/enroll.tsx's `refusal` does. The refusals below are static
+// One requirement for whoever exposes these over HTTP — `openSessionFn` in
+// routes/devices.tsx for the browser, `daemonTokenFn` in routes/enroll.tsx for
+// the daemon, and anything added later: wrap the call the way
+// routes/enroll.tsx's `refusal` does. The refusals below are static
 // strings and safe to surface, but a *drizzle* failure underneath is raised as
 // `Failed query: <SQL>\nparams: <every bound value>` — which on this path means
 // the device id and the `sha256(enrollmentToken)` digest. Log it, answer with a
@@ -66,8 +67,9 @@ export const CLIENT_TOKEN_TTL_S = 60
  * Five minutes rather than one because a daemon dials on its own schedule —
  * boot, network flap, backoff — and a token that expires between "mint" and
  * "reconnect" turns a transient network failure into a permanent one. It
- * refreshes ahead of expiry (Task 11), so this is a ceiling on how stale a
- * revocation can be for a machine that is already connected.
+ * refreshes ahead of expiry (Go: internal/controlplane.DaemonTokens), so this
+ * is a ceiling on how stale a revocation can be for a machine that is already
+ * connected.
  */
 export const DAEMON_TOKEN_TTL_S = 300
 
