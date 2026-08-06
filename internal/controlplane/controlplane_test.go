@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -358,6 +359,98 @@ func TestARefusalNeverQuotesTheResponseBody(t *testing.T) {
 	if !strings.Contains(err.Error(), "502") {
 		t.Errorf("the error does not name the status: %v", err)
 	}
+}
+
+// TestARefusalIsClippedAndStripped: the `error` field is JSON, so unlike the
+// body around it this daemon does print it — to stderr with no escaping
+// (cmd/flue/main.go) and into the log on every failed relay dial
+// (internal/transport/relay). It is still a string chosen by whatever answered,
+// bounded only by the 64 KiB read cap, so what reaches those two places is a
+// clipped, printable version of it. `printableCode` in cmd/flue/link.go is the
+// same argument about the other server-chosen string in this flow.
+func TestARefusalIsClippedAndStripped(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		sent string
+		// gone is what must not survive into the printed error.
+		gone []string
+		// kept is the readable part of the same message.
+		kept string
+	}{
+		{
+			name: "an escape sequence that repaints the operator's screen",
+			// ESC[2J clears it; \r rewrites the line above; ESC]0; retitles
+			// the window on most emulators.
+			sent: "enroll: refused\x1b[2J\x1b]0;owned\x07\rflue: success",
+			gone: []string{"\x1b", "\r", "\x07"},
+			kept: "enroll: refused",
+		},
+		{
+			name: "characters that make the sentence read backwards",
+			sent: "enroll: refused‮gnihtemos",
+			gone: []string{"‮"},
+			kept: "enroll: refused",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeControlPlane(t)
+			f.statuses[StartDeviceAuthPath()] = http.StatusForbidden
+			f.answers[StartDeviceAuthPath()] = string(mustJSON(t, map[string]string{"error": tc.sent}))
+
+			_, err := f.client().StartDeviceAuth(context.Background(), "l", "k")
+			if err == nil {
+				t.Fatal("a refusal came back as success")
+			}
+			for _, bad := range tc.gone {
+				if strings.Contains(err.Error(), bad) {
+					t.Errorf("the error carries %q through to a terminal: %q", bad, err.Error())
+				}
+			}
+			// And it is still the sentence somebody has to read.
+			if !strings.Contains(err.Error(), tc.kept) {
+				t.Errorf("the readable part was lost: %q", err.Error())
+			}
+		})
+	}
+
+	t.Run("a message far longer than a message", func(t *testing.T) {
+		t.Parallel()
+		// The relay transport logs this on every failed dial and retries
+		// forever, so an unclipped one is a log nobody reads and a disk
+		// somebody pays for.
+		f := newFakeControlPlane(t)
+		f.statuses[StartDeviceAuthPath()] = http.StatusForbidden
+		f.answers[StartDeviceAuthPath()] = string(mustJSON(t, map[string]string{
+			"error": strings.Repeat("A", 40_000),
+		}))
+
+		_, err := f.client().StartDeviceAuth(context.Background(), "l", "k")
+		if err == nil {
+			t.Fatal("a refusal came back as success")
+		}
+		var refusal *Error
+		if !errors.As(err, &refusal) {
+			t.Fatalf("err = %v (%T), want a *controlplane.Error", err, err)
+		}
+		if len(refusal.Message) > maxServerMessage+len("…") {
+			t.Errorf("Message is %d bytes, want at most %d", len(refusal.Message), maxServerMessage)
+		}
+	})
+}
+
+// mustJSON encodes a value the way the control plane would, so a test can put
+// bytes that are awkward to write as a Go string literal inside a JSON string
+// without hand-escaping them.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return b
 }
 
 // TestTheClientDoesNotFollowRedirects: every one of these POSTs carries a

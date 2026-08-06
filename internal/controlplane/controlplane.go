@@ -66,6 +66,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // DefaultOrigin is where flue.sh's control plane lives. Overridable on
@@ -231,11 +233,16 @@ func (g ChannelGrant) String() string {
 // Error is a refusal the control plane spelled out, carrying the status it
 // came with.
 //
-// The message is the control plane's own and is passed through verbatim: those
-// strings are written to be read by whoever runs the daemon ("too many
-// enrolments from this address", "the device key must be 32 bytes"). What is
-// never passed through is a response *body* that is not one of these — see
-// `post`.
+// The message is the control plane's own, because those strings are written to
+// be read by whoever runs the daemon ("too many enrolments from this address",
+// "the device key must be 32 bytes"). It is not passed through *verbatim*: it
+// is a string chosen by whatever answered, and where it goes is a terminal the
+// operator is watching (cmd/flue/main.go prints it to stderr with no escaping)
+// and the daemon's log (internal/transport/relay logs it on every failed dial).
+// So it is clipped and stripped on the way in — see `printable`, and
+// `printableCode` in cmd/flue/link.go, which does the same for the other two
+// server-chosen strings this flow prints. What is never passed through at all
+// is a response *body* that is not one of these; see `post`.
 type Error struct {
 	Status  int
 	Message string
@@ -323,7 +330,7 @@ func (c *Client) post(ctx context.Context, path string, form url.Values, out any
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return fmt.Errorf("read the control plane's answer (%s): %w", resp.Status, err)
+		return fmt.Errorf("read the control plane's answer (%s): %w", printable(resp.Status), err)
 	}
 
 	// Refusals are JSON too, and the message inside one is written for the
@@ -338,15 +345,67 @@ func (c *Client) post(ctx context.Context, path string, form url.Values, out any
 		if err := json.Unmarshal(body, &refusal); err != nil || refusal.Error == "" {
 			return &Error{Status: resp.StatusCode}
 		}
-		return &Error{Status: resp.StatusCode, Message: refusal.Error}
+		return &Error{Status: resp.StatusCode, Message: printable(refusal.Error)}
 	}
 
 	if err := json.Unmarshal(body, out); err != nil {
 		// Deliberately not "%w" on the decode error either: encoding/json quotes
 		// the input it choked on in some of its messages.
-		return fmt.Errorf("the control plane answered %s with something that is not the JSON this daemon speaks", resp.Status)
+		return fmt.Errorf("the control plane answered %s with something that is not the JSON this daemon speaks", printable(resp.Status))
 	}
 	return nil
+}
+
+// maxServerMessage bounds a string the control plane chose, in bytes, before it
+// is allowed near a terminal or a log.
+//
+// Two hundred is roughly twice the longest refusal the deployed control plane
+// writes, so a real message arrives whole. The bound is not about screen width:
+// the body it comes out of is capped at 64 KiB (`maxResponseBytes`), and 64 KiB
+// of anything on one log line — once per failed dial, forever, since the relay
+// transport retries — is a log nobody reads and a disk somebody pays for.
+const maxServerMessage = 200
+
+// printable is what a string chosen by whatever answered has to survive before
+// this daemon prints or logs it.
+//
+// The two things it removes are separate problems with the same source.
+//
+// **Control and escape characters**, because the destination is a terminal. A
+// carriage return rewrites the line above it; an ESC moves the cursor, repaints
+// the screen, retitles the window, or on some emulators answers back into the
+// shell. `flue link` prints this string to stderr with no escaping
+// (cmd/flue/main.go), so a control plane — or anything that has got in front of
+// one — could write anywhere on the operator's screen, including over the
+// output of whatever they run next. Dropped rather than escaped: an escaped
+// control character is noise in a sentence meant to be read, and there is no
+// refusal a real control plane writes that needs one. `unicode.IsPrint` is the
+// test, so the direction-override characters (Cf) that make a message read
+// backwards go too, and invalid UTF-8 with them.
+//
+// **Length**, because the destination is also a log. See `maxServerMessage`.
+//
+// Not `printableCode`'s treatment (cmd/flue/link.go), which refuses the whole
+// string rather than cleaning it, and that difference is deliberate: a user code
+// is typed back in, so a code with one wrong byte is not a code and printing
+// part of it would be worse than saying so. A refusal is prose, and prose with
+// its escape sequences removed is still the sentence somebody needs to read.
+func printable(raw string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if !unicode.IsPrint(r) {
+			continue
+		}
+		if b.Len()+utf8.RuneLen(r) > maxServerMessage {
+			// Clipped on a rune boundary, and said so: a sentence that stops
+			// mid-word without a mark reads like the control plane wrote it
+			// that way.
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // NormalizeOrigin turns whatever an operator typed into the exact string that
