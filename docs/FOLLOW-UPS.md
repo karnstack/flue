@@ -270,6 +270,32 @@ has stopped reading — rather than "one browser was briefly noisy". The constan
 doc comment in `relay.go` states the asymmetry so nobody reads `outboxDepth = 256`
 as the isolation the inbox gives.
 
+### 11. The pairing page is now served by the relay whenever one is live
+
+Item 8 above asked part 2 to keep `/pair` out of relay control. The wiring task
+did the opposite, deliberately: `Server.pairingOrigin` (`internal/daemon/server.go`)
+returns the relay's origin whenever the relay is connected, so `pairing.url` —
+the QR — names the relay rather than `http://127.0.0.1:7717`. There is no version
+of remote pairing where it does not: the device being paired is a phone that is
+not on this LAN, and a URL it cannot open is not a ceremony.
+
+What that costs is exactly what item 8 described. The relay ships the JS that
+reads `?k=` and compares it to the `daemonPub` in the answer, so a relay that
+wanted to could pin its own key and pair *itself* as a device — which is the one
+move that would let it read sessions it otherwise only carries as ciphertext.
+
+Two things bound it, neither of which is a fix. The origin comes from
+`relay.json` on this machine (`config.LoadRelay`), never from anything the relay
+announces, so this is a compromised or hostile *deployed* relay rather than
+anyone who can reach one; and pairing still needs a window a user opened, inside
+a two-minute single-use token.
+
+The cheapest real mitigation is confirmation rather than isolation: the local UI
+already holds `daemonPub`, so showing a short fingerprint of it beside the QR and
+having the paired device show what it pinned makes a substituted key something a
+user can see. A native pairing client or an integrity-pinned bundle closes it
+properly; both are larger than the ceremony they protect.
+
 ## Things worth knowing before touching this code
 
 **Tailwind scans raw bytes.** Prose in comments, parameter names, and
