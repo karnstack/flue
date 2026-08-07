@@ -1,16 +1,20 @@
 import { SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 
-import { authorizeDaemon, type Env } from '../src/index'
+import { authorizeDaemon, machineIdFrom, type Env } from '../src/index'
 
 const BASE = 'https://relay.example'
+
+/** The two machines this suite talks about: alpha gets a daemon, beta never does. */
+const ALPHA = 'alpha-1a2b'
+const BETA = 'beta-9f8e'
 
 function open(path: string, headers: Record<string, string> = {}): Promise<Response> {
   return SELF.fetch(`${BASE}${path}`, { headers: { Upgrade: 'websocket', ...headers } })
 }
 
-function openDaemon(): Promise<Response> {
-  return open('/daemon', { Authorization: 'Bearer test-secret' })
+function openDaemon(machine = ALPHA): Promise<Response> {
+  return open(`/daemon/${machine}`, { Authorization: 'Bearer test-secret' })
 }
 
 /** Resolves with the next event of the given type on an accepted socket. */
@@ -20,39 +24,98 @@ function once<T>(ws: WebSocket, type: keyof WebSocketEventMap): Promise<T> {
   })
 }
 
-describe('the relay Worker routes', () => {
-  // This test must run before any daemon has connected: the shared hub keeps
-  // its accepted sockets for the life of the test worker.
-  it('refuses /client when no daemon is connected: 503 daemon offline', async () => {
-    const res = await open('/client')
-    expect(res.status).toBe(503)
-    expect(await res.json()).toEqual({ error: 'daemon offline' })
+describe('machineIdFrom', () => {
+  it('reads the id out of <prefix>/<id>', () => {
+    expect(machineIdFrom('/daemon/alpha-1a2b', '/daemon')).toBe('alpha-1a2b')
+    expect(machineIdFrom('/api/pair/x0', '/api/pair')).toBe('x0')
   })
 
-  it('refuses POST /api/pair when no daemon is connected: 503 daemon offline', async () => {
-    const res = await SELF.fetch(`${BASE}/api/pair`, { method: 'POST', body: '{}' })
-    expect(res.status).toBe(503)
-    expect(await res.json()).toEqual({ error: 'daemon offline' })
+  it('refuses the bare prefix and the empty id', () => {
+    expect(machineIdFrom('/daemon', '/daemon')).toBeNull()
+    expect(machineIdFrom('/daemon/', '/daemon')).toBeNull()
   })
 
-  it('refuses /daemon without the bearer secret: 401', async () => {
+  it('refuses uppercase — ids are minted lowercase, never case-folded here', () => {
+    expect(machineIdFrom('/daemon/ALPHA-1A2B', '/daemon')).toBeNull()
+  })
+
+  it('takes 63 characters and refuses 65: the hostname bound', () => {
+    expect(machineIdFrom(`/daemon/${'a'.repeat(63)}`, '/daemon')).toBe('a'.repeat(63))
+    expect(machineIdFrom(`/daemon/${'a'.repeat(65)}`, '/daemon')).toBeNull()
+  })
+
+  it('refuses a trailing slash', () => {
+    expect(machineIdFrom('/daemon/alpha-1a2b/', '/daemon')).toBeNull()
+  })
+
+  it('refuses an embedded slash: one segment, not a subtree', () => {
+    expect(machineIdFrom('/daemon/a/b', '/daemon')).toBeNull()
+  })
+})
+
+describe('the relay Worker routes by machine id', () => {
+  it('404s /daemon with no id: no such machine, never an asset', async () => {
     const res = await open('/daemon')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'no such machine' })
+  })
+
+  it('404s an id the grammar refuses: /daemon/UPPER', async () => {
+    const res = await open('/daemon/UPPER')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'no such machine' })
+  })
+
+  it('404s a path with an embedded slash: /daemon/a/b', async () => {
+    const res = await open('/daemon/a/b')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'no such machine' })
+  })
+
+  it('404s /client with no id', async () => {
+    const res = await open('/client')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'no such machine' })
+  })
+
+  it('404s POST /api/pair with no id: the id-less route did not survive', async () => {
+    const res = await SELF.fetch(`${BASE}/api/pair`, { method: 'POST', body: '{}' })
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'no such machine' })
+  })
+
+  it('refuses /daemon/<id> without the bearer secret: 401', async () => {
+    const res = await open(`/daemon/${ALPHA}`)
     expect(res.status).toBe(401)
   })
 
-  it('refuses /daemon with the wrong bearer secret: 401', async () => {
-    const res = await open('/daemon', { Authorization: 'Bearer wrong-secret' })
+  it('refuses /daemon/<id> with the wrong bearer secret: 401', async () => {
+    const res = await open(`/daemon/${ALPHA}`, { Authorization: 'Bearer wrong-secret' })
     expect(res.status).toBe(401)
   })
 
-  it('refuses an authorized /daemon request that is not an upgrade: 426', async () => {
-    const res = await SELF.fetch(`${BASE}/daemon`, {
+  it('refuses an authorized /daemon/<id> request that is not an upgrade: 426', async () => {
+    const res = await SELF.fetch(`${BASE}/daemon/${ALPHA}`, {
       headers: { Authorization: 'Bearer test-secret' },
     })
     expect(res.status).toBe(426)
   })
 
-  it('upgrades an authorized /daemon request: 101', async () => {
+  it('answers a client whose machine has no daemon from that hub: 503 offline', async () => {
+    // The 503 is the hub's own refusal (src/hub.ts, offline), so the id
+    // picked an object and the object ran. An asset answer would be a 200.
+    const res = await open('/client/lonely-0a0a')
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'daemon offline' })
+  })
+
+  it('parks no pairing for a machine with no daemon: 503 offline', async () => {
+    const res = await SELF.fetch(`${BASE}/api/pair/lonely-0b0b`, { method: 'POST', body: '{}' })
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'daemon offline' })
+  })
+
+  it('upgrades an authorized daemon on /daemon/<id>: 101', async () => {
     const res = await openDaemon()
     expect(res.status).toBe(101)
     expect(res.webSocket).not.toBeNull()
@@ -82,14 +145,27 @@ describe('the relay Worker routes', () => {
     second.close()
   })
 
-  it('upgrades /client while a daemon is connected: 101', async () => {
-    const daemon = (await openDaemon()).webSocket!
+  it("upgrades /client/<id> while that machine's daemon is connected: 101", async () => {
+    const daemon = (await openDaemon(ALPHA)).webSocket!
     daemon.accept()
-    const res = await open('/client')
+    const res = await open(`/client/${ALPHA}`)
     expect(res.status).toBe(101)
     expect(res.webSocket).not.toBeNull()
     res.webSocket!.accept()
     res.webSocket!.close()
+    daemon.close()
+  })
+
+  it("isolates machines: a client for beta never reaches alpha's daemon", async () => {
+    // Alpha has a live daemon; beta has never seen one. If the id in the path
+    // did not pick the hub — every machine on one object, as before — this
+    // dial would ride alpha's daemon to a 101. The offline answer is the
+    // proof it landed on beta's own, empty hub.
+    const daemon = (await openDaemon(ALPHA)).webSocket!
+    daemon.accept()
+    const res = await open(`/client/${BETA}`)
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'daemon offline' })
     daemon.close()
   })
 
@@ -144,7 +220,9 @@ describe('the security headers on served assets', () => {
     // /api/* is run-worker-first, so a GET lands in the Worker and falls
     // through to env.ASSETS.fetch — a different path to the same bytes, and
     // the one a `_headers` file would miss if the binding did not apply it.
-    const res = await SELF.fetch(`${BASE}/api/pair`)
+    // Not /api/pair: that prefix now belongs to the machine router, which
+    // answers its id-less form with a 404 rather than an asset.
+    const res = await SELF.fetch(`${BASE}/api/anything-else`)
     expect(res.status).toBe(200)
     expect(res.headers.get('Content-Security-Policy')).toBe(CSP)
   })
@@ -173,14 +251,14 @@ describe('authorizeDaemon', () => {
   // unbound-secret case is a direct unit test: with no secret in the env,
   // `Bearer ${undefined}` must not become an accepted credential.
   it('fails closed when DAEMON_SECRET is not bound: Bearer "undefined" is refused', () => {
-    const req = new Request(`${BASE}/daemon`, {
+    const req = new Request(`${BASE}/daemon/${ALPHA}`, {
       headers: { Authorization: 'Bearer undefined', Upgrade: 'websocket' },
     })
     expect(authorizeDaemon(req, {} as Env)).toBe(false)
   })
 
   it('fails closed on an empty-string secret: "Bearer " is refused', () => {
-    const req = new Request(`${BASE}/daemon`, {
+    const req = new Request(`${BASE}/daemon/${ALPHA}`, {
       headers: { Authorization: 'Bearer ', Upgrade: 'websocket' },
     })
     expect(authorizeDaemon(req, { DAEMON_SECRET: '' } as Env)).toBe(false)

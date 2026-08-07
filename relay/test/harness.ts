@@ -10,7 +10,7 @@ import { expect } from 'vitest'
 import { decodeFrame, encodeFrame } from '../src/frame'
 // Aliased: workers-types also declares a global `Env`, which would shadow a
 // bare `Env` inside the augmentation below.
-import type { Env as RelayEnv } from '../src/index'
+import { machineIdFrom, type Env as RelayEnv } from '../src/index'
 
 // vitest-pool-workers 0.20 types `env` as `Cloudflare.Env`; teach it our bindings.
 declare global {
@@ -21,13 +21,37 @@ declare global {
 
 export const BASE = 'https://relay.example'
 
+/**
+ * The one machine the DO suites live on. Which id is irrelevant to hub
+ * internals — the Worker has already picked the object by the time the hub
+ * runs — but every dial spells the public shape, so the suites read like the
+ * traffic they stand in for.
+ */
+export const MACHINE = 'test-machine-0a1b'
+
+/**
+ * The path the hub itself receives for a public machine path. The Worker owns
+ * the id: it picks the object with `idFromName(id)` and forwards the bare
+ * prefix (src/index.ts). A stub dial skips the Worker, so the harness replays
+ * that strip — through the real `machineIdFrom`, so a path the router would
+ * 404 fails loudly here instead of as a hub 404 two asserts later.
+ */
+export function hubPath(path: string): '/daemon' | '/client' | '/api/pair' {
+  for (const prefix of ['/daemon', '/client', '/api/pair'] as const) {
+    if (machineIdFrom(path, prefix) !== null) return prefix
+  }
+  throw new Error(`not a machine path: ${path}`)
+}
+
 export const encoder = new TextEncoder()
 export const decoder = new TextDecoder()
 
 /**
- * Each test dials its own hub: a fresh DO name sidesteps the shared-instance
- * declaration-order trap the routing tests live with, and lets a test start
- * from "no daemon attached" whenever it wants to.
+ * Each test dials its own hub: a fresh DO name sidesteps shared-instance
+ * state between tests, and lets a test start from "no daemon attached"
+ * whenever it wants to. (The Worker suite gets the same isolation by picking
+ * a fresh machine id per test — the same trick from the other side of the
+ * router, since a UUID is itself a well-formed machine id.)
  */
 export function freshHub(): DurableObjectStub {
   return env.HUB.get(env.HUB.idFromName(crypto.randomUUID()))
@@ -95,8 +119,17 @@ export class Leg {
   }
 }
 
-export async function dial(stub: DurableObjectStub, path: '/daemon' | '/client'): Promise<Leg> {
-  const res = await stub.fetch(`${BASE}${path}`, { headers: { Upgrade: 'websocket' } })
+/** The raw upgrade Response for a machine path — for tests about refusals,
+ * where dial's 101-or-throw is the wrong shape. */
+export function open(stub: DurableObjectStub, path: string): Promise<Response> {
+  return stub.fetch(`${BASE}${hubPath(path)}`, { headers: { Upgrade: 'websocket' } })
+}
+
+export async function dial(
+  stub: DurableObjectStub,
+  path: `/daemon/${string}` | `/client/${string}`,
+): Promise<Leg> {
+  const res = await open(stub, path)
   if (res.status !== 101 || !res.webSocket) throw new Error(`${path} upgrade answered ${res.status}`)
   // The pool's test-side socket defaults to delivering binary as Blob; ask for
   // ArrayBuffer so frames can be decoded synchronously.

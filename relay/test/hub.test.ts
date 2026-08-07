@@ -9,6 +9,8 @@ import {
   encoder,
   frame,
   freshHub,
+  MACHINE,
+  open,
   sleep,
   within,
 } from './harness'
@@ -23,16 +25,16 @@ afterEach(() => {
 describe('channel assignment', () => {
   it('announces a client to the daemon: open{channel: 1, origin} on channel 0', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    await dial(hub, `/client/${MACHINE}`)
     expect(await daemon.nextControl()).toEqual({ type: 'open', channel: 1, origin: BASE })
   })
 
   it('assigns sequential channel ids', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    await dial(hub, '/client')
-    await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    await dial(hub, `/client/${MACHINE}`)
+    await dial(hub, `/client/${MACHINE}`)
     expect((await daemon.nextControl()).channel).toBe(1)
     expect((await daemon.nextControl()).channel).toBe(2)
   })
@@ -41,8 +43,8 @@ describe('channel assignment', () => {
 describe('forwarding', () => {
   it('wraps client bytes in the channel header on the way to the daemon', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     client.ws.send(Uint8Array.of(0xde, 0xad))
     const f = await daemon.nextFrame()
@@ -52,8 +54,8 @@ describe('forwarding', () => {
 
   it('strips the header from daemon bytes on the way to the client', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     daemon.ws.send(frame(1, Uint8Array.of(1, 2, 3)))
     expect(bytes(await client.next('bare bytes'))).toEqual([1, 2, 3])
@@ -61,9 +63,9 @@ describe('forwarding', () => {
 
   it('routes a daemon frame to the client that owns the channel', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const c1 = await dial(hub, '/client')
-    const c2 = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const c1 = await dial(hub, `/client/${MACHINE}`)
+    const c2 = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     await daemon.nextControl()
     daemon.ws.send(frame(2, Uint8Array.of(9)))
@@ -74,8 +76,8 @@ describe('forwarding', () => {
 
   it('drops a daemon payload for a channel with no socket', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     daemon.ws.send(frame(99, Uint8Array.of(1)))
     // The leg survives the stray and the next frame still lands.
@@ -87,8 +89,8 @@ describe('forwarding', () => {
 describe('the control channel', () => {
   it('close{channel} closes that client: 1000 "daemon closed"', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     daemon.ws.send(controlFrame({ type: 'close', channel: 1 }))
     expect(await within(client.closed, 'the client to close')).toEqual({
@@ -100,8 +102,8 @@ describe('the control channel', () => {
   it('a client disconnect tells the daemon closed{channel} and logs the counters', async () => {
     const spy = vi.spyOn(console, 'log')
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     client.ws.send(Uint8Array.of(1, 2))
     client.ws.send(Uint8Array.of(3, 4, 5))
@@ -133,8 +135,8 @@ describe('the control channel', () => {
 
   it('drops malformed control JSON without killing the leg', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     daemon.ws.send(frame(0, encoder.encode('not json')))
     daemon.ws.send(frame(1, Uint8Array.of(5)))
@@ -145,8 +147,8 @@ describe('the control channel', () => {
 describe('text frames', () => {
   it('answers flue-ping on a client leg from the auto-response, socket kept', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     client.ws.send('flue-ping')
     expect(await client.next('the pong')).toBe('flue-pong')
@@ -157,8 +159,8 @@ describe('text frames', () => {
 
   it('closes a client that sends any other text frame: 1002, daemon hears closed', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     client.ws.send('hello')
     expect((await within(client.closed, 'the client to close')).code).toBe(1002)
@@ -167,8 +169,8 @@ describe('text frames', () => {
 
   it('closes a daemon that sends a stray text frame: 1002; clients go down 1012', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
     daemon.ws.send('hello')
     expect((await within(daemon.closed, 'the daemon to close')).code).toBe(1002)
@@ -180,7 +182,7 @@ describe('text frames', () => {
 
   it('closes a daemon that sends a binary frame shorter than the header: 1002', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     daemon.ws.send(Uint8Array.of(1, 2))
     expect((await within(daemon.closed, 'the daemon to close')).code).toBe(1002)
   })
@@ -189,24 +191,24 @@ describe('text frames', () => {
 describe('daemon loss and takeover', () => {
   it('daemon disconnect closes every client 1012 "daemon gone"', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const c1 = await dial(hub, '/client')
-    const c2 = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const c1 = await dial(hub, `/client/${MACHINE}`)
+    const c2 = await dial(hub, `/client/${MACHINE}`)
     daemon.ws.close(1000, 'bye')
     expect(await within(c1.closed, 'c1 to close')).toEqual({ code: 1012, reason: 'daemon gone' })
     expect(await within(c2.closed, 'c2 to close')).toEqual({ code: 1012, reason: 'daemon gone' })
     // And the hub is empty again: the next client is refused at the door.
-    const res = await hub.fetch(`${BASE}/client`, { headers: { Upgrade: 'websocket' } })
+    const res = await open(hub, `/client/${MACHINE}`)
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ error: 'daemon offline' })
   })
 
   it('a replacement takes over cleanly: old leg 4000, its clients 1012, no stray closed', async () => {
     const hub = freshHub()
-    const first = await dial(hub, '/daemon')
-    const c1 = await dial(hub, '/client')
+    const first = await dial(hub, `/daemon/${MACHINE}`)
+    const c1 = await dial(hub, `/client/${MACHINE}`)
     await first.nextControl()
-    const second = await dial(hub, '/daemon')
+    const second = await dial(hub, `/daemon/${MACHINE}`)
     expect(await within(first.closed, 'the old daemon to close')).toEqual({
       code: 4000,
       reason: 'replaced',
@@ -218,7 +220,7 @@ describe('daemon loss and takeover', () => {
     // The channel counter survives the takeover, and the replacement's first
     // frame is the new client's open — not a stray closed for channel 1, which
     // it never opened.
-    const c2 = await dial(hub, '/client')
+    const c2 = await dial(hub, `/client/${MACHINE}`)
     expect(await second.nextControl()).toEqual({ type: 'open', channel: 2, origin: BASE })
     // Forwarding targets the live daemon, not whichever socket the runtime
     // happens to list first while the old one dies.
@@ -235,9 +237,9 @@ describe('the message-size cap', () => {
 
   it('closes only the client that sent an oversized frame: 1009, socket kept', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const fat = await dial(hub, '/client')
-    const other = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const fat = await dial(hub, `/client/${MACHINE}`)
+    const other = await dial(hub, `/client/${MACHINE}`)
     expect((await daemon.nextControl()).channel).toBe(1)
     expect((await daemon.nextControl()).channel).toBe(2)
 
@@ -262,8 +264,8 @@ describe('the message-size cap', () => {
 
   it('forwards a frame exactly at the cap', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     await daemon.nextControl()
 
     const payload = new Uint8Array(CAP)
@@ -290,10 +292,10 @@ describe('the channel cap', () => {
       const hubInstance = instance as unknown as { env: Record<string, unknown> }
       hubInstance.env = { ...hubInstance.env, HANDSHAKE_TIMEOUT_MS: 600_000 }
     })
-    const daemon = await dial(hub, '/daemon')
-    await Promise.all(Array.from({ length: 64 }, () => dial(hub, '/client')))
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    await Promise.all(Array.from({ length: 64 }, () => dial(hub, `/client/${MACHINE}`)))
     await sleep(TIMEOUT_MS + 30)
-    const res = await hub.fetch(`${BASE}/client`, { headers: { Upgrade: 'websocket' } })
+    const res = await open(hub, `/client/${MACHINE}`)
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ error: 'relay full' })
     daemon.ws.close()
@@ -303,8 +305,8 @@ describe('the channel cap', () => {
 describe('hibernation', () => {
   it('bridges across an eviction: attachments and the counter carry the state', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const client = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
     expect(await daemon.nextControl()).toEqual({ type: 'open', channel: 1, origin: BASE })
     client.ws.send(Uint8Array.of(1))
     expect((await daemon.nextFrame()).channel).toBe(1)
@@ -319,7 +321,7 @@ describe('hibernation', () => {
     expect(bytes(await client.next('the payload after eviction'))).toEqual([4])
     // The wake re-found the live daemon from its attachment and the next id
     // from the persisted counter.
-    await dial(hub, '/client')
+    await dial(hub, `/client/${MACHINE}`)
     expect(await daemon.nextControl()).toEqual({ type: 'open', channel: 2, origin: BASE })
   })
 })
@@ -327,8 +329,8 @@ describe('hibernation', () => {
 describe('the handshake deadline', () => {
   it('reaps a client that never sends, tells the daemon, spares one that did', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const seen = await dial(hub, '/client') // channel 1
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const seen = await dial(hub, `/client/${MACHINE}`) // channel 1
     seen.ws.send(Uint8Array.of(1))
     // Wait for the byte to come out the daemon side before dialing the idle
     // client: the send and the dial travel different paths to the hub, and on
@@ -336,7 +338,7 @@ describe('the handshake deadline', () => {
     // before this frame, and the strictly-ordered queue below misreads both.
     await daemon.nextControl()
     await daemon.nextFrame()
-    const idle = await dial(hub, '/client') // channel 2
+    const idle = await dial(hub, `/client/${MACHINE}`) // channel 2
     await daemon.nextControl()
     await sleep(TIMEOUT_MS + 30)
     await runDurableObjectAlarm(hub) // a no-op if the real alarm already fired
@@ -354,10 +356,10 @@ describe('the handshake deadline', () => {
 
   it('re-arms while unseen clients remain, then reaps them too', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
-    const b1 = await dial(hub, '/client')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const b1 = await dial(hub, `/client/${MACHINE}`)
     await sleep(40)
-    const b2 = await dial(hub, '/client') // rides b1's pending alarm
+    const b2 = await dial(hub, `/client/${MACHINE}`) // rides b1's pending alarm
     await daemon.nextControl()
     await daemon.nextControl()
     await sleep(25) // past b1's deadline, well before b2's

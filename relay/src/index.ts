@@ -13,8 +13,9 @@ export interface Env {
 /**
  * May this request open the daemon leg?
  *
- * A bearer secret, shared with the one daemon the relay serves — set on the
- * Worker by `flue relay setup`, presented by the daemon on every dial.
+ * A bearer secret, shared with every daemon this relay serves — set on the
+ * Worker by `flue relay setup`, presented by each daemon on every dial. One
+ * secret for the fleet: the machine id in the path is routing, not identity.
  */
 export function authorizeDaemon(req: Request, env: Env): boolean {
   // Fail closed: if the secret was never bound (`wrangler secret put
@@ -30,6 +31,26 @@ export function authorizeDaemon(req: Request, env: Env): boolean {
   return diff === 0
 }
 
+/** The machine-id grammar: a lowercase hostname-shaped slug, 1–63 characters. */
+const MACHINE_ID = /^[a-z0-9][a-z0-9-]{0,62}$/
+
+/**
+ * The machine id in `<prefix>/<id>`, or null when the path is not exactly
+ * that shape. Null covers the bare prefix, an empty id, a trailing slash, an
+ * embedded segment and anything outside the grammar — the router answers
+ * every one of them with the same 404, and never with an asset.
+ */
+export function machineIdFrom(pathname: string, prefix: string): string | null {
+  if (!pathname.startsWith(`${prefix}/`)) return null
+  const id = pathname.slice(prefix.length + 1)
+  return MACHINE_ID.test(id) ? id : null
+}
+
+/** Does this path claim the prefix — the prefix itself or anything under it? */
+function claims(pathname: string, prefix: string): boolean {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`)
+}
+
 // The client and pairing legs are credential-less on purpose: Noise is the
 // confidentiality boundary, the pairing token in the POST body is the pairing
 // credential, and the DO's channel cap and handshake deadline bound the abuse
@@ -37,19 +58,41 @@ export function authorizeDaemon(req: Request, env: Env): boolean {
 
 const unauthorized = () => new Response('unauthorized', { status: 401 })
 
+const noSuchMachine = () =>
+  new Response('{"error":"no such machine"}', {
+    status: 404,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  })
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url)
-    const hub = () => env.HUB.get(env.HUB.idFromName('hub'))
-    if (url.pathname === '/daemon') {
+    // One hub per machine: the id in the path picks the Durable Object, and
+    // the hub receives the bare prefix — its internals are unchanged from the
+    // single-machine relay and never see an id (src/hub.ts matches '/daemon'
+    // exactly). idFromName means a daemon and its clients meet on the same
+    // object by agreeing on a string, with no registry in between.
+    const toHub = (id: string, prefix: string): Promise<Response> => {
+      url.pathname = prefix
+      return env.HUB.get(env.HUB.idFromName(id)).fetch(new Request(url, req))
+    }
+    if (claims(url.pathname, '/daemon')) {
+      const id = machineIdFrom(url.pathname, '/daemon')
+      if (id === null) return noSuchMachine()
       if (!authorizeDaemon(req, env)) return unauthorized()
-      return hub().fetch(req)
+      return toHub(id, '/daemon')
     }
-    if (url.pathname === '/client') {
-      return hub().fetch(req)
+    if (claims(url.pathname, '/client')) {
+      const id = machineIdFrom(url.pathname, '/client')
+      if (id === null) return noSuchMachine()
+      return toHub(id, '/client')
     }
-    if (url.pathname === '/api/pair' && req.method === 'POST') {
-      return hub().fetch(req)
+    if (claims(url.pathname, '/api/pair')) {
+      const id = machineIdFrom(url.pathname, '/api/pair')
+      if (id === null) return noSuchMachine()
+      if (req.method === 'POST') return toHub(id, '/api/pair')
+      // A GET of a well-formed pair URL is a browser following a link; the
+      // SPA below answers it, the API does not.
     }
     return env.ASSETS.fetch(req)
   },

@@ -1,7 +1,17 @@
 import { runInDurableObject } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 
-import { BASE, controlFrame, decoder, dial, encoder, freshHub, type Leg } from './harness'
+import {
+  BASE,
+  controlFrame,
+  decoder,
+  dial,
+  encoder,
+  freshHub,
+  hubPath,
+  MACHINE,
+  type Leg,
+} from './harness'
 
 /** Mirrors the PAIR_TIMEOUT_MS binding in vitest.config.ts. */
 const PAIR_TIMEOUT_MS = 250
@@ -12,13 +22,17 @@ const MAX_BODY = 4096
 /** Mirrors MAX_PENDING_PAIRS in src/hub.ts. */
 const MAX_PENDING = 8
 
+/** Where a stub-side pairing POST lands. The test spells the public path;
+ * hubPath strips it to the bare one the hub receives behind the Worker. */
+const PAIR_URL = `${BASE}${hubPath(`/api/pair/${MACHINE}`)}`
+
 /** A pairing POST. Not awaited by the caller until the daemon has answered. */
 function post(
   hub: DurableObjectStub,
   body: string,
   headers: Record<string, string> = {},
 ): Promise<Response> {
-  return hub.fetch(`${BASE}/api/pair`, { method: 'POST', body, headers })
+  return hub.fetch(PAIR_URL, { method: 'POST', body, headers })
 }
 
 /** Reads the daemon's `pair` frame and answers it. Returns what it read. */
@@ -48,7 +62,7 @@ describe('POST /api/pair', () => {
 
   it('sends pair{id, origin, body} to the daemon and writes back its pairResult', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const res = post(hub, '{"token":"t","publicKey":"k","label":"iPhone"}')
     const pair = await answer(daemon, 403, { error: 'pairing refused' })
     expect(pair).toEqual({
@@ -64,7 +78,7 @@ describe('POST /api/pair', () => {
 
   it('answers a success verbatim, as no-store application/json', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const res = post(hub, '{"token":"t"}')
     await answer(daemon, 200, { deviceId: 'd1b2c3d4e5f60718', daemonPub: 'AAAA' })
     const got = await res
@@ -76,7 +90,7 @@ describe('POST /api/pair', () => {
 
   it('forwards the browser JSON byte for byte, unreshaped', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     // Key order, inner whitespace and characters a re-encoder would escape:
     // the daemon parses these bytes itself, so the relay must not touch them.
     const body = '{"z":  1,\n  "a": "<&>é", "token":"t"}'
@@ -94,7 +108,7 @@ describe('POST /api/pair', () => {
   // pairing code at all). hub.test.ts already proves storage survives a wake.
   it('assigns pair ids from a counter it keeps in storage', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const first = post(hub, '{"token":"a"}')
     expect((await answer(daemon, 200, {})).id).toBe(1)
     await first
@@ -108,7 +122,7 @@ describe('POST /api/pair', () => {
 describe('the pairing provenance check', () => {
   it('admits a same-origin Origin', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const res = post(hub, '{"token":"t"}', { Origin: BASE })
     await answer(daemon, 200, { ok: true })
     expect((await res).status).toBe(200)
@@ -120,7 +134,7 @@ describe('the pairing provenance check', () => {
     // daemon's own verdict and the browser reads it as one — see REFUSED_STATUS
     // in web/src/routes/pair.tsx.
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const res = await post(hub, '{"token":"secret"}', { Origin: 'https://evil.example' })
     expect(res.status).toBe(400)
     expect(await res.json()).toEqual({ error: 'pairing request rejected' })
@@ -134,7 +148,7 @@ describe('the pairing provenance check', () => {
 describe('the pairing body cap', () => {
   it('forwards a body of exactly the cap', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const body = bodyOfSize(MAX_BODY)
     const res = post(hub, body)
     expect(decoder.decode(await daemon.nextControlBytes())).toContain(body)
@@ -144,7 +158,7 @@ describe('the pairing body cap', () => {
 
   it('refuses one byte over the cap with 413, telling the daemon nothing', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const res = await post(hub, bodyOfSize(MAX_BODY + 1))
     expect(res.status).toBe(413)
     expect(await res.json()).toEqual({ error: 'pairing body too large' })
@@ -155,7 +169,7 @@ describe('the pairing body cap', () => {
 
   it('refuses an oversized streamed body, whose length no header declares', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const chunk = encoder.encode('x'.repeat(1024))
     let left = 8
     const stream = new ReadableStream<Uint8Array>({
@@ -164,7 +178,7 @@ describe('the pairing body cap', () => {
         else controller.enqueue(chunk)
       },
     })
-    const res = await hub.fetch(`${BASE}/api/pair`, {
+    const res = await hub.fetch(PAIR_URL, {
       method: 'POST',
       body: stream,
       // Undici/workerd want the half-duplex opt-out spelled out for a stream body.
@@ -180,7 +194,7 @@ describe('the pairing body cap', () => {
 describe('a pairing body that is not JSON', () => {
   it('is rejected rather than spliced into the control frame', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const res = await post(hub, 'not json at all')
     // 400: the guard is the relay's own and it ran before the daemon heard
     // anything, so the token in that body — a truncated POST from a phone on a
@@ -194,7 +208,7 @@ describe('a pairing body that is not JSON', () => {
 
   it('cannot smuggle a second control message past the splice', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     // Verbatim splicing is only safe because this is refused: a body that
     // closes the pair object early would forge a relay → daemon control
     // message — here, a `closed` for somebody else's channel.
@@ -218,7 +232,7 @@ describe('403 on this endpoint', () => {
     // their own assertions above.
     const hub = freshHub()
     const noDaemon = await post(freshHub(), '{"token":"t"}')
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const relayOwn = [
       noDaemon,
       await post(hub, '{"token":"t"}', { Origin: 'https://evil.example' }),
@@ -237,7 +251,7 @@ describe('403 on this endpoint', () => {
 describe('the cap on concurrent pairing attempts', () => {
   it('refuses the 9th parked attempt with 429, spending neither an id nor a frame', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     // Park the cap's worth against a daemon that says nothing yet. Concurrent
     // POSTs reach the object in whatever order the runtime delivers them, so
     // each answer is routed back by the id the daemon read for that token
@@ -278,7 +292,7 @@ describe('the cap on concurrent pairing attempts', () => {
 describe('a daemon that does not answer', () => {
   it('times out with 504 daemon did not answer', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const started = Date.now()
     const res = await post(hub, '{"token":"t"}')
     expect(res.status).toBe(504)
@@ -293,7 +307,7 @@ describe('a daemon that does not answer', () => {
 
   it('fails a pair in flight when the daemon leg drops, without waiting it out', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const res = post(hub, '{"token":"t"}')
     await daemon.nextControl()
     daemon.ws.close(1000, 'bye')
@@ -306,7 +320,7 @@ describe('a daemon that does not answer', () => {
 describe('a pairResult the hub did not ask for', () => {
   it('is dropped, and the control channel keeps working', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     daemon.ws.send(controlFrame({ type: 'pairResult', id: 987, status: 200, body: {} }))
     const honest = post(hub, '{"token":"honest"}')
     expect((await answer(daemon, 200, { ok: true })).id).toBe(1)
@@ -315,7 +329,7 @@ describe('a pairResult the hub did not ask for', () => {
 
   it('carrying a status no HTTP response can hold answers 502', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const res = post(hub, '{"token":"t"}')
     await answer(daemon, 0, { error: 'nonsense' })
     expect((await res).status).toBe(502)
@@ -323,7 +337,7 @@ describe('a pairResult the hub did not ask for', () => {
 
   it('carrying a status that forbids a body drops the body instead of throwing', async () => {
     const hub = freshHub()
-    const daemon = await dial(hub, '/daemon')
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const res = post(hub, '{"token":"t"}')
     await answer(daemon, 204, { ignored: true })
     const got = await res
