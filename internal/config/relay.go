@@ -16,64 +16,20 @@ const relayFileName = "relay.json"
 // Relay is how this daemon reaches a deployed relay: where to dial, what
 // authenticates the dial, and the origin the relay serves browsers on.
 //
-// It is written by whatever set the relay up and read by `flue serve` at
-// startup. This package deliberately does not decide whether a file is
-// *complete* — see transport/relay.New, which is where that lives — because a
-// file that exists says the user meant to have a relay, and telling them which
-// field is missing is a better answer than pretending they never configured one.
-//
-// # Two shapes, one file
-//
-// URL and Origin always apply. What differs is the credential, and it is what
-// tells the two kinds of relay apart:
-//
-//   - **Self-hosted** (`flue relay setup`): `Secret` is the DAEMON_SECRET the
-//     deploy set on the user's own Worker. One long-lived string, shared by the
-//     daemon and the relay, presented on every dial.
-//
-//   - **Hosted on flue.sh** (`flue link`): there is no shared secret on this
-//     machine. `EnrollmentToken` is what the device-authorization handshake
-//     handed back — the machine's permanent, revocable credential *for the
-//     control plane* — and the daemon spends it, at `ControlPlane`, on
-//     short-lived channel tokens that the relay actually checks. `DeviceID` is
-//     this machine's name on the account, derived from its Noise static key.
-//     The key the relay verifies with exists on exactly two Workers, and this
-//     is not one of them.
-//
-// `Hosted` is the one place that distinction is decided; nothing else may
-// re-derive it from a different field.
+// It is written by `flue relay setup` and read by `flue serve` at startup.
+// This package deliberately does not decide whether a file is *complete* —
+// see transport/relay.New, which is where that lives — because a file that
+// exists says the user meant to have a relay, and telling them which field is
+// missing is a better answer than pretending they never configured one.
 type Relay struct {
 	URL    string `json:"url"`
 	Origin string `json:"origin"`
 
-	// Secret is the self-hosted relay's shared DAEMON_SECRET. Omitted from a
-	// hosted relay.json, which has none.
+	// Secret is the relay's shared DAEMON_SECRET: the deploy set it on the
+	// user's own Worker, and the daemon presents it on every dial. Never
+	// logged, never in argv, and the reason this file is 0600.
 	Secret string `json:"secret,omitempty"`
-
-	// ControlPlane is the flue.sh origin this machine is linked to —
-	// https://app.flue.sh, or wherever `flue link --app` pointed it. Where
-	// channel tokens are minted.
-	ControlPlane string `json:"control_plane,omitempty"`
-	// DeviceID is this machine's id on the account: hex(sha256(noise static
-	// public key))[:12], the same twelve characters the control plane derived
-	// when it enrolled it.
-	DeviceID string `json:"device_id,omitempty"`
-	// EnrollmentToken is the machine's credential at the control plane. It does
-	// not expire and it is not the thing the relay checks: it is presented to
-	// the control plane, which answers with a channel token that lives five
-	// minutes. Never logged, never in argv, and the reason this file is 0600.
-	EnrollmentToken string `json:"enrollment_token,omitempty"`
 }
-
-// Hosted reports whether this configuration names flue.sh's relay rather than
-// one the user deployed themselves.
-//
-// The enrollment token is the discriminator because it is the field that
-// decides what a dial presents: with one, the daemon mints a channel token and
-// bears that; without one, it bears `Secret`. A relay.json written before
-// flue.sh existed has no enrollment token and keeps working unchanged, which is
-// the other property this choice buys.
-func (r Relay) Hosted() bool { return r.EnrollmentToken != "" }
 
 // LoadRelay reads relay.json. ok is false when there is no relay configured at
 // all, which is the ordinary state and not an error.

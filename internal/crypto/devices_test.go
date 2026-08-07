@@ -95,19 +95,13 @@ func TestDeviceStoreRejectsBadAndDuplicateKeys(t *testing.T) {
 	}
 }
 
-// TestDeviceIDVector pins the one value two codebases have to agree on.
-//
-// flue.sh's control plane derives a device's id the same way this function
-// does — `hex(sha256(pubkey))[:12]` — because the daemon enrolls under an id it
-// computes for itself and is then addressed by that id everywhere else (the
-// relay's account scoping, the dashboard's device list). If the two
-// derivations ever drift, a daemon and the service disagree about who it is,
-// and nothing else in either system notices.
+// TestDeviceIDVector pins the derivation — `hex(sha256(pubkey))[:12]` — to a
+// known value. A device is addressed by this id everywhere it has a name (the
+// web client's pinned-key records, log lines, revocation), so the derivation
+// changing silently would rename every paired device at once.
 //
 // The key is the initiator static from testdata/noise/ik.json, so the same
-// bytes already have a name on both sides. app/test/enroll.test.ts asserts the
-// identical pair; changing one without the other is what this test exists to
-// catch.
+// bytes already have a name elsewhere in the tree.
 func TestDeviceIDVector(t *testing.T) {
 	pub, err := hex.DecodeString("07c49831ace851c4c861ad4fa8bc850e18c6128731bdf5631076920bc1e89411")
 	if err != nil {

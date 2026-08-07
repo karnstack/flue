@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/karnstack/flue/internal/config"
-	"github.com/karnstack/flue/internal/controlplane"
 	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/service"
@@ -85,8 +84,6 @@ func main() {
 		err = cmdStatus()
 	case "relay":
 		err = cmdRelay(os.Args[2:])
-	case "link":
-		err = cmdLink(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -104,7 +101,6 @@ const usageText = `flue — your terminal, as a browser tab
   flue enable             install the login service, start the daemon, open the UI
   flue disable            remove the login service
   flue status             daemon, login service, and session diagnostics
-  flue link               link this machine to a flue.sh account
   flue relay setup        deploy a relay to your own Cloudflare account
   flue relay status       show the configured relay
   flue open [path]        spawn a session in path and open it in the browser
@@ -301,29 +297,6 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 	}
 
 	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin}
-	if rc.Hosted() {
-		// A machine linked to flue.sh holds no shared secret: the relay checks
-		// a token signed by the control plane, and this is what goes and gets
-		// one before every dial. Built here rather than inside the transport
-		// because the transport must not know what a control plane is — it asks
-		// one question, "what should I present now", and this answers it.
-		//
-		// Refused rather than half-built when the file cannot say where to ask:
-		// a source with no origin fails on every mint, which would be a
-		// reconnect loop whose log line never names the actual problem.
-		if rc.ControlPlane == "" || rc.DeviceID == "" {
-			logger.Warn("relay not started",
-				"err", "relay.json names a flue.sh enrolment with no control plane or no device id; run flue link again")
-			return
-		}
-		tokens := controlplane.NewDaemonTokens(
-			&controlplane.Client{Origin: rc.ControlPlane}, rc.DeviceID, rc.EnrollmentToken)
-		// The same sink the transport writes to, so its one warning — a token
-		// TTL too short to cache — lands beside the dials it is about.
-		tokens.Logger = logger
-		cfg.Tokens = tokens
-	}
-
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
 	if err != nil {
 		logger.Warn("relay not started", "err", err)
@@ -1230,16 +1203,6 @@ func relayLine() string {
 			strings.Join(problems, ", "))
 	}
 
-	if rc.Hosted() {
-		// Named as flue.sh rather than as a URL alone, because the two shapes
-		// are managed in completely different places: a self-hosted relay is
-		// the operator's own Worker, and this one is a machine on somebody's
-		// account, revocable from the device list. The device id is how they
-		// find it there. It is a label, not a credential — it is derived from a
-		// public key — so printing it is safe and useful.
-		return fmt.Sprintf("relay:    flue.sh (%s), this machine is %s, status unknown from here",
-			rc.URL, rc.DeviceID)
-	}
 	return fmt.Sprintf("relay:    configured (%s), status unknown from here", rc.URL)
 }
 
@@ -1252,21 +1215,6 @@ func relayProblems(rc config.Relay) []string {
 	}
 	if rc.Origin == "" {
 		problems = append(problems, "no origin")
-	}
-	if rc.Hosted() {
-		if rc.Secret != "" {
-			// relay.New refuses this outright: a self-hosted secret and a
-			// flue.sh enrolment describe two different relays, and picking
-			// either could take a working daemon off the internet silently.
-			problems = append(problems, "it names both a self-hosted secret and a flue.sh enrolment")
-		}
-		if rc.ControlPlane == "" {
-			problems = append(problems, "no control plane to mint relay tokens from")
-		}
-		if rc.DeviceID == "" {
-			problems = append(problems, "no device id")
-		}
-		return problems
 	}
 	if rc.Secret == "" {
 		problems = append(problems, "no secret")

@@ -125,42 +125,15 @@ const (
 	minStableConn = 5 * time.Second
 )
 
-// TokenSource mints the credential a *hosted* relay wants on the daemon leg: a
-// short-lived, control-plane-signed `role: 'daemon'` channel token.
-//
-// It is an interface here rather than a concrete type because this package must
-// not know what a control plane is: the implementation
-// (internal/controlplane.DaemonTokens) presents the machine's enrollment token
-// to app.flue.sh and caches what comes back. What this package needs is one
-// question, asked once per dial — "what should I present now?" — and the answer
-// being fresh is the source's business.
-//
-// Token is called on the dial path, so it must return promptly; the context it
-// is given carries the dial's deadline.
-type TokenSource interface {
-	Token(ctx context.Context) (string, error)
-}
-
 // Config is everything the adapter needs to reach a deployed relay.
 //
-// URL and Origin are always required. Exactly one of Secret and Tokens must be
-// set, and which one it is decides what kind of relay this is:
-//
-//   - Secret — a relay the user deployed themselves (`flue relay setup`). The
-//     daemon and the Worker share one long-lived DAEMON_SECRET, and the daemon
-//     presents it on every dial.
-//   - Tokens — flue.sh's hosted relay (`flue link`). There is no shared secret
-//     on this machine at all: the relay verifies tokens signed with a key held
-//     only by the control plane and the relay itself, and this daemon asks the
-//     control plane for one. A daemon that held the signing key could sign a
-//     token naming any account on the service.
-//
-// See New for why both at once is refused rather than resolved.
+// All three fields are required: where to dial, what the dial presents, and
+// the origin the relay serves browsers on. The daemon and the Worker share
+// one long-lived DAEMON_SECRET, set at deploy time by `flue relay setup`.
 type Config struct {
-	URL    string // wss://flue-relay.<sub>.workers.dev/daemon, or wss://relay.flue.sh/daemon
-	Secret string // self-host: the DAEMON_SECRET set at deploy time
+	URL    string // wss://flue-relay.<sub>.workers.dev/daemon
+	Secret string // the DAEMON_SECRET set at deploy time
 	Origin string // https origin the relay serves the UI on
-	Tokens TokenSource
 }
 
 // ErrIncompleteConfig is what New answers a Config that is missing a field it
@@ -169,9 +142,6 @@ type Config struct {
 // the message names which field it was.
 var ErrIncompleteConfig = errors.New("relay: incomplete config")
 
-// ErrConflictingConfig is what New answers a Config that names both kinds of
-// credential. See New.
-var ErrConflictingConfig = errors.New("relay: conflicting config")
 
 // Server is the surface the adapter drives — implemented by *daemon.Server.
 //
@@ -253,27 +223,15 @@ var noRedirects = &http.Client{
 // built from. A misconfigured field must fail here, at wiring time, rather than
 // quietly disarming the check it exists for.
 //
-// URL and a credential are required for the ordinary reason: without them there
+// URL and the secret are required for the ordinary reason: without them there
 // is nothing to dial and nothing to authenticate with, so Run would do nothing
 // but fail and back off forever.
-//
-// Both credentials at once is refused rather than resolved, and that is a
-// decision rather than pedantry. It is what a hand-edited relay.json looks like
-// when a machine that was already pointed at a self-hosted relay is linked to
-// flue.sh, and there is no honest guess to make: a shared secret is refused by a
-// hosted relay and a channel token by a self-hosted one, so picking either could
-// take a working daemon off the internet without saying why. The daemon comes up
-// serving loopback and the log names the problem.
 func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceStore, log *slog.Logger) (*Transport, error) {
 	switch {
 	case cfg.URL == "":
 		return nil, fmt.Errorf("%w: no URL", ErrIncompleteConfig)
-	case cfg.Secret == "" && cfg.Tokens == nil:
-		return nil, fmt.Errorf("%w: no daemon secret and no token source", ErrIncompleteConfig)
-	case cfg.Secret != "" && cfg.Tokens != nil:
-		// The message names neither value. One of them is a shared secret and
-		// the other mints bearer tokens, and this error is logged.
-		return nil, fmt.Errorf("%w: a self-hosted daemon secret and a hosted token source cannot both apply to one relay", ErrConflictingConfig)
+	case cfg.Secret == "":
+		return nil, fmt.Errorf("%w: no daemon secret", ErrIncompleteConfig)
 	case cfg.Origin == "":
 		return nil, fmt.Errorf("%w: no origin", ErrIncompleteConfig)
 	}
@@ -457,28 +415,11 @@ func (t *Transport) runOnce(ctx context.Context) (connectedAt time.Time, err err
 
 // bearer is what this dial presents on the daemon leg.
 //
-// Two shapes, one header. A self-hosted relay is authenticated by the shared
-// secret in relay.json; a hosted one by a channel token this daemon has to go
-// and get, because the key that signs those lives only on the control plane and
-// the relay — never here. New has already established that exactly one of the
-// two is configured, so this is a branch on which, not a search for either.
-//
-// A failed mint returns an error and no token, and the caller treats it exactly
-// as a failed dial: log it, back off, try again. It must never fall through to
-// dialling with an empty bearer — a relay that accepted that would be a relay
-// with no authentication at all.
+// bearer is what a dial presents: the shared secret in relay.json. New has
+// already refused a config without one, so this never returns empty — a relay
+// that accepted an empty bearer would be a relay with no authentication at all.
 func (t *Transport) bearer(ctx context.Context) (string, error) {
-	if t.cfg.Tokens == nil {
-		return t.cfg.Secret, nil
-	}
-	token, err := t.cfg.Tokens.Token(ctx)
-	if err != nil {
-		return "", err
-	}
-	if token == "" {
-		return "", errors.New("relay: the token source returned an empty channel token")
-	}
-	return token, nil
+	return t.cfg.Secret, nil
 }
 
 // readLoop reads until the socket ends or the relay breaks the protocol.

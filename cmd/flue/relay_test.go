@@ -601,16 +601,14 @@ func TestRunRelaySetupSendsTheSecurityHeaders(t *testing.T) {
 	if strings.Contains(got, "127.0.0.1") || strings.Contains(got, "localhost") {
 		t.Errorf("assets._headers carries the daemon's loopback connect-src:\n%q", got)
 	}
-	// And the one the relay must carry that the daemon must not: the control
-	// plane, because the token refresh is a cross-origin fetch from a document
-	// on the relay origin and `'self'` refuses it before the network. Spelled
-	// out here rather than derived, so widening it to a scheme or a wildcard
-	// has to be done twice.
-	if !strings.Contains(got, "connect-src 'self' https://app.flue.sh;") {
-		t.Errorf("assets._headers does not allow the control-plane origin exactly:\n%q", got)
+	// The relay's policy grants nothing beyond 'self': the bundle on a relay
+	// origin talks to that origin alone, and any second origin appearing here
+	// is a policy widening someone has to justify.
+	if !strings.Contains(got, "connect-src 'self';") {
+		t.Errorf("assets._headers does not pin connect-src to 'self' exactly:\n%q", got)
 	}
-	if strings.Contains(got, "https:;") || strings.Contains(got, "*.flue.sh") {
-		t.Errorf("assets._headers widens connect-src past the one origin:\n%q", got)
+	if strings.Contains(got, "https:;") || strings.Contains(got, "flue.sh") {
+		t.Errorf("assets._headers widens connect-src past the relay's own origin:\n%q", got)
 	}
 	// And nothing uploaded the document as an asset, which is the failure this
 	// whole mechanism exists to avoid.
