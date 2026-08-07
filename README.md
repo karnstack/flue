@@ -110,8 +110,9 @@ flue relay join wss://<your-relay> --secret <...>     # printed by setup, verbat
 `join` needs no token and deploys nothing — the Worker already exists and the
 secret is the whole credential. It mints the machine an id of its own and
 points its daemon at its own slot on the same Worker. Opening the relay's one
-URL shows a picker of the machines that browser has paired with; pairing is
-per machine, once per browser, from the QR each machine shows. The token is
+URL opens the machine this browser has paired — or a picker, once it has
+paired several; pairing is per machine, once per browser, from the QR each
+machine shows. The token is
 never stored. What it deploys, what it costs, what bounds abuse, what one
 shared secret does and does not separate, and the counters it leaves behind
 are in [docs/RELAY.md](docs/RELAY.md).

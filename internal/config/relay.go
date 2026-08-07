@@ -43,7 +43,8 @@ type Relay struct {
 	// not.
 	MachineID string `json:"machine_id"`
 	// MachineName is the human label for this machine — free text, shown in
-	// machine lists and never part of any URL.
+	// machine lists; it rides the pairing link's query (`n=`, so the pairing
+	// browser can label the machine), never any path the relay routes on.
 	MachineName string `json:"machine_name"`
 }
 

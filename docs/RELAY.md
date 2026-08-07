@@ -92,7 +92,8 @@ whole credential, so everything it does is local — check the address, mint
 this machine a fresh id (`<hostname>-<4 hex>`, its slot on the relay and the
 `<id>` in both wss paths), and write the same `relay.json` shape setup writes.
 `--name` sets the label the machine picker shows; it defaults to the hostname
-and never appears in a URL. The printed line carries the secret — that is the
+and rides the pairing link's query (`n=`) so the pairing browser can write it
+down — never a path, and never anything the Worker routes on. The printed line carries the secret — that is the
 point, it is the deliberate hand-off — so paste it into the other machine's
 terminal, not into a chat that keeps history.
 
