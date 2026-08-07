@@ -255,6 +255,13 @@ related asymmetry on the daemon's own outbound queue is §10.
 
 ## Reading the counters
 
+`GET /api/health` answers `200 {"ok":true}` from the Worker alone — no
+Durable Object wakes, no machine is named. It is the address to give an
+uptime monitor: it proves the deploy is live and routing, and deliberately
+nothing more. Whether a *machine* is up is a different question with a
+different cost — a `/client/<id>` dial answers it, and the presence note
+under fair use is the reason it stays off this endpoint.
+
 The Worker deploys with observability enabled, and the hub logs one JSON line
 per client channel when that channel closes:
 

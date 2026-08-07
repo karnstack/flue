@@ -206,6 +206,21 @@ describe('the relay Worker routes by machine id', () => {
     expect(res.headers.get('Content-Type')).toContain('text/html')
     expect(await res.text()).toContain('flue relay')
   })
+
+  it('answers GET /api/health with 200 ok, from the Worker alone', async () => {
+    // Liveness of the Worker, nothing else: no machine id, no Durable Object
+    // woken, nothing about any daemon. An uptime monitor pointed here costs
+    // hibernation nothing and learns nothing a public URL does not already
+    // say. Per-machine liveness is deliberately NOT here — that is the
+    // presence oracle RELAY.md documents, and adding it to an endpoint
+    // monitors poll would turn an accepted observation into an advertised API.
+    const res = await SELF.fetch(`${BASE}/api/health`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Content-Type')).toContain('application/json')
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(await res.json()).toEqual({ ok: true })
+  })
+
 })
 
 /**

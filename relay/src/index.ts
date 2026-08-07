@@ -94,6 +94,17 @@ export default {
       // A GET of a well-formed pair URL is a browser following a link; the
       // SPA below answers it, the API does not.
     }
+    if (url.pathname === '/api/health' && req.method === 'GET') {
+      // Liveness of the Worker and nothing else — no id, no Durable Object
+      // woken, nothing about any daemon. An uptime monitor pointed here costs
+      // hibernation nothing. Per-machine liveness stays off this endpoint on
+      // purpose: a valid /client/<id> dial already observes it (RELAY.md,
+      // "what a probe can learn"), and an *advertised* per-machine health API
+      // would turn that accepted observation into a product surface.
+      return new Response('{"ok":true}', {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      })
+    }
     return env.ASSETS.fetch(req)
   },
 }
