@@ -127,13 +127,18 @@ describe('RemoteRoute', () => {
     expect(await navigator.clipboard.readText()).toBe('https://flue-relay.example')
   })
 
-  it('says it cannot run either command itself', async () => {
-    // The whole honesty of the screen. A browser cannot drive the daemon's CLI,
-    // so a page that showed a "Set up" button would be offering a click that
-    // does nothing — this one copies a command and says that is all it does.
+  it('offers both doors out of not-configured: the deploy form and the CLI', async () => {
+    // The screen can act now — the daemon's /api/relay/deploy runs the same
+    // deploy the CLI does — so the honesty moved: the form says exactly what
+    // a deploy creates and that the token is never stored, and the CLI
+    // command stays beside it as the same deploy's other door.
     await mountRemote()
 
-    expect(screen.getByText(/copy a command for you, not run it/)).toBeTruthy()
+    expect(screen.getByText(/from this page, or from a terminal/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Deploy to Cloudflare' })).toBeTruthy()
+    expect(screen.getByLabelText(/API token/)).toBeTruthy()
+    expect(screen.getByText(/kept on this machine/)).toBeTruthy()
+    expect(screen.getByText(SETUP)).toBeTruthy()
   })
 
   it('copies a command to the clipboard', async () => {
@@ -248,5 +253,75 @@ describe('RemoteRoute', () => {
       .filter((el) => el.getAttribute('data-variant') === 'default')
 
     expect(filled).toHaveLength(1)
+  })
+})
+
+describe('JoinReveal', () => {
+  it('hands the join line over on request, never on page load', async () => {
+    const user = userEvent.setup()
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body =
+        url === '/api/relay/info'
+          ? { configured: true, can_deploy: true, version: 'v', worker: 'flue-relay' }
+          : { join_command: 'flue relay join wss://r --secret s' }
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    try {
+      await mountRemote({ relay: RELAY_UP })
+
+      // The secret-bearing line is not on the page and nothing fetched it —
+      // the deliberate difference from every other fact this screen shows.
+      // (The info fetch on mount is fine; the join fetch is the one gated.)
+      expect(screen.queryByText(/--secret/)).toBeNull()
+      expect(fetchImpl.mock.calls.map((c) => String(c[0]))).not.toContain('/api/relay/join')
+
+      await user.click(await screen.findByRole('button', { name: 'Show the join command' }))
+
+      expect(await screen.findByText('flue relay join wss://r --secret s')).toBeTruthy()
+      expect(fetchImpl.mock.calls.map((c) => String(c[0]))).toContain('/api/relay/join')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('the welcome gap', () => {
+  it('flips to connected when the daemon says the relay came up after the greeting', async () => {
+    // The welcome is a snapshot: a tab greeted mid-dial would say
+    // "connecting" until its socket reconnected, which on stable loopback is
+    // never. The screen polls /api/relay/info while its snapshot claims less
+    // than connected, and adopts the daemon's live answer.
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body =
+        url === '/api/relay/info'
+          ? {
+              configured: true,
+              can_deploy: true,
+              version: 'v',
+              transport: 'connected',
+              transport_origin: 'https://flue-relay.example',
+            }
+          : {}
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    try {
+      await mountRemote({ relay: { status: 'connecting' } })
+
+      expect(await screen.findByText('Connected')).toBeTruthy()
+      expect(screen.getByText('https://flue-relay.example')).toBeTruthy()
+      expect(screen.queryByText('Dialling the relay')).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

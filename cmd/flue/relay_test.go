@@ -51,6 +51,7 @@ type wireMetadata struct {
 		Type      string `json:"type"`
 		Name      string `json:"name"`
 		ClassName string `json:"class_name"`
+		Text      string `json:"text"`
 	} `json:"bindings"`
 	KeepBindings []string `json:"keep_bindings"`
 	Migrations   *struct {
@@ -81,6 +82,9 @@ type fakeCloudflare struct {
 	srv       *httptest.Server
 	accounts  []cloudflare.Account
 	subdomain string
+	// script is the Worker name the fake expects requests for; the default is
+	// relayScriptName, and a test that deploys under --worker overrides it.
+	script string
 	// reject maps a path suffix to the Cloudflare error message that endpoint
 	// should fail with, for the tests that check a step failing stops the flow.
 	reject map[string]string
@@ -92,6 +96,7 @@ type fakeCloudflare struct {
 	uploads          map[string][]byte
 	module           []byte
 	meta             wireMetadata
+	secretPuts       int
 	secretName       string
 	secretText       string
 	secretType       string
@@ -112,6 +117,7 @@ func newFakeCloudflare(t *testing.T, accounts []cloudflare.Account, subdomain st
 		reject:    map[string]string{},
 		manifest:  map[string]manifestLine{},
 		uploads:   map[string][]byte{},
+		script:    relayScriptName,
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.route))
 	t.Cleanup(f.srv.Close)
@@ -154,14 +160,14 @@ func (f *fakeCloudflare) route(w http.ResponseWriter, r *http.Request) {
 		f.uploadBucket(w, r, body)
 	case strings.HasSuffix(p, "/secrets"):
 		f.putSecret(w, body)
-	case strings.HasSuffix(p, "/scripts/"+relayScriptName+"/subdomain"):
+	case strings.HasSuffix(p, "/scripts/"+f.script+"/subdomain"):
 		f.mu.Lock()
 		f.subdomainEnabled = true
 		f.mu.Unlock()
 		writeResult(w, map[string]bool{"enabled": true})
 	case strings.HasSuffix(p, "/workers/subdomain"):
 		writeResult(w, map[string]string{"subdomain": f.subdomain})
-	case strings.HasSuffix(p, "/scripts/"+relayScriptName):
+	case strings.HasSuffix(p, "/scripts/"+f.script):
 		f.putScript(w, r, body)
 	default:
 		f.errorf(w, "unexpected request %s %s", r.Method, p)
@@ -267,7 +273,12 @@ func (f *fakeCloudflare) putScript(w http.ResponseWriter, r *http.Request, body 
 	}
 	f.mu.Unlock()
 	if repeat {
-		writeAPIError(w, "Cannot apply new-sqlite-class migration to class DaemonHub that is already depended on by existing Durable Objects")
+		// The refusal the real API actually sends on a re-deploy, verbatim
+		// from the first live `flue relay update` (error 10079). An earlier
+		// fake used a "class … already depended on" wording that the real
+		// API apparently reserves for other cases; the matcher missed this
+		// one in production, so the fake now speaks the observed dialect.
+		writeAPIErrorCode(w, 10079, "Actor migration tag precondition failed, got tag '' when expected tag is 'v1'. Please make sure the tags match and try again.")
 		return
 	}
 
@@ -295,6 +306,7 @@ func (f *fakeCloudflare) putSecret(w http.ResponseWriter, body []byte) {
 		return
 	}
 	f.mu.Lock()
+	f.secretPuts++
 	f.secretName, f.secretText, f.secretType = req.Name, req.Text, req.Type
 	f.mu.Unlock()
 	writeResult(w, map[string]string{"name": req.Name})
@@ -333,10 +345,14 @@ func writeResult(w http.ResponseWriter, result any) {
 }
 
 func writeAPIError(w http.ResponseWriter, msg string) {
+	writeAPIErrorCode(w, 10000, msg)
+}
+
+func writeAPIErrorCode(w http.ResponseWriter, code int, msg string) {
 	b, _ := json.Marshal(msg)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
-	_, _ = fmt.Fprintf(w, `{"success":false,"errors":[{"code":10000,"message":%s}],"result":null}`, b)
+	_, _ = fmt.Fprintf(w, `{"success":false,"errors":[{"code":%d,"message":%s}],"result":null}`, code, b)
 }
 
 // --- helpers -----------------------------------------------------------------
@@ -426,7 +442,7 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	f := newFakeCloudflare(t, oneAccount(), "karn")
 
 	var out bytes.Buffer
-	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client()); err != nil {
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), nil); err != nil {
 		t.Fatalf("runRelaySetup: %v", err)
 	}
 
@@ -446,14 +462,21 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	// running: without the ASSETS binding every /api/* fallthrough calls fetch
 	// on undefined, and without observability there are no logs to find out
 	// with. Both are silent in a deploy that otherwise reports success.
-	var gotAssets, gotHub bool
+	var gotAssets, gotHub, gotVersion bool
 	for _, b := range f.meta.Bindings {
 		switch {
 		case b.Type == "assets" && b.Name == "ASSETS":
 			gotAssets = true
 		case b.Type == "durable_object_namespace" && b.Name == "HUB" && b.ClassName == "DaemonHub":
 			gotHub = true
+		case b.Type == "plain_text" && b.Name == "FLUE_VERSION" && b.Text == deployStamp():
+			// The version stamp: what the Worker reports on /api/health, and
+			// what lets a daemon see a relay older than itself.
+			gotVersion = true
 		}
+	}
+	if !gotVersion {
+		t.Fatalf("no FLUE_VERSION plain_text binding carrying %q in %+v", deployStamp(), f.meta.Bindings)
 	}
 	if !gotAssets {
 		t.Fatalf("no assets binding named ASSETS in %+v; env.ASSETS would be undefined in the deployed worker", f.meta.Bindings)
@@ -520,8 +543,8 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the saved secret is not base64url: %v", err)
 	}
-	if len(raw) != daemonSecretBytes {
-		t.Fatalf("the saved secret decodes to %d bytes, want %d", len(raw), daemonSecretBytes)
+	if len(raw) != 32 {
+		t.Fatalf("the saved secret decodes to %d bytes, want %d", len(raw), 32)
 	}
 
 	// The URL is the bare host — the /daemon/<machine id> leg is the
@@ -559,14 +582,16 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 		"✓ secret set",
 		"✓ reachable at https://" + host,
 		"flue relay join wss://" + host + " --secret " + saved.Secret,
-		"does not store it",
+		"token stored for one-click updates",
 	} {
 		if !strings.Contains(transcript, want) {
 			t.Fatalf("transcript is missing %q:\n%s", want, transcript)
 		}
 	}
 
-	// The token was used, and then it was forgotten.
+	// The token was used, never echoed, and stored in exactly one place: the
+	// 0600 cloudflare.json that makes the next update a click. Storing it is
+	// the product decision; ONE file is the discipline that remains.
 	usedIt := false
 	for _, a := range f.auths {
 		if a == "Bearer "+setupToken {
@@ -579,8 +604,16 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	if strings.Contains(transcript, setupToken) {
 		t.Fatalf("the API token was echoed back:\n%s", transcript)
 	}
-	if hits := configFilesContaining(t, setupToken); len(hits) > 0 {
-		t.Fatalf("the API token was written to %v", hits)
+	hits := configFilesContaining(t, setupToken)
+	if len(hits) != 1 || filepath.Base(hits[0]) != "cloudflare.json" {
+		t.Fatalf("the API token should be in cloudflare.json and nowhere else, got %v", hits)
+	}
+	cf, ok, err := config.LoadCloudflare()
+	if err != nil || !ok {
+		t.Fatalf("LoadCloudflare after setup: ok=%v err=%v", ok, err)
+	}
+	if cf.Token != setupToken || cf.AccountID == "" {
+		t.Fatalf("stored credential = %+v; want the pasted token and the deployed account", cf)
 	}
 }
 
@@ -603,7 +636,7 @@ func TestRunRelaySetupSendsTheSecurityHeaders(t *testing.T) {
 	f := newFakeCloudflare(t, oneAccount(), "karn")
 
 	var out bytes.Buffer
-	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client()); err != nil {
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), nil); err != nil {
 		t.Fatalf("runRelaySetup: %v", err)
 	}
 	if f.meta.Assets == nil {
@@ -660,13 +693,13 @@ func TestRunRelaySetupIsSafeToRerun(t *testing.T) {
 	f := newFakeCloudflare(t, oneAccount(), "karn")
 
 	var out bytes.Buffer
-	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client()); err != nil {
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), nil); err != nil {
 		t.Fatalf("first runRelaySetup: %v", err)
 	}
 	first := loadSavedRelay(t)
 
 	out.Reset()
-	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client()); err != nil {
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), nil); err != nil {
 		t.Fatalf("second runRelaySetup: %v", err)
 	}
 	second := loadSavedRelay(t)
@@ -709,14 +742,14 @@ func TestRunRelaySetupRerunLeavesALiveRelayWorking(t *testing.T) {
 	f := newFakeCloudflare(t, oneAccount(), "karn")
 
 	var out bytes.Buffer
-	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client()); err != nil {
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), nil); err != nil {
 		t.Fatalf("first runRelaySetup: %v", err)
 	}
 	live := loadSavedRelay(t)
 
 	f.reject["/workers/subdomain"] = "computer says no"
 	out.Reset()
-	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client()); err == nil {
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), nil); err == nil {
 		t.Fatal("the re-run succeeded despite the subdomain step failing")
 	}
 
@@ -739,7 +772,7 @@ func TestRunRelaySetupPromptsWhenThereIsMoreThanOneAccount(t *testing.T) {
 	f := newFakeCloudflare(t, accounts, "karn")
 
 	var out bytes.Buffer
-	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n2\n"), f.client()); err != nil {
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n2\n"), f.client(), nil); err != nil {
 		t.Fatalf("runRelaySetup: %v", err)
 	}
 
@@ -766,7 +799,7 @@ func TestRunRelaySetupRejectsAnUnusableAccountChoice(t *testing.T) {
 	f := newFakeCloudflare(t, accounts, "karn")
 
 	var out bytes.Buffer
-	err := runRelaySetup(&out, strings.NewReader(setupToken+"\nnope\n9\n0\n"), f.client())
+	err := runRelaySetup(&out, strings.NewReader(setupToken+"\nnope\n9\n0\n"), f.client(), nil)
 	if err == nil {
 		t.Fatal("runRelaySetup accepted a choice that names no account")
 	}
@@ -780,7 +813,7 @@ func TestRunRelaySetupRefusesAnEmptyToken(t *testing.T) {
 	f := newFakeCloudflare(t, oneAccount(), "karn")
 
 	var out bytes.Buffer
-	if err := runRelaySetup(&out, strings.NewReader("\n"), f.client()); err == nil {
+	if err := runRelaySetup(&out, strings.NewReader("\n"), f.client(), nil); err == nil {
 		t.Fatal("runRelaySetup accepted an empty token")
 	}
 	if len(f.paths) != 0 {
@@ -808,7 +841,7 @@ func TestRunRelaySetupStopsAtTheFailingStep(t *testing.T) {
 			f.reject[tc.suffix] = "computer says no"
 
 			var out bytes.Buffer
-			err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client())
+			err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), nil)
 			if err == nil {
 				t.Fatalf("runRelaySetup succeeded with %s failing", tc.name)
 			}
@@ -1023,4 +1056,165 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// --- flue relay setup --worker / flue relay update ---------------------------
+
+// TestRelaySetupWorkerFlagDeploysUnderThatName: the flag names the script, and
+// everything derived from the script name — the deploy path, the subdomain
+// call, the printed line, the record in relay.json — follows it. This is what
+// keeps a dev relay and a real one apart in one account.
+func TestRelaySetupWorkerFlagDeploysUnderThatName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+	f.script = "flue-relay-dev"
+
+	var out bytes.Buffer
+	err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), []string{"--worker", "flue-relay-dev"})
+	if err != nil {
+		t.Fatalf("runRelaySetup --worker: %v", err)
+	}
+	if !strings.Contains(out.String(), "worker deployed: flue-relay-dev") {
+		t.Fatalf("output does not name the worker it deployed:\n%s", out.String())
+	}
+	if !f.subdomainEnabled {
+		t.Fatal("the workers.dev subdomain was never enabled for the custom-named script")
+	}
+	cfg, ok, err := config.LoadRelay()
+	if err != nil || !ok {
+		t.Fatalf("LoadRelay after setup: ok=%v err=%v", ok, err)
+	}
+	if cfg.Worker != "flue-relay-dev" {
+		t.Fatalf("relay.json worker = %q, want flue-relay-dev", cfg.Worker)
+	}
+	if cfg.URL != "wss://flue-relay-dev.karn.workers.dev" {
+		t.Fatalf("relay.json url = %q, want the custom script's workers.dev host", cfg.URL)
+	}
+}
+
+// TestRelaySetupRefusesABadWorkerName, before any credential is asked for: a
+// name the workers.dev grammar would refuse must die here, not as a deploy
+// error after a token was pasted.
+func TestRelaySetupRefusesABadWorkerName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+
+	for _, bad := range []string{"Flue-Relay", "flue_relay", "-dev", "dev-", ""} {
+		var out bytes.Buffer
+		err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), []string{"--worker", bad})
+		if err == nil {
+			t.Fatalf("--worker %q was accepted", bad)
+		}
+		if strings.Contains(out.String(), "Token:") {
+			t.Fatalf("--worker %q was refused only after asking for a token", bad)
+		}
+	}
+	if len(f.paths) != 0 {
+		t.Fatalf("a refused worker name still reached the API: %v", f.paths)
+	}
+}
+
+// TestRelayUpdateRedeploysAndRotatesNothing is the upgrade contract: a second
+// deploy lands, and the secret, the machine id and relay.json are all exactly
+// what setup left — because rotating any of them is what would force every
+// other machine to re-join and every browser to re-pair.
+func TestRelayUpdateRedeploysAndRotatesNothing(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+
+	var out bytes.Buffer
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), nil); err != nil {
+		t.Fatalf("runRelaySetup: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "flue", "relay.json"))
+	if err != nil {
+		t.Fatalf("reading relay.json after setup: %v", err)
+	}
+	pathsBefore := len(f.paths)
+
+	out.Reset()
+	if err := runRelayUpdate(&out, strings.NewReader(setupToken+"\n"), f.client(), nil); err != nil {
+		t.Fatalf("runRelayUpdate: %v", err)
+	}
+
+	// Three, not two: update's deploy meets the already-applied DO migration,
+	// is refused, and retries without it — the same path a re-run of setup
+	// takes. What matters is that at least one upload landed after setup's.
+	if f.scriptPuts < 2 {
+		t.Fatalf("script uploads = %d, want setup's and then update's", f.scriptPuts)
+	}
+	if want := relaybundle.Module(); !bytes.Equal(f.module, want) {
+		t.Fatalf("the module deployed by update is %d bytes, want the embedded bundle's %d", len(f.module), len(want))
+	}
+	if f.secretPuts != 1 {
+		t.Fatalf("secret puts = %d, want the single one setup performed", f.secretPuts)
+	}
+	for _, p := range f.paths[pathsBefore:] {
+		if strings.HasSuffix(p, "/subdomain") {
+			t.Fatalf("update touched the subdomain endpoint (%s); that is setup's job", p)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "flue", "relay.json"))
+	if err != nil {
+		t.Fatalf("reading relay.json after update: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("update rewrote relay.json:\nbefore: %s\nafter:  %s", before, after)
+	}
+	if !strings.Contains(out.String(), "worker updated: "+relayScriptName) {
+		t.Fatalf("output does not say what it updated:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), setupToken) {
+		t.Fatal("the API token appears in update's output")
+	}
+}
+
+// TestRelayUpdateWithoutARelayPointsAtSetup: update refreshes a relay, it does
+// not create one, and it must say so before asking for a credential.
+func TestRelayUpdateWithoutARelayPointsAtSetup(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+
+	var out bytes.Buffer
+	err := runRelayUpdate(&out, strings.NewReader(setupToken+"\n"), f.client(), nil)
+	if err == nil {
+		t.Fatal("update with no relay.json succeeded")
+	}
+	if !strings.Contains(err.Error(), "flue relay setup") {
+		t.Fatalf("the error does not point at setup: %v", err)
+	}
+	if strings.Contains(out.String(), "Token:") {
+		t.Fatal("update asked for a token before checking a relay exists")
+	}
+}
+
+// TestUpdateWorkerNameResolution pins the order an update decides which script
+// it redeploys: the flag, then relay.json's record, then the workers.dev
+// host's first label — and a refusal, never a guess, when none of those hold.
+func TestUpdateWorkerNameResolution(t *testing.T) {
+	cases := []struct {
+		name string
+		flag string
+		cfg  config.Relay
+		want string
+		err  bool
+	}{
+		{name: "flag wins", flag: "from-flag", cfg: config.Relay{Worker: "recorded", URL: "wss://x.karn.workers.dev"}, want: "from-flag"},
+		{name: "recorded name", cfg: config.Relay{Worker: "recorded", URL: "wss://x.karn.workers.dev"}, want: "recorded"},
+		{name: "derived from workers.dev", cfg: config.Relay{URL: "wss://flue-relay.karn.workers.dev"}, want: "flue-relay"},
+		{name: "custom domain refused", cfg: config.Relay{URL: "wss://relay.example.com"}, err: true},
+		{name: "bad flag refused", flag: "Nope", cfg: config.Relay{Worker: "recorded"}, err: true},
+	}
+	for _, tc := range cases {
+		got, err := updateWorkerName(tc.flag, tc.cfg)
+		if tc.err {
+			if err == nil {
+				t.Errorf("%s: got %q, want an error", tc.name, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("%s: got %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+	}
 }

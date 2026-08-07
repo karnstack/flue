@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
-import { PlusIcon } from 'lucide-react'
+import { LayoutGridIcon, PlusIcon } from 'lucide-react'
 
 import { useFlueClient } from '@/client/provider'
 import { ExitOverlay } from '@/components/exit-overlay'
@@ -85,25 +85,28 @@ export const RESIZE_SETTLE_MS = 150
  *
  * ## The sizing policy
  *
- * Exactly one attached client is primary and owns the pty's dimensions. It
- * measures its own pane and asks the daemon for the cells that fit. Every
- * other client renders the primary's screen at the primary's dimensions and
- * scales the whole surface with a CSS transform, staying fully interactive.
- * That is what stops a phone at 40 columns from shrinking a laptop's terminal.
+ * Every attached view measures its own pane and reports the cells that fit
+ * it; the daemon sizes the pty to the componentwise maximum across the
+ * views and broadcasts the result (`recordDesire` in internal/daemon). A
+ * view whose own fit matches or exceeds the pty renders it one-to-one; a
+ * smaller view renders the full screen and scales the whole surface down
+ * with a CSS transform, staying fully interactive. That is what stops a
+ * phone at 40 columns from shrinking a laptop's terminal — and what hands
+ * the columns back the moment the laptop detaches, because a departed
+ * view's report leaves the maximum with it. Ownership never moves, so a
+ * socket blip on either device reshapes nothing.
  *
- * The daemon decides who is primary — first attacher wins, and it promotes the
- * most recently active client when a primary leaves — so this view never
- * claims the role, it is only ever told about it. `primary: true` goes out on
- * the dimension request because the daemon reads that field as a claim, and
- * this view only sends one when it already holds the role.
+ * The daemon still keeps one client primary — first attacher, most recently
+ * active promoted on departure — but the role now governs exactly one
+ * thing: who answers device queries. Size never follows it.
  *
  * Known cost of the transform, and it is a real one: xterm derives mouse
  * coordinates from `getBoundingClientRect`, which reports the *scaled* box, so
  * click-to-position and drag-select land off by the scale factor on a
- * non-primary client. Keyboard input, which is what a terminal is for, is
+ * scaled view. Keyboard input, which is what a terminal is for, is
  * unaffected. The alternative — scaling by font size instead — keeps mouse
- * coordinates honest but reflows the primary's screen into a different shape,
- * which is the one thing the policy exists to prevent.
+ * coordinates honest but reflows the larger view's screen into a different
+ * shape, which is the one thing the policy exists to prevent.
  *
  * ## One view per session per tab
  *
@@ -177,6 +180,11 @@ export function Terminal({
     let ref: number | null = null
     let primary = false
     let dims: Dimensions = { cols: 80, rows: 24 }
+    // The fit this view last told the daemon about, per connection: the
+    // daemon holds one desired size per attachment, so re-sending an
+    // unchanged one is noise — and under the largest-view policy a small
+    // view's fit never converges on `dims`, so `dims` cannot be the guard.
+    let reported: Dimensions | null = null
     // The replay mute gate, per-attach state: every `attached` re-arms it.
     // consumed counts this ref's output bytes from seq — advanced in each
     // write's done callback, not at frame arrival, because xterm parses
@@ -239,33 +247,36 @@ export function Terminal({
       // wrong-sized terminal for one round trip.
       if (ref === null) return
       const content = emulator.contentSize()
+      if (!content) return
+      const cell = cellBox(content, dims)
+      if (!cell) return
+      const want = cellsThatFit(paneBox(), cell)
 
-      if (primary) {
-        // The pty is this client's to size, so the surface simply fills the
-        // pane and nothing is transformed — but the pty itself is told only
-        // after RESIZE_SETTLE_MS without further movement, one SIGWINCH per
-        // settled layout rather than one per animation frame.
+      // Every view reports its own fit — the daemon keeps the largest — but
+      // only after RESIZE_SETTLE_MS without further movement, one report per
+      // settled layout rather than one per animation frame.
+      if (reported === null || want.cols !== reported.cols || want.rows !== reported.rows) {
+        if (settleTimer) clearTimeout(settleTimer)
+        settleTimer = window.setTimeout(sendFittedSize, RESIZE_SETTLE_MS)
+      }
+
+      if (want.cols >= dims.cols && want.rows >= dims.rows) {
+        // The pty fits this pane — this is the largest view, or its equal —
+        // so the surface simply fills the pane and nothing is transformed.
         surface.style.removeProperty('width')
         surface.style.removeProperty('height')
         surface.style.removeProperty('scale')
-        if (!content) return
-        const cell = cellBox(content, dims)
-        if (!cell) return
-        const want = cellsThatFit(paneBox(), cell)
-        if (want.cols === dims.cols && want.rows === dims.rows) return
-        if (settleTimer) clearTimeout(settleTimer)
-        settleTimer = window.setTimeout(sendFittedSize, RESIZE_SETTLE_MS)
         return
       }
 
-      if (!content) return
-      // Someone else owns the dimensions. Lay the surface out at their screen's
-      // true size and scale the whole thing down, rather than reflowing text.
+      // A larger view is setting the size. Lay the surface out at the
+      // screen's true size and scale the whole thing down, rather than
+      // reflowing text.
       //
       // The gutter goes back on. The scrollbar is drawn at the right-hand edge
       // of the surface, and a surface exactly as wide as the screen puts it on
-      // top of the last column — which is the very thing the primary reserves
-      // it to avoid, so both paths have to account for it.
+      // top of the last column — which is the very thing the unscaled view
+      // reserves it to avoid, so both paths have to account for it.
       const boxed = { width: content.width + GUTTER_PX, height: content.height }
       // These override flue-term-surface's 100% even though that utility is
       // written with the logical properties: logical and physical declarations
@@ -290,14 +301,15 @@ export function Terminal({
     // unmount can all land inside the settle window.
     const sendFittedSize = () => {
       settleTimer = 0
-      if (ref === null || !primary) return
+      if (ref === null) return
       const content = emulator.contentSize()
       if (!content) return
       const cell = cellBox(content, dims)
       if (!cell) return
       const want = cellsThatFit(paneBox(), cell)
-      if (want.cols === dims.cols && want.rows === dims.rows) return
-      client.resize(ref, want.cols, want.rows, true)
+      if (reported !== null && want.cols === reported.cols && want.rows === reported.rows) return
+      reported = want
+      client.resize(ref, want.cols, want.rows, primary)
     }
 
     emulator.onData((bytes) => {
@@ -305,6 +317,47 @@ export function Terminal({
       if (ref === null || consumed < muteUntil) return
       client.sendInput(ref, bytes)
     })
+
+    // Touch scrolling, by hand: xterm's viewport scrolls on wheel events and
+    // nothing else, so without this a phone cannot reach the scrollback at
+    // all. Drags become whole-line scrollLines() calls, with the fractional
+    // remainder carried between moves so slow drags still add up. The
+    // surface's own CSS sets touch-action: none (styles.css), which is what
+    // keeps the browser from spending the gesture on panning the page.
+    let touchY: number | null = null
+    let touchCarry = 0
+    const lineHeightPx = () => {
+      const content = emulator.contentSize()
+      return content && dims.rows > 0 ? content.height / dims.rows : 17
+    }
+    const touchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        touchY = null
+        return
+      }
+      touchY = e.touches[0]!.clientY
+      touchCarry = 0
+    }
+    const touchMove = (e: TouchEvent) => {
+      if (touchY === null || e.touches.length !== 1) return
+      e.preventDefault()
+      const y = e.touches[0]!.clientY
+      // Dragging the content down (finger moves down) shows older lines:
+      // negative scrollLines. The carry keeps sub-line motion.
+      const delta = (touchY - y) / lineHeightPx() + touchCarry
+      const lines = Math.trunc(delta)
+      touchCarry = delta - lines
+      touchY = y
+      if (lines !== 0) emulator.scrollLines(lines)
+    }
+    const touchEnd = () => {
+      touchY = null
+      touchCarry = 0
+    }
+    surface.addEventListener('touchstart', touchStart, { passive: true })
+    surface.addEventListener('touchmove', touchMove, { passive: false })
+    surface.addEventListener('touchend', touchEnd, { passive: true })
+    surface.addEventListener('touchcancel', touchEnd, { passive: true })
 
     // Every registration returns an unsubscribe, and all of them are released
     // on cleanup: the client outlives this view by design.
@@ -325,6 +378,9 @@ export function Terminal({
         if (s !== 'open') {
           ref = null
           primary = false
+          // A new connection is a new attachment with no recorded desire;
+          // whatever this view reported belongs to the old one.
+          reported = null
           // No role, no voice: a client that answered device queries while
           // unattached would race the reattach's own answer arbitration.
           emulator.answerQueries(false)
@@ -354,6 +410,9 @@ export function Terminal({
         if (a.id !== sessionId) return
         ref = a.ref
         primary = a.primary
+        // A fresh attachment has no recorded desire on the daemon; the next
+        // relayout re-reports this pane's fit under the new ref.
+        reported = null
         // The primary is the one client that answers device queries; a
         // mirror answering too is how a program that asked once hears back
         // once per tab, the extras landing at the prompt as garbage.
@@ -496,6 +555,10 @@ export function Terminal({
     return () => {
       actionsRef.current = null
       for (const off of offs) off()
+      surface.removeEventListener('touchstart', touchStart)
+      surface.removeEventListener('touchmove', touchMove)
+      surface.removeEventListener('touchend', touchEnd)
+      surface.removeEventListener('touchcancel', touchEnd)
       window.removeEventListener('storage', onStorage)
       window.removeEventListener('keydown', onKey, true)
       observer.disconnect()
@@ -576,6 +639,25 @@ export function Terminal({
           opens in a new tab by default so this session stays put; the root
           route spawns into ?cwd= on mount and navigates itself.
         */}
+        {/*
+          The way back to the rest of flue — sessions, devices, remote — in
+          the same chip the strip's other controls wear. A new tab, like the
+          + beside it: this tab is a session and stays one.
+        */}
+        <a
+          href="/"
+          target="_blank"
+          rel="noopener"
+          title="Open the dashboard"
+          className={cn(
+            'rounded-lg px-2.5 py-1.5',
+            'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
+            'transition-colors hover:text-(--chip-fg)',
+          )}
+        >
+          <LayoutGridIcon aria-hidden="true" className="size-4" />
+          <span className="sr-only">Open the flue dashboard</span>
+        </a>
         <a
           href={cwd ? `/?cwd=${encodeURIComponent(cwd)}` : '/'}
           target="_blank"

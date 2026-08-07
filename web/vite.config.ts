@@ -23,8 +23,12 @@ const MANIFEST_FILE = 'manifest.webmanifest'
 const SW_FILE = 'sw.js'
 const SW_ENTRY = 'sw'
 
-/** The daemon's default loopback port; see `defaultPort` in cmd/flue/main.go. */
-const DAEMON_PORT = process.env.FLUE_PORT ?? '7717'
+/**
+ * The port Vite proxies /api and /ws to. Vite only ever fronts the dev
+ * daemon, which `make run` starts on 7719 — not 7717, so an installed flue
+ * and the dev loop coexist (FLUE_DEV_PORT in the Makefile moves both ends).
+ */
+const DAEMON_PORT = process.env.FLUE_PORT ?? '7719'
 const DAEMON_ORIGIN = `http://127.0.0.1:${DAEMON_PORT}`
 
 /** Emitted files worth holding for an offline load: the shell and its code. */

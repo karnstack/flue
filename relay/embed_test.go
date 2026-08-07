@@ -14,7 +14,7 @@ import (
 // nothing.
 //
 // DaemonHub is the check because it is the name the deploy's migration and
-// Durable Object binding both refer to (cmd/flue/relay.go): a bundle that does
+// Durable Object binding both refer to (internal/relaydeploy): a bundle that does
 // not export it produces a Worker Cloudflare rejects, or worse, accepts with a
 // binding pointing at a class that is not there.
 func TestModuleIsTheBuiltWorker(t *testing.T) {

@@ -444,6 +444,7 @@ async function renderRelayPair(search = '') {
     search: window.location.search,
     hash: '',
     reload: vi.fn(),
+    replace: vi.fn(),
   })
   const router = createFlueRouter()
   await router.load()
@@ -473,6 +474,25 @@ describe('PairRoute on a relay origin', () => {
     expect(machines).toHaveLength(1)
     expect(machines[0]).toMatchObject({ id: 'blue-mesa', name: 'Blue Mesa' })
     expect(machines[0]!.pairedAt).toBeGreaterThan(0)
+  })
+
+  it('walks straight into the machine it just paired', async () => {
+    // The ceremony's product is access; "you can close this page" was making
+    // the user go find it. Everything the relay boot needs is written before
+    // `paired` is set, so the button selects the machine and does a full
+    // document load — the same move MachinesRoute.connect makes, and for the
+    // same reason: the tab's router was built before the record existed.
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&d=blue-mesa&n=Blue%20Mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+    expect(screen.queryByText(/close this page/)).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: /Open this machine's sessions/ }))
+
+    expect(sessionStorage.getItem('flue.machine.selected')).toBe('blue-mesa')
+    expect(vi.mocked(location.replace)).toHaveBeenCalledWith('/')
   })
 
   it('falls back to the id as the name when the link carries none', async () => {

@@ -104,6 +104,8 @@ const usageText = `flue — your terminal, as a browser tab
   flue relay setup        deploy a relay to your own Cloudflare account
   flue relay join URL --secret S   point this machine at an existing relay
   flue relay status       show the configured relay
+  flue relay update       redeploy this release's relay; secret and pairings kept
+  flue relay address URL  repoint this machine at a custom domain on the same relay
   flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N] [--open]   run the daemon in the foreground
 `
@@ -222,7 +224,17 @@ func cmdServe(args []string) error {
 	// reason the bind fails — would kick the working one off the relay on its
 	// way to exiting. Dialling only once this process owns the port means the
 	// daemon that is actually serving is the one that is reachable.
-	startRelay(ctx, srv, identity)
+	//
+	// The runtime record and the service behind /api/relay/* share the same
+	// start function, so a relay deployed from the Remote screen starts
+	// dialling in this same process — and a daemon whose transport is already
+	// up is never handed a second one.
+	rt := &relayRuntime{start: func() bool { return startRelay(ctx, srv, identity) }}
+	rt.running = startRelay(ctx, srv, identity)
+	srv.SetRelayUI(&relayUIService{
+		runtime: rt,
+		log:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
 
 	// Only now, after the bind is confirmed and the runtime record is in place,
 	// so the link is never printed for a daemon that turned out not to be
@@ -281,7 +293,10 @@ func loadIdentity() (daemon.Identity, error) {
 // The secret never reaches the log. relay.New's errors name the field that is
 // missing rather than the value that is there, and the transport logs the URL
 // it dials and nothing else from the config.
-func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identity) {
+// It reports whether a transport was actually started — false for the
+// ordinary no-relay.json case and for every logged failure — so the caller's
+// bookkeeping (relayRuntime) knows whether a later deploy may start one.
+func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identity) bool {
 	// The same sink and format the daemon's own default logger uses, which
 	// launchd and systemd already capture.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -291,17 +306,17 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 		// Configured and unreadable is worth a line: "no relay" is the ordinary
 		// state, but this is a file somebody wrote and this daemon cannot use.
 		logger.Warn("relay not started", "err", err)
-		return
+		return false
 	}
 	if !ok {
-		return
+		return false
 	}
 
 	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin, MachineID: rc.MachineID}
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
 	if err != nil {
 		logger.Warn("relay not started", "err", err)
-		return
+		return false
 	}
 	// The machine's identity rides every welcome alongside the status, so the
 	// UI can build /client/<id> URLs for this machine. It is configuration
@@ -321,6 +336,7 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 			logger.Warn("relay stopped", "err", err)
 		}
 	}()
+	return true
 }
 
 // snapshotsDir is where shutdown snapshots live between daemons. An empty

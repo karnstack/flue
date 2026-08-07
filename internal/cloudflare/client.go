@@ -385,6 +385,12 @@ type DeployInput struct {
 	Assets               []Asset
 	AssetsRunWorkerFirst []string // ["/daemon", "/client", "/api/*"]
 
+	// PlainTextVars become bindings of type "plain_text": ordinary,
+	// non-secret env vars the Worker can read. The relay's version stamp
+	// travels this way. Values here are visible to anyone who can read the
+	// script in the dashboard — nothing secret may ever ride one.
+	PlainTextVars map[string]string
+
 	// AssetHeaders is a `_headers` document — response headers for the static
 	// assets, in the file format Cloudflare's asset router parses. Empty sends
 	// no header config at all. See assetsConfig.Headers for why this travels in
@@ -437,6 +443,8 @@ type binding struct {
 	Type      string `json:"type"`
 	Name      string `json:"name"`
 	ClassName string `json:"class_name,omitempty"`
+	// Text is only present on plain_text bindings; every other type omits it.
+	Text string `json:"text,omitempty"`
 }
 
 type observability struct {
@@ -510,6 +518,21 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 			Type:      "durable_object_namespace",
 			Name:      name,
 			ClassName: in.DOBindings[name],
+		})
+	}
+
+	// Plain-text vars after the Durable Objects, sorted for the same
+	// determinism reason.
+	varNames := make([]string, 0, len(in.PlainTextVars))
+	for name := range in.PlainTextVars {
+		varNames = append(varNames, name)
+	}
+	sort.Strings(varNames)
+	for _, name := range varNames {
+		meta.Bindings = append(meta.Bindings, binding{
+			Type: "plain_text",
+			Name: name,
+			Text: in.PlainTextVars[name],
 		})
 	}
 
@@ -651,7 +674,20 @@ func migrationAlreadyApplied(err error) bool {
 	if !errors.As(err, &apiErr) {
 		return false
 	}
+	// 10079 is the tag-precondition refusal: "Actor migration tag
+	// precondition failed, got tag '' when expected tag is 'v1'" — the
+	// script already carries the tag this deploy's migration would apply,
+	// and the request's implied "currently untagged" is what failed. Seen
+	// live on the first real `flue relay update`; its wording carries
+	// neither "migration … already" word the older refusal does, which is
+	// why the code is matched and not just the prose.
+	if apiErr.Code == 10079 {
+		return true
+	}
 	msg := strings.ToLower(apiErr.Message)
+	if strings.Contains(msg, "migration tag precondition") {
+		return true
+	}
 	return strings.Contains(msg, "migration") && strings.Contains(msg, "already")
 }
 

@@ -296,4 +296,15 @@
 @utility flue-term-surface {
   block-size: 100%;
   inline-size: 100%;
+  /* The gesture is ours: touches become scrollLines() calls (terminal.tsx),
+   * and a browser allowed to pan or pinch the page would eat them first. */
+  touch-action: none;
+}
+
+/* xterm v6's overlay scrollbar, hidden. It draws over the last column and
+ * over the floating controls in the top-right, appears only mid-scroll, and
+ * wheel, touch and keyboard scrolling all work without it — an affordance
+ * this design pays for twice and uses never. */
+.flue-term-surface .xterm .xterm-scrollable-element > .scrollbar {
+  display: none;
 }

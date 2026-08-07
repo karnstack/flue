@@ -7,7 +7,7 @@
   // daemon this relay serves shares with it; see spec/relay-protocol.md, Auth.
   //
   // A user's relay does not read this file at all — `flue relay setup` builds
-  // its own deploy request in cmd/flue/relay.go and leaves that relay on
+  // its own deploy request in internal/relaydeploy and leaves that relay on
   // workers.dev: one daemon, one origin. This config exists for developing
   // the Worker itself (`pnpm dev`, the vitest pool).
   "assets": {
@@ -15,7 +15,7 @@
     // schema rejects any key but the four below. They live in ./public/_headers,
     // which wrangler strips out of the upload and sends as a string in the
     // script metadata instead. `flue relay setup` sends the same document from
-    // relayAssetHeaders (cmd/flue/relay.go), and a test keeps the two byte for
+    // relayAssetHeaders (cmd/flue/relay.go, via internal/relaydeploy), and a test keeps the two byte for
     // byte identical; edit both or neither.
     "directory": "./public",
     "binding": "ASSETS",
@@ -23,7 +23,7 @@
     // The bare entries matter: "/daemon/*" alone would let the asset router
     // answer a bare /daemon with the SPA before the Worker's 404 could — the
     // Worker keeps refusal authority over its whole prefix, ids or not.
-    // cmd/flue/relay.go (relayRunWorkerFirst) ships the same list in the
+    // internal/relaydeploy (RunWorkerFirst) ships the same list in the
     // deploy request `flue relay setup` builds; edit both or neither.
     "run_worker_first": ["/daemon", "/daemon/*", "/client", "/client/*", "/api/*"]
   },

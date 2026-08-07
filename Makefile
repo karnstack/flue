@@ -8,7 +8,7 @@
 # Both dist directories are gitignored on purpose and must stay that way — see
 # web/embed.go and relay/embed.go.
 
-.PHONY: all web relay build run web-dev test test-go test-web test-relay lint clean site-dev site-deploy
+.PHONY: all web relay build run run-release web-dev test test-go test-web test-relay lint clean site-dev site-deploy
 
 all: build
 
@@ -29,12 +29,30 @@ build: web relay
 # The dev tag swaps the embedded UI for a redirect to Vite (web/dev.go), so
 # no web build happens and web/dist need not exist — hot reload owns the
 # frontend. A production-like run is `make build && bin/flue serve`.
+#
+# The dev daemon deliberately does not share a port or a config directory
+# with an installed flue: 7719 instead of 7717, and its token, runtime.json
+# and relay.json live under FLUE_DEV_CONFIG so the two daemons never fight
+# over runtime.json or each other's relay. The session cookie's name carries
+# the port (local.CookieNameFor), so both UIs stay logged in side by side.
+# To point other flue commands at the dev daemon, use the same environment:
+# XDG_CONFIG_HOME=$(FLUE_DEV_CONFIG) go run -tags dev ./cmd/flue status
+
+FLUE_DEV_PORT ?= 7719
+FLUE_DEV_CONFIG ?= $(HOME)/.config/flue-dev
 
 run:
-	go run -tags dev ./cmd/flue serve --open
+	XDG_CONFIG_HOME=$(FLUE_DEV_CONFIG) go run -tags dev ./cmd/flue serve --open --port $(FLUE_DEV_PORT)
+
+# The relay-capable dev daemon: a release binary (embeds the Worker and the
+# web app, so it can deploy) on the same dev port and config as `make run`.
+# Slower to start — it runs both node builds — and `make web-dev` still
+# proxies to it, so UI hot reload keeps working on top of it.
+run-release: build
+	XDG_CONFIG_HOME=$(FLUE_DEV_CONFIG) bin/flue serve --open --port $(FLUE_DEV_PORT)
 
 web-dev:
-	cd web && pnpm install --frozen-lockfile && pnpm dev
+	cd web && pnpm install --frozen-lockfile && FLUE_PORT=$(FLUE_DEV_PORT) pnpm dev
 
 test: test-go test-web test-relay
 

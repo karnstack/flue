@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,30 +19,23 @@ import (
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/relaydeploy"
 	relaybundle "github.com/karnstack/flue/relay"
 	"github.com/karnstack/flue/web"
 )
 
-// The deploy's shape. Every constant here has a twin in relay/wrangler.jsonc,
-// which is how the same Worker gets deployed by `wrangler deploy` during
-// development — the two must agree or a developer and a user end up running
-// different relays. The migration tag lives in internal/cloudflare, for the
-// same reason and with the same obligation.
+// The deploy's shape lives in internal/relaydeploy — the daemon's /api/relay
+// endpoints share it, and sharing is what keeps a UI deploy and a CLI deploy
+// the same deploy. These names remain for this package's tests and prose.
 const (
-	relayScriptName        = "flue-relay"
-	relayCompatibilityDate = "2026-08-01"
-	relayDOClass           = "DaemonHub"
-	relayDOBinding         = "HUB"
-	relayAssetsBinding     = "ASSETS"
+	relayScriptName        = relaydeploy.DefaultWorker
+	relayCompatibilityDate = relaydeploy.CompatibilityDate
+	relayDOClass           = relaydeploy.DOClass
+	relayDOBinding         = relaydeploy.DOBinding
+	relayAssetsBinding     = relaydeploy.AssetsBinding
 )
 
-// relayRunWorkerFirst are the paths the Worker handles itself rather than
-// letting the asset router answer from the bundle: the two WebSocket legs and
-// the pairing API. The bare entries matter alongside the globs — "/daemon/*"
-// alone would let the asset router answer a bare /daemon with the SPA before
-// the Worker's "no such machine" could. relay/wrangler.jsonc carries the same
-// list for `pnpm dev` and the vitest pool; edit both or neither.
-var relayRunWorkerFirst = []string{"/daemon", "/daemon/*", "/client", "/client/*", "/api/*"}
+var relayRunWorkerFirst = relaydeploy.RunWorkerFirst
 
 // relayAssetHeaders is the `_headers` document the relay serves its static
 // assets with — the same security headers the daemon wraps its own responses in
@@ -65,26 +57,9 @@ var relayAssetHeaders = "/*\n" +
 	"  Content-Security-Policy: " + daemon.RelayCSP + "\n"
 
 const (
-	// daemonSecretName is the Worker secret the daemon authenticates its
-	// outbound leg with (relay/src/index.ts, authorizeDaemon).
-	daemonSecretName = "DAEMON_SECRET"
-	// daemonSecretBytes is how much entropy that secret carries. It is the only
-	// thing standing between the internet and the daemon leg of a relay, and it
-	// is machine-generated and machine-stored, so there is no reason to be
-	// frugal with it.
-	daemonSecretBytes = 32
-)
-
-const (
-	// relayStepTimeout bounds one ordinary API call. Each step gets its own
-	// deadline rather than the whole flow sharing one, because the flow contains
-	// a prompt: a clock started before the account question would be counting
-	// while the user reads it, and would kill a setup that was doing nothing
-	// wrong.
-	relayStepTimeout = time.Minute
-	// relayDeployTimeout bounds the deploy, which uploads the whole web bundle
-	// over whatever link the user has.
-	relayDeployTimeout = 10 * time.Minute
+	daemonSecretName   = relaydeploy.SecretName
+	relayStepTimeout   = relaydeploy.StepTimeout
+	relayDeployTimeout = relaydeploy.DeployTimeout
 )
 
 // accountPromptAttempts is how many times setup will re-ask which account to
@@ -93,7 +68,7 @@ const (
 // number, and EOF alone is not enough of a guarantee to rely on.
 const accountPromptAttempts = 3
 
-const relayUsage = "usage: flue relay <setup|join|status>"
+const relayUsage = "usage: flue relay <setup|join|status|update|address>"
 
 func cmdRelay(args []string) error {
 	if len(args) == 0 {
@@ -103,14 +78,66 @@ func cmdRelay(args []string) error {
 	case "setup":
 		// A fresh client with no token: runRelaySetup is what puts the pasted
 		// one on it, and it goes no further than this process.
-		return runRelaySetup(os.Stdout, os.Stdin, &cloudflare.Client{})
+		return runRelaySetup(os.Stdout, os.Stdin, &cloudflare.Client{}, args[1:])
 	case "join":
 		return runRelayJoin(os.Stdout, args[1:])
 	case "status":
 		return runRelayStatus(os.Stdout)
+	case "update":
+		return runRelayUpdate(os.Stdout, os.Stdin, &cloudflare.Client{}, args[1:])
+	case "address":
+		return runRelayAddress(os.Stdout, args[1:])
 	default:
 		return fmt.Errorf("unknown relay subcommand %q; %s", args[0], relayUsage)
 	}
+}
+
+const relayAddressUsage = "usage: flue relay address <wss://relay.example.com>"
+
+// runRelayAddress points this machine's relay config at a different hostname
+// for the same Worker — the custom-domain move: the user routes a domain to
+// the Worker in the Cloudflare dashboard, then tells flue the new name here.
+// Only the URL and origin change; the worker, the secret and this machine's
+// id are exactly what they were, because the Worker behind the name is.
+//
+// Browsers paired against the old origin keep working as long as that origin
+// still routes (workers.dev does not stop when a domain is added). A browser
+// opening the new origin pairs afresh — its keys and records are stored per
+// origin by the browser itself, and no amount of daemon config can move them.
+func runRelayAddress(w io.Writer, args []string) error {
+	if len(args) != 1 {
+		return errors.New(relayAddressUsage)
+	}
+	host, err := relayHost(args[0])
+	if err != nil {
+		return err
+	}
+	cfg, ok, err := config.LoadRelay()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("no relay is configured on this machine; `flue relay setup` deploys one first")
+	}
+	cfg.URL = "wss://" + host
+	cfg.Origin = "https://" + host
+	if err := config.SaveRelay(cfg); err != nil {
+		return fmt.Errorf("save the relay configuration: %w", err)
+	}
+	fmt.Fprintf(w, "  ✓ relay address is now wss://%s\n", host)
+	fmt.Fprint(w, relayJoinDone)
+	return nil
+}
+
+const relaySetupUsage = "usage: flue relay setup [--worker <name>]"
+
+// parseWorkerName validates a Cloudflare script name for the --worker flag;
+// the grammar itself lives beside the deploy (relaydeploy.ValidWorkerName).
+func parseWorkerName(name string) (string, error) {
+	if err := relaydeploy.ValidWorkerName(name); err != nil {
+		return "", fmt.Errorf("--worker: %w", err)
+	}
+	return name, nil
 }
 
 // relayTokenPrompt is what setup says before it asks for a credential. It names
@@ -122,14 +149,15 @@ Create one at https://dash.cloudflare.com/profile/api-tokens with the
 "Edit Cloudflare Workers" template, then paste it here.
 Token: `
 
-// relaySetupDone is the closing note. It says the token is not stored because
-// that is the one thing a user cannot check for themselves, and because the
-// safest thing they can do next — delete it — is something they will only do if
-// they know nothing here depends on it.
+// relaySetupDone is the closing note. It says where the token went because
+// that is the one thing a user cannot check for themselves: stored, in one
+// 0600 file, so `flue relay update` and the Remote screen's update button
+// need no re-paste — and deleting that file is the whole undo.
 const relaySetupDone = `
 relay configured. restart the daemon (flue disable && flue enable, or
-restart flue serve) to connect. you can delete the API token now — flue
-does not store it.
+restart flue serve) to connect. the token is stored in cloudflare.json
+(0600, beside relay.json) so updates need no re-paste; delete that file to
+forget it.
 `
 
 // runRelaySetup deploys the relay Worker and the web app into the user's own
@@ -149,7 +177,21 @@ does not store it.
 // they were told to delete afterwards anyway. What this function guarantees is
 // narrower and more useful: flue itself never writes it — not to the transcript,
 // not into an error, not to any file.
-func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
+func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []string) error {
+	fs := flag.NewFlagSet("relay setup", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workerFlag := fs.String("worker", relayScriptName, "the Cloudflare Worker name to deploy under")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w; %s", err, relaySetupUsage)
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q; %s", fs.Arg(0), relaySetupUsage)
+	}
+	worker, err := parseWorkerName(*workerFlag)
+	if err != nil {
+		return err
+	}
+
 	// Both of these are checked before a credential is asked for. A binary that
 	// cannot deploy anything must not be the reason a user pastes an API token
 	// into a terminal. The hostname is read here for the same reason: it is
@@ -169,7 +211,7 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 	}
 
 	in := bufio.NewReader(r)
-	token, err := readAPIToken(w, in)
+	token, fromPrompt, err := tokenForCLI(w, in)
 	if err != nil {
 		return err
 	}
@@ -188,80 +230,30 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 	}); err != nil {
 		return fmt.Errorf("list the Cloudflare accounts this token can reach: %w", err)
 	}
-	account, err := pickAccount(w, in, accounts)
+	account, err := pickAccountPreferring(w, in, accounts, storedAccountID())
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "  ✓ account: %s (%s)\n", account.Name, shortID(account.ID))
 
-	if err := withTimeout(relayDeployTimeout, func(ctx context.Context) error {
-		return api.Deploy(ctx, cloudflare.DeployInput{
-			AccountID:         account.ID,
-			ScriptName:        relayScriptName,
-			Module:            module,
-			CompatibilityDate: relayCompatibilityDate,
-			// Sent on every run, including re-runs of an account that already
-			// has the class. Cloudflare refuses a migration it has already
-			// applied and the client recovers from exactly that (see Deploy);
-			// the alternative — asking the account what it has already migrated
-			// — is a request that can only tell us something we can handle
-			// without asking.
-			NewSQLiteClasses:     []string{relayDOClass},
-			DOBindings:           map[string]string{relayDOBinding: relayDOClass},
-			Assets:               assets,
-			AssetsRunWorkerFirst: relayRunWorkerFirst,
-			// Without this the relay serves the same bundle the daemon does,
-			// from the internet, with none of the daemon's security headers —
-			// including the `script-src 'self'` that web/src/crypto/keys.ts
-			// names as the reason it is willing to keep a raw private key in
-			// IndexedDB.
-			AssetHeaders: relayAssetHeaders,
-			// Not optional, and its absence is invisible until the Worker is
-			// live: the relay calls env.ASSETS.fetch itself for everything that
-			// is not one of the run-worker-first paths, and without this binding
-			// that call is on undefined.
-			AssetsBinding: relayAssetsBinding,
-			// A self-hosted relay has no operator but its user; Workers Logs is
-			// the only way they will ever see why it did something.
-			Observability: true,
-		})
-	}); err != nil {
-		return fmt.Errorf("deploy the relay worker: %w", err)
-	}
-	fmt.Fprintf(w, "  ✓ worker deployed: %s\n", relayScriptName)
-	fmt.Fprintf(w, "  ✓ web app uploaded (%d files)\n", len(assets))
-
-	// Before the secret, deliberately. Setting the secret is the step that
-	// changes what credential the deployed Worker accepts, and from that moment
-	// until relay.json is written the two can disagree — a daemon presenting the
-	// old secret to a Worker that now wants the new one gets 401s with nothing
-	// to say why. Every remote call that can fail is therefore moved in front of
-	// it, so the only thing left after the secret is set is a local file write.
-	var host string
-	if err := withTimeout(relayStepTimeout, func(ctx context.Context) error {
-		var err error
-		host, err = api.EnableSubdomain(ctx, account.ID, relayScriptName)
+	// The choreography — deploy, workers.dev host, fresh secret, in that
+	// order and with those orderings' reasons — lives in relaydeploy.Provision;
+	// what stays here is the terminal: the ✓ lines, and everything after the
+	// Cloudflare part is done.
+	host, secret, err := relaydeploy.Provision(relaydeploy.Input{
+		API:          api,
+		AccountID:    account.ID,
+		Worker:       worker,
+		Module:       module,
+		Assets:       assets,
+		AssetHeaders: relayAssetHeaders,
+		Version:      deployStamp(),
+		OnStep:       func(line string) { fmt.Fprintf(w, "  ✓ %s\n", line) },
+	})
+	if err != nil {
 		return err
-	}); err != nil {
-		return fmt.Errorf("make the relay reachable on workers.dev: %w", err)
 	}
 	origin := "https://" + host
-	fmt.Fprintf(w, "  ✓ reachable at %s\n", origin)
-
-	// Fresh on every run, never reused from an existing relay.json. Setup is
-	// also the recovery path for a leaked or half-configured relay, and one that
-	// preserved the old secret would be unable to rotate the one credential the
-	// relay has.
-	secret, err := newDaemonSecret()
-	if err != nil {
-		return fmt.Errorf("generate the relay secret: %w", err)
-	}
-	if err := withTimeout(relayStepTimeout, func(ctx context.Context) error {
-		return api.SetSecret(ctx, account.ID, relayScriptName, daemonSecretName, secret)
-	}); err != nil {
-		return fmt.Errorf("set %s on the relay worker: %w", daemonSecretName, err)
-	}
-	fmt.Fprintln(w, "  ✓ secret set")
 
 	// This machine's identity on the relay: the id is the slot it dials
 	// (/daemon/<id>) and the name is its human label. Minted fresh on every
@@ -287,10 +279,23 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 		Origin:      origin,
 		MachineID:   machineID,
 		MachineName: machineName,
+		Worker:      worker,
 	}); err != nil {
 		return fmt.Errorf("save the relay configuration: %w", err)
 	}
 	fmt.Fprintf(w, "  ✓ this machine joined as %s (%s)\n", machineName, machineID)
+
+	if fromPrompt {
+		// Stored by product decision, 0600 beside relay.json: the next
+		// update — CLI or Remote screen — needs no re-paste, and the UI can
+		// name the account the relay lives in. Failing to store fails
+		// nothing else.
+		if err := config.SaveCloudflare(config.Cloudflare{Token: token, AccountID: account.ID, AccountName: account.Name}); err != nil {
+			fmt.Fprintf(w, "  could not store the token: %v\n", err)
+		} else {
+			fmt.Fprintln(w, "  ✓ token stored for one-click updates")
+		}
+	}
 
 	// The one line another machine needs, exactly as it should be run there.
 	// It carries the secret — that is the point: the relay is shared by
@@ -429,6 +434,162 @@ func runRelayStatus(w io.Writer) error {
 	return nil
 }
 
+const relayUpdateUsage = "usage: flue relay update [--worker <name>]"
+
+// relayUpdateDone says the two things a user cannot see from the ✓ lines: what
+// deliberately did not change, and that nothing needs restarting. The deploy
+// preserves the secret binding (keptBindingTypes in internal/cloudflare), the
+// machine ids live in relay.json files this command never touches, and both
+// legs redial a replaced Worker on their own.
+const relayUpdateDone = `
+relay updated. the secret, the machine ids and every pairing are unchanged —
+daemons and browsers reconnect on their own.
+`
+
+// runRelayUpdate redeploys the Worker and the web bundle this binary carries
+// over the relay this machine is joined to, and changes nothing else.
+//
+// It is the upgrade path: a new flue release carries a new embedded relay, and
+// this is how a deployed one catches up without the resets `flue relay setup`
+// exists to perform. No secret is minted (the deploy keeps the bound one), no
+// machine id is minted, and relay.json is read but never written — so no other
+// machine re-joins and no browser re-pairs.
+func runRelayUpdate(w io.Writer, r io.Reader, api *cloudflare.Client, args []string) error {
+	fs := flag.NewFlagSet("relay update", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	workerFlag := fs.String("worker", "", "the Worker name to redeploy (defaults to the one relay.json records)")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w; %s", err, relayUpdateUsage)
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q; %s", fs.Arg(0), relayUpdateUsage)
+	}
+
+	module := relaybundle.Module()
+	if len(module) == 0 {
+		return errors.New("this build carries no relay worker; build a release binary with `make build` (a dev build leaves it out)")
+	}
+	assets, err := webAssets()
+	if err != nil {
+		return err
+	}
+
+	cfg, ok, err := config.LoadRelay()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("no relay is configured on this machine; `flue relay setup` deploys one, `flue relay update` only refreshes it")
+	}
+	worker, err := updateWorkerName(*workerFlag, cfg)
+	if err != nil {
+		return err
+	}
+
+	in := bufio.NewReader(r)
+	token, fromPrompt, err := tokenForCLI(w, in)
+	if err != nil {
+		return err
+	}
+	api.Token = token
+
+	if err := withTimeout(relayStepTimeout, api.VerifyToken); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "  ✓ token verified")
+
+	var accounts []cloudflare.Account
+	if err := withTimeout(relayStepTimeout, func(ctx context.Context) error {
+		var err error
+		accounts, err = api.Accounts(ctx)
+		return err
+	}); err != nil {
+		return fmt.Errorf("list the Cloudflare accounts this token can reach: %w", err)
+	}
+	account, err := pickAccountPreferring(w, in, accounts, storedAccountID())
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "  ✓ account: %s (%s)\n", account.Name, shortID(account.ID))
+
+	// The same deploy setup performs, to the same script name. An update of a
+	// script that does not exist creates it — with no DAEMON_SECRET bound, so
+	// the daemon leg would 401 until a real setup runs. That is the one way
+	// this command can leave things worse than it found them, and it is only
+	// reachable by naming a worker that was never deployed; the name comes
+	// from relay.json precisely so that does not happen by accident.
+	if err := relaydeploy.Deploy(relaydeploy.Input{
+		API:          api,
+		AccountID:    account.ID,
+		Worker:       worker,
+		Module:       module,
+		Assets:       assets,
+		AssetHeaders: relayAssetHeaders,
+		Version:      deployStamp(),
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "  ✓ worker updated: %s\n", worker)
+	fmt.Fprintf(w, "  ✓ web app uploaded (%d files)\n", len(assets))
+
+	if fromPrompt {
+		if err := config.SaveCloudflare(config.Cloudflare{Token: token, AccountID: account.ID, AccountName: account.Name}); err != nil {
+			fmt.Fprintf(w, "  could not store the token: %v\n", err)
+		} else {
+			fmt.Fprintln(w, "  ✓ token stored for one-click updates")
+		}
+	}
+
+	fmt.Fprint(w, relayUpdateDone)
+	return nil
+}
+
+// updateWorkerName decides which script an update redeploys: the flag when
+// given, the name relay.json records otherwise, and — for a relay.json from
+// before the field existed, or written by join — the workers.dev host's first
+// label, which is the script name by construction. A host that is not
+// workers.dev carries no such fact, and guessing a default there could create
+// a second, secret-less Worker; that case asks for the flag instead.
+func updateWorkerName(flagValue string, cfg config.Relay) (string, error) {
+	if flagValue != "" {
+		return parseWorkerName(flagValue)
+	}
+	if cfg.Worker != "" {
+		return parseWorkerName(cfg.Worker)
+	}
+	host := strings.TrimPrefix(cfg.URL, "wss://")
+	if label, rest, ok := strings.Cut(host, "."); ok && strings.HasSuffix(rest, ".workers.dev") {
+		return parseWorkerName(label)
+	}
+	return "", fmt.Errorf("relay.json does not record the worker's name and %q is not a workers.dev host; pass --worker <name>", host)
+}
+
+// tokenForCLI hands back the stored Cloudflare token when there is one and
+// prompts otherwise. fromPrompt reports which; prompted tokens are stored
+// after the deploy succeeds, never before.
+func tokenForCLI(w io.Writer, in *bufio.Reader) (token string, fromPrompt bool, err error) {
+	if cf, ok, _ := config.LoadCloudflare(); ok {
+		fmt.Fprintln(w, "  using the stored Cloudflare token (delete cloudflare.json to be asked again)")
+		return cf.Token, false, nil
+	}
+	t, err := readAPIToken(w, in)
+	return t, true, err
+}
+
+// pickAccountPreferring is pickAccount with a remembered answer: when the
+// stored credential's account is among the choices, it is taken silently —
+// asking a question whose answer is on disk would be ceremony.
+func pickAccountPreferring(w io.Writer, r *bufio.Reader, accounts []cloudflare.Account, preferredID string) (cloudflare.Account, error) {
+	if preferredID != "" {
+		for _, a := range accounts {
+			if a.ID == preferredID {
+				return a, nil
+			}
+		}
+	}
+	return pickAccount(w, r, accounts)
+}
+
 // readAPIToken prompts for and reads the Cloudflare API token.
 //
 // EOF with content is not an error: a token piped in without a trailing newline
@@ -531,17 +692,6 @@ func webAssets() ([]cloudflare.Asset, error) {
 		return nil, errors.New("the embedded web app is empty; rebuild with `make build`")
 	}
 	return assets, nil
-}
-
-// newDaemonSecret mints the credential the daemon presents on its outbound leg.
-// base64url with no padding, so it can go into an Authorization header — which
-// is exactly where the daemon puts it — without any escaping question.
-func newDaemonSecret() (string, error) {
-	var raw [daemonSecretBytes]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
 }
 
 // withTimeout runs one API step under a deadline of its own.

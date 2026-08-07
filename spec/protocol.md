@@ -48,6 +48,21 @@ Every control message is a JSON object with a `type` discriminator.
 | `error` | `code`, `msg`, `reqId?` | a request failed, or a stream did |
 | `deviceList` | `devices[]` | answers `devices`, and is broadcast after a pairing or a `revoke` |
 | `pairing` | `token`, `url`, `daemonPub`, `expiresAt` | answers `pairStart` |
+
+### Sizing
+
+Every attached view sends `resize` with the cells that fit its own pane. The
+daemon records one desired size per attachment and keeps the PTY at the
+componentwise maximum across them — the largest attached view — recomputing
+when a report changes and when an attachment ends, and broadcasting the
+result as `sizeChanged`. A view whose fit is below the broadcast size renders
+the full screen scaled down; a phone therefore never shrinks a laptop, and a
+laptop detaching hands its columns back without anyone asking again.
+
+`primary` marks exactly one attachment per session — first attacher, most
+recently active promoted when it leaves — and governs one thing: which
+emulator answers device queries (DA, DSR, OSC color) arriving in the
+broadcast output. It has no effect on dimensions.
 | `revoked` | `reason` | this device was unpaired; the connection is about to close |
 
 Each record of `deviceList.devices[]` carries `id`, `label`, `pairedAt` and

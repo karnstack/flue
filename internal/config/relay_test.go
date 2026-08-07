@@ -292,4 +292,3 @@ func TestLoadRelayErrorNeverQuotesTheFile(t *testing.T) {
 		t.Errorf("the error does not name the field that is wrong: %q", err)
 	}
 }
-

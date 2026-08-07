@@ -8,6 +8,12 @@ export interface Env {
   /** How long `POST /api/pair` waits for the daemon, in ms — the same test
    * seam (vitest binds 250). Unset in production, where it is 10 000. */
   PAIR_TIMEOUT_MS?: string | number
+  /** The version of the flue that deployed this Worker, stamped by the
+   * deploy as a plain-text binding (internal/relaydeploy, VersionVar) and
+   * reported on /api/health. It is how a daemon sees that this relay is
+   * older than the binary looking at it. Unset under `pnpm dev`, which
+   * deploys nothing. */
+  FLUE_VERSION?: string
 }
 
 /**
@@ -101,7 +107,13 @@ export default {
       // purpose: a valid /client/<id> dial already observes it (RELAY.md,
       // "what a probe can learn"), and an *advertised* per-machine health API
       // would turn that accepted observation into a product surface.
-      return new Response('{"ok":true}', {
+      // The version is public by choice: this origin already serves the web
+      // bundle to anyone who asks, so which flue deployed it is not a secret
+      // the endpoint could keep — and reporting it is what lets a daemon
+      // (and the Remote screen) say "this relay is older than you".
+      const body: { ok: true; version?: string } = { ok: true }
+      if (env.FLUE_VERSION) body.version = env.FLUE_VERSION
+      return new Response(JSON.stringify(body), {
         headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
       })
     }

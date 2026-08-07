@@ -64,14 +64,26 @@ func newTestServerUI(t *testing.T, ui http.Handler) (*httptest.Server, *session.
 	t.Cleanup(ts.Close)
 
 	// Rebuild auth against the port httptest actually chose.
+	srv.SetAuth(local.NewAuth(tok, tsPort(ts)))
+	return ts, reg, srv
+}
+
+// tsPort is the port httptest actually chose.
+func tsPort(ts *httptest.Server) int {
 	port := 0
 	if _, p, ok := strings.Cut(strings.TrimPrefix(ts.URL, "http://"), ":"); ok {
 		for _, c := range p {
 			port = port*10 + int(c-'0')
 		}
 	}
-	srv.SetAuth(local.NewAuth(tok, port))
-	return ts, reg, srv
+	return port
+}
+
+// tsCookie is the session cookie's name for that port; the name carries the
+// port (local.CookieNameFor), so a test that speaks cookies derives it from
+// the server it is talking to.
+func tsCookie(ts *httptest.Server) string {
+	return local.CookieNameFor(tsPort(ts))
 }
 
 func dial(t *testing.T, ts *httptest.Server) *websocket.Conn {
@@ -279,7 +291,11 @@ func TestSecondAttacherIsNotPrimary(t *testing.T) {
 	})
 }
 
-func TestNonPrimaryResizeDoesNotChangePTY(t *testing.T) {
+// TestResizeKeepsTheLargestAttachedView pins the sizing policy: the PTY is
+// the componentwise maximum of what the attached views report, so a phone's
+// 40 columns cannot shrink a laptop's 120 — and when the laptop leaves, its
+// columns leave with it and the phone finally gets a phone-sized terminal.
+func TestResizeKeepsTheLargestAttachedView(t *testing.T) {
 	ts, reg := newTestServer(t)
 	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
 	if err != nil {
@@ -287,29 +303,57 @@ func TestNonPrimaryResizeDoesNotChangePTY(t *testing.T) {
 	}
 	defer s.Close()
 
-	first := dial(t, ts)
-	writeControl(t, first, wire.Hello{Ver: "test"})
-	writeControl(t, first, wire.Attach{ID: s.ID(), LastSeq: 0})
-	readUntil(t, first, func(msg any, _ []byte) bool { _, ok := msg.(wire.Attached); return ok })
-
-	second := dial(t, ts)
-	writeControl(t, second, wire.Hello{Ver: "test"})
-	writeControl(t, second, wire.Attach{ID: s.ID(), LastSeq: 0})
-	var ref uint32
-	readUntil(t, second, func(msg any, _ []byte) bool {
+	laptop := dial(t, ts)
+	writeControl(t, laptop, wire.Hello{Ver: "test"})
+	writeControl(t, laptop, wire.Attach{ID: s.ID(), LastSeq: 0})
+	var laptopRef uint32
+	readUntil(t, laptop, func(msg any, _ []byte) bool {
 		a, ok := msg.(wire.Attached)
 		if ok {
-			ref = a.Ref
+			laptopRef = a.Ref
+		}
+		return ok
+	})
+	writeControl(t, laptop, wire.Resize{Ref: laptopRef, Cols: 120, Rows: 40, Primary: true})
+	waitFor(t, func() bool { return s.Info().Cols == 120 && s.Info().Rows == 40 })
+
+	phone := dial(t, ts)
+	writeControl(t, phone, wire.Hello{Ver: "test"})
+	writeControl(t, phone, wire.Attach{ID: s.ID(), LastSeq: 0})
+	var phoneRef uint32
+	readUntil(t, phone, func(msg any, _ []byte) bool {
+		a, ok := msg.(wire.Attached)
+		if ok {
+			phoneRef = a.Ref
 		}
 		return ok
 	})
 
-	writeControl(t, second, wire.Resize{Ref: ref, Cols: 40, Rows: 10, Primary: false})
+	// The phone reports what fits it. The maximum is unmoved, so the PTY is.
+	writeControl(t, phone, wire.Resize{Ref: phoneRef, Cols: 40, Rows: 10, Primary: false})
 	time.Sleep(200 * time.Millisecond)
-
-	if got := s.Info().Cols; got != 80 {
-		t.Fatalf("Cols = %d after a non-primary resize, want 80", got)
+	if got := s.Info(); got.Cols != 120 || got.Rows != 40 {
+		t.Fatalf("size = %dx%d after the phone's report, want the laptop's 120x40", got.Cols, got.Rows)
 	}
+
+	// The laptop leaves; the largest remaining view is the phone's, and the
+	// PTY follows it down without the phone asking again.
+	writeControl(t, laptop, wire.Detach{Ref: laptopRef})
+	waitFor(t, func() bool { return s.Info().Cols == 40 && s.Info().Rows == 10 })
+}
+
+// waitFor polls cond briefly; the daemon's side of these flows is
+// asynchronous but fast.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition never became true")
 }
 
 func TestPrimarySeizureResizesPTY(t *testing.T) {
@@ -427,7 +471,7 @@ func get(t *testing.T, ts *httptest.Server, path, fetchSite string) *http.Respon
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.AddCookie(&http.Cookie{Name: local.CookieName, Value: tok})
+	req.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
 	if fetchSite != "" {
 		req.Header.Set("Sec-Fetch-Site", fetchSite)
 	}
@@ -522,9 +566,9 @@ func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
 	for _, path := range []string{"/?h=not-a-handoff", "/?t=" + tok, "/?h=" + tok} {
 		resp := get(t, ts, path, "none")
 		for _, c := range resp.Cookies() {
-			if c.Name == local.CookieName && c.Value != tok {
+			if c.Name == tsCookie(ts) && c.Value != tok {
 				t.Fatalf("GET %s set %s to the client-supplied %q, want the daemon's own token",
-					path, local.CookieName, c.Value)
+					path, tsCookie(ts), c.Value)
 			}
 		}
 	}
@@ -539,15 +583,15 @@ func TestCookieExchangeNeverStoresAClientSuppliedToken(t *testing.T) {
 	resp := get(t, ts, "/?"+local.HandoffParam+"="+h, "none")
 	var found *http.Cookie
 	for _, c := range resp.Cookies() {
-		if c.Name == local.CookieName {
+		if c.Name == tsCookie(ts) {
 			found = c
 		}
 	}
 	if found == nil {
-		t.Fatalf("first load with a handoff token set no %s cookie", local.CookieName)
+		t.Fatalf("first load with a handoff token set no %s cookie", tsCookie(ts))
 	}
 	if found.Value != tok {
-		t.Fatalf("%s cookie = %q, want the daemon's token", local.CookieName, found.Value)
+		t.Fatalf("%s cookie = %q, want the daemon's token", tsCookie(ts), found.Value)
 	}
 	if !found.HttpOnly {
 		t.Error("cookie HttpOnly = false, want true")
@@ -727,7 +771,7 @@ func mintReqQuery(t *testing.T, ts *httptest.Server, query string) *http.Request
 func mintReqCookie(t *testing.T, ts *httptest.Server, token string) *http.Request {
 	t.Helper()
 	req := mintReq(t, ts, "")
-	req.AddCookie(&http.Cookie{Name: local.CookieName, Value: token})
+	req.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: token})
 	return req
 }
 
@@ -790,7 +834,7 @@ func TestHandoffIsRedeemableExactlyOnceOverHTTP(t *testing.T) {
 	}
 	var cookie *http.Cookie
 	for _, c := range first.Cookies() {
-		if c.Name == local.CookieName {
+		if c.Name == tsCookie(ts) {
 			cookie = c
 		}
 	}
@@ -812,7 +856,7 @@ func TestHandoffIsRedeemableExactlyOnceOverHTTP(t *testing.T) {
 		t.Fatalf("second presentation = %d, want 401", second.StatusCode)
 	}
 	for _, c := range second.Cookies() {
-		if c.Name == local.CookieName {
+		if c.Name == tsCookie(ts) {
 			t.Fatal("a spent handoff token still yielded a session cookie")
 		}
 	}
@@ -861,7 +905,7 @@ func TestConcurrentHandoffExchangesYieldExactlyOneSuccess(t *testing.T) {
 					ok.Add(1)
 				}
 				for _, c := range resp.Cookies() {
-					if c.Name == local.CookieName {
+					if c.Name == tsCookie(ts) {
 						cookies.Add(1)
 					}
 				}
@@ -917,7 +961,7 @@ func TestExpiredHandoffIsRefusedOverHTTP(t *testing.T) {
 		t.Fatalf("expired handoff = %d, want 401", resp.StatusCode)
 	}
 	for _, c := range resp.Cookies() {
-		if c.Name == local.CookieName {
+		if c.Name == tsCookie(ts) {
 			t.Fatal("an expired handoff token still yielded a session cookie")
 		}
 	}
@@ -987,7 +1031,7 @@ func TestSessionTokenIsNeverAcceptedFromAURL(t *testing.T) {
 			t.Errorf("GET %s = 200; the session token must never authenticate from a URL", path)
 		}
 		for _, c := range resp.Cookies() {
-			if c.Name == local.CookieName {
+			if c.Name == tsCookie(ts) {
 				t.Errorf("GET %s handed out a session cookie", path)
 			}
 		}
@@ -1304,8 +1348,8 @@ func TestThePairingPageCannotSpendAHandoffToken(t *testing.T) {
 		t.Fatalf("GET the pairing page carrying a handoff token = %d, want 200", resp.StatusCode)
 	}
 	for _, c := range resp.Cookies() {
-		if c.Name == local.CookieName {
-			t.Fatalf("the pairing page set %s; it authenticates nobody", local.CookieName)
+		if c.Name == tsCookie(ts) {
+			t.Fatalf("the pairing page set %s; it authenticates nobody", tsCookie(ts))
 		}
 	}
 
@@ -1318,13 +1362,13 @@ func TestThePairingPageCannotSpendAHandoffToken(t *testing.T) {
 	}
 	var cookie *http.Cookie
 	for _, c := range exchange.Cookies() {
-		if c.Name == local.CookieName {
+		if c.Name == tsCookie(ts) {
 			cookie = c
 		}
 	}
 	if cookie == nil {
 		t.Fatalf("the handoff token was spent by the pairing page: no %s cookie on the exchange",
-			local.CookieName)
+			tsCookie(ts))
 	}
 }
 
@@ -2800,5 +2844,149 @@ func TestSetRelayStatusRefusesStatesItCannotMean(t *testing.T) {
 	srv.SetRelayStatus(RelayConnecting, "https://r.example")
 	if info := srv.relayInfo(); info == nil || info.Origin != "" {
 		t.Fatalf("relay = %+v while connecting, want no origin", info)
+	}
+}
+
+// --- the Remote screen's relay endpoints -------------------------------------
+
+// TestRelayUIEndpointSurface pins the surface before any service exists: the
+// mutating paths take POST and nothing else, every path wants auth, and a
+// daemon nobody wired a RelayUI into answers 404 rather than pretending.
+func TestRelayUIEndpointSurface(t *testing.T) {
+	ts, _, _ := newTestServerUI(t, http.NotFoundHandler())
+
+	// methodPolicy lets GET through everywhere, so the handler itself must
+	// refuse a GET spelling of the mutation — even an authenticated one.
+	getReq, err := http.NewRequest(http.MethodGet, ts.URL+RelayDeployPath, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	getReq.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
+	getReq.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		t.Fatalf("GET deploy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("authenticated GET %s = %d, want 405", RelayDeployPath, resp.StatusCode)
+	}
+
+	// POST without a credential is refused.
+	resp, err = http.Post(ts.URL+RelayUpdatePath, "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("POST update: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated POST %s = %d, want 401", RelayUpdatePath, resp.StatusCode)
+	}
+
+	// Authenticated, but no service wired: 404, the same answer an absent
+	// endpoint gives.
+	req, err := http.NewRequest(http.MethodPost, ts.URL+RelayDeployPath, strings.NewReader(`{"token":"x"}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
+	req.Header.Set("Origin", ts.URL)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST deploy: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("POST with no service = %d, want 404", resp.StatusCode)
+	}
+
+	// Info is a plain authenticated read with the same no-service answer.
+	req, _ = http.NewRequest(http.MethodGet, ts.URL+RelayInfoPath, nil)
+	req.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET info: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET info with no service = %d, want 404", resp.StatusCode)
+	}
+}
+
+// stubRelayUI answers the join endpoint; everything else is unused by the
+// test that carries it.
+type stubRelayUI struct {
+	join string
+}
+
+func (s *stubRelayUI) Status(context.Context) RelayUIStatus { return RelayUIStatus{} }
+func (s *stubRelayUI) Provision(context.Context, RelayUIDeployRequest) (RelayUIDeployResult, error) {
+	return RelayUIDeployResult{}, nil
+}
+func (s *stubRelayUI) Update(context.Context, RelayUIDeployRequest) (RelayUIDeployResult, error) {
+	return RelayUIDeployResult{}, nil
+}
+func (s *stubRelayUI) JoinCommand(context.Context) (string, bool, error) {
+	if s.join == "" {
+		return "", false, nil
+	}
+	return s.join, true, nil
+}
+func (s *stubRelayUI) SetAddress(context.Context, string) (RelayUIDeployResult, error) {
+	return RelayUIDeployResult{}, nil
+}
+
+// TestRelayUIJoinEndpoint: an authenticated GET gets the line back, and a
+// daemon whose service has none answers 404 — the same shape as unconfigured.
+func TestRelayUIJoinEndpoint(t *testing.T) {
+	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
+	srv.SetRelayUI(&stubRelayUI{join: "flue relay join wss://r --secret s"})
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+RelayJoinPath, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET join: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET join = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		JoinCommand string `json:"join_command"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if body.JoinCommand != "flue relay join wss://r --secret s" {
+		t.Fatalf("join_command = %q", body.JoinCommand)
+	}
+
+	// Unauthenticated: refused before the secret-bearing line is built.
+	plain, err := http.Get(ts.URL + RelayJoinPath)
+	if err != nil {
+		t.Fatalf("plain GET: %v", err)
+	}
+	plain.Body.Close()
+	if plain.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET join = %d, want 401", plain.StatusCode)
+	}
+
+	// A service with nothing to say is a 404.
+	srv.SetRelayUI(&stubRelayUI{})
+	req2, _ := http.NewRequest(http.MethodGet, ts.URL+RelayJoinPath, nil)
+	req2.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
+	req2.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("GET join unconfigured: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("unconfigured GET join = %d, want 404", resp2.StatusCode)
 	}
 }

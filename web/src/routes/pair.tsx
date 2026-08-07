@@ -10,7 +10,7 @@ import {
   type DeviceKey,
 } from '@/crypto/keys'
 import { cn } from '@/lib/utils'
-import { MACHINE_ID, saveMachine } from '@/relay/machines'
+import { MACHINE_ID, SELECTED_KEY, saveMachine } from '@/relay/machines'
 import { isRelayOrigin } from '@/relay/mode'
 
 /**
@@ -597,6 +597,34 @@ export function PairRoute() {
         </p>
       )}
 
+      {/*
+        The way in, on the spot. Everything the relay client boots from is
+        already written by the time `paired` is set — the machine record, the
+        pinned key, this device's own key — so the ceremony's natural next
+        step is the sessions it just earned. A full document load, not a
+        router navigate: relayBoot runs once at import and this tab's router
+        was built before the record existed (the same reasoning as
+        MachinesRoute.connect). Selecting the machine first is what makes a
+        multi-machine browser land in the right one instead of on the picker.
+
+        Relay origins only. On loopback no machine record exists and /ws is
+        cookie-gated; "you can close this page" remains the honest ending
+        there.
+      */}
+      {paired !== null && viaRelay && machineId !== null && (
+        <Button
+          type="button"
+          size="lg"
+          className="h-11 w-full"
+          onClick={() => {
+            sessionStorage.setItem(SELECTED_KEY, machineId)
+            location.replace('/')
+          }}
+        >
+          Open this machine's sessions
+        </Button>
+      )}
+
       {paired === null && !stopped && (
         <form onSubmit={submit} className="flex flex-col gap-y-4">
           <div className="flex flex-col gap-y-2">
@@ -653,7 +681,8 @@ export function PairRoute() {
         costs no space until it has something to say.
       */}
       <p role="status" className={cn(PROSE, 'empty:-mt-5')}>
-        {paired !== null && `Paired ✓ — ${paired}. You can close this page.`}
+        {paired !== null &&
+          `Paired ✓ — ${paired}.${viaRelay ? '' : ' You can close this page.'}`}
         {failure !== null && `${failure.text} ${EXPIRY_NOTE}`}
       </p>
     </Frame>

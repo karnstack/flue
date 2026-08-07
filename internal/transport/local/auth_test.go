@@ -17,7 +17,7 @@ func req(t *testing.T, host, origin, query, cookie string) *http.Request {
 		r.Header.Set("Origin", origin)
 	}
 	if cookie != "" {
-		r.AddCookie(&http.Cookie{Name: CookieName, Value: cookie})
+		r.AddCookie(&http.Cookie{Name: CookieNameFor(7717), Value: cookie})
 	}
 	return r
 }
@@ -150,7 +150,7 @@ func TestAuthRejectsRepeatedTokenHeaders(t *testing.T) {
 
 func handoffCookie(rec *httptest.ResponseRecorder) *http.Cookie {
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == CookieName {
+		if c.Name == CookieNameFor(7717) {
 			return c
 		}
 	}
@@ -246,7 +246,7 @@ func TestMiddlewareRefusesASpentHandoff(t *testing.T) {
 		t.Fatalf("second presentation status = %d, want 401", second.Code)
 	}
 	if c := handoffCookie(second); c != nil {
-		t.Fatalf("a spent handoff token still yielded a %s cookie (%q)", CookieName, c.Value)
+		t.Fatalf("a spent handoff token still yielded a %s cookie (%q)", CookieNameFor(7717), c.Value)
 	}
 }
 
@@ -304,7 +304,7 @@ func TestMiddlewareDoesNotFallBackToTheSessionToken(t *testing.T) {
 			t.Errorf("%q was served, want a rejection", q)
 		}
 		if c := handoffCookie(rec); c != nil {
-			t.Errorf("%q yielded a %s cookie, want none", q, CookieName)
+			t.Errorf("%q yielded a %s cookie, want none", q, CookieNameFor(7717))
 		}
 	}
 }
@@ -544,6 +544,6 @@ func TestMiddlewareSetsNoCookieOnRejectedRequest(t *testing.T) {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
 	if c := handoffCookie(rec); c != nil {
-		t.Fatalf("rejected request still got a %s cookie set", CookieName)
+		t.Fatalf("rejected request still got a %s cookie set", CookieNameFor(7717))
 	}
 }

@@ -116,6 +116,10 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       term.resize(cols, rows)
     },
 
+    scrollLines(n: number) {
+      term.scrollLines(n)
+    },
+
     snapshot(): Grid {
       return extractGrid(term)
     },

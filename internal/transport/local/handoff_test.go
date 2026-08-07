@@ -291,7 +291,7 @@ func TestCheckMintRejectsAnUnauthenticatedRequest(t *testing.T) {
 func TestCheckMintRejectsTheCookie(t *testing.T) {
 	a := NewAuth(testToken, 7717)
 	r := mintReq(t, "")
-	r.AddCookie(&http.Cookie{Name: CookieName, Value: testToken})
+	r.AddCookie(&http.Cookie{Name: CookieNameFor(7717), Value: testToken})
 	if err := a.CheckMint(r); err == nil {
 		t.Fatal("CheckMint err = nil for a cookie-authenticated request, want a rejection")
 	}

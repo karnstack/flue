@@ -159,9 +159,18 @@ export function SessionsRoute() {
     client.list()
     spawnPendingCwd()
     const poll = setInterval(() => client.list(), REFRESH_MS)
+    // Browsers throttle background intervals to a crawl; asking again the
+    // moment the tab is looked at beats waiting out a stretched poll tick.
+    const focused = () => {
+      if (!document.hidden) client.list()
+    }
+    window.addEventListener('focus', focused)
+    document.addEventListener('visibilitychange', focused)
 
     return () => {
       clearInterval(poll)
+      window.removeEventListener('focus', focused)
+      document.removeEventListener('visibilitychange', focused)
       for (const off of offs) off()
       // Whatever this screen asked for and did not live to see answered:
       // the client hands each reply back when it lands.

@@ -33,13 +33,23 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
 
-// CookieName is where the session token lives after the first load, so it
-// never stays in the URL where history and referrers would leak it.
-const CookieName = "flue_token"
+// CookieNameFor is the session cookie's name for a daemon on port. The token
+// lives there after the first load, so it never stays in the URL where
+// history and referrers would leak it.
+//
+// The port is in the name because the browser will not keep it anywhere
+// else: cookies are scoped to the host and blind to the port, so two daemons
+// on one machine — an installed one on 7717, a dev one on another port —
+// would otherwise share one name and each login would evict the other's
+// session.
+func CookieNameFor(port int) string {
+	return "flue_token_" + strconv.Itoa(port)
+}
 
 // HeaderName is the request header a non-browser local client presents the
 // session token in. It is the only way to authenticate a mint, and one of two
@@ -72,6 +82,7 @@ var (
 // It also owns the handoff token store; see handoff.go.
 type Auth struct {
 	token   string
+	cookie  string // CookieNameFor(port), fixed at construction
 	hosts   map[string]struct{}
 	origins map[string]struct{}
 
@@ -95,8 +106,9 @@ func NewAuthWithClock(token string, port int, now func() time.Time) *Auth {
 		now = time.Now
 	}
 	return &Auth{
-		token: token,
-		hosts: map[string]struct{}{h1: {}, h2: {}},
+		token:  token,
+		cookie: CookieNameFor(port),
+		hosts:  map[string]struct{}{h1: {}, h2: {}},
 		origins: map[string]struct{}{
 			"http://" + h1: {},
 			"http://" + h2: {},
@@ -207,7 +219,7 @@ func (a *Auth) validToken(r *http.Request) bool {
 	if constantEqual(r.Header.Get(HeaderName), a.token) {
 		return true
 	}
-	if c, err := r.Cookie(CookieName); err == nil && constantEqual(c.Value, a.token) {
+	if c, err := r.Cookie(a.cookie); err == nil && constantEqual(c.Value, a.token) {
 		return true
 	}
 	return false
@@ -312,7 +324,7 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			// appearing in the URL; the client then strips the spent handoff
 			// parameter from the URL with replaceState.
 			http.SetCookie(w, &http.Cookie{
-				Name:     CookieName,
+				Name:     a.cookie,
 				Value:    a.token,
 				Path:     "/",
 				HttpOnly: true,

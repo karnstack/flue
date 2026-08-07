@@ -86,6 +86,8 @@ flue open [path]   # spawn a session here — handy from a shell prompt
 flue relay setup   # deploy a relay to your own Cloudflare account (see below)
 flue relay join    # point this machine at a relay another machine deployed
 flue relay status  # show the configured relay
+flue relay update  # redeploy this release's relay; secret and pairings kept
+flue relay address # repoint this machine at a custom domain on the same relay
 flue serve         # run the daemon in the foreground, no login service
 ```
 
@@ -108,6 +110,12 @@ touches the Cloudflare API:
 ```sh
 flue relay setup     # machine 1: paste a Cloudflare API token, watch it deploy, done
 ```
+
+The same deploy is a card on the UI's Remote screen: paste the token there,
+see exactly what will be created in your account, click Deploy. Both doors
+run the same code, and the UI one exists only on the daemon's own loopback
+origin — a token typed into a remote tab would cross the relay, so no remote
+tab is ever offered the form.
 
 That deploys the relay Worker **and** the web app into your own Cloudflare
 account, sets a fresh daemon secret, joins this machine under a machine id of
@@ -153,12 +161,23 @@ caveat is real.
 
 ## Developing
 
+The full guide — the dev/prod split, working on the relay, deploying a dev
+relay of your own — is [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The
+short version:
+
 Development never builds the web app — hot reload owns it:
 
 ```sh
-make run       # terminal 1: the daemon on 127.0.0.1:7717, no web build
+make run       # terminal 1: the dev daemon on 127.0.0.1:7719, no web build
 make web-dev   # terminal 2: Vite with hot reload on 127.0.0.1:5173
 ```
+
+The dev daemon runs on 7719 with its own config directory
+(`~/.config/flue-dev`), so it coexists with an installed flue on 7717: they
+never fight over `runtime.json`, the dev `relay.json` cannot clobber the
+installed one, and the session cookie's name carries the port so logging
+into one UI does not log you out of the other. `FLUE_DEV_PORT` and
+`FLUE_DEV_CONFIG` in the Makefile move both knobs.
 
 `make run` compiles with the `dev` build tag, which swaps the embedded UI
 for a redirect to Vite (`web/dev.go`) and the embedded relay Worker for
@@ -170,9 +189,11 @@ link plants the auth cookie and lands you on the Vite server, no clicking
 race. Vite proxies `/api` and `/ws` back to the daemon and rewrites the
 Origin so its checks pass; the cookie rides along because cookies ignore
 the port. Stick to `127.0.0.1`, not `localhost`: the cookie is set for that
-host exactly. Restarting a lot and tired of tabs? `go run -tags dev
-./cmd/flue serve` skips the auto-open; the cookie from the first open keeps
-working.
+host exactly. Restarting a lot and tired of tabs?
+`XDG_CONFIG_HOME=~/.config/flue-dev go run -tags dev ./cmd/flue serve --port 7719`
+skips the auto-open; the cookie from the first open keeps working. Any other
+flue command aimed at the dev daemon needs that same `XDG_CONFIG_HOME`, or
+it will talk to the installed one.
 
 A production-like run — the embedded UI, exactly what a user gets — is:
 

@@ -218,7 +218,10 @@ describe('the relay Worker routes by machine id', () => {
     expect(res.status).toBe(200)
     expect(res.headers.get('Content-Type')).toContain('application/json')
     expect(res.headers.get('Cache-Control')).toBe('no-store')
-    expect(await res.json()).toEqual({ ok: true })
+    // The version is the one fact beyond liveness: which flue deployed this
+    // Worker (the FLUE_VERSION binding the deploy stamps). It is what lets a
+    // daemon see a relay that is older than the binary looking at it.
+    expect(await res.json()).toEqual({ ok: true, version: 'test-version' })
   })
 
 })

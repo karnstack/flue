@@ -50,6 +50,14 @@ type Relay struct {
 	// machine lists; it rides the pairing link's query (`n=`, so the pairing
 	// browser can label the machine), never any path the relay routes on.
 	MachineName string `json:"machine_name"`
+
+	// Worker is the Cloudflare script name the relay was deployed under —
+	// `flue relay setup --worker`, or the default. `flue relay update` reads
+	// it back so a redeploy names the same script without re-deriving it from
+	// the URL. Empty in files written by `flue relay join` (join deploys
+	// nothing and does not know) and in files from before the field existed;
+	// readers must treat empty as "derive or ask", never as a name.
+	Worker string `json:"worker,omitempty"`
 }
 
 // Machine-id shape. The relay refuses ids outside its grammar with a 404

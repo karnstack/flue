@@ -4,6 +4,8 @@ import { Link } from '@tanstack/react-router'
 import { generate } from 'lean-qr'
 
 import type { ConnStatus } from '@/client/client'
+import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
+import { useRelayTransport } from '@/hooks/use-relay-transport'
 import { useFlueClient } from '@/client/provider'
 import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
 import { Button } from '@/components/ui/button'
@@ -428,6 +430,15 @@ export function DevicesRoute() {
   // Seeded for the same reason: the welcome that said what the relay is doing
   // usually landed before this screen was navigated to.
   const [relay, setRelay] = useState<RelayInfo>(() => client.relay)
+
+  // The welcome's relay snapshot never updates on a stable socket, so a tab
+  // greeted while the daemon was still dialling would hold the Pair gate
+  // shut forever. While the snapshot claims less than connected, the daemon's
+  // live answer is polled and adopted — machine identity kept from the
+  // welcome, which the poll does not carry.
+  useRelayTransport(relay.status !== 'connected', (liveOrigin) =>
+    setRelay((r) => ({ ...r, status: 'connected', origin: liveOrigin })),
+  )
   const [pairing, setPairing] = useState<Pairing | null>(null)
   const [left, setLeft] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
@@ -525,6 +536,11 @@ export function DevicesRoute() {
       for (const off of offs) off()
     }
   }, [client, showWindow])
+
+  // The daemon broadcasts device changes to live connections, but a tab that
+  // was backgrounded through a reconnect can still be behind; asking again on
+  // focus is idempotent and closes that gap.
+  useRefetchOnFocus(() => client.listDevices())
 
   useEffect(() => {
     if (pairing === null) return

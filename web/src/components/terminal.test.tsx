@@ -7,7 +7,7 @@ import type { SessionInfo } from '@/client/protocol'
 import { GUTTER_PX } from '@/lib/geometry'
 import { createFakeEmulator, type FakeEmulator } from '@/testing/emulator'
 import { attached, fakeClient, sizeChanged, type FakeSocket } from '@/testing/socket'
-import { Terminal, TERMINAL_SHORTCUT_HINT } from './terminal'
+import { RESIZE_SETTLE_MS, Terminal, TERMINAL_SHORTCUT_HINT } from './terminal'
 
 /**
  * One emulator per mount, all of them kept.
@@ -525,9 +525,11 @@ describe('Terminal', () => {
       expect(sock.ofType('resize')).toEqual([])
     })
 
-    it('scales its surface instead of touching the pty, when not primary', async () => {
+    it('scales its surface to the larger view and reports only its own fit', async () => {
       // The whole point of the policy: a phone at 400px must not drag a
-      // laptop's terminal down to 40 columns.
+      // laptop's terminal down to 40 columns. The pty stays at the largest
+      // view — the phone renders it scaled, and the one thing it sends the
+      // daemon is what fits *itself*, which cannot lower the maximum.
       paneOf(400, 400)
       const { sock, em } = mountTerminal((e) => (
         <Terminal sessionId="s1" createEmulator={e.create} />
@@ -545,13 +547,21 @@ describe('Terminal', () => {
       )
       expect(surface.style.width).toBe(`${1600 + GUTTER_PX}px`)
       expect(surface.style.height).toBe('800px')
-      expect(sock.ofType('resize')).toEqual([])
+      // Its own 38x23 fit, reported once the layout settles; never the pty's.
+      await waitFor(() => expect(sock.ofType('resize')).toHaveLength(1))
+      const [report] = sock.ofType('resize') as [{ cols: number; rows: number; primary: boolean }]
+      expect(report.primary).toBe(false)
+      expect(report.cols).toBeLessThan(160)
+      expect(report.rows).toBeLessThan(47)
     })
 
-    it('gives the surface back to the pane when it is promoted to primary', async () => {
-      // The daemon promotes the most recently active client when the primary
-      // leaves, and says so with a sizeChanged. Nothing else will ever ask for
-      // this client's dimensions, so it has to act on that.
+    it('reshapes nothing when promoted — the role moves voices, not sizes', async () => {
+      // The daemon promotes the most recently active client when a primary
+      // leaves, and the promotion arrives as a sizeChanged. Under the
+      // largest-view policy that changes who answers device queries and
+      // nothing else: the surface stays scaled to the pty it mirrors, and no
+      // new dimensions are volunteered — a socket blip on the other device
+      // must not reshape the shared terminal.
       paneOf(800 + GUTTER_PX, 408)
       const { sock, em } = mountTerminal((e) => (
         <Terminal sessionId="s1" createEmulator={e.create} />
@@ -564,22 +574,19 @@ describe('Terminal', () => {
       )
       const surface = document.querySelector<HTMLElement>('[data-flue-surface]')!
       await waitFor(() => expect(surface.style.scale).toBe('0.5'))
+      // The one report: this view's own fit, sent at attach.
+      await waitFor(() => expect(sock.ofType('resize')).toHaveLength(1))
 
       act(() =>
         sock.emitControl(sizeChanged({ ref: 1, cols: 160, rows: 48, primary: true })),
       )
 
-      await waitFor(() => expect(surface.style.scale).toBe(''))
-      expect(surface.style.width).toBe('')
-      await waitFor(() =>
-        expect(sock.ofType('resize')).toContainEqual({
-          type: 'resize',
-          ref: 1,
-          cols: 80,
-          rows: 24,
-          primary: true,
-        }),
-      )
+      // Still scaled, still mirroring, nothing re-sent.
+      await new Promise((r) => setTimeout(r, RESIZE_SETTLE_MS + 60))
+      expect(surface.style.scale).toBe('0.5')
+      expect(sock.ofType('resize')).toHaveLength(1)
+      // What did move: the answering role.
+      expect(em.live().queryAnswers.at(-1)).toBe(true)
     })
 
     it('asks for nothing at all when nothing has been laid out', async () => {

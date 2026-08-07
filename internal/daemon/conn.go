@@ -417,20 +417,29 @@ func (c *conn) handleControl(msg any) {
 			return
 		}
 		c.srv.touch(a.s.ID(), c)
-		// Only the primary owns PTY dimensions. A non-primary resize is
-		// ignored unless the client is explicitly seizing primary, which
-		// is what stops a phone from shrinking a laptop's view.
 		if m.Primary {
 			c.srv.setPrimary(a.s.ID(), c)
 		}
-		if !c.srv.isPrimary(a.s.ID(), c) {
+		// Every view reports the size that fits it; the PTY takes the
+		// componentwise maximum across them. This is what stops a phone from
+		// shrinking a laptop's view — the phone's 40 columns raise no
+		// maximum — and what hands the columns back when the laptop leaves,
+		// because a departed view's report leaves with it (releasePrimary).
+		// The primary role above still decides who answers device queries;
+		// it no longer owns the dimensions.
+		eff, ok := c.srv.recordDesire(a.s.ID(), c, m.Cols, m.Rows)
+		if !ok {
 			return
 		}
-		if err := a.s.Resize(m.Cols, m.Rows); err != nil {
+		info := a.s.Info()
+		if eff.cols == info.Cols && eff.rows == info.Rows {
+			return
+		}
+		if err := a.s.Resize(eff.cols, eff.rows); err != nil {
 			c.sendError("resize_failed", err.Error())
 			return
 		}
-		c.srv.broadcastSize(a.s.ID(), m.Cols, m.Rows)
+		c.srv.broadcastSize(a.s.ID(), eff.cols, eff.rows)
 
 	case wire.Signal:
 		a := c.attachment(m.Ref)
@@ -729,12 +738,27 @@ func (c *conn) detach(ref uint32) {
 	a.release()
 	a.s.Unsubscribe(a.sub)
 
-	promoted := c.srv.releasePrimary(a.s.ID(), c)
+	promoted, eff, ok := c.srv.releasePrimary(a.s.ID(), c)
+
+	// The departed view's size is out of the maximum now. If it was the
+	// largest, the PTY shrinks to the largest remaining view — this is the
+	// laptop closing and the phone getting a phone-sized terminal back —
+	// and everyone still attached hears the new size.
+	if ok {
+		info := a.s.Info()
+		if eff.cols != info.Cols || eff.rows != info.Rows {
+			if err := a.s.Resize(eff.cols, eff.rows); err == nil {
+				c.srv.broadcastSize(a.s.ID(), eff.cols, eff.rows)
+			}
+		}
+	}
+
 	if promoted == nil {
 		return
 	}
-	// The promoted client now owns the dimensions and has to know it, or
-	// nobody resizes the PTY again.
+	// The promoted client answers device queries now and has to know it. The
+	// size in the frame is the session's, which the resize above may just
+	// have set; promotion itself never reshapes anything.
 	info := a.s.Info()
 	for _, r := range promoted.refsFor(a.s.ID()) {
 		_ = promoted.sendControl(wire.SizeChanged{

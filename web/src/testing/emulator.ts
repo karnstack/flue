@@ -19,6 +19,8 @@ export interface FakeEmulator extends Emulator {
   readonly mountedOn: HTMLElement | null
   readonly disposals: number
   readonly focusCalls: number
+  /** Net lines scrolled through scrollLines(); positive is toward newer. */
+  readonly scrolled: number
   /** What contentSize() reports. jsdom lays nothing out, so this is set by hand. */
   measured: PixelSize | null
   /** Simulate the user typing. */
@@ -51,6 +53,7 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
     mountedOn: null,
     disposals: 0,
     focusCalls: 0,
+    scrolled: 0,
     measured: null,
 
     text: () => written.join(''),
@@ -70,6 +73,10 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
     resize(cols: number, rows: number) {
       mutable(self).cols = cols
       mutable(self).rows = rows
+    },
+
+    scrollLines(n: number) {
+      mutable(self).scrolled += n
     },
 
     snapshot(): Grid {

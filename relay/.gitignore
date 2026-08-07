@@ -1,6 +1,9 @@
 node_modules/
 dist/
 .wrangler/
+# The dev secret for `wrangler dev` (DAEMON_SECRET). A credential, never
+# committed — the deployed relay gets its secret from `flue relay setup`.
+.dev.vars
 # Deploying the *hosted* relay means copying the built web bundle into the
 # assets directory first (docs/SAAS.md, "Deploy"), because that origin is what
 # serves a browser its terminal. Only these two files are ours; everything else

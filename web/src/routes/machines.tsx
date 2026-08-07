@@ -23,6 +23,7 @@
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
 import { cn } from '@/lib/utils'
 import {
   forgetMachine,
@@ -63,6 +64,11 @@ export function MachinesRoute() {
   const [machines, setMachines] = useState(() => ordered(listMachines()))
   /** What the last forget had to say for itself, when it could not finish. */
   const [failure, setFailure] = useState<string | null>(null)
+
+  // localStorage is this screen's whole source, and another tab's pairing
+  // writes it without telling this one; re-reading on focus is what keeps a
+  // picker left open from hiding a machine paired a minute ago.
+  useRefetchOnFocus(() => setMachines(ordered(listMachines())))
 
   function connect(id: string) {
     sessionStorage.setItem(SELECTED_KEY, id)

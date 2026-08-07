@@ -119,6 +119,70 @@ to run on machine two. Re-running setup against a *different* account leaves
 the old Worker live and reachable; there is no `flue relay teardown`, so
 delete it in the dashboard yourself (`docs/FOLLOW-UPS.md` §12).
 
+### The Remote screen runs the same deploys
+
+Setup and update are also cards on the UI's Remote screen: a token field, a
+plain list of what will be created, a Deploy button, and — when the relay's
+`/api/health` reports an older flue than the daemon — an update card. They
+POST to the daemon's `/api/relay/*` endpoints, which call the same
+`internal/relaydeploy` code the CLI calls; there is one deploy, with two
+doors.
+
+The boundary that makes a token in a browser acceptable: those endpoints
+exist only on the daemon's loopback HTTP surface, and the form only renders
+on a loopback origin (`useRelayUIInfo` refuses elsewhere). A remote tab —
+served by the relay, speaking the Noise channel — is never offered the form
+and has no wire operation that could reach the endpoints. A Cloudflare API
+token must never ride the relay; the FAQ's hostile-origin analysis is the
+reason.
+
+### Updating a deployed relay
+
+The command for a relay that should catch up with a newer flue is not setup,
+it is:
+
+```sh
+flue relay update
+```
+
+It redeploys the Worker and the web bundle this binary embeds over the
+script `relay.json` records (`flue relay setup --worker` chose it; older
+files without the record fall back to the workers.dev host's first label),
+and it rotates nothing: the deploy preserves the bound `DAEMON_SECRET`, no
+machine id is minted, and `relay.json` is never written. Every joined daemon
+and every paired browser reconnects on its own. It asks for an API token the
+same way setup does, uses it for the deploy alone, and stores nothing.
+
+A relay's version is the version of the flue that deployed it — the Worker
+ships inside the binary, so `brew upgrade flue && flue relay update` is the
+whole upgrade story.
+
+### A custom domain
+
+Route a domain to the Worker in the Cloudflare dashboard (Workers → your
+relay → Domains & Routes), then tell flue the new name:
+
+```sh
+flue relay address wss://relay.example.com
+```
+
+or use "Change the relay address" on the Remote screen's card. Either way it
+is a local rewrite of relay.json's URL and origin — the worker, the secret
+and this machine's id are untouched, because the Worker behind the name is
+the same one. Restart the daemon to dial the new name. Browsers paired
+against the workers.dev origin keep working while that origin still routes;
+a browser opening the custom domain pairs afresh, because its keys and
+records live per origin in the browser itself.
+
+### One account, several relays
+
+The script name is the unit of separation. `--worker flue-relay-dev` on
+setup deploys a second, fully independent relay beside the default
+`flue-relay`: its own workers.dev hostname, its own secret, its own hubs.
+That is how a development relay lives in the same account as the one your
+installed flue depends on without being able to touch it
+([DEVELOPMENT.md](DEVELOPMENT.md)).
+
 ## One secret for the fleet
 
 Daemon-leg auth, v1: one `DAEMON_SECRET` per Worker, shared by every machine

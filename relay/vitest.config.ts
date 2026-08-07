@@ -16,7 +16,14 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
-        bindings: { HANDSHAKE_TIMEOUT_MS: 50, PAIR_TIMEOUT_MS: 250, DAEMON_SECRET: 'test-secret' },
+        bindings: {
+          HANDSHAKE_TIMEOUT_MS: 50,
+          PAIR_TIMEOUT_MS: 250,
+          DAEMON_SECRET: 'test-secret',
+          // The deploy stamps this (internal/relaydeploy, VersionVar); binding
+          // it here is what lets the health test pin the passthrough.
+          FLUE_VERSION: 'test-version',
+        },
       },
     }),
   ],

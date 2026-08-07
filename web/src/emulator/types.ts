@@ -83,6 +83,14 @@ export interface Emulator {
   write(bytes: Uint8Array, done?: () => void): void
   /** Change the rendered dimensions. */
   resize(cols: number, rows: number): void
+  /**
+   * Scroll the viewport by whole lines; positive is toward newer output.
+   *
+   * This exists for touch: xterm's own viewport scrolls on wheel events and
+   * nothing else, so a phone gets no scrolling at all unless the view
+   * translates drags into this.
+   */
+  scrollLines(n: number): void
   /** Capture the current screen. */
   snapshot(): Grid
   /**
