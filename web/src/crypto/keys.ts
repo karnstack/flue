@@ -127,16 +127,13 @@ export async function loadPinnedDaemonKey(
 }
 
 /**
- * Pin the static key of one machine, under the id the control plane names it
- * by.
+ * Pin the static key of one machine, under its device id —
+ * `hex(sha256(publicKey))[:12]`, the name a machine carries everywhere.
  *
- * The hosted-relay counterpart of `savePinnedDaemonKey`, and it holds its key
- * on different terms. There, a pin is the *whole* trust decision, made once in
- * a ceremony the user carried out by hand. Here the key arrives with every
- * "open a session" — signed-in, over TLS, from the control plane that holds the
- * device row (`app/src/server/devices.ts`, `openSession`) — so the handoff is
- * the authority and this is a cache of it, keyed by the id that machine is
- * addressed by everywhere else.
+ * The per-machine counterpart of `savePinnedDaemonKey`, kept for the relay
+ * that fronts more than one machine on one origin: each pairing ceremony pins
+ * its machine's key under that machine's id, so two machines are two records
+ * and neither can overwrite the other.
  *
  * Which is why it overwrites without asking. A device id *is*
  * `hex(sha256(publicKey))[:12]`, so a different key under the same id is not a

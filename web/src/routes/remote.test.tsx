@@ -49,7 +49,6 @@ async function mountRemote({ relay }: { relay?: RelayInfo } = {}) {
  * that does not exist, pasted into somebody's terminal.
  */
 const SETUP = 'flue relay setup'
-const LINK = 'flue link'
 const STATUS = 'flue relay status'
 
 /** What a browser that refuses the clipboard is told. */
@@ -86,9 +85,8 @@ describe('RemoteRoute', () => {
 
     expect(screen.getByRole('heading', { name: 'Remote access' })).toBeTruthy()
     expect(screen.getByText('Not configured')).toBeTruthy()
-    // Both routes out of it: the self-hosted relay and the hosted account.
+    // The one route out of it: the reader's own relay.
     expect(screen.getByText(SETUP)).toBeTruthy()
-    expect(screen.getByText(LINK)).toBeTruthy()
   })
 
   it('claims nothing about the relay until the daemon has said something', async () => {
@@ -138,14 +136,6 @@ describe('RemoteRoute', () => {
     expect(screen.getByText(/copy a command for you, not run it/)).toBeTruthy()
   })
 
-  it('offers the account flow as well as the self-hosted one', async () => {
-    await mountRemote()
-
-    expect(screen.getByRole('link', { name: /flue\.sh/ }).getAttribute('href')).toBe(
-      'https://app.flue.sh',
-    )
-  })
-
   it('copies a command to the clipboard', async () => {
     const user = userEvent.setup()
     await mountRemote()
@@ -179,14 +169,6 @@ describe('RemoteRoute', () => {
     expect(screen.getByText(/pair a device against this address/i)).toBeTruthy()
     // Nothing left to set up, so nothing is offered.
     expect(screen.queryByText(SETUP)).toBeNull()
-  })
-
-  it('points at the flue.sh device directory once there is an address', async () => {
-    await mountRemote({ relay: RELAY_UP })
-
-    expect(screen.getByRole('link', { name: /device directory/i }).getAttribute('href')).toBe(
-      'https://app.flue.sh/devices',
-    )
   })
 
   it('reports a relay that is still being dialled without inventing an address', async () => {

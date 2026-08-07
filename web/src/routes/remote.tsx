@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
   ArrowPathIcon,
-  ArrowTopRightOnSquareIcon,
   ClipboardIcon,
   GlobeAltIcon,
   QrCodeIcon,
@@ -27,21 +26,7 @@ import { cn } from '@/lib/utils'
  * remote.test.tsx for that reason.
  */
 const SETUP_COMMAND = 'flue relay setup'
-const LINK_COMMAND = 'flue link'
 const STATUS_COMMAND = 'flue relay status'
-
-/**
- * flue.sh's control plane, and the page on it that lists a linked account's
- * machines — `controlplane.DefaultOrigin` and app/src/routes/devices.tsx.
- *
- * Written out rather than derived from anything this tab holds, because nothing
- * it holds says so: the daemon's welcome reports the relay leg and not who owns
- * the relay, so a daemon on a self-hosted Worker and one on flue.sh look
- * identical from here. Hence the hedged wording wherever these are offered —
- * the link is a signpost, not a claim about this machine.
- */
-const CONTROL_PLANE = 'https://app.flue.sh'
-const DEVICE_DIRECTORY = `${CONTROL_PLANE}/devices`
 
 /** What a copy that worked says, and what a browser that refused one says. */
 const COPIED = 'Copied ✓'
@@ -81,8 +66,8 @@ function connectionNotice(status: ConnStatus): string | null {
  * relay carries this machine at — with a button that puts it there.
  *
  * **This screen guides; it does not act.** The daemon takes `flue relay setup`
- * and `flue link` from a shell on the machine it runs on, and nothing a browser
- * can send it would start either — so the affordance here is a command a reader
+ * from a shell on the machine it runs on, and nothing a browser can send it
+ * would start one — so the affordance here is a command a reader
  * can copy, and a button labelled "Set up" would be an offer the page cannot
  * keep. The text is `select-all` as well as copyable, because the clipboard is
  * not always there to be had (below) and a command nobody can select is a dead
@@ -209,10 +194,8 @@ function StatusBadge({ status }: { status: RelayInfo['status'] | null }) {
 /**
  * A daemon with no relay: the state every fresh install is in.
  *
- * Two routes out of it and they are genuinely different products — one deploys
- * a Worker into the reader's own Cloudflare account, the other attaches this
- * machine to a flue.sh account — so they are offered side by side rather than
- * as a primary and an afterthought.
+ * One route out of it: a Worker deployed into the reader's own Cloudflare
+ * account. There is no hosted alternative, on purpose.
  */
 function NotConfigured() {
   return (
@@ -233,46 +216,19 @@ function NotConfigured() {
         </EmptyHeader>
       </Empty>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Run your own relay</CardTitle>
-            <CardDescription className={PROSE}>
-              Deploys a small Worker into your own Cloudflare account, sets a secret only it and
-              this daemon hold, and points the daemon at it. The address is yours, and so is
-              everything that travels over it.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Command command={SETUP_COMMAND} />
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Connect to flue.sh</CardTitle>
-            <CardDescription className={PROSE}>
-              Attaches this machine to a flue.sh account instead. The command prints a short code,
-              you approve it in a browser you are already signed in to, and the hosted relay carries
-              this daemon from then on.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-y-3">
-            <Command command={LINK_COMMAND} />
-            {/*
-              `noreferrer` alongside `noopener` because this is a link off the
-              daemon's own origin, and that origin is a loopback address with a
-              port on it — not something to hand to another site as a Referer.
-            */}
-            <Button variant="outline" size="sm" asChild className="self-start">
-              <a href={CONTROL_PLANE} target="_blank" rel="noreferrer noopener">
-                Open flue.sh
-                <ArrowTopRightOnSquareIcon data-icon="inline-end" aria-hidden="true" />
-              </a>
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
+      <Card className="sm:max-w-lg">
+        <CardHeader>
+          <CardTitle>Run your own relay</CardTitle>
+          <CardDescription className={PROSE}>
+            Deploys a small Worker into your own Cloudflare account, sets a secret only it and this
+            daemon hold, and points the daemon at it. The address is yours, and so is everything
+            that travels over it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Command command={SETUP_COMMAND} />
+        </CardContent>
+      </Card>
     </>
   )
 }
@@ -350,18 +306,7 @@ function Reachable({ origin }: { origin: string }) {
               Pair a device
             </Link>
           </Button>
-          <Button variant="outline" size="sm" asChild>
-            <a href={DEVICE_DIRECTORY} target="_blank" rel="noreferrer noopener">
-              flue.sh device directory
-              <ArrowTopRightOnSquareIcon data-icon="inline-end" aria-hidden="true" />
-            </a>
-          </Button>
         </div>
-        <p className={NOTE}>
-          If this machine is linked to a flue.sh account it is listed in that directory too. Nothing
-          in the daemon’s greeting says which kind of relay is carrying it, so this page offers the
-          link rather than claiming the account.
-        </p>
       </CardContent>
     </Card>
   )
