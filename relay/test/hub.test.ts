@@ -279,8 +279,20 @@ describe('the message-size cap', () => {
 describe('the channel cap', () => {
   it('refuses the 65th concurrent client: 503 relay full', async () => {
     const hub = freshHub()
+    // None of the 64 clients below ever handshakes, and on a slow runner the
+    // 50 ms deadline this config binds would reap them before the 65th dial —
+    // the cap check would then find free slots and hand out a 101. Reap-then-
+    // accept is the hub behaving correctly; this test is about the cap alone,
+    // so give this one instance a deadline the test cannot outlive. The sleep
+    // stands in for the slow runner, and keeps the reap from ever going quiet
+    // here by accident.
+    await runInDurableObject(hub, (instance) => {
+      const hubInstance = instance as unknown as { env: Record<string, unknown> }
+      hubInstance.env = { ...hubInstance.env, HANDSHAKE_TIMEOUT_MS: 600_000 }
+    })
     const daemon = await dial(hub, '/daemon')
     await Promise.all(Array.from({ length: 64 }, () => dial(hub, '/client')))
+    await sleep(TIMEOUT_MS + 30)
     const res = await hub.fetch(`${BASE}/client`, { headers: { Upgrade: 'websocket' } })
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ error: 'relay full' })
