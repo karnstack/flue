@@ -9,15 +9,9 @@ import { cn } from '@/lib/utils'
 /**
  * Where the ceremony is completed; `internal/daemon/pairing.go`, PairPath.
  *
- * **This page is for a self-hosted deployment, and only for one.** The
- * ceremony is a second device scanning a code shown on a first, and the daemon
- * handing back its static key over the connection the user themselves
- * established — which is the whole basis of the pin. On flue.sh nothing pairs:
- * a machine joins an account with `flue link` (device authorization, approved
- * by a signed-in person at app.flue.sh), and a browser is handed the machine's
- * key with the session itself, from the control plane that holds the device row
- * (src/relay/session.ts).
- *
+ * The ceremony is a second device scanning a code shown on a first, and the
+ * daemon handing back its static key over the connection the user themselves
+ * established — which is the whole basis of the pin.
  */
 const PAIR_ENDPOINT = '/api/pair'
 
