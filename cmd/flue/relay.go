@@ -387,6 +387,13 @@ func runRelayJoin(w io.Writer, args []string) error {
 // user can see would be pedantry. Anything else is refused by name, including
 // a path: the old relay.json format kept /daemon on the URL, and silently
 // accepting one here would hide that the contract changed.
+//
+// Lowercased on the way out, because DNS does not care about case and the
+// daemon does: the origin derived from this host is compared byte for byte
+// against the one the relay announces on every channel open
+// (internal/transport/relay/channel.go), so a hand-typed WSS://RELAY.EXAMPLE
+// saved verbatim would dial fine and then have every browser refused as
+// arriving on an origin this daemon never dialled.
 func relayHost(rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -401,7 +408,7 @@ func relayHost(rawURL string) (string, error) {
 	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("the relay url carries a path or query it should not (%q); it is just wss://<host>", rawURL)
 	}
-	return u.Host, nil
+	return strings.ToLower(u.Host), nil
 }
 
 // truncateRunes bounds free text by runes, which is the unit the limit is

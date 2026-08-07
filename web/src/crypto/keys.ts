@@ -127,27 +127,29 @@ export async function loadPinnedDaemonKey(
 }
 
 /**
- * Pin the static key of one machine, under its device id —
- * `hex(sha256(publicKey))[:12]`, the name a machine carries everywhere.
+ * Pin the static key of one machine, under the machine id it holds on the
+ * relay — the `<id>` in `/client/<id>`, minted by `flue relay setup` and
+ * `join`, carried into the ceremony by the pairing link.
  *
  * The per-machine counterpart of `savePinnedDaemonKey`, kept for the relay
  * that fronts more than one machine on one origin: each pairing ceremony pins
  * its machine's key under that machine's id, so two machines are two records
  * and neither can overwrite the other.
  *
- * Which is why it overwrites without asking. A device id *is*
- * `hex(sha256(publicKey))[:12]`, so a different key under the same id is not a
- * second opinion about one machine, it is a 48-bit collision or a stale cache —
- * and refusing to overwrite would turn a crafted link into a permanent denial
- * of service for that machine in this browser. What the record buys is a
- * reload: the fragment carrying the key is scrubbed the moment it is read, so
- * without this a refreshed tab would have no key to hand the handshake.
+ * Which is why it overwrites without asking. Pairing the same id again is the
+ * ordinary way this browser learns that a machine's key changed — a daemon
+ * reinstalled, its identity reminted — and refusing to overwrite would strand
+ * the browser on the stale pin forever, with forgetting the machine by hand
+ * as the only way back. What the record buys is a reload: the fragment
+ * carrying the key is scrubbed the moment it is read, so without this a
+ * refreshed tab would have no key to hand the handshake.
  *
- * Which puts the whole weight on the caller: *only* a key that hashes to
- * `deviceId` may be written here, because a record failing that is exactly the
- * lasting denial of service the overwrite was meant not to be. `relay/session.ts`
- * (`namesItsOwnKey`) is where that is checked — before this is called, and
- * before anything else is written down.
+ * Which puts the whole weight on the caller: *only* a key the ceremony proved
+ * is the machine's — taken from the QR, and matched against the daemon's own
+ * answer — may be written here, because a record failing that is exactly the
+ * lasting denial of service the overwrite was meant not to be. routes/pair.tsx
+ * is where that is checked — before this is called, and before anything else
+ * is written down.
  */
 export async function savePinnedDaemonKeyFor(
   deviceId: string,

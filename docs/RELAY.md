@@ -95,7 +95,10 @@ this machine a fresh id (`<hostname>-<4 hex>`, its slot on the relay and the
 and rides the pairing link's query (`n=`) so the pairing browser can write it
 down — never a path, and never anything the Worker routes on. The printed line carries the secret — that is the
 point, it is the deliberate hand-off — so paste it into the other machine's
-terminal, not into a chat that keeps history.
+terminal, not into a chat that keeps history. Shell history keeps it just as
+well as chat history does — the join line lands in the other machine's history
+file, secret and all — so clear that entry on a machine whose history anyone
+else can read.
 
 Run it from a **release binary** (`make build`, or an installed flue). The
 Worker and the web app are both compiled into that binary, and a dev build
@@ -224,6 +227,12 @@ reads the socket carrying every browser on your machine with a 2 MiB limit that
 kills the connection rather than the message, so the relay's 1 MiB has to stay
 under it. Anything else and one oversized frame from a stranger drops every
 session on the machine, repeatedly.
+
+The credential-less legs also leak presence: a valid machine id answers
+differently with its daemon connected than without (`503 daemon offline`), so
+anyone holding the relay URL can probe which of your machines are up — which
+machines exist and when they are online, never what they carry, because
+everything a channel forwards is still behind Noise.
 
 **Worth adding yourself: a rate limit on `/api/pair`.** That endpoint carries no
 credential by design, and the caps above bound how many attempts one caller can

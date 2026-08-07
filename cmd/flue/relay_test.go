@@ -876,22 +876,37 @@ func TestRunRelayJoinWritesTheRelayConfig(t *testing.T) {
 	}
 }
 
-// TestRunRelayJoinNormalizesAnHTTPSURL: the address on the setup screen is an
-// https origin as often as it is a wss url — they name the same host, and a
-// user who pastes the one they can see must not be told it is wrong.
-func TestRunRelayJoinNormalizesAnHTTPSURL(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+// TestRunRelayJoinNormalizesTheAddress: the address arrives however the user
+// came by it — the https origin off a browser's address bar as often as the
+// wss url setup printed, in whatever case a hand retyped it — and every
+// spelling names the same Worker, DNS being indifferent. relay.json has to
+// hold the one spelling the relay announces itself with, because the daemon
+// compares its configured origin byte for byte against the announced one on
+// every channel open (internal/transport/relay/channel.go): a saved
+// WSS://HOST would dial fine and then refuse every browser.
+func TestRunRelayJoinNormalizesTheAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arg  string
+	}{
+		{"an https origin", "https://flue-relay.karn.workers.dev"},
+		{"an uppercase host", "wss://FLUE-Relay.KARN.workers.dev"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	var out bytes.Buffer
-	if err := runRelayJoin(&out, []string{"https://flue-relay.karn.workers.dev", "--secret", "s"}); err != nil {
-		t.Fatalf("runRelayJoin: %v", err)
-	}
-	saved := loadSavedRelay(t)
-	if saved.URL != "wss://flue-relay.karn.workers.dev" {
-		t.Fatalf("relay.json url = %q, want the https url normalized to wss://", saved.URL)
-	}
-	if saved.Origin != "https://flue-relay.karn.workers.dev" {
-		t.Fatalf("relay.json origin = %q", saved.Origin)
+			var out bytes.Buffer
+			if err := runRelayJoin(&out, []string{tc.arg, "--secret", "s"}); err != nil {
+				t.Fatalf("runRelayJoin(%q): %v", tc.arg, err)
+			}
+			saved := loadSavedRelay(t)
+			if saved.URL != "wss://flue-relay.karn.workers.dev" {
+				t.Fatalf("relay.json url = %q, want %q normalized to wss:// and lowercase", saved.URL, tc.arg)
+			}
+			if saved.Origin != "https://flue-relay.karn.workers.dev" {
+				t.Fatalf("relay.json origin = %q, want %q normalized to https:// and lowercase", saved.Origin, tc.arg)
+			}
+		})
 	}
 }
 

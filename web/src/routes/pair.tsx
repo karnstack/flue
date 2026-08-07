@@ -647,10 +647,12 @@ export function PairRoute() {
         announce only changes to a live region that was already in the
         accessibility tree, so a region that appears alongside its first message
         is a message nobody hears — which is also why it is not dropped when
-        empty. Empty, it contributes no line box at all, and `empty:mt-0` takes
-        its own spacing with it.
+        empty. Empty, it contributes no line box of its own, but the frame
+        still deals it a gap-y-5 slot — flex gap does not care that an item is
+        empty — so `empty:-mt-5` hands that one slot back, and the region
+        costs no space until it has something to say.
       */}
-      <p role="status" className={cn(PROSE, 'empty:mt-0')}>
+      <p role="status" className={cn(PROSE, 'empty:-mt-5')}>
         {paired !== null && `Paired ✓ — ${paired}. You can close this page.`}
         {failure !== null && `${failure.text} ${EXPIRY_NOTE}`}
       </p>

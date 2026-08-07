@@ -93,11 +93,11 @@ export function listMachines(): MachineRecord[] {
 /**
  * Write one machine down, replacing any record under the same id.
  *
- * Overwrite for the reason savePinnedDaemonKeyFor gives: an id is derived from
- * the machine's key, so pairing again under the same id is the same machine —
- * renamed, perhaps — and not a second row. Throws if storage refuses the
- * write; the pairing page treats that as it treats a key store that will not
- * keep the pin.
+ * Overwrite for the reason savePinnedDaemonKeyFor gives: an id is one
+ * machine's slot on the relay, so pairing again under the same id is the same
+ * machine — renamed, or re-keyed — and not a second row. Throws if storage
+ * refuses the write; the pairing page treats that as it treats a key store
+ * that will not keep the pin.
  */
 export function saveMachine(record: MachineRecord): void {
   const rest = listMachines().filter((m) => m.id !== record.id)

@@ -33,7 +33,11 @@ type Relay struct {
 
 	// Secret is the relay's shared DAEMON_SECRET: the deploy set it on the
 	// user's own Worker, and the daemon presents it on every dial. Never
-	// logged, never in argv, and the reason this file is 0600.
+	// logged, and the reason this file is 0600. It does ride argv exactly
+	// once — `flue relay join --secret`, the hand-off line setup prints —
+	// and that is deliberate: argv and the shell history that keeps it are
+	// the accepted cost of moving the secret to the next machine
+	// (docs/RELAY.md says so where the line is printed).
 	Secret string `json:"secret,omitempty"`
 
 	// MachineID is the slot this machine holds on the relay: the <id> in the

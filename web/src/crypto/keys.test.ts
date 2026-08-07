@@ -110,11 +110,13 @@ describe('a daemon key pinned per device', () => {
     expect((await loadOrCreateDeviceKey(db)).privateKey).toEqual(before.privateKey)
   })
 
-  it('replaces a machine’s key when the control plane hands over a new one', async () => {
-    // The control plane is the authority on which key belongs to which
-    // machine: the id *is* `sha256(key)[:12]`, so a differing key under the
-    // same id cannot be a legitimate second opinion. Write-through, so a
-    // browser can never be stuck on bytes it once cached.
+  it('replaces a machine’s key when a later pairing pins a different one', async () => {
+    // The pairing ceremony is the authority on which key belongs to which
+    // machine: the key is taken from the QR and matched against the daemon's
+    // own answer before this is ever called (routes/pair.tsx), so a differing
+    // key under the same id is that slot re-paired, not a second opinion to
+    // referee. Write-through, so a browser can never be stuck on bytes it
+    // once cached.
     const db = new IDBFactory()
     await savePinnedDaemonKeyFor('aaaaaaaaaaaa', KEY_A, db)
     await savePinnedDaemonKeyFor('aaaaaaaaaaaa', KEY_B, db)

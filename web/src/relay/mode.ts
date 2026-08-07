@@ -14,7 +14,7 @@
  *
  * What the browser holds for the relay case lives elsewhere now that one
  * relay origin fronts many machines: the records in ./machines say which
- * machines there are, and the boot (src/main.tsx, relayOptions) assembles the
+ * machines there are, and the boot (relayBoot in ./boot.ts) assembles the
  * chosen one's identity from the key pinned under its id.
  */
 

@@ -176,7 +176,10 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 	//
 	// The machine id is close behind: it is the path this transport dials, and
 	// a transport that dialled /daemon/ with nothing after it would meet the
-	// Worker's 404 forever while the config *looked* complete.
+	// Worker's 404 forever while the config *looked* complete. The grammar
+	// rows are the same fault with the field filled in — an id the Worker
+	// will not route (relay/src/index.ts, MACHINE_ID) earns that 404 just as
+	// forever, and only a hand-edited relay.json can produce one.
 	for _, tc := range []struct {
 		name string
 		cfg  Config
@@ -186,6 +189,9 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 		{"no origin", Config{URL: full.URL, Secret: full.Secret, MachineID: full.MachineID}},
 		{"no machine id", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin}},
 		{"nothing at all", Config{}},
+		{"a machine id with a capital", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "My-Mac"}},
+		{"a machine id led by a dash", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "-a1b2"}},
+		{"a machine id past 63 characters", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: strings.Repeat("a", 64)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -219,6 +225,15 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 			&stubServer{}, noise.DHKey{}, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "no machine id") {
 			t.Fatalf("New without a machine id = %v, want an error saying \"no machine id\"", err)
+		}
+	})
+
+	t.Run("the machine id grammar error names the fault and the value", func(t *testing.T) {
+		t.Parallel()
+		_, err := New(Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "My-Mac"},
+			&stubServer{}, noise.DHKey{}, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "not a valid slug") || !strings.Contains(err.Error(), "My-Mac") {
+			t.Fatalf("New with machine id \"My-Mac\" = %v, want an error quoting it as not a valid slug", err)
 		}
 	})
 }

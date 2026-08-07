@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -139,12 +140,23 @@ type Config struct {
 	MachineID string // the machine's slot on the relay: the <id> of /daemon/<id>
 }
 
-// ErrIncompleteConfig is what New answers a Config that is missing a field it
-// cannot invent. Wrapping rather than a sentinel per field: the caller's
-// decision is the same for all of them — this daemon is not configured for a
-// relay — and the message names which field it was.
+// ErrIncompleteConfig is what New answers a Config it cannot dial with: a
+// field missing it cannot invent, or a machine id the relay would never
+// route. Wrapping rather than a sentinel per fault: the caller's decision is
+// the same for all of them — this daemon is not configured for a relay — and
+// the message names which field it was.
 var ErrIncompleteConfig = errors.New("relay: incomplete config")
 
+// machineIDRe is the relay's own id grammar (relay/src/index.ts, MACHINE_ID;
+// the browser's records are held to the same expression in
+// web/src/relay/machines.ts): one lowercase slug of 1–63 characters. New
+// holds MachineID to it because the id is the path this transport dials, and
+// the Worker answers anything outside the grammar with the same 404 a missing
+// machine gets — minted ids are always inside it (config.MintMachineID), so
+// what this catches is a relay.json edited by hand, a `machine_id: "My-Mac"`
+// that would otherwise dial into "no such machine" forever while the config
+// looked complete.
+var machineIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // Server is the surface the adapter drives — implemented by *daemon.Server.
 //
@@ -237,7 +249,9 @@ var noRedirects = &http.Client{
 // is nothing to dial and nothing to authenticate with, so Run would do nothing
 // but fail and back off forever. The machine id is the same kind of required:
 // it is the path this transport dials, and without one every dial would meet
-// the Worker's "no such machine" 404 while the config looked complete.
+// the Worker's "no such machine" 404 while the config looked complete. Held
+// to the relay's own grammar too, not merely non-empty, because an id the
+// Worker will not route earns exactly that 404 with a value in the field.
 func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceStore, log *slog.Logger) (*Transport, error) {
 	switch {
 	case cfg.URL == "":
@@ -248,6 +262,12 @@ func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceSto
 		return nil, fmt.Errorf("%w: no origin", ErrIncompleteConfig)
 	case cfg.MachineID == "":
 		return nil, fmt.Errorf("%w: no machine id", ErrIncompleteConfig)
+	case !machineIDRe.MatchString(cfg.MachineID):
+		// Quoted, unlike the secret nothing here may ever quote: the id is
+		// public — it rides every /daemon and /client URL — and the operator
+		// staring at a hand-edited relay.json needs to see which value the
+		// grammar refused.
+		return nil, fmt.Errorf("%w: machine id %q is not a valid slug", ErrIncompleteConfig, cfg.MachineID)
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
