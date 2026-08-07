@@ -49,9 +49,9 @@ export const decoder = new TextDecoder()
 /**
  * Each test dials its own hub: a fresh DO name sidesteps shared-instance
  * state between tests, and lets a test start from "no daemon attached"
- * whenever it wants to. (The Worker suite gets the same isolation by picking
- * a fresh machine id per test — the same trick from the other side of the
- * router, since a UUID is itself a well-formed machine id.)
+ * whenever it wants to. (The Worker suite isolates the same way from the
+ * other side of the router: a test that needs an empty hub names a machine
+ * id — lonely-0a0a, beta-9f8e — that nothing else in its file dials.)
  */
 export function freshHub(): DurableObjectStub {
   return env.HUB.get(env.HUB.idFromName(crypto.randomUUID()))

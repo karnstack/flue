@@ -36,8 +36,11 @@ const (
 
 // relayRunWorkerFirst are the paths the Worker handles itself rather than
 // letting the asset router answer from the bundle: the two WebSocket legs and
-// the pairing API.
-var relayRunWorkerFirst = []string{"/daemon", "/client", "/api/*"}
+// the pairing API. The bare entries matter alongside the globs — "/daemon/*"
+// alone would let the asset router answer a bare /daemon with the SPA before
+// the Worker's "no such machine" could. relay/wrangler.jsonc carries the same
+// list for `pnpm dev` and the vitest pool; edit both or neither.
+var relayRunWorkerFirst = []string{"/daemon", "/daemon/*", "/client", "/client/*", "/api/*"}
 
 // relayAssetHeaders is the `_headers` document the relay serves its static
 // assets with — the same security headers the daemon wraps its own responses in

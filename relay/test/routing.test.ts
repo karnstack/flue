@@ -2,6 +2,7 @@ import { SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 
 import { authorizeDaemon, machineIdFrom, type Env } from '../src/index'
+import { controlFrame, decoder, Leg } from './harness'
 
 const BASE = 'https://relay.example'
 
@@ -22,6 +23,18 @@ function once<T>(ws: WebSocket, type: keyof WebSocketEventMap): Promise<T> {
   return new Promise((resolve) => {
     ws.addEventListener(type, (e) => resolve(e as T), { once: true })
   })
+}
+
+/** The daemon leg as a harness Leg, dialed through the Worker rather than a stub. */
+async function daemonLeg(machine: string): Promise<Leg> {
+  const res = await openDaemon(machine)
+  expect(res.status).toBe(101)
+  const ws = res.webSocket!
+  // The pool's test-side socket defaults to delivering binary as Blob; ask for
+  // ArrayBuffer so frames can be decoded synchronously.
+  ;(ws as unknown as { binaryType: string }).binaryType = 'arraybuffer'
+  ws.accept()
+  return new Leg(ws)
 }
 
 describe('machineIdFrom', () => {
@@ -167,6 +180,24 @@ describe('the relay Worker routes by machine id', () => {
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ error: 'daemon offline' })
     daemon.close()
+  })
+
+  it('carries a pairing body byte for byte through the Worker to the daemon', async () => {
+    // The stub suites prove the hub forwards these bytes unreshaped
+    // (pair.test.ts) — but they dial the object directly. This is the same
+    // claim made of the Worker path: the re-wrap in toHub (a new Request on
+    // the bare prefix) must hand the hub the exact body that was POSTed.
+    // Key order, inner whitespace and characters a re-encoder would escape.
+    const daemon = await daemonLeg('pairful-3c4d')
+    const body = '{"z":  1,\n  "a": "<&>é", "token":"t"}'
+    const res = SELF.fetch(`${BASE}/api/pair/pairful-3c4d`, { method: 'POST', body })
+    const payload = await daemon.nextControlBytes()
+    expect(decoder.decode(payload)).toBe(`{"type":"pair","id":1,"origin":"${BASE}","body":${body}}`)
+    daemon.ws.send(controlFrame({ type: 'pairResult', id: 1, status: 200, body: { ok: true } }))
+    const got = await res
+    expect(got.status).toBe(200)
+    expect(await got.json()).toEqual({ ok: true })
+    daemon.ws.close()
   })
 
   it('serves the asset placeholder for unknown paths', async () => {

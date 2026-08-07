@@ -20,7 +20,12 @@
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/daemon/*", "/client/*", "/api/*"]
+    // The bare entries matter: "/daemon/*" alone would let the asset router
+    // answer a bare /daemon with the SPA before the Worker's 404 could — the
+    // Worker keeps refusal authority over its whole prefix, ids or not.
+    // cmd/flue/relay.go (relayRunWorkerFirst) ships the same list in the
+    // deploy request `flue relay setup` builds; edit both or neither.
+    "run_worker_first": ["/daemon", "/daemon/*", "/client", "/client/*", "/api/*"]
   },
   "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "DaemonHub" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DaemonHub"] }],

@@ -475,7 +475,7 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	if f.meta.Assets == nil {
 		t.Fatal("no assets attached to the script")
 	}
-	if got, want := f.meta.Assets.Config.RunWorkerFirst, []string{"/daemon", "/client", "/api/*"}; !slicesEqual(got, want) {
+	if got, want := f.meta.Assets.Config.RunWorkerFirst, []string{"/daemon", "/daemon/*", "/client", "/client/*", "/api/*"}; !slicesEqual(got, want) {
 		t.Fatalf("run_worker_first = %v, want %v", got, want)
 	}
 
