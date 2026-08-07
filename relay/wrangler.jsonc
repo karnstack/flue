@@ -2,35 +2,14 @@
   "name": "flue-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
-  // Two secrets, neither of them in this file — `wrangler secret put` only,
-  // because anything written here is committed:
+  // One secret, not in this file — `wrangler secret put DAEMON_SECRET` only,
+  // because anything written here is committed. It is the bearer secret the
+  // daemon this relay serves shares with it; see spec/relay-protocol.md, Auth.
   //
-  //   DAEMON_SECRET         self-host mode: the bearer secret the one daemon
-  //                         this relay serves shares with it.
-  //   RELAY_SIGNING_SECRET  SaaS mode: the HMAC key the control plane signs
-  //                         channel tokens with. **Binding it is what selects
-  //                         SaaS mode** (src/channel-auth.ts): every leg then
-  //                         presents a signed token and lands on a hub named
-  //                         by that token's account and device, and
-  //                         DAEMON_SECRET stops being honoured. It exists on
-  //                         exactly two Workers, app/ and this one.
-  //
-  // See spec/relay-protocol.md, Auth.
-  //
-  // The custom domain is for the **hosted** deploy of this Worker (flue.sh),
-  // and it has to be under the same registrable domain as the control plane:
-  // the browser tab lives on this origin and refreshes its 60-second channel
-  // token against `app.flue.sh` with credentials, and the session cookie is
-  // `SameSite=Lax`, which rides a cross-*origin* request only between hosts
-  // that are same-*site*. `relay.flue.sh` + `app.flue.sh` are; a relay on
-  // workers.dev in front of app.flue.sh is not, and every session there dies
-  // at its first reconnect. docs/SAAS.md is the runbook.
-  //
-  // Self-hosting does not read this file at all — `flue relay setup` builds
+  // A user's relay does not read this file at all — `flue relay setup` builds
   // its own deploy request in cmd/flue/relay.go and leaves that relay on
-  // workers.dev, which is correct there: one daemon, one origin, no cookie
-  // and no control plane.
-  "routes": [{ "pattern": "relay.flue.sh", "custom_domain": true }],
+  // workers.dev: one daemon, one origin. This config exists for developing
+  // the Worker itself (`pnpm dev`, the vitest pool).
   "assets": {
     // Response headers for these assets are NOT configurable here — wrangler's
     // schema rejects any key but the four below. They live in ./public/_headers,

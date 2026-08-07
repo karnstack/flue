@@ -1,7 +1,7 @@
 import { SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 
-import { authorizeDaemon, hubIdFor, type Env } from '../src/index'
+import { authorizeDaemon, type Env } from '../src/index'
 
 const BASE = 'https://relay.example'
 
@@ -130,7 +130,7 @@ describe('the relay Worker routes', () => {
 describe('the security headers on served assets', () => {
   const CSP =
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-    "img-src 'self' data:; connect-src 'self' https://app.flue.sh; " +
+    "img-src 'self' data:; connect-src 'self'; " +
     "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
   it('serves the app shell under the same CSP the daemon does, minus the loopback sockets', async () => {
@@ -159,7 +159,7 @@ describe('the security headers on served assets', () => {
       .get('Content-Security-Policy')!
       .split('; ')
       .find((d) => d.startsWith('connect-src '))
-    expect(connect).toBe("connect-src 'self' https://app.flue.sh")
+    expect(connect).toBe("connect-src 'self'")
   })
 
   it('does not publish the header document as an asset', async () => {
@@ -169,33 +169,20 @@ describe('the security headers on served assets', () => {
 })
 
 describe('authorizeDaemon', () => {
-  // Null rather than false since the SaaS mode landed: an authorized request
-  // now carries the claims it was authorized by (`Grant`), and null is the
-  // refusal. The property under test is unchanged.
-  //
   // The SELF worker always has DAEMON_SECRET bound (vitest.config.ts), so the
   // unbound-secret case is a direct unit test: with no secret in the env,
   // `Bearer ${undefined}` must not become an accepted credential.
-  it('fails closed when DAEMON_SECRET is not bound: Bearer "undefined" is refused', async () => {
+  it('fails closed when DAEMON_SECRET is not bound: Bearer "undefined" is refused', () => {
     const req = new Request(`${BASE}/daemon`, {
       headers: { Authorization: 'Bearer undefined', Upgrade: 'websocket' },
     })
-    expect(await authorizeDaemon(req, {} as Env)).toBeNull()
+    expect(authorizeDaemon(req, {} as Env)).toBe(false)
   })
 
-  it('fails closed on an empty-string secret: "Bearer " is refused', async () => {
+  it('fails closed on an empty-string secret: "Bearer " is refused', () => {
     const req = new Request(`${BASE}/daemon`, {
       headers: { Authorization: 'Bearer ', Upgrade: 'websocket' },
     })
-    expect(await authorizeDaemon(req, { DAEMON_SECRET: '' } as Env)).toBeNull()
-  })
-
-  // The self-hosted grant carries no claims, and `hubIdFor` is what would go
-  // wrong if it ever did: in SaaS mode a request with nothing verified about it
-  // must not fall back to the one shared hub, where every account would meet.
-  it('refuses to route a claimless request in SaaS mode', () => {
-    const req = new Request(`${BASE}/client`, { headers: { Upgrade: 'websocket' } })
-    const env = { RELAY_SIGNING_SECRET: 'a-secret' } as Env
-    expect(() => hubIdFor(req, env, { claims: null, protocol: null })).toThrow(/no claims/)
+    expect(authorizeDaemon(req, { DAEMON_SECRET: '' } as Env)).toBe(false)
   })
 })
