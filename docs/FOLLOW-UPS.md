@@ -3,9 +3,8 @@
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size. Items 7–9 are the same exercise for the
 crypto+pairing milestone, items 10–13 for the relay. Items 14–16 covered the
-SaaS control plane, which the open-source-only pivot (2026-08-07,
-docs/superpowers/specs/2026-08-07-flue-oss-only-design.md) deleted — mentions
-of it below are history, not description.
+SaaS control plane, which the open-source-only pivot (2026-08-07) deleted —
+mentions of it below are history, not description.
 
 ## Done
 

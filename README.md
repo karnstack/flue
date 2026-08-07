@@ -10,7 +10,8 @@
 
 <p align="center">
   <a href="https://flue.sh">flue.sh</a> ·
-  <a href="docs/superpowers/specs/2026-07-28-flue-design.md">design</a>
+  <a href="docs/RELAY.md">relay runbook</a> ·
+  <a href="docs/faq.md">faq</a>
 </p>
 
 > Status: the local terminal works, and `flue enable` installs the login
