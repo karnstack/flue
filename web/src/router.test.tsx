@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import { RouterProvider } from '@tanstack/react-router'
 import { FlueClientProvider } from './client/provider'
@@ -39,13 +39,14 @@ async function renderAt(path: string) {
 }
 
 /**
- * Mount the real router at `path` as a browser that holds no key for any
- * daemon: served by a relay, never paired. No client provider, because the
- * whole claim is that nothing on these routes asks for one.
+ * Mount the real router at `path` as a browser with no machine selected:
+ * served by a relay, and either never paired or holding several machines with
+ * no selection made. No client provider, because the whole claim is that
+ * nothing on these routes asks for one.
  */
-async function renderUnpaired(path: string) {
+async function renderPicker(path: string) {
   window.history.replaceState(null, '', path)
-  const router = createFlueRouter({ unpaired: true })
+  const router = createFlueRouter({ picker: true })
   await router.load()
   return render(<RouterProvider router={router} />)
 }
@@ -59,7 +60,7 @@ async function renderUnpaired(path: string) {
  * WebSocket constructor is the seam, because that is the only thing a daemon
  * ever sees.
  */
-async function renderBare(path: string, unpaired = false): Promise<string[]> {
+async function renderBare(path: string, picker = false): Promise<string[]> {
   const urls: string[] = []
   class RecordingWebSocket {
     binaryType = ''
@@ -75,11 +76,18 @@ async function renderBare(path: string, unpaired = false): Promise<string[]> {
   vi.stubGlobal('WebSocket', RecordingWebSocket)
 
   window.history.replaceState(null, '', path)
-  const router = createFlueRouter({ unpaired })
+  const router = createFlueRouter({ picker })
   await router.load()
   render(<RouterProvider router={router} />)
   return urls
 }
+
+beforeEach(() => {
+  // The picker reads its rows out of localStorage, so a record another test
+  // file left behind would put a machine on a screen asserting emptiness.
+  localStorage.clear()
+  sessionStorage.clear()
+})
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -225,13 +233,13 @@ describe('createFlueRouter', () => {
     expect(screen.getByRole('link', { name: 'Sessions' }).getAttribute('aria-current')).toBe('page')
   })
 
-  it('sends every screen of the app to the unpaired explainer', async () => {
-    // Served by a relay to a browser that kept no daemon key. There is no
-    // handshake to be had on any of these screens, so none of them may render
-    // the app's own chrome and sit at "reconnecting" for ever.
+  it('sends every screen of the app to the machine picker', async () => {
+    // Served by a relay to a browser with no machine selected. There is no
+    // handshake to be had on any of these screens until one is, so none of
+    // them may render the app's own chrome and sit at "reconnecting" for ever.
     for (const path of ['/', '/sessions', '/devices', '/remote', '/settings']) {
-      const view = await renderUnpaired(path)
-      expect(screen.getByRole('heading', { name: 'Not paired with a daemon yet' })).toBeTruthy()
+      const view = await renderPicker(path)
+      expect(screen.getByRole('heading', { name: 'No machines paired yet' })).toBeTruthy()
       expect(screen.queryByRole('navigation')).toBeNull()
       expect(screen.queryByRole('heading', { name: 'Sessions' })).toBeNull()
       view.unmount()
@@ -242,24 +250,36 @@ describe('createFlueRouter', () => {
     // A bookmarked session URL on the relay's origin. Rendering the terminal
     // would mount a client with no key to hand it, which is a socket that can
     // never open — and a black screen while it tries.
-    const { container } = await renderUnpaired('/d/local/s/abc123')
-    expect(screen.getByRole('heading', { name: 'Not paired with a daemon yet' })).toBeTruthy()
+    const { container } = await renderPicker('/d/local/s/abc123')
+    expect(screen.getByRole('heading', { name: 'No machines paired yet' })).toBeTruthy()
     expect(container.querySelector('[data-flue-surface]')).toBeNull()
   })
 
-  it('still serves the pairing page while unpaired, because it is the way out', async () => {
-    // The one route that must survive the flag: every word on the explainer
-    // points at a ceremony that finishes here.
-    await renderUnpaired('/pair')
+  it('still serves the pairing page under the picker, because it is the way out', async () => {
+    // The one route that must survive the flag: every word on the empty
+    // picker points at a ceremony that finishes here.
+    await renderPicker('/pair')
     expect(screen.getByRole('heading', { name: 'Nothing to pair with yet' })).toBeTruthy()
-    expect(screen.queryByRole('heading', { name: 'Not paired with a daemon yet' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'No machines paired yet' })).toBeNull()
   })
 
-  it('opens no socket at all while unpaired', async () => {
-    // The point of the screen. Without it the app would connect on a loop with
+  it('opens no socket at all while the picker is up', async () => {
+    // The point of the flag. Without it the app would connect on a loop with
     // nothing to authenticate with — a phone radio kept awake for a handshake
     // that cannot complete.
     expect(await renderBare('/sessions', true)).toEqual([])
+  })
+
+  it('registers the picker at /machines, outside the shell', async () => {
+    // The door has an address of its own, so a connected tab can come back and
+    // switch machines — and like every door, no sidebar chrome around it.
+    const ids = routeIds('/machines')
+    expect(ids).toContain('/machines')
+    expect(ids.some((id) => id.includes('shell'))).toBe(false)
+
+    await renderAt('/machines')
+    expect(screen.getByRole('heading', { name: 'No machines paired yet' })).toBeTruthy()
+    expect(screen.queryByRole('navigation')).toBeNull()
   })
 
   it('matches every path the nav links to', async () => {

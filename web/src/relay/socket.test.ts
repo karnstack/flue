@@ -125,11 +125,15 @@ class FakeDaemon {
 const DEVICE_PRIV = unhex(vectors.initiatorStaticPriv)
 const DAEMON_PRIV = unhex(vectors.responderStaticPriv)
 
+/** The machine the socket under test dials, unless a case says otherwise. */
+const MACHINE_ID = 'test-machine-0a1b'
+
 function harness(
   opts: {
     origin?: string
     daemonPriv?: Uint8Array
     pin?: Uint8Array
+    machineId?: string
   } = {},
 ) {
   const daemonPriv = opts.daemonPriv ?? DAEMON_PRIV
@@ -139,12 +143,17 @@ function harness(
   }
   const urls: string[] = []
   const raws: FakeRaw[] = []
-  const sock = relaySocket(opts.origin ?? 'https://relay.example', identity, (url) => {
-    urls.push(url)
-    const raw = new FakeRaw()
-    raws.push(raw)
-    return raw
-  })
+  const sock = relaySocket(
+    opts.origin ?? 'https://relay.example',
+    identity,
+    opts.machineId ?? MACHINE_ID,
+    (url) => {
+      urls.push(url)
+      const raw = new FakeRaw()
+      raws.push(raw)
+      return raw
+    },
+  )
   const got: Array<string | ArrayBuffer> = []
   let opens = 0
   let closes = 0
@@ -199,13 +208,15 @@ describe('the fake daemon', () => {
 })
 
 describe('opening the relay socket', () => {
-  it('dials /client on the origin, over wss', () => {
-    expect(harness().urls).toEqual(['wss://relay.example/client'])
+  it('dials /client/<machine> on the origin, over wss', () => {
+    // The id in the path is what picks the hub: one relay origin fronts every
+    // machine, and a bare /client no longer names any of them.
+    expect(harness().urls).toEqual(['wss://relay.example/client/test-machine-0a1b'])
   })
 
   it('dials ws for an http origin, so a dev relay works', () => {
     expect(harness({ origin: 'http://127.0.0.1:8787' }).urls).toEqual([
-      'ws://127.0.0.1:8787/client',
+      'ws://127.0.0.1:8787/client/test-machine-0a1b',
     ])
   })
 
@@ -485,7 +496,7 @@ describe('under FlueClient', () => {
     }
     const raws: FakeRaw[] = []
     const client = new FlueClient('https://relay.example', (url) =>
-      relaySocket(url, identity, () => {
+      relaySocket(url, identity, MACHINE_ID, () => {
         const raw = new FakeRaw()
         raws.push(raw)
         return raw
@@ -530,7 +541,7 @@ describe('under FlueClient', () => {
     }
     const raws: FakeRaw[] = []
     const client = new FlueClient('https://relay.example', (url) =>
-      relaySocket(url, identity, () => {
+      relaySocket(url, identity, MACHINE_ID, () => {
         const raw = new FakeRaw()
         raws.push(raw)
         return raw

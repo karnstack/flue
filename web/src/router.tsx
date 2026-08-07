@@ -9,11 +9,11 @@ import type { FlueClient } from '@/client/client'
 import { FlueClientProvider } from '@/client/provider'
 import { AppShell } from '@/components/app-shell'
 import { DevicesRoute } from '@/routes/devices'
+import { MachinesRoute } from '@/routes/machines'
 import { PairRoute } from '@/routes/pair'
 import { RemoteRoute } from '@/routes/remote'
 import { SessionsRoute } from '@/routes/sessions'
 import { TerminalRoute } from '@/routes/terminal'
-import { UnpairedRoute } from '@/routes/unpaired'
 
 /** The pairing page's path. Its own constant because two routing decisions
  *  turn on it: the route below, and whether the tab opens a socket at all. */
@@ -38,11 +38,12 @@ export interface FlueRouterOptions {
    */
   client?: FlueClient
   /**
-   * True when this page came from a relay and this browser holds no key for any
-   * daemon. Every screen but /pair is then an explainer, because there is no
-   * handshake for any of them to attempt.
+   * True when this page came from a relay and no machine is selected — none
+   * paired, or several with the choice not yet made. Every screen but /pair is
+   * then the machine picker, because there is no handshake for any of them to
+   * attempt until it has an answer.
    */
-  unpaired?: boolean
+  picker?: boolean
 }
 
 /**
@@ -62,22 +63,21 @@ export interface FlueRouterOptions {
  * sessions, the terminal and Devices alike. Only crossing in or out of /pair
  * changes which branch renders, and nothing in the app links there.
  *
- * `unpaired` is answered here rather than per route for the same reason the
+ * `picker` is answered here rather than per route for the same reason the
  * provider is: it is one fact about the whole tab. It sits below the /pair
- * branch deliberately — that page is the only way out of the state, and a flag
- * that swallowed it would leave the user with an explainer pointing at a screen
+ * branch deliberately — that page is the only way into a machine record, and a
+ * flag that swallowed it would leave the user with a door pointing at a screen
  * the app refuses to render. The URL is left alone rather than redirected, so
- * the moment a pairing lands, a reload of the same address is the app — and the
- * explainer asks the key store again when it mounts, so a tab that pairs and
- * then routes back into the app reloads itself rather than sitting on a flag
- * that was answered before the ceremony (src/routes/unpaired.tsx).
+ * the moment a machine is chosen, a reload of the same address is the app on
+ * that machine — the picker itself does the reloading when a choice is made
+ * (src/routes/machines.tsx).
  */
 const rootRoute = createRootRouteWithContext<FlueRouterOptions>()({
   component: function Root() {
     const pathname = useRouterState({ select: (s) => s.location.pathname })
-    const { client, unpaired } = rootRoute.useRouteContext()
+    const { client, picker } = rootRoute.useRouteContext()
     if (pathname === PAIR_PATH) return <Outlet />
-    if (unpaired === true) return <UnpairedRoute />
+    if (picker === true) return <MachinesRoute />
     return (
       <FlueClientProvider client={client}>
         <Outlet />
@@ -182,6 +182,19 @@ const terminalRoute = createRoute({
 })
 
 /**
+ * The machine picker's own address, beside the terminal and outside the shell:
+ * it is the relay door, and a door with a sidebar of links to one machine's
+ * sessions would be chrome answering the very question the screen is asking.
+ * Registered as a route — not only as the `picker` flag's rendering — so a tab
+ * already riding one machine can come back and switch to another.
+ */
+const machinesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/machines',
+  component: MachinesRoute,
+})
+
+/**
  * The pairing page, beside the terminal and outside the shell for a related
  * reason: a device that reaches this route is not paired yet, and sidebar links
  * to sessions it cannot open would be chrome promising what the visitor does
@@ -193,24 +206,32 @@ const pairRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: PAIR_PATH,
   /**
-   * The two halves of what a QR code carries.
+   * What a QR code carries.
    *
    * `t` is the single-use pairing token. `k` is the daemon's static public key,
    * unpadded URL-safe base64 of 32 bytes — the thing the scanning device pins,
    * and the reason the QR is the trusted channel rather than the answer to the
-   * device's own POST. `internal/daemon/conn.go` writes both.
+   * device's own POST. `internal/daemon/conn.go` writes both. On a relay that
+   * fronts more than one machine the link also names which: `d` is the machine
+   * id — the slot to post at and the record to pin under — and `n` its display
+   * name, which is why `n` may only ever be a query parameter and never a path.
+   * The Devices screen appends those two (src/routes/devices.tsx, pairLink).
    *
    * Each is narrowed to a non-empty string or dropped, so a link that arrives
    * with a parameter repeated (which parses to an array) or empty lands on the
    * page's refusal rather than posting something token-shaped at the daemon and
-   * spending the user's window on it. The page re-checks both types anyway: a
+   * spending the user's window on it. The page re-checks every type anyway: a
    * route's search is its parent's merged with its own and the root route has
    * no schema, so what reaches the component is the raw parse.
    */
-  validateSearch: (search: Record<string, unknown>): { t?: string; k?: string } => {
-    const out: { t?: string; k?: string } = {}
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { t?: string; k?: string; d?: string; n?: string } => {
+    const out: { t?: string; k?: string; d?: string; n?: string } = {}
     if (typeof search.t === 'string' && search.t !== '') out.t = search.t
     if (typeof search.k === 'string' && search.k !== '') out.k = search.k
+    if (typeof search.d === 'string' && search.d !== '') out.d = search.d
+    if (typeof search.n === 'string' && search.n !== '') out.n = search.n
     return out
   },
   component: PairRoute,
@@ -219,6 +240,7 @@ const pairRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   shellRoute.addChildren([indexRoute, sessionsRoute, devicesRoute, remoteRoute, settingsRoute]),
   terminalRoute,
+  machinesRoute,
   pairRoute,
 ])
 

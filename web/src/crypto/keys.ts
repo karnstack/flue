@@ -170,6 +170,26 @@ export async function loadPinnedDaemonKeyFor(
   return read(`${DEVICE_RECORD_PREFIX}${deviceId}`, factory)
 }
 
+/**
+ * Drop the key pinned for one machine.
+ *
+ * The other half of forgetting a machine (relay/machines.ts): a record without
+ * its key is a row the boot can never connect, and a key without its record is
+ * a credential the UI no longer admits to holding. Deleting a record that was
+ * never there succeeds, as IndexedDB's own delete does — forget is idempotent.
+ */
+export async function deletePinnedDaemonKeyFor(
+  deviceId: string,
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const db = await openDb(factory)
+  try {
+    await tx(db, 'readwrite', (s) => s.delete(`${DEVICE_RECORD_PREFIX}${deviceId}`))
+  } finally {
+    db.close()
+  }
+}
+
 /** One record out of the key store, copied out of whatever IndexedDB returned. */
 async function read(record: string, factory: IDBFactory): Promise<Uint8Array | null> {
   const db = await openDb(factory)

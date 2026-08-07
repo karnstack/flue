@@ -6,9 +6,9 @@
  * instead of a WebSocket wrapper and never learns that anything changed. What
  * sits between the two is the whole point —
  *
- *   wss://<origin>/client        bare payloads; the Worker adds the channel
- *                                header on the daemon's side, so nothing here
- *                                ever writes one
+ *   wss://<origin>/client/<id>   bare payloads; the machine id picks the hub,
+ *                                and the Worker adds the channel header on the
+ *                                daemon's side, so nothing here ever writes one
  *   Noise IK, browser initiator  pinning the daemon's static key, which is the
  *                                entire basis of trusting the far end
  *   [1 byte kind][wire bytes]    the text/binary distinction the WebSocket used
@@ -80,12 +80,18 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
 /**
- * A SocketLike that reaches the daemon through the relay at `origin` — the
+ * A SocketLike that reaches one machine through the relay at `origin` — the
  * origin serving the page, in production.
+ *
+ * `machineId` is which machine: the slot the daemon holds on the relay, from
+ * the machine's own pairing record. It is routing, not identity — the id picks
+ * the hub, and `identity.daemonPub` is still the entire basis of trusting
+ * whatever answers there.
  */
 export function relaySocket(
   origin: string,
   identity: RelayIdentity,
+  machineId: string,
   wsFactory: (url: string) => RawSocket = browserSocket,
 ): SocketLike {
   const hs = initiatorHandshake(identity.deviceKey.privateKey, identity.daemonPub)
@@ -160,7 +166,7 @@ export function relaySocket(
    */
   const dial = () => {
     if (dead) return
-    const sock = wsFactory(clientUrl(origin))
+    const sock = wsFactory(clientUrl(origin, machineId))
     ws = sock
 
     sock.onopen = () => {
@@ -263,11 +269,14 @@ export function relaySocket(
 }
 
 /**
- * The relay's client endpoint on an origin: `wss` for an https origin, `ws` for
- * an http one, which is what a local `wrangler dev` serves.
+ * The relay's client endpoint for one machine on an origin: `wss` for an https
+ * origin, `ws` for an http one, which is what a local `wrangler dev` serves.
+ * The id is spliced in raw because the machine grammar (relay/src/index.ts) is
+ * URL-safe by construction, and an id from anywhere else never reaches here —
+ * the boot only dials ids it wrote down at pairing time.
  */
-function clientUrl(origin: string): string {
-  const url = new URL('/client', origin)
+function clientUrl(origin: string, machineId: string): string {
+  const url = new URL(`/client/${machineId}`, origin)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
 }

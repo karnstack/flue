@@ -3,7 +3,9 @@ import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import './styles.css'
 import { FlueClient } from '@/client/client'
-import { isRelayOrigin, loadRelayIdentity } from '@/relay/mode'
+import { loadOrCreateDeviceKey, loadPinnedDaemonKeyFor } from '@/crypto/keys'
+import { bootMachine } from '@/relay/machines'
+import { isRelayOrigin } from '@/relay/mode'
 import { relaySocket } from '@/relay/socket'
 import { createFlueRouter, type FlueRouterOptions } from '@/router'
 import { stripHandoff } from '@/lib/url'
@@ -27,23 +29,39 @@ if (cleaned !== location.href) history.replaceState(null, '', cleaned)
  *
  * On loopback the socket at /ws is the daemon: already private, and already
  * authenticated by a cookie the daemon itself set. On a relay origin there is
- * no /ws at all — there is a Worker at /client that forwards bytes it must not
- * be able to read. So a relay origin gets a client whose transport is a Noise
- * channel to a daemon whose static key this browser holds; see
- * src/relay/socket.ts, which FlueClient cannot tell apart from a WebSocket.
+ * no /ws at all — there is a Worker at /client/<machine> that forwards bytes
+ * it must not be able to read, and one origin fronts every machine this
+ * browser has paired with. So the boot needs an answer to "which machine?"
+ * before it can build anything: the tab's own selection when it has one, the
+ * only machine there is when there is only one (bootMachine owns that
+ * judgement), and otherwise the machine picker — which is also where a
+ * machine whose pinned key has gone missing lands, because a record this
+ * browser cannot handshake for is a row to pick again, not a client to build.
  *
- * With no daemon key there is nothing to build: the tab has no daemon, and the
- * router is told to say so rather than to connect on a loop with no credential
- * to offer.
+ * The chosen machine's client rides a Noise channel keyed to the static key
+ * pinned under that machine's id at pairing time; see src/relay/socket.ts,
+ * which FlueClient cannot tell apart from a WebSocket. A key store that will
+ * not open at all lands on the picker too, for the reason the old identity
+ * loader gave: a rejected promise at the entry point mounts no app and tells
+ * the user even less than the picker does.
  */
 async function relayOptions(): Promise<FlueRouterOptions> {
-  const identity = await loadRelayIdentity()
-  if (identity === null) return { unpaired: true }
-  return {
-    // `location.origin` and not a configured one: the page and the relay it
-    // talks to are the same deployment by construction, and a URL from anywhere
-    // else would be a second thing to keep true.
-    client: new FlueClient(location.origin, (origin) => relaySocket(origin, identity)),
+  try {
+    const machine = bootMachine()
+    if (machine === null) return { picker: true }
+    const daemonPub = await loadPinnedDaemonKeyFor(machine.id)
+    if (daemonPub === null) return { picker: true }
+    const identity = { deviceKey: await loadOrCreateDeviceKey(), daemonPub }
+    return {
+      // `location.origin` and not a configured one: the page and the relay it
+      // talks to are the same deployment by construction, and a URL from
+      // anywhere else would be a second thing to keep true.
+      client: new FlueClient(location.origin, (origin) =>
+        relaySocket(origin, identity, machine.id),
+      ),
+    }
+  } catch {
+    return { picker: true }
   }
 }
 

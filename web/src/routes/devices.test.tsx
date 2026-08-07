@@ -268,6 +268,35 @@ describe('DevicesRoute', () => {
     expect(canvas!.width).toBe(canvas!.height)
   })
 
+  it('adds the machine to the link when the relay carries one by name', async () => {
+    // The daemon writes ?t= and ?k= into the URL; which machine the link pairs
+    // against is this tab's to add, from the welcome's relay snapshot. The
+    // name rides along only as a query parameter, encoded — never in a path.
+    const { sock } = await mountDevices({
+      relay: { ...RELAY_UP, machineId: 'blue-mesa', machineName: 'Blue Mesa' },
+    })
+    await userEvent.click(pairButton())
+
+    offered(sock)
+
+    expect(
+      screen.getByText('http://127.0.0.1:7717/pair?t=zK3tokenzK3&d=blue-mesa&n=Blue%20Mesa'),
+    ).toBeTruthy()
+  })
+
+  it('leaves the name off the link when the relay reports none', async () => {
+    const { sock } = await mountDevices({
+      relay: { ...RELAY_UP, machineId: 'blue-mesa' },
+    })
+    await userEvent.click(pairButton())
+
+    offered(sock)
+
+    expect(
+      screen.getByText('http://127.0.0.1:7717/pair?t=zK3tokenzK3&d=blue-mesa'),
+    ).toBeTruthy()
+  })
+
   it('still shows the link where no canvas can be drawn', async () => {
     // A hardened browser can refuse a 2D context, and the link below the code
     // is the whole of what the code encodes — so that path degrades rather

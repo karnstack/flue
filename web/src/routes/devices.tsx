@@ -8,6 +8,7 @@ import { useFlueClient } from '@/client/provider'
 import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { MACHINE_ID } from '@/relay/machines'
 import { isRelayOrigin } from '@/relay/mode'
 
 /** How often the pairing window's remaining time is redrawn. */
@@ -92,6 +93,26 @@ function remaining(secs: number): string {
 /** Whole seconds until a pairing window closes; zero or less once it has. */
 function secondsLeft(p: Pairing): number {
   return Math.round(p.expiresAt - Date.now() / 1000)
+}
+
+/**
+ * The link the QR encodes, with the machine the relay carries this daemon as.
+ *
+ * The daemon writes `?t=` and `?k=` into the URL (internal/daemon/conn.go);
+ * *which machine* the link pairs against is appended here, from the welcome's
+ * relay snapshot, because the machine id is a fact about the relay leg and
+ * this tab holds the freshest copy of it. `d` is the id, spliced raw only
+ * once it matches the relay's own grammar — an id the Worker would 404 has no
+ * business in a link — and `n` is the display name, which travels encoded and
+ * only ever as a query parameter, never as a path. A daemon with no machine
+ * id (no relay configured, or one from before machines had names) hands out
+ * its URL untouched, which is the single-machine link /pair has always read.
+ */
+function pairLink(pairing: Pairing, relay: RelayInfo): string {
+  const id = relay.machineId
+  if (id === undefined || !MACHINE_ID.test(id)) return pairing.url
+  const name = relay.machineName ? `&n=${encodeURIComponent(relay.machineName)}` : ''
+  return `${pairing.url}&d=${id}${name}`
 }
 
 /**
@@ -302,12 +323,14 @@ function DeviceRows({
  * with a screen reader.
  */
 function PairingWindow({
-  pairing,
+  url,
   left,
   connected,
   onCancel,
 }: {
-  pairing: Pairing
+  /** What the QR encodes and the line beneath it prints: the daemon's pairing
+   *  URL with the machine appended — see pairLink. */
+  url: string
   left: number
   connected: boolean
   onCancel: () => void
@@ -326,8 +349,8 @@ function PairingWindow({
     // Explicit black on white, because lean-qr defaults the "off" modules to
     // transparent: on this app's dark theme that would leave a black code on a
     // near-black card, which no camera can read.
-    generate(pairing.url).toCanvas(canvas, { on: [0, 0, 0], off: [255, 255, 255] })
-  }, [pairing.url])
+    generate(url).toCanvas(canvas, { on: [0, 0, 0], off: [255, 255, 255] })
+  }, [url])
 
   return (
     <div className="flex flex-col items-start gap-4 rounded-xl border border-zinc-950/10 p-4 sm:flex-row sm:gap-6 sm:p-6 dark:border-white/10">
@@ -346,7 +369,7 @@ function PairingWindow({
           Scan this on the device you are pairing, or open the link there.
         </p>
         <p className="w-full font-mono text-xs/5 break-all text-zinc-600 select-all dark:text-zinc-400">
-          {pairing.url}
+          {url}
         </p>
         {/*
           The deadline is stated rather than merely counted: two minutes is
@@ -631,7 +654,12 @@ export function DevicesRoute() {
       </div>
 
       {pairing !== null && (
-        <PairingWindow pairing={pairing} left={left} connected={connected} onCancel={cancel} />
+        <PairingWindow
+          url={pairLink(pairing, relay)}
+          left={left}
+          connected={connected}
+          onCancel={cancel}
+        />
       )}
 
       {devices !== null && (

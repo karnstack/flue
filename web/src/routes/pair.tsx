@@ -3,8 +3,15 @@ import { useSearch } from '@tanstack/react-router'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { loadOrCreateDeviceKey, savePinnedDaemonKey, type DeviceKey } from '@/crypto/keys'
+import {
+  loadOrCreateDeviceKey,
+  savePinnedDaemonKey,
+  savePinnedDaemonKeyFor,
+  type DeviceKey,
+} from '@/crypto/keys'
 import { cn } from '@/lib/utils'
+import { MACHINE_ID, saveMachine } from '@/relay/machines'
+import { isRelayOrigin } from '@/relay/mode'
 
 /**
  * Where the ceremony is completed; `internal/daemon/pairing.go`, PairPath.
@@ -12,6 +19,11 @@ import { cn } from '@/lib/utils'
  * The ceremony is a second device scanning a code shown on a first, and the
  * daemon handing back its static key over the connection the user themselves
  * established — which is the whole basis of the pin.
+ *
+ * On a relay origin the machine id from the link is appended — `/api/pair/<d>`
+ * — because one relay fronts every machine and the id in the path is what
+ * picks the hub (relay/src/index.ts). On the daemon's own loopback origin the
+ * bare path is the daemon, and there is nothing to pick.
  */
 const PAIR_ENDPOINT = '/api/pair'
 
@@ -290,18 +302,37 @@ function Frame({ title, children }: { title: string; children: ReactNode }) {
  * runtime.
  */
 export function PairRoute() {
-  const { t, k } = useSearch({ from: '/pair' })
+  const { t, k, d, n } = useSearch({ from: '/pair' })
   /*
-   * The route's validateSearch narrows `t` and `k` to non-empty strings, and
-   * the types here say it did — but a route's search is its parent's merged
-   * with its own, and the root route has no schema at all, so what actually
-   * arrives is whatever the URL parsed to. A link carrying ?t twice parses to
-   * an array, and an array is not a token. Measured rather than believed,
-   * because one of these values is posted at the daemon and the other is the
-   * key everything this device ever says to it will be sealed to.
+   * The route's validateSearch narrows every parameter to a non-empty string,
+   * and the types here say it did — but a route's search is its parent's
+   * merged with its own, and the root route has no schema at all, so what
+   * actually arrives is whatever the URL parsed to. A link carrying ?t twice
+   * parses to an array, and an array is not a token. Measured rather than
+   * believed, because one of these values is posted at the daemon and another
+   * is the key everything this device ever says to it will be sealed to.
    */
   const token = typeof t === 'string' ? t : ''
   const carried = typeof k === 'string' ? k : ''
+
+  /**
+   * Whether this page was served by a relay, which is the fork in the whole
+   * ceremony: a relay fronts many machines and the link must name one; the
+   * daemon's own loopback origin *is* the machine, and names nothing.
+   */
+  const viaRelay = isRelayOrigin()
+
+  /**
+   * The machine the link names, held to the relay's own id grammar before it
+   * goes anywhere near a URL path. An id outside it is not a machine the
+   * Worker would route — it answers 404 for exactly this shape — so it is
+   * refused here the way a truncated key is: as no id at all. The name rides
+   * only into storage and never into a path, and falls back to the id, which
+   * is at least true of the machine rather than empty.
+   */
+  const rawMachine = typeof d === 'string' ? d : ''
+  const machineId = MACHINE_ID.test(rawMachine) ? rawMachine : null
+  const machineName = typeof n === 'string' ? n : ''
 
   /**
    * The daemon's static key, from the QR and from nowhere else.
@@ -339,10 +370,10 @@ export function PairRoute() {
 
   useEffect(() => {
     // Nothing is generated and nothing is asked of the daemon without a token
-    // and a key: a visitor who arrived here by hand is reading an explanation,
-    // not beginning a ceremony, and a link with no key in it cannot begin one
-    // that would be safe to finish.
-    if (token === '' || pinned === null) return
+    // and a key — and, on a relay, a machine: a visitor who arrived here by
+    // hand is reading an explanation, not beginning a ceremony, and a link
+    // missing any of the three cannot begin one that would be safe to finish.
+    if (token === '' || pinned === null || (viaRelay && machineId === null)) return
 
     let live = true
     pending.current ??= loadOrCreateDeviceKey()
@@ -361,7 +392,7 @@ export function PairRoute() {
     return () => {
       live = false
     }
-  }, [token, pinned])
+  }, [token, pinned, viaRelay, machineId])
 
   /**
    * The whole exchange as one answer: null when this device is paired, and a
@@ -376,9 +407,13 @@ export function PairRoute() {
    * from the closure so that this function cannot be reached without one.
    */
   async function attempt(device: DeviceKey, expected: Uint8Array): Promise<Failure | null> {
+    // On a relay the machine id picks the hub; submit() cannot run without one
+    // there, so the bare endpoint is always the loopback daemon's own.
+    const endpoint =
+      viaRelay && machineId !== null ? `${PAIR_ENDPOINT}/${machineId}` : PAIR_ENDPOINT
     let res: Response
     try {
-      res = await fetch(PAIR_ENDPOINT, {
+      res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -437,7 +472,21 @@ export function PairRoute() {
     try {
       // `expected`, not `daemonPub`. They are equal by the line above, and this
       // says which of the two is the trusted one.
-      await savePinnedDaemonKey(expected)
+      if (viaRelay && machineId !== null) {
+        // Under the machine's own id, so a second machine's ceremony cannot
+        // overwrite this one — and the record beside it, which is what the
+        // boot and the picker read. The record follows the pin: a machine
+        // written down without its key would be a row that can never connect,
+        // where a pin without its row is only invisible.
+        await savePinnedDaemonKeyFor(machineId, expected)
+        saveMachine({
+          id: machineId,
+          name: machineName.trim() || machineId,
+          pairedAt: Date.now(),
+        })
+      } else {
+        await savePinnedDaemonKey(expected)
+      }
     } catch {
       return {
         text: `This browser would not keep the daemon’s key, so this device cannot reach it. ${ORPHAN_NOTE}`,
@@ -497,6 +546,27 @@ export function PairRoute() {
           retyped or passed through something that shortened it has lost the part that makes pairing
           safe.
         </p>
+      </Frame>
+    )
+  }
+
+  /*
+   * A relay link with no machine in it — or one carrying an id the relay's own
+   * router would answer 404 for. This origin fronts every machine, so without
+   * the id there is nowhere to post the token and no slot to pin the key
+   * under; posting it anyway would spend the user's window on a request that
+   * cannot name its destination. An old link from before machines had ids
+   * looks exactly like this, and the cure is the same: a fresh code.
+   */
+  if (viaRelay && machineId === null) {
+    return (
+      <Frame title="This link names no machine">
+        <p className={PROSE}>
+          This relay carries more than one machine, and a pairing link says which one drew it —
+          this link does not carry a usable machine id, so there is nothing here to pair against.
+          Nothing has been sent.
+        </p>
+        <p className={PROSE}>{EXPIRY_NOTE}</p>
       </Frame>
     )
   }

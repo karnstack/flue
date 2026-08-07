@@ -4,7 +4,8 @@ import { RouterProvider } from '@tanstack/react-router'
 import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { loadOrCreateDeviceKey, loadPinnedDaemonKey } from '@/crypto/keys'
+import { loadOrCreateDeviceKey, loadPinnedDaemonKey, loadPinnedDaemonKeyFor } from '@/crypto/keys'
+import { listMachines } from '@/relay/machines'
 import { createFlueRouter } from '@/router'
 
 /** The token a QR code carries: unpadded URL-safe base64 of 32 bytes. */
@@ -114,6 +115,8 @@ beforeEach(() => {
   vi.stubGlobal('indexedDB', new IDBFactory())
   fetchMock = vi.fn()
   vi.stubGlobal('fetch', fetchMock)
+  // The machine records a relay-origin pairing writes, likewise per test.
+  localStorage.clear()
 })
 
 afterEach(() => {
@@ -418,5 +421,92 @@ describe('PairRoute', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('')
     await renderPair(LINK)
     expect(await screen.findByDisplayValue('This device')).toBeTruthy()
+  })
+})
+
+/**
+ * Mount the pairing page as a relay would serve it: same document, same router,
+ * an origin that is not the daemon's own.
+ *
+ * The whole location is replaced rather than one property spied on — jsdom's
+ * `Location` is [Unforgeable], so a spy on one field throws — and it is
+ * replaced *after* the history move so the pathname and search the router
+ * reads are the ones the test named.
+ */
+async function renderRelayPair(search = '') {
+  window.history.replaceState(null, '', `/pair${search}`)
+  vi.stubGlobal('location', {
+    ...window.location,
+    href: `https://flue.example${window.location.pathname}${window.location.search}`,
+    origin: 'https://flue.example',
+    hostname: 'flue.example',
+    pathname: window.location.pathname,
+    search: window.location.search,
+    hash: '',
+    reload: vi.fn(),
+  })
+  const router = createFlueRouter()
+  await router.load()
+  return render(<RouterProvider router={router} />)
+}
+
+describe('PairRoute on a relay origin', () => {
+  it('posts to the machine the link names, pins under it, and records it', async () => {
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&d=blue-mesa&n=Blue%20Mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    // The id in the path is what picks the hub on a relay that fronts more
+    // than one machine — a bare /api/pair no longer names any of them.
+    const { url } = posted(fetchMock)
+    expect(url).toBe('/api/pair/blue-mesa')
+
+    // Pinned under the machine's id, so a second machine's ceremony cannot
+    // overwrite this one — and not in the single self-host slot.
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+    expect(await loadPinnedDaemonKey()).toBeNull()
+
+    // And written down, so the boot and the picker know this machine exists.
+    const machines = listMachines()
+    expect(machines).toHaveLength(1)
+    expect(machines[0]).toMatchObject({ id: 'blue-mesa', name: 'Blue Mesa' })
+    expect(machines[0]!.pairedAt).toBeGreaterThan(0)
+  })
+
+  it('falls back to the id as the name when the link carries none', async () => {
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&d=blue-mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(listMachines()[0]).toMatchObject({ id: 'blue-mesa', name: 'blue-mesa' })
+  })
+
+  it('refuses a link that names no machine, and posts nothing', async () => {
+    // On a relay origin the machine id is the address: without one there is
+    // nowhere to post and no slot to pin under, so the ceremony never starts.
+    await renderRelayPair(LINK)
+
+    expect(await screen.findByText(/names no machine|no machine/i)).toBeTruthy()
+    expect(screen.getByText(EXPIRY_NOTE)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await loadPinnedDaemonKey()).toBeNull()
+    expect(listMachines()).toEqual([])
+  })
+
+  it('refuses a machine id the relay would refuse, the same way', async () => {
+    // The Worker 404s anything outside its grammar, and an id is about to be
+    // spliced into a path — so the page holds the link to the same rule rather
+    // than posting at a URL of the link's own design.
+    await renderRelayPair(`${LINK}&d=Not%2FValid`)
+
+    expect(await screen.findByText(/names no machine|no machine/i)).toBeTruthy()
+    expect(screen.getByText(EXPIRY_NOTE)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
