@@ -1,10 +1,12 @@
 # Remote access: the relay
 
-The relay is a Cloudflare Worker with one Durable Object per daemon. It bridges
-your daemon's single outbound WebSocket to any number of browser tabs, and it
-forwards bytes: the terminal traffic crossing it is Noise ciphertext it holds no
-key for. You deploy it into your own Cloudflare account with `flue relay setup`;
-there is no flue-operated server in the path.
+The relay is a Cloudflare Worker with one Durable Object per machine. One
+Worker fronts every machine you own: each daemon dials its own slot on it,
+outbound, and the Worker bridges that single WebSocket to any number of browser
+tabs, forwarding bytes — the terminal traffic crossing it is Noise ciphertext
+it holds no key for. The first machine deploys it into your own Cloudflare
+account with `flue relay setup`; every other machine joins the same Worker with
+the one line setup prints. There is no flue-operated server in the path.
 
 This is the operator's document — the protocol in one page, what it costs, what
 bounds abuse, how to read its counters, and the manual end-to-end a human runs
@@ -15,13 +17,19 @@ in [`faq.md`](faq.md); the normative protocol is
 ## The protocol in one page
 
 ```
-daemon  ---- wss /daemon ---->  Worker + Durable Object  <---- wss /client ----  browser
-        [4B channel][payload]                            [payload]
-           |                                                            |
-           +--------- Noise IK: browser initiator, daemon responder ----+
-                      inside: [1B kind][wire protocol bytes]
+daemon  ---- wss /daemon/<id> ---->  Worker + one DO per machine  <---- wss /client/<id> ----  browser
+        [4B channel][payload]                                     [payload]
+           |                                                                     |
+           +------------- Noise IK: browser initiator, daemon responder ---------+
+                          inside: [1B kind][wire protocol bytes]
 ```
 
+- **The `<id>` in the path is routing, not identity.** It is the machine id a
+  daemon joined under — `<hostname>-<4 hex>`, minted by setup and join — and
+  the Worker turns it into that machine's own Durable Object (`idFromName`),
+  handing the hub the bare path. One lowercase slug of 1–63 characters;
+  anything else, including a bare `/daemon` or `/client`, is answered
+  `404 {"error":"no such machine"}` and never with an asset.
 - **The daemon leg is outbound.** Nothing on your machine listens for the
   relay's sake. Every binary message on it is `[4-byte big-endian channel]` then
   payload.
@@ -42,10 +50,11 @@ daemon  ---- wss /daemon ---->  Worker + Durable Object  <---- wss /client ---- 
   gone`; browsers reconnect and handshake again. Channel ids come from a counter
   in Durable Object storage, so an id is never reused.
 - **Auth is asymmetric on purpose.** The daemon leg carries
-  `Authorization: Bearer <daemon secret>`; the browser leg carries nothing,
-  because Noise is the confidentiality boundary and a browser credential would
-  add none. What a credential-less leg does expose is denial of service, and
-  that is what the caps below are for.
+  `Authorization: Bearer <daemon secret>` — one secret for the whole Worker,
+  every machine presenting the same one ("One secret for the fleet", below);
+  the browser leg carries nothing, because Noise is the confidentiality
+  boundary and a browser credential would add none. What a credential-less leg
+  does expose is denial of service, and that is what the caps below are for.
 - **Keepalive:** either leg may send the text frame `flue-ping`, which the
   Cloudflare edge answers `flue-pong` from the Durable Object's auto-response
   without waking it. The daemon and the browser each send one every 30 s, which
@@ -54,7 +63,8 @@ daemon  ---- wss /daemon ---->  Worker + Durable Object  <---- wss /client ---- 
 ## Standing one up
 
 ```sh
-flue relay setup     # paste a Cloudflare API token, pick an account, watch it deploy
+flue relay setup     # machine 1: paste a Cloudflare API token, watch it deploy
+flue relay join …    # every other machine: the one line setup printed, verbatim
 flue relay status    # what is configured
 ```
 
@@ -64,25 +74,79 @@ Worker with its Durable Object migration and the whole web bundle as the
 Worker's static assets — served under the same `Referrer-Policy` and
 `Content-Security-Policy` the daemon serves its own UI with, minus the loopback
 sockets a relay origin has no use for — enables the `workers.dev` subdomain, sets a fresh
-32-byte `DAEMON_SECRET` on the script, and writes `relay.json` (mode 0600) into
-flue's config directory — `$XDG_CONFIG_HOME/flue`, or `~/.config/flue`. The API
-token is never stored: its whole life is that one command, and you can delete it
-afterwards. Restart the daemon to pick the relay up.
+32-byte `DAEMON_SECRET` on the script, mints this machine an id and a display
+name, and writes `relay.json` (mode 0600) into flue's config directory —
+`$XDG_CONFIG_HOME/flue`, or `~/.config/flue`. The API token is never stored:
+its whole life is that one command, and you can delete it afterwards. Restart
+the daemon to pick the relay up.
+
+Setup ends by printing the line every other machine joins with:
+
+```
+flue relay join wss://flue-relay.<sub>.workers.dev --secret <...>
+```
+
+Run it there and restart that daemon — that is the whole of adding a machine.
+Join never touches the Cloudflare API: the Worker exists and the secret is the
+whole credential, so everything it does is local — check the address, mint
+this machine a fresh id (`<hostname>-<4 hex>`, its slot on the relay and the
+`<id>` in both wss paths), and write the same `relay.json` shape setup writes.
+`--name` sets the label the machine picker shows; it defaults to the hostname
+and never appears in a URL. The printed line carries the secret — that is the
+point, it is the deliberate hand-off — so paste it into the other machine's
+terminal, not into a chat that keeps history.
 
 Run it from a **release binary** (`make build`, or an installed flue). The
 Worker and the web app are both compiled into that binary, and a dev build
 carries neither — setup refuses rather than deploying something that is not
 there.
 
-Re-running setup against the same account is safe — the deploy and the secret
-are upserts. Re-running it against a *different* account leaves the old Worker
-live and reachable; there is no `flue relay teardown`, so delete it in the
-dashboard yourself (`docs/FOLLOW-UPS.md` §12).
+Re-running setup against the same account is safe for the Worker — the deploy
+and the secret are upserts — but it is a reset, not a repair: every run mints
+a fresh secret *and* a fresh machine id. The fresh secret is deliberate —
+setup is the recovery path for a leaked one, and a run that reused the old
+could never rotate it — and it means every machine that joined is now
+presenting a stale secret and has to run the newly printed join line. The
+fresh id means the old hub slot is simply abandoned: a browser that paired
+against it is dialling a slot no daemon dials, answered `503 daemon offline`
+until it pairs this machine again and forgets the old row in the picker. To
+*add* a machine, the join line is the whole of it — setup is never the command
+to run on machine two. Re-running setup against a *different* account leaves
+the old Worker live and reachable; there is no `flue relay teardown`, so
+delete it in the dashboard yourself (`docs/FOLLOW-UPS.md` §12).
+
+## One secret for the fleet
+
+Daemon-leg auth, v1: one `DAEMON_SECRET` per Worker, shared by every machine
+that joined it. The machine id in the path is routing, not identity — the
+Worker checks the secret and nothing else before giving a dial the hub it
+asked for.
+
+The honest limit follows directly. A compromised machine holds the secret,
+and the secret opens *any* machine's daemon leg, so it can dial a sibling's
+slot and impersonate that machine's daemon. What it cannot do is read the
+sibling's sessions: Noise keys are per machine, a browser's handshake only
+completes against the static key it pinned when it paired that machine, and
+the impostor does not hold that key. What it can do is squat the slot — the
+hub gives the daemon leg to the newcomer and closes the incumbent
+(`4000 replaced`), so the real daemon is knocked off and its browsers see it
+drop — and accept *new* pairings as if it were the sibling, which is the
+capability to take seriously.
+
+Two things keep that in proportion, and neither is a fix. The secret is shared
+only across machines you already trust with each other, so the blast radius is
+your own fleet — which matters exactly on the day one of them stops deserving
+the trust. And recovery is one command: `flue relay setup` on any machine
+mints a fresh secret the compromised machine does not hold; re-join the
+machines that still deserve it. The upgrade path — a per-machine secret,
+learned by each hub on its first daemon connect — changes no wire format and
+is deliberately deferred; until it lands, this section is the honest statement
+of what the shared secret does and does not separate.
 
 ## Cost model
 
-The whole SaaS question rests on this, and the invite-phase decision should rest
-on measured counters rather than on this section. Every figure below is
+The whole free-tier promise rests on this, and it should rest on measured
+counters rather than on this section. Every figure below is
 Cloudflare's list pricing as researched in **August 2026** — re-check it at
 [the Workers pricing page](https://developers.cloudflare.com/workers/platform/pricing/)
 before quoting it at anyone.
@@ -126,8 +190,8 @@ Four facts decide flue's shape here:
 4. **Egress is free and assets are free.** Relaying megabytes of build log costs
    nothing in transfer, and the web bundle the Worker serves is not a metered
    request. The cost of a session is its *request count* and its *active
-   duration*, not its bytes — which is the tailwind that makes a cheap price
-   possible at all.
+   duration*, not its bytes — which is the tailwind that keeps a personal
+   fleet inside the free tier at all.
 
 Two limits worth knowing rather than paying for: a WebSocket message may be at
 most **32 MiB** (flue's frames are orders of magnitude below that), and an idle
@@ -136,13 +200,14 @@ connection is closed at roughly **100 s**, which the 30 s keepalive covers.
 **Verdict for now:** personal use, self-hosted, sits inside the free plan with
 room to spare — the free daily DO request allowance is roughly two million
 inbound messages. What is *not* yet proven is hibernation under real load, and
-that is the go/no-go for anything hosted. Measure before pricing.
+that is the difference between a free relay and a metered one. Measure before
+trusting it.
 
 ## Fair use, and the caps that exist today
 
 The `/client` leg and `POST /api/pair` are both credential-less by design, so
 the Durable Object bounds them directly. All of these are per hub — that is, per
-daemon:
+machine:
 
 | bound | value | what it stops |
 |---|---|---|
@@ -207,8 +272,8 @@ timestamps rather than from the record itself (`docs/FOLLOW-UPS.md` §13).
 
 ## What a month of dogfooding should record
 
-Before any pricing decision — and before the fair-use numbers stop being
-guesses — a month of real daily use should leave this behind:
+Before the fair-use numbers stop being guesses, a month of real daily use
+should leave this behind:
 
 - **Daily DO requests and daily GB-s**, from the dashboard, one row per day
   against the 100,000 and 13,000 free caps. The ratio between them is the whole
@@ -232,8 +297,8 @@ guesses — a month of real daily use should leave this behind:
   phone on a bad network — the numbers those produce are the fair-use cap's
   input, and they are worth writing down as anecdotes and not just as totals.
 
-Cost per active machine per month, with its tail, is the output. Anything that
-looks like a price before that number exists is a guess.
+Cost per active machine per month, with its tail, is the output. Any fair-use
+cap set before that number exists is a guess.
 
 ## Release gate: the manual end-to-end
 
@@ -262,6 +327,18 @@ a dev build carries no Worker to deploy.
       same session on the desktop; see both sides mirror.
 - [ ] Kill the daemon (`kill -9`), watch the phone report the drop, restart the
       daemon, and watch the session come back without re-pairing.
+- [ ] `flue relay join` on a second machine, with the exact line setup printed.
+      Restart its daemon: both daemons' logs say connected, to the same host,
+      each under its own machine id.
+- [ ] Pair the phone with the second machine too — its own QR, one more scan.
+      Opening the relay URL now lands on the machine picker; both machines are
+      listed, and switching between them lands in each machine's own sessions.
+- [ ] The isolation check, by hand: stop machine A's daemon, leave B's up, and
+      `curl -si --http1.1 -H 'Upgrade: websocket' https://<relay>/client/<A's id>`
+      answers `503` `{"error":"daemon offline"}` — B's daemon being up must
+      never answer for A. The same command against a bare `/client`, or an id
+      with a capital in it, answers `404` `{"error":"no such machine"}`.
 - [ ] Re-run `flue relay setup` on the same account. It succeeds — the deploy
-      and the secret are upserts — and the phone re-pairs against the new
-      secret after the daemon restarts.
+      and the secret are upserts — and it is a reset: the phone pairs this
+      machine again (the fresh machine id abandons the slot its old row
+      names), and the second machine re-joins with the newly printed line.

@@ -1,8 +1,8 @@
 # flue relay protocol
 
-The relay is a Cloudflare Worker (one Durable Object per daemon) that bridges a
-daemon's single outbound socket to any number of browser tabs. It forwards bytes
-and nothing else: it holds no Noise keys, reads no terminal traffic, and cannot
+The relay is a Cloudflare Worker (one Durable Object per machine) that bridges
+each daemon's single outbound socket to any number of browser tabs. It
+forwards bytes and nothing else: it holds no Noise keys, reads no terminal traffic, and cannot
 tell one keystroke from another. What it *does* see — the control channel is
 cleartext — is set out under "What the relay sees" below.
 
@@ -11,11 +11,11 @@ each. It does **not** redefine the wire protocol — `spec/protocol.md` is
 unchanged and travels inside, encrypted. The relay is a transport for it.
 
 ```
-daemon  ---- wss /daemon ---->  Worker + Durable Object  <---- wss /client ----  browser
-        [4B channel][payload]                            [payload]
-           |                                                            |
-           +--------- Noise IK: browser initiator, daemon responder ----+
-                      inside: [1B kind][wire protocol bytes]
+daemon  ---- wss /daemon/<id> ---->  Worker + one DO per machine  <---- wss /client/<id> ----  browser
+        [4B channel][payload]                                     [payload]
+           |                                                                     |
+           +------------- Noise IK: browser initiator, daemon responder ---------+
+                          inside: [1B kind][wire protocol bytes]
 ```
 
 Three layers stack, outermost first:
@@ -28,8 +28,8 @@ Three layers stack, outermost first:
 
 ## The daemon leg
 
-The daemon dials `wss://<relay>/daemon` **outbound** — nothing listens on the
-user's machine for the relay's sake. Every **binary** WebSocket message on that
+The daemon dials `wss://<relay>/daemon/<machine-id>` **outbound** — nothing
+listens on the user's machine for the relay's sake. Every **binary** WebSocket message on that
 socket is laid out as:
 
 ```
@@ -63,7 +63,8 @@ assigned fresh ids that the persisted counter guarantees are new.
 
 ## The browser leg
 
-The browser opens `wss://<relay>/client` and sends **no channel header**. The
+The browser opens `wss://<relay>/client/<machine-id>` and sends **no channel
+header**. The
 Worker knows which channel that socket is from the socket itself, and wraps and
 unwraps on the browser's behalf: it prefixes the header on the way to the
 daemon and strips it on the way back. A browser therefore sends bare handshake
@@ -168,8 +169,8 @@ almost-free Durable Object.
 ## Auth
 
 The daemon's upgrade request carries `Authorization: Bearer <daemon secret>` —
-the Worker's deploy-time `DAEMON_SECRET`, shared with the one daemon it serves.
-A browser upgrade carries **nothing**, and every leg lands on one hub.
+the Worker's deploy-time `DAEMON_SECRET`, shared by every machine that joined
+this Worker. A browser upgrade carries **nothing**.
 
 That is deliberate: Noise is the confidentiality boundary, and a browser
 credential would add none — an attacker who could open a channel still cannot
@@ -179,6 +180,18 @@ unauthenticated `/client` does expose is denial of service, so the Durable
 Object bounds it directly: a cap on concurrent channels, a deadline on
 completing the handshake, after which the channel is closed, and a cap on the
 size of one client message.
+
+Both legs, and `POST /api/pair`, carry a **machine id** in the path —
+`/daemon/<id>`, `/client/<id>`, `/api/pair/<id>` — and the Worker routes on it:
+`idFromName(id)` selects that machine's Durable Object, and the hub receives
+the bare prefix, never the id. The id is a lowercase hostname-shaped slug of
+1–63 characters (`^[a-z0-9][a-z0-9-]{0,62}$`), minted at setup or join time;
+anything outside that — a bare prefix, an empty id, an embedded segment — is
+answered `404 {"error":"no such machine"}` before any hub wakes. The id is
+routing, not identity: the one bearer secret authorizes the daemon leg of
+*every* machine's hub, and what keeps a machine's sessions its own is the
+per-machine Noise key a browser pins at pairing, not the path. The honest
+limit of that shared secret is `docs/RELAY.md`, "One secret for the fleet".
 
 The size cap is **1 MiB**, and it is the relay's to enforce rather than the
 daemon's. A client frame over it closes that socket alone with `1009`

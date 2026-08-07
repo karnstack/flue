@@ -126,9 +126,11 @@ only way to pair at all.
 
 No. There is no hosted service and none is planned. `flue relay setup` takes a
 Cloudflare API token, deploys the Worker and the web bundle into **your**
-account, sets a fresh daemon secret, and writes the config the daemon dials. No
-flue account, no flue server, nothing of anyone else's between your browser and
-your machine. Cloudflare's free plan is enough for personal use.
+account, sets a fresh daemon secret, and writes the config the daemon dials.
+Your other machines join the same Worker with the `flue relay join` line setup
+prints — no token, no second deploy — and one URL fronts all of them. No flue
+account, no flue server, nothing of anyone else's between your browser and
+your machines. Cloudflare's free plan is enough for personal use.
 
 The runbook — what gets deployed, what it costs, what the caps are, and how to
 read the relay's own counters — is [`docs/RELAY.md`](RELAY.md). flue.sh itself

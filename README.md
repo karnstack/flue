@@ -17,8 +17,9 @@
 > service. Pairing works over `local` — pair a second device from the UI, see
 > it listed, revoke it — and the end-to-end crypto it pins is in place. The
 > Cloudflare relay is built: `flue relay setup` deploys it to your own
-> account, and the daemon dials it. It has not yet been through its manual
-> end-to-end gate against a real account
+> account, `flue relay join` points your other machines at the same Worker,
+> and each daemon dials its own slot on it. It has not yet been through its
+> manual end-to-end gate against a real account
 > ([docs/RELAY.md](docs/RELAY.md)), so treat it as ready to try rather than
 > ready to rely on. Tailscale is still designed, not built. No release is
 > tagged yet — the pipeline is live, and the first tag ships binaries, a brew
@@ -76,6 +77,7 @@ flue disable      # remove it
 flue status       # version, daemon state, session count
 flue open [path]  # spawn a session here — handy from a shell prompt
 flue relay setup  # deploy a relay to your own Cloudflare account (see below)
+flue relay join   # point this machine at a relay another machine deployed
 ```
 
 ## Remote access
@@ -90,14 +92,29 @@ the UI orders them by what you already have.
 | Tailscale | Tailscale on each device | none, often direct peer-to-peer | designed |
 | Cloudflare + your domain | a domain on Cloudflare | your own Worker | designed |
 
+One relay fronts every machine you own, and only the first machine ever
+touches the Cloudflare API:
+
 ```sh
-flue relay setup     # paste a Cloudflare API token, watch it deploy, done
+flue relay setup     # machine 1: paste a Cloudflare API token, watch it deploy, done
 ```
 
 That deploys the relay Worker **and** the web app into your own Cloudflare
-account, sets a fresh daemon secret, and points the daemon at it. The token is
-never stored. What it deploys, what it costs, what bounds abuse, and the
-counters it leaves behind are in [docs/RELAY.md](docs/RELAY.md).
+account, sets a fresh daemon secret, joins this machine under a machine id of
+its own, and ends by printing one line. Run that line on every other machine:
+
+```sh
+flue relay join wss://<your-relay> --secret <...>     # printed by setup, verbatim
+```
+
+`join` needs no token and deploys nothing — the Worker already exists and the
+secret is the whole credential. It mints the machine an id of its own and
+points its daemon at its own slot on the same Worker. Opening the relay's one
+URL shows a picker of the machines that browser has paired with; pairing is
+per machine, once per browser, from the QR each machine shows. The token is
+never stored. What it deploys, what it costs, what bounds abuse, what one
+shared secret does and does not separate, and the counters it leaves behind
+are in [docs/RELAY.md](docs/RELAY.md).
 
 Anything through an intermediary is end-to-end encrypted (Noise IK, the
 daemon's key pinned at pairing), so the relay forwards ciphertext it holds no
