@@ -463,6 +463,11 @@ func (c *conn) handleControl(msg any) {
 			return
 		}
 		c.srv.touch(a.s.ID(), c)
+		// Reaching for Ctrl-C is a hand on this device, so it moves the size
+		// here like any other activity — before the signal is delivered, so
+		// whatever the process does about the interrupt it does at the size
+		// the view asking for it can read.
+		c.syncSize(a)
 		if err := a.s.Signal(sig); err != nil {
 			c.sendError("signal_failed", err.Error())
 		}

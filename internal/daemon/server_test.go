@@ -292,13 +292,22 @@ func TestSecondAttacherIsNotPrimary(t *testing.T) {
 }
 
 // TestPtySizeFollowsTheActiveView pins the sizing policy: the PTY wears the
-// fitted size of the most recently active view — attaching, reporting a size
-// and typing all count as activity. A phone that attaches beside a laptop
-// gets a phone-sized terminal the moment it reports, and the laptop takes
-// the size back with its first keystroke, no re-report needed.
+// fitted size of the most recently active view — attaching, reporting a size,
+// typing and signalling all count as activity. A phone that attaches beside a
+// laptop gets a phone-sized terminal the moment it reports, and the laptop
+// takes the size back with its first keystroke, no re-report needed.
+//
+// The session ignores SIGINT rather than sleeping plainly, because the signal
+// step below is asserting that a signal is *activity* and nothing else: every
+// signal a client may send ends the process group, and a session that died
+// mid-test would tear both attachments down and race the assertions that
+// follow. An ignored disposition survives exec, so the `sleep` inherits it and
+// the whole group shrugs the interrupt off.
 func TestPtySizeFollowsTheActiveView(t *testing.T) {
 	ts, reg := newTestServer(t)
-	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
+	s, err := reg.Spawn(session.SpawnOpts{
+		Cmd: []string{"sh", "-c", "trap '' INT; sleep 30"}, Cols: 80, Rows: 24,
+	})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -342,6 +351,12 @@ func TestPtySizeFollowsTheActiveView(t *testing.T) {
 		t.Fatalf("write input: %v", err)
 	}
 	waitFor(t, func() bool { return s.Info().Cols == 120 && s.Info().Rows == 40 })
+
+	// A signal is activity too — the phone reaching for Ctrl-C is a hand on
+	// the phone — so it takes the size back on its recorded desire alone,
+	// having neither typed nor reported anything since.
+	writeControl(t, phone, wire.Signal{Ref: phoneRef, Sig: "SIGINT"})
+	waitFor(t, func() bool { return s.Info().Cols == 40 && s.Info().Rows == 10 })
 
 	// The phone's keyboard opening is a fresh report, and a report is
 	// activity: the size follows the phone again.
