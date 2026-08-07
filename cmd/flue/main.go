@@ -102,6 +102,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue disable            remove the login service
   flue status             daemon, login service, and session diagnostics
   flue relay setup        deploy a relay to your own Cloudflare account
+  flue relay join URL --secret S   point this machine at an existing relay
   flue relay status       show the configured relay
   flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N] [--open]   run the daemon in the foreground
@@ -296,12 +297,17 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 		return
 	}
 
-	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin}
+	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin, MachineID: rc.MachineID}
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
 	if err != nil {
 		logger.Warn("relay not started", "err", err)
 		return
 	}
+	// The machine's identity rides every welcome alongside the status, so the
+	// UI can build /client/<id> URLs for this machine. It is configuration
+	// rather than socket state, which is why it is set here — once, by the
+	// process that read relay.json — and not by the transport's callbacks.
+	srv.SetRelayMachine(rc.MachineID, rc.MachineName)
 	// Before the goroutine, never after it. The transport reports this itself
 	// the moment it starts dialling, and this only covers the window before it
 	// is scheduled — but a seed written *after* the goroutine started races the
@@ -1218,6 +1224,13 @@ func relayProblems(rc config.Relay) []string {
 	}
 	if rc.Secret == "" {
 		problems = append(problems, "no secret")
+	}
+	if rc.MachineID == "" {
+		// A relay.json from before machines had ids, or one written by hand.
+		// The daemon dials /daemon/<machine id>, so without one there is
+		// nothing to dial as; `flue relay join` against the existing relay is
+		// the fix, and mints one.
+		problems = append(problems, "no machine id")
 	}
 	return problems
 }

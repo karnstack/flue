@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -14,9 +16,11 @@ func TestSaveRelayRoundTrips(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", base)
 
 	want := Relay{
-		URL:    "wss://flue-relay.karn.workers.dev/daemon",
-		Secret: "s3cr3t-daemon-secret",
-		Origin: "https://flue-relay.karn.workers.dev",
+		URL:         "wss://flue-relay.karn.workers.dev",
+		Secret:      "s3cr3t-daemon-secret",
+		Origin:      "https://flue-relay.karn.workers.dev",
+		MachineID:   "karns-macbook-pro-local-a1b2",
+		MachineName: "Karn's MacBook Pro.local",
 	}
 	if err := SaveRelay(want); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
@@ -198,6 +202,53 @@ func TestLoadRelayKeepsAnIncompleteFile(t *testing.T) {
 	}
 	if got.URL != "wss://r.example/daemon" || got.Secret != "" || got.Origin != "" {
 		t.Fatalf("LoadRelay = %+v, want only the URL set", got)
+	}
+}
+
+// TestMintMachineID pins the id format machines join the relay under:
+// `<hostname sanitized, truncated to 24>-<4 lowercase hex>`. The hostname part
+// is what makes an id readable in a machine list; the random suffix is what
+// keeps two machines with the same hostname from silently replacing each other
+// on the relay.
+func TestMintMachineID(t *testing.T) {
+	// The exact slug, pinned: lowercased, the apostrophe dropped, spaces and
+	// dots folded to dashes, and the injected randomness hex-encoded on the end.
+	fixed := bytes.NewReader([]byte{0xa1, 0xb2})
+	if got, want := MintMachineID("Karn's MacBook Pro.local", fixed), "karns-macbook-pro-local-a1b2"; got != want {
+		t.Fatalf("MintMachineID = %q, want %q", got, want)
+	}
+
+	// The hostname part is truncated to 24 characters so the id stays readable
+	// and comfortably inside the relay's 63-character limit, whatever a fleet's
+	// naming convention produces.
+	long := MintMachineID(strings.Repeat("a", 40), bytes.NewReader([]byte{0, 0}))
+	if want := strings.Repeat("a", 24) + "-0000"; long != want {
+		t.Fatalf("MintMachineID(40×a) = %q, want %q", long, want)
+	}
+
+	// Every mint matches the relay's id grammar (relay/src/index.ts), whatever
+	// the hostname looked like — including ones that sanitize to nothing at
+	// all, which still have to produce a diallable id rather than a bare "-hex".
+	idRe := regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	for _, hostname := range []string{
+		"Karn's MacBook Pro.local",
+		"plain",
+		"UPPER-CASE",
+		"tromsø",
+		"...",
+		"---",
+		"",
+		"-leading-dash",
+		"名前",
+		strings.Repeat("é", 30),
+	} {
+		got := MintMachineID(hostname, bytes.NewReader([]byte{0xff, 0x00}))
+		if !idRe.MatchString(got) {
+			t.Errorf("MintMachineID(%q) = %q, which is not a valid machine id", hostname, got)
+		}
+		if !strings.HasSuffix(got, "-ff00") {
+			t.Errorf("MintMachineID(%q) = %q, want the -ff00 suffix from the injected randomness", hostname, got)
+		}
 	}
 }
 

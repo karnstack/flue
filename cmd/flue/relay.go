@@ -6,13 +6,16 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
@@ -90,7 +93,7 @@ const (
 // number, and EOF alone is not enough of a guarantee to rely on.
 const accountPromptAttempts = 3
 
-const relayUsage = "usage: flue relay <setup|status>"
+const relayUsage = "usage: flue relay <setup|join|status>"
 
 func cmdRelay(args []string) error {
 	if len(args) == 0 {
@@ -101,6 +104,8 @@ func cmdRelay(args []string) error {
 		// A fresh client with no token: runRelaySetup is what puts the pasted
 		// one on it, and it goes no further than this process.
 		return runRelaySetup(os.Stdout, os.Stdin, &cloudflare.Client{})
+	case "join":
+		return runRelayJoin(os.Stdout, args[1:])
 	case "status":
 		return runRelayStatus(os.Stdout)
 	default:
@@ -147,7 +152,9 @@ does not store it.
 func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 	// Both of these are checked before a credential is asked for. A binary that
 	// cannot deploy anything must not be the reason a user pastes an API token
-	// into a terminal.
+	// into a terminal. The hostname is read here for the same reason: it is
+	// this machine's name and id on the relay, and its one failure mode
+	// belongs before the token prompt, not after the deploy.
 	module := relaybundle.Module()
 	if len(module) == 0 {
 		return errors.New("this build carries no relay worker; build a release binary with `make build` (a dev build leaves it out)")
@@ -155,6 +162,10 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 	assets, err := webAssets()
 	if err != nil {
 		return err
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("read this machine's hostname: %w", err)
 	}
 
 	in := bufio.NewReader(r)
@@ -252,6 +263,13 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 	}
 	fmt.Fprintln(w, "  ✓ secret set")
 
+	// This machine's identity on the relay: the id is the slot it dials
+	// (/daemon/<id>) and the name is its human label. Minted fresh on every
+	// run like the secret — setup is the recovery path, and a stale id would
+	// resurrect whatever state the old hub was left holding.
+	machineID := config.MintMachineID(hostname, rand.Reader)
+	machineName := truncateRunes(hostname, machineNameMaxRunes)
+
 	// Last, deliberately. relay.json is what makes the daemon dial, and every
 	// step above can fail; writing it earlier would leave a daemon dialling a
 	// relay that was never finished. Re-running setup is the fix for anything
@@ -259,16 +277,142 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client) error {
 	// are both upserts, and the deploy keeps the secret already bound to the
 	// Worker (see keptBindingTypes in internal/cloudflare), so a run that dies
 	// part-way leaves an existing relay working rather than credential-less.
+	//
+	// The URL is the bare host: the transport appends /daemon/<machine id>
+	// itself, so the file cannot hold a path that disagrees with the id
+	// beside it.
 	if err := config.SaveRelay(config.Relay{
-		URL:    "wss://" + host + "/daemon",
-		Secret: secret,
-		Origin: origin,
+		URL:         "wss://" + host,
+		Secret:      secret,
+		Origin:      origin,
+		MachineID:   machineID,
+		MachineName: machineName,
+	}); err != nil {
+		return fmt.Errorf("save the relay configuration: %w", err)
+	}
+	fmt.Fprintf(w, "  ✓ this machine joined as %s (%s)\n", machineName, machineID)
+
+	// The one line another machine needs, exactly as it should be run there.
+	// It carries the secret — that is the point: the relay is shared by
+	// machines that share it, and this is the deliberate hand-off, printed
+	// once at the moment the user is wiring their fleet up.
+	fmt.Fprintf(w, "\nto add another machine, run this on it:\n\n  flue relay join wss://%s --secret %s\n", host, secret)
+
+	fmt.Fprint(w, relaySetupDone)
+	return nil
+}
+
+// machineNameMaxRunes bounds a machine's display name. It is free text for
+// humans — never part of a URL — so the only limit it needs is one that keeps
+// a machine list rendering as a list.
+const machineNameMaxRunes = 64
+
+const relayJoinUsage = "usage: flue relay join <url> --secret <secret> [--name <label>]"
+
+// relayJoinDone mirrors relaySetupDone's restart note without the token line:
+// join never saw a Cloudflare credential, so there is nothing to tell the user
+// to delete.
+const relayJoinDone = `
+relay configured. restart the daemon (flue disable && flue enable, or
+restart flue serve) to connect.
+`
+
+// runRelayJoin points this machine at a relay another machine already
+// deployed: the line setup printed there, run here.
+//
+// No Cloudflare API, no token — the Worker exists and the secret is the whole
+// credential. Everything join does is local: validate the address, mint this
+// machine a fresh id, and write relay.json. Which is why its failures name the
+// argument at fault — the command arrives pasted across machines, and a lost
+// flag or a stale path is the ordinary mistake.
+func runRelayJoin(w io.Writer, args []string) error {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return errors.New("no relay url was given; " + relayJoinUsage)
+	}
+	rawURL := args[0]
+
+	fs := flag.NewFlagSet("relay join", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	secret := fs.String("secret", "", "the relay's daemon secret, from flue relay setup")
+	name := fs.String("name", "", "a display name for this machine (defaults to the hostname)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return fmt.Errorf("%w; %s", err, relayJoinUsage)
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q; %s", fs.Arg(0), relayJoinUsage)
+	}
+	if *secret == "" {
+		return errors.New("no --secret was given; " + relayJoinUsage)
+	}
+	if utf8.RuneCountInString(*name) > machineNameMaxRunes {
+		return fmt.Errorf("--name is longer than %d characters", machineNameMaxRunes)
+	}
+
+	host, err := relayHost(rawURL)
+	if err != nil {
+		return err
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("read this machine's hostname: %w", err)
+	}
+	machineName := *name
+	if machineName == "" {
+		machineName = truncateRunes(hostname, machineNameMaxRunes)
+	}
+	machineID := config.MintMachineID(hostname, rand.Reader)
+
+	// The same shape setup writes, derived the same way: bare wss:// URL, the
+	// https origin on the same host. SaveRelay is 0600 — the file holds the
+	// relay's whole credential.
+	if err := config.SaveRelay(config.Relay{
+		URL:         "wss://" + host,
+		Secret:      *secret,
+		Origin:      "https://" + host,
+		MachineID:   machineID,
+		MachineName: machineName,
 	}); err != nil {
 		return fmt.Errorf("save the relay configuration: %w", err)
 	}
 
-	fmt.Fprint(w, relaySetupDone)
+	fmt.Fprintf(w, "  ✓ this machine joined wss://%s as %s (%s)\n", host, machineName, machineID)
+	fmt.Fprint(w, relayJoinDone)
 	return nil
+}
+
+// relayHost is the host a pasted relay address names, however the user came by
+// it: the wss:// url setup prints, or the https:// origin they can read off a
+// browser's address bar — the two name the same Worker, and refusing the one a
+// user can see would be pedantry. Anything else is refused by name, including
+// a path: the old relay.json format kept /daemon on the URL, and silently
+// accepting one here would hide that the contract changed.
+func relayHost(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("the relay url could not be parsed: %w", err)
+	}
+	if u.Scheme != "wss" && u.Scheme != "https" {
+		return "", fmt.Errorf("the relay url must be wss:// or https://, got %q", rawURL)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("the relay url %q names no host; %s", rawURL, relayJoinUsage)
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("the relay url carries a path or query it should not (%q); it is just wss://<host>", rawURL)
+	}
+	return u.Host, nil
+}
+
+// truncateRunes bounds free text by runes, which is the unit the limit is
+// stated in — a hostname can be multibyte, and cutting bytes could leave an
+// invalid final rune.
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:n])
 }
 
 // runRelayStatus prints what is configured, which is the same line flue status

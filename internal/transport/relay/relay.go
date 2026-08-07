@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -127,19 +128,21 @@ const (
 
 // Config is everything the adapter needs to reach a deployed relay.
 //
-// All three fields are required: where to dial, what the dial presents, and
-// the origin the relay serves browsers on. The daemon and the Worker share
-// one long-lived DAEMON_SECRET, set at deploy time by `flue relay setup`.
+// All four fields are required: where to dial, which machine's slot to dial
+// it as, what the dial presents, and the origin the relay serves browsers on.
+// The daemon and the Worker share one long-lived DAEMON_SECRET, set at deploy
+// time by `flue relay setup`.
 type Config struct {
-	URL    string // wss://flue-relay.<sub>.workers.dev/daemon
-	Secret string // the DAEMON_SECRET set at deploy time
-	Origin string // https origin the relay serves the UI on
+	URL       string // the bare relay address: wss://flue-relay.<sub>.workers.dev
+	Secret    string // the DAEMON_SECRET set at deploy time
+	Origin    string // https origin the relay serves the UI on
+	MachineID string // the machine's slot on the relay: the <id> of /daemon/<id>
 }
 
 // ErrIncompleteConfig is what New answers a Config that is missing a field it
-// cannot invent. Wrapping rather than three sentinels: the caller's decision is
-// the same for all of them — this daemon is not configured for a relay — and
-// the message names which field it was.
+// cannot invent. Wrapping rather than a sentinel per field: the caller's
+// decision is the same for all of them — this daemon is not configured for a
+// relay — and the message names which field it was.
 var ErrIncompleteConfig = errors.New("relay: incomplete config")
 
 
@@ -175,6 +178,13 @@ var _ Server = (*daemon.Server)(nil)
 type Transport struct {
 	cfg Config
 	srv Server
+
+	// dialURL is what the WebSocket dial actually opens: cfg.URL with
+	// /daemon/<machine id> appended. Built once in New so every dial, retry
+	// and log line names the same address — the id travels in the path and
+	// nowhere else, no header, no query (the Worker routes on it and strips it
+	// before the hub sees the request).
+	dialURL string
 
 	// identity is the daemon's static Noise key and devices is the paired-device
 	// registry. Both belong to the channel layer: the responder handshake runs
@@ -225,7 +235,9 @@ var noRedirects = &http.Client{
 //
 // URL and the secret are required for the ordinary reason: without them there
 // is nothing to dial and nothing to authenticate with, so Run would do nothing
-// but fail and back off forever.
+// but fail and back off forever. The machine id is the same kind of required:
+// it is the path this transport dials, and without one every dial would meet
+// the Worker's "no such machine" 404 while the config looked complete.
 func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceStore, log *slog.Logger) (*Transport, error) {
 	switch {
 	case cfg.URL == "":
@@ -234,13 +246,19 @@ func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceSto
 		return nil, fmt.Errorf("%w: no daemon secret", ErrIncompleteConfig)
 	case cfg.Origin == "":
 		return nil, fmt.Errorf("%w: no origin", ErrIncompleteConfig)
+	case cfg.MachineID == "":
+		return nil, fmt.Errorf("%w: no machine id", ErrIncompleteConfig)
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Transport{
-		cfg:       cfg,
-		srv:       srv,
+		cfg: cfg,
+		srv: srv,
+		// TrimRight rather than trusting the caller's spelling: relay.json
+		// stores the bare origin-shaped URL, but a trailing slash typed by
+		// hand must not become //daemon/<id>.
+		dialURL:   strings.TrimRight(cfg.URL, "/") + "/daemon/" + cfg.MachineID,
 		identity:  identity,
 		devices:   devices,
 		pairings:  make(chan struct{}, maxPairings),
@@ -271,11 +289,11 @@ func (t *Transport) Run(ctx context.Context) error {
 		}
 
 		if connectedAt.IsZero() {
-			t.log.Warn("relay dial failed", "url", t.cfg.URL, "err", err)
+			t.log.Warn("relay dial failed", "url", t.dialURL, "err", err)
 		} else {
 			lasted := time.Since(connectedAt)
 			t.log.Info("relay connection lost",
-				"url", t.cfg.URL, "lasted", lasted.Round(time.Millisecond), "err", err)
+				"url", t.dialURL, "lasted", lasted.Round(time.Millisecond), "err", err)
 			if lasted >= minStableConn {
 				// The socket was kept, so whatever ended it says nothing about
 				// how long to wait before the next one: start from the base
@@ -328,7 +346,7 @@ func (t *Transport) runOnce(ctx context.Context) (connectedAt time.Time, err err
 		cancelDial()
 		return time.Time{}, err
 	}
-	ws, _, err := websocket.Dial(dialCtx, t.cfg.URL, &websocket.DialOptions{
+	ws, _, err := websocket.Dial(dialCtx, t.dialURL, &websocket.DialOptions{
 		// The credential travels in a header, never in the URL: a URL is written
 		// to logs, proxies and error messages by everything it passes through.
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + bearer}},
@@ -352,7 +370,7 @@ func (t *Transport) runOnce(ctx context.Context) (connectedAt time.Time, err err
 	// announced open against, so it is the only one it can honestly hand a
 	// browser.
 	t.srv.SetRelayStatus(daemon.RelayConnected, t.cfg.Origin)
-	t.log.Info("relay connected", "url", t.cfg.URL)
+	t.log.Info("relay connected", "url", t.dialURL)
 
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -387,7 +405,7 @@ func (t *Transport) runOnce(ctx context.Context) (connectedAt time.Time, err err
 		// queues behind whatever was in flight; cancelling first would race
 		// that write, and a cancelled write context closes the socket outright
 		// (Conn.setupWriteTimeout), taking the close frame with it.
-		t.log.Warn("relay protocol error", "url", t.cfg.URL, "err", readErr)
+		t.log.Warn("relay protocol error", "url", t.dialURL, "err", readErr)
 		_ = ws.Close(websocket.StatusProtocolError, "protocol error")
 	}
 

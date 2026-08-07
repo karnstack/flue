@@ -241,7 +241,10 @@ func TestControlRoundTripsDeviceAndPairingMessages(t *testing.T) {
 func TestWelcomeCarriesRelayStatus(t *testing.T) {
 	b, err := EncodeControl(Welcome{
 		DaemonID: "local", Host: "macbook", Ver: "0.1.0",
-		Relay: &RelayInfo{Status: "connected", Origin: "https://flue-relay.example"},
+		Relay: &RelayInfo{
+			Status: "connected", Origin: "https://flue-relay.example",
+			MachineID: "karns-macbook-pro-a1b2", MachineName: "Karn's MacBook Pro",
+		},
 	})
 	if err != nil {
 		t.Fatalf("EncodeControl: %v", err)
@@ -257,6 +260,12 @@ func TestWelcomeCarriesRelayStatus(t *testing.T) {
 	if relay["status"] != "connected" || relay["origin"] != "https://flue-relay.example" {
 		t.Fatalf("relay = %v, want {status:connected origin:https://flue-relay.example}", relay)
 	}
+	// The machine's identity on the relay, for the client that builds
+	// /client/<id> URLs out of it: camelCase on the wire like every other
+	// field, whatever relay.json spells them.
+	if relay["machineId"] != "karns-macbook-pro-a1b2" || relay["machineName"] != "Karn's MacBook Pro" {
+		t.Fatalf("relay = %v, want machineId karns-macbook-pro-a1b2 and machineName Karn's MacBook Pro", relay)
+	}
 
 	msg, err := DecodeControl(b)
 	if err != nil {
@@ -271,6 +280,9 @@ func TestWelcomeCarriesRelayStatus(t *testing.T) {
 	}
 	if w.Relay.Status != "connected" || w.Relay.Origin != "https://flue-relay.example" {
 		t.Fatalf("decoded relay = %+v, want {connected https://flue-relay.example}", *w.Relay)
+	}
+	if w.Relay.MachineID != "karns-macbook-pro-a1b2" || w.Relay.MachineName != "Karn's MacBook Pro" {
+		t.Fatalf("decoded relay = %+v, want the machine id and name to round-trip", *w.Relay)
 	}
 
 	// A relay that is merely dialling has no origin to name, and the field is

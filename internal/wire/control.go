@@ -102,6 +102,14 @@ type RelayInfo struct {
 	// pairing URL names while the relay is up. Empty unless Status is
 	// "connected", because a socket that is not up carries nothing.
 	Origin string `json:"origin,omitempty"`
+	// MachineID is the slot this daemon holds on the relay — the <id> in the
+	// /client/<id> URL a browser opens to reach this machine. It comes from
+	// relay.json rather than from the socket, so it is present whenever the
+	// relay is configured, connecting and connected alike.
+	MachineID string `json:"machineId,omitempty"`
+	// MachineName is the machine's human label, free text from the same file.
+	// For lists and titles, never for URLs — that is what MachineID is for.
+	MachineName string `json:"machineName,omitempty"`
 }
 
 type Sessions struct {

@@ -109,6 +109,11 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
+// testMachineID is the id every transport in this file dials as. Distinctive
+// on purpose: the dial-path assertion is only worth something if a match could
+// not be a coincidence.
+const testMachineID = "karns-macbook-pro-a1b2"
+
 // newTestTransport builds an adapter pointed at r. The identity and the device
 // store are the zero values: this task never runs a handshake, and a test that
 // does (Task 8) passes real ones.
@@ -119,9 +124,10 @@ func newTestTransport(t *testing.T, r *fakeRelay, secret string, log *slog.Logge
 		log = slog.New(slog.DiscardHandler)
 	}
 	tr, err := New(Config{
-		URL:    r.URL(),
-		Secret: secret,
-		Origin: "https://relay.example",
+		URL:       r.URL(),
+		Secret:    secret,
+		Origin:    "https://relay.example",
+		MachineID: testMachineID,
 	}, srv, noise.DHKey{}, nil, log)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -160,20 +166,25 @@ func runTransport(t *testing.T, tr *Transport) func() {
 
 func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 	t.Parallel()
-	full := Config{URL: "wss://relay.example/daemon", Secret: "s3cr3t", Origin: "https://relay.example"}
+	full := Config{URL: "wss://relay.example", Secret: "s3cr3t", Origin: "https://relay.example", MachineID: "karns-mbp-a1b2"}
 
 	// Origin is the one worth stating a reason for. It is what every announced
 	// open and every forwarded pair is checked against, so an empty one does
 	// not merely omit a value — it disarms the check, since a relay announcing
 	// `origin:""` then matches. It is also what ConnMeta.Origin carries into
 	// the daemon, which is what pairing URLs are built from.
+	//
+	// The machine id is close behind: it is the path this transport dials, and
+	// a transport that dialled /daemon/ with nothing after it would meet the
+	// Worker's 404 forever while the config *looked* complete.
 	for _, tc := range []struct {
 		name string
 		cfg  Config
 	}{
-		{"no URL", Config{Secret: full.Secret, Origin: full.Origin}},
-		{"no secret", Config{URL: full.URL, Origin: full.Origin}},
-		{"no origin", Config{URL: full.URL, Secret: full.Secret}},
+		{"no URL", Config{Secret: full.Secret, Origin: full.Origin, MachineID: full.MachineID}},
+		{"no secret", Config{URL: full.URL, Origin: full.Origin, MachineID: full.MachineID}},
+		{"no origin", Config{URL: full.URL, Secret: full.Secret, MachineID: full.MachineID}},
+		{"no machine id", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin}},
 		{"nothing at all", Config{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -201,6 +212,15 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 			t.Fatal("New returned a nil transport and a nil error")
 		}
 	})
+
+	t.Run("the machine id error names the field", func(t *testing.T) {
+		t.Parallel()
+		_, err := New(Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin},
+			&stubServer{}, noise.DHKey{}, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "no machine id") {
+			t.Fatalf("New without a machine id = %v, want an error saying \"no machine id\"", err)
+		}
+	})
 }
 
 func TestTransportDialsTheRelayWithBearerAuth(t *testing.T) {
@@ -212,6 +232,13 @@ func TestTransportDialsTheRelayWithBearerAuth(t *testing.T) {
 	r.accept(t)
 	if got, want := r.lastAuth(t), "Bearer s3cr3t"; got != want {
 		t.Errorf("Authorization header = %q, want %q", got, want)
+	}
+	// The machine id rides the path and nothing else — no header, no query.
+	// relay.json stores the bare wss:// host; the /daemon/<id> leg is this
+	// transport's to append, so the relay knows which machine's hub this
+	// socket is.
+	if got, want := r.lastPath(t), "/daemon/"+testMachineID; got != want {
+		t.Errorf("dial path = %q, want %q", got, want)
 	}
 	if n := srv.served(); n != 0 {
 		t.Errorf("ServeConn was called %d times before any channel opened", n)
@@ -239,7 +266,7 @@ func TestTransportRefusesARedirectRatherThanFollowIt(t *testing.T) {
 	// never a valid handshake, so refusing costs nothing.
 	var followed atomic.Int64
 	mux := http.NewServeMux()
-	mux.HandleFunc("/daemon", func(w http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("/daemon/", func(w http.ResponseWriter, req *http.Request) {
 		http.Redirect(w, req, "/elsewhere", http.StatusFound)
 	})
 	mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, req *http.Request) {
@@ -253,9 +280,10 @@ func TestTransportRefusesARedirectRatherThanFollowIt(t *testing.T) {
 
 	srv := &stubServer{}
 	tr, err := New(Config{
-		URL:    "ws" + strings.TrimPrefix(ts.URL, "http") + "/daemon",
-		Secret: "s3cr3t",
-		Origin: "https://relay.example",
+		URL:       "ws" + strings.TrimPrefix(ts.URL, "http"),
+		Secret:    "s3cr3t",
+		Origin:    "https://relay.example",
+		MachineID: testMachineID,
 	}, srv, noise.DHKey{}, nil, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("New: %v", err)

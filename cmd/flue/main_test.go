@@ -1227,9 +1227,11 @@ func TestStatusReportsAConfiguredRelayWithoutItsSecret(t *testing.T) {
 
 	const secret = "s3cr3t-daemon-secret"
 	if err := config.SaveRelay(config.Relay{
-		URL:    "wss://flue-relay.example/daemon",
-		Secret: secret,
-		Origin: "https://flue-relay.example",
+		URL:         "wss://flue-relay.example",
+		Secret:      secret,
+		Origin:      "https://flue-relay.example",
+		MachineID:   "karns-macbook-pro-a1b2",
+		MachineName: "Karn's MacBook Pro",
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
 	}
@@ -1239,7 +1241,7 @@ func TestStatusReportsAConfiguredRelayWithoutItsSecret(t *testing.T) {
 		t.Fatalf("statusTo: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "relay:    configured (wss://flue-relay.example/daemon)") {
+	if !strings.Contains(out, "relay:    configured (wss://flue-relay.example)") {
 		t.Fatalf("status output does not report the configured relay:\n%s", out)
 	}
 	if strings.Contains(out, secret) {
@@ -1259,9 +1261,10 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	var attempts atomic.Int64
-	var auth atomic.Value
+	var auth, path atomic.Value
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth.Store(r.Header.Get("Authorization"))
+		path.Store(r.URL.Path)
 		attempts.Add(1)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}))
@@ -1269,9 +1272,11 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 
 	const secret = "s3cr3t-daemon-secret"
 	if err := config.SaveRelay(config.Relay{
-		URL:    "ws" + strings.TrimPrefix(ts.URL, "http") + "/daemon",
-		Secret: secret,
-		Origin: "https://r.example",
+		URL:         "ws" + strings.TrimPrefix(ts.URL, "http"),
+		Secret:      secret,
+		Origin:      "https://r.example",
+		MachineID:   "karns-macbook-pro-a1b2",
+		MachineName: "Karn's MacBook Pro",
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
 	}
@@ -1294,6 +1299,11 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 	if got, want := auth.Load().(string), "Bearer "+secret; got != want {
 		t.Errorf("Authorization = %q, want %q", got, want)
 	}
+	// The machine id from relay.json rides the dial path — it is how the
+	// Worker knows which machine's hub this socket is.
+	if got, want := path.Load().(string), "/daemon/karns-macbook-pro-a1b2"; got != want {
+		t.Errorf("dial path = %q, want %q", got, want)
+	}
 }
 
 // TestStartRelayIsNeverFatal: every way a relay configuration can be wrong
@@ -1308,9 +1318,10 @@ func TestStartRelayIsNeverFatal(t *testing.T) {
 	}{
 		{"no relay configured", ""},
 		{"malformed json", "{not json"},
-		{"no url", `{"secret":"s","origin":"https://r.example"}`},
-		{"no secret", `{"url":"wss://r.example/daemon","origin":"https://r.example"}`},
-		{"no origin", `{"url":"wss://r.example/daemon","secret":"s"}`},
+		{"no url", `{"secret":"s","origin":"https://r.example","machine_id":"m-0001"}`},
+		{"no secret", `{"url":"wss://r.example","origin":"https://r.example","machine_id":"m-0001"}`},
+		{"no origin", `{"url":"wss://r.example","secret":"s","machine_id":"m-0001"}`},
+		{"no machine id", `{"url":"wss://r.example","secret":"s","origin":"https://r.example"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := t.TempDir()
@@ -1356,9 +1367,13 @@ func TestStatusReportsAnIncompleteRelayConfig(t *testing.T) {
 		relay config.Relay
 		want  string
 	}{
-		{"no url", config.Relay{Secret: secret, Origin: "https://r.example"}, "no url"},
-		{"no secret", config.Relay{URL: "wss://r.example/daemon", Origin: "https://r.example"}, "no secret"},
-		{"no origin", config.Relay{URL: "wss://r.example/daemon", Secret: secret}, "no origin"},
+		{"no url", config.Relay{Secret: secret, Origin: "https://r.example", MachineID: "m-0001"}, "no url"},
+		{"no secret", config.Relay{URL: "wss://r.example", Origin: "https://r.example", MachineID: "m-0001"}, "no secret"},
+		{"no origin", config.Relay{URL: "wss://r.example", Secret: secret, MachineID: "m-0001"}, "no origin"},
+		// A relay.json from before machines had ids, or one hand-edited into
+		// that shape: the daemon will not dial it (relay.New refuses), so the
+		// status line has to say why rather than call it configured.
+		{"no machine id", config.Relay{URL: "wss://r.example", Secret: secret, Origin: "https://r.example"}, "no machine id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())

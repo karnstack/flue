@@ -2723,6 +2723,10 @@ func TestWelcomeReportsTheRelay(t *testing.T) {
 		return true
 	})
 
+	// The machine's identity arrives with the relay configuration, before any
+	// socket is up: it comes from relay.json, not from the connection, so a
+	// welcome sent while the transport is still dialling already carries it.
+	srv.SetRelayMachine("karns-macbook-pro-a1b2", "Karn's MacBook Pro")
 	srv.SetRelayStatus(RelayConnecting, "")
 	c = dial(t, ts)
 	readUntil(t, c, func(msg any, _ []byte) bool {
@@ -2735,6 +2739,9 @@ func TestWelcomeReportsTheRelay(t *testing.T) {
 		}
 		if w.Relay.Status != RelayConnecting || w.Relay.Origin != "" {
 			t.Fatalf("relay = %+v, want {connecting}", *w.Relay)
+		}
+		if w.Relay.MachineID != "karns-macbook-pro-a1b2" || w.Relay.MachineName != "Karn's MacBook Pro" {
+			t.Fatalf("relay = %+v, want the machine id and name from the configuration", *w.Relay)
 		}
 		return true
 	})
@@ -2751,6 +2758,9 @@ func TestWelcomeReportsTheRelay(t *testing.T) {
 		}
 		if w.Relay.Status != RelayConnected || w.Relay.Origin != "https://r.example" {
 			t.Fatalf("relay = %+v, want {connected https://r.example}", *w.Relay)
+		}
+		if w.Relay.MachineID != "karns-macbook-pro-a1b2" || w.Relay.MachineName != "Karn's MacBook Pro" {
+			t.Fatalf("relay = %+v, want the machine id and name from the configuration", *w.Relay)
 		}
 		return true
 	})

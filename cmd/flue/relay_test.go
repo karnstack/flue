@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -340,6 +341,10 @@ func writeAPIError(w http.ResponseWriter, msg string) {
 
 // --- helpers -----------------------------------------------------------------
 
+// machineIDRe is the relay's id grammar (relay/src/index.ts), which every id
+// this command mints has to satisfy or the Worker answers the dial with 404.
+var machineIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
 func oneAccount() []cloudflare.Account {
 	return []cloudflare.Account{{ID: "acct-0123456789abcdef", Name: "Karn's Account"}}
 }
@@ -519,18 +524,32 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 		t.Fatalf("the saved secret decodes to %d bytes, want %d", len(raw), daemonSecretBytes)
 	}
 
+	// The URL is the bare host — the /daemon/<machine id> leg is the
+	// transport's to append, so a relay.json is one machine's whole
+	// registration: address, credential, and which machine it is.
 	const host = "flue-relay.karn.workers.dev"
-	if saved.URL != "wss://"+host+"/daemon" {
-		t.Fatalf("relay.json url = %q", saved.URL)
+	if saved.URL != "wss://"+host {
+		t.Fatalf("relay.json url = %q, want the bare wss://%s", saved.URL, host)
 	}
 	if saved.Origin != "https://"+host {
 		t.Fatalf("relay.json origin = %q", saved.Origin)
+	}
+	if !machineIDRe.MatchString(saved.MachineID) {
+		t.Fatalf("relay.json machine_id = %q, which is not a valid machine id", saved.MachineID)
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname: %v", err)
+	}
+	if saved.MachineName != hostname {
+		t.Fatalf("relay.json machine_name = %q, want this machine's hostname %q", saved.MachineName, hostname)
 	}
 	if !f.subdomainEnabled {
 		t.Fatal("the workers.dev subdomain was never enabled")
 	}
 
-	// The transcript, checkmark by checkmark.
+	// The transcript, checkmark by checkmark — and the one line the user
+	// copies to every other machine, url and secret exactly as saved.
 	transcript := out.String()
 	for _, want := range []string{
 		"✓ token verified",
@@ -539,6 +558,7 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 		fmt.Sprintf("✓ web app uploaded (%d files)", len(files)),
 		"✓ secret set",
 		"✓ reachable at https://" + host,
+		"flue relay join wss://" + host + " --secret " + saved.Secret,
 		"does not store it",
 	} {
 		if !strings.Contains(transcript, want) {
@@ -805,6 +825,127 @@ func TestRunRelaySetupStopsAtTheFailingStep(t *testing.T) {
 	}
 }
 
+// --- flue relay join ---------------------------------------------------------
+
+// TestRunRelayJoinWritesTheRelayConfig is the second machine's whole ceremony:
+// no Cloudflare API, no token — the relay already exists — just the url and
+// secret the first machine's setup printed, written to relay.json with a fresh
+// machine id minted here.
+func TestRunRelayJoinWritesTheRelayConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out bytes.Buffer
+	if err := runRelayJoin(&out, []string{"wss://flue-relay.karn.workers.dev", "--secret", "s3cr3t-from-setup"}); err != nil {
+		t.Fatalf("runRelayJoin: %v", err)
+	}
+
+	saved := loadSavedRelay(t)
+	if saved.URL != "wss://flue-relay.karn.workers.dev" {
+		t.Fatalf("relay.json url = %q, want the bare wss:// host", saved.URL)
+	}
+	// The origin is derived the way setup derives it: the same host, https.
+	if saved.Origin != "https://flue-relay.karn.workers.dev" {
+		t.Fatalf("relay.json origin = %q, want https://flue-relay.karn.workers.dev", saved.Origin)
+	}
+	if saved.Secret != "s3cr3t-from-setup" {
+		t.Fatalf("relay.json secret = %q, want the one given", saved.Secret)
+	}
+	if !machineIDRe.MatchString(saved.MachineID) {
+		t.Fatalf("relay.json machine_id = %q, which is not a valid machine id", saved.MachineID)
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname: %v", err)
+	}
+	if saved.MachineName != hostname {
+		t.Fatalf("relay.json machine_name = %q, want this machine's hostname %q", saved.MachineName, hostname)
+	}
+
+	// 0600, the same argument as setup's write: the file holds the relay's
+	// whole credential.
+	dir, err := config.Dir()
+	if err != nil {
+		t.Fatalf("config.Dir: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "relay.json"))
+	if err != nil {
+		t.Fatalf("Stat relay.json: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("relay.json mode = %o, want 0600", mode)
+	}
+}
+
+// TestRunRelayJoinNormalizesAnHTTPSURL: the address on the setup screen is an
+// https origin as often as it is a wss url — they name the same host, and a
+// user who pastes the one they can see must not be told it is wrong.
+func TestRunRelayJoinNormalizesAnHTTPSURL(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out bytes.Buffer
+	if err := runRelayJoin(&out, []string{"https://flue-relay.karn.workers.dev", "--secret", "s"}); err != nil {
+		t.Fatalf("runRelayJoin: %v", err)
+	}
+	saved := loadSavedRelay(t)
+	if saved.URL != "wss://flue-relay.karn.workers.dev" {
+		t.Fatalf("relay.json url = %q, want the https url normalized to wss://", saved.URL)
+	}
+	if saved.Origin != "https://flue-relay.karn.workers.dev" {
+		t.Fatalf("relay.json origin = %q", saved.Origin)
+	}
+}
+
+// TestRunRelayJoinTakesADisplayName: --name replaces the hostname as the
+// machine's label. It is free text for humans and never enters a URL, so it is
+// stored as given.
+func TestRunRelayJoinTakesADisplayName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out bytes.Buffer
+	if err := runRelayJoin(&out, []string{"wss://r.example", "--secret", "s", "--name", "Study Mac Mini"}); err != nil {
+		t.Fatalf("runRelayJoin: %v", err)
+	}
+	if saved := loadSavedRelay(t); saved.MachineName != "Study Mac Mini" {
+		t.Fatalf("relay.json machine_name = %q, want the --name given", saved.MachineName)
+	}
+}
+
+// TestRunRelayJoinRefusesBadArguments: every refusal names what was missing or
+// wrong, because this command is run from a line pasted across machines and
+// the mistakes are predictable — a lost flag, a scheme that is neither wss nor
+// https, an old-style url with the /daemon path still on it.
+func TestRunRelayJoinRefusesBadArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string // must appear in the error
+	}{
+		{"no arguments at all", nil, "url"},
+		{"no url", []string{"--secret", "s"}, "url"},
+		{"no secret", []string{"wss://r.example"}, "--secret"},
+		{"empty secret", []string{"wss://r.example", "--secret", ""}, "--secret"},
+		{"a scheme that is neither", []string{"http://r.example", "--secret", "s"}, "wss://"},
+		{"no host", []string{"wss://", "--secret", "s"}, "url"},
+		{"a path on the url", []string{"wss://r.example/daemon", "--secret", "s"}, "path"},
+		{"a name past 64 runes", []string{"wss://r.example", "--secret", "s", "--name", strings.Repeat("é", 65)}, "--name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			var out bytes.Buffer
+			err := runRelayJoin(&out, tc.args)
+			if err == nil {
+				t.Fatalf("runRelayJoin(%q) succeeded, want a refusal", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not name %q", err, tc.want)
+			}
+			if _, ok, _ := config.LoadRelay(); ok {
+				t.Fatal("relay.json was written for a join that was refused")
+			}
+		})
+	}
+}
+
 func TestRunRelayStatusReportsTheConfiguredRelay(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
@@ -817,9 +958,11 @@ func TestRunRelayStatusReportsTheConfiguredRelay(t *testing.T) {
 	}
 
 	if err := config.SaveRelay(config.Relay{
-		URL:    "wss://flue-relay.karn.workers.dev/daemon",
-		Secret: "s3cret-value",
-		Origin: "https://flue-relay.karn.workers.dev",
+		URL:         "wss://flue-relay.karn.workers.dev",
+		Secret:      "s3cret-value",
+		Origin:      "https://flue-relay.karn.workers.dev",
+		MachineID:   "karns-macbook-pro-a1b2",
+		MachineName: "Karn's MacBook Pro",
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
 	}
@@ -828,7 +971,7 @@ func TestRunRelayStatusReportsTheConfiguredRelay(t *testing.T) {
 		t.Fatalf("runRelayStatus: %v", err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "wss://flue-relay.karn.workers.dev/daemon") {
+	if !strings.Contains(got, "wss://flue-relay.karn.workers.dev") {
 		t.Fatalf("status = %q, want the relay's URL", got)
 	}
 	if strings.Contains(got, "s3cret-value") {
@@ -845,10 +988,10 @@ func TestCmdRelayRejectsAnUnknownSubcommand(t *testing.T) {
 	}
 }
 
-// TestUsageMentionsRelay keeps the two new lines in the help text: a
-// subcommand nobody can discover may as well not exist.
+// TestUsageMentionsRelay keeps the relay lines in the help text: a subcommand
+// nobody can discover may as well not exist.
 func TestUsageMentionsRelay(t *testing.T) {
-	for _, want := range []string{"flue relay setup", "flue relay status"} {
+	for _, want := range []string{"flue relay setup", "flue relay join", "flue relay status"} {
 		if !strings.Contains(usageText, want) {
 			t.Fatalf("usage text does not mention %q:\n%s", want, usageText)
 		}

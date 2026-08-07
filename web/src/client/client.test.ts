@@ -301,7 +301,12 @@ describe('control message golden file', () => {
       daemonId: 'local',
       host: 'macbook',
       ver: '0.1.0',
-      relay: { status: 'connected', origin: 'https://flue-relay.karn.workers.dev' },
+      relay: {
+        status: 'connected',
+        origin: 'https://flue-relay.karn.workers.dev',
+        machineId: 'karns-macbook-pro-a1b2',
+        machineName: "Karn's MacBook Pro",
+      },
     }
     expect(fixture('welcomeRelay')).toStrictEqual(want)
   })

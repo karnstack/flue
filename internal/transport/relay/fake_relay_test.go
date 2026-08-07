@@ -62,6 +62,7 @@ type fakeRelay struct {
 	upgrades int
 	at       []time.Time
 	auths    []string
+	paths    []string
 	live     []*relayConn
 }
 
@@ -70,7 +71,12 @@ func newFakeRelay(t *testing.T, secret string) *fakeRelay {
 	t.Helper()
 	r := &fakeRelay{secret: secret, conns: make(chan *relayConn, 32)}
 	mux := http.NewServeMux()
+	// The subtree, the way the Worker routes it: the daemon leg dials
+	// /daemon/<machine id>, and which id it presented is recorded for the test
+	// to assert on. The bare path is registered too so a transport that lost
+	// the id dials *something* — and the recorded path is what convicts it.
 	mux.HandleFunc("/daemon", r.serveDaemon)
+	mux.HandleFunc("/daemon/", r.serveDaemon)
 	r.ts = httptest.NewServer(mux)
 	// Registered before any transport's cleanup, so it runs after it: the
 	// handler holds the hijacked socket for its lifetime, and httptest.Server
@@ -83,11 +89,13 @@ func newFakeRelay(t *testing.T, secret string) *fakeRelay {
 	return r
 }
 
-// URL is the address the daemon leg dials, ws:// rather than wss:// because
-// httptest serves plain HTTP. The scheme is the only difference that matters
-// here: the handshake, the header and the framing are the deployed ones.
+// URL is the address the daemon leg is configured with — the bare host, the
+// shape relay.json stores; the transport appends /daemon/<machine id> itself.
+// ws:// rather than wss:// because httptest serves plain HTTP. The scheme is
+// the only difference that matters here: the handshake, the header and the
+// framing are the deployed ones.
 func (r *fakeRelay) URL() string {
-	return "ws" + strings.TrimPrefix(r.ts.URL, "http") + "/daemon"
+	return "ws" + strings.TrimPrefix(r.ts.URL, "http")
 }
 
 // admit is the relay's authorization: the shared secret unless a test said
@@ -105,6 +113,7 @@ func (r *fakeRelay) serveDaemon(w http.ResponseWriter, req *http.Request) {
 	r.upgrades++
 	r.at = append(r.at, time.Now())
 	r.auths = append(r.auths, auth)
+	r.paths = append(r.paths, req.URL.Path)
 	r.mu.Unlock()
 
 	if !r.admit(auth) {
@@ -191,6 +200,18 @@ func (r *fakeRelay) lastAuth(t *testing.T) string {
 		t.Fatal("no upgrade request reached the relay")
 	}
 	return r.auths[len(r.auths)-1]
+}
+
+// lastPath is the URL path of the most recent upgrade request — where the
+// machine id travels, and the only place it does.
+func (r *fakeRelay) lastPath(t *testing.T) string {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.paths) == 0 {
+		t.Fatal("no upgrade request reached the relay")
+	}
+	return r.paths[len(r.paths)-1]
 }
 
 // longestGap is the widest interval between two consecutive upgrade requests,

@@ -84,7 +84,7 @@ func newChannelTransport(t *testing.T, r *fakeRelay, srv Server, id *identity, l
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	tr, err := New(Config{URL: r.URL(), Secret: "s", Origin: testOrigin}, srv, id.key, id.devices, log)
+	tr, err := New(Config{URL: r.URL(), Secret: "s", Origin: testOrigin, MachineID: testMachineID}, srv, id.key, id.devices, log)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

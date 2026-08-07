@@ -184,6 +184,12 @@ type Server struct {
 	relayMu     sync.RWMutex
 	relayStatus string
 	relayOrigin string
+	// The machine's identity on the relay, from relay.json. Written once at
+	// startup by the process that read the file (SetRelayMachine), and never
+	// by the transport: it is configuration, not socket state, which is why
+	// the status callbacks do not carry it.
+	relayMachineID   string
+	relayMachineName string
 
 	primaryMu sync.Mutex
 	primary   map[string]*conn // session ID -> primary connection
@@ -852,6 +858,22 @@ func (s *Server) SetRelayStatus(status, origin string) {
 	s.relayStatus, s.relayOrigin = status, origin
 }
 
+// SetRelayMachine records which machine this daemon is on the relay: the id it
+// dials /daemon/<id> as, and the human label that goes with it. Both come from
+// relay.json, read once at startup by the process that wires the transport up
+// — which is the only caller, and why there is no un-set: a machine identity
+// does not change while the daemon runs.
+//
+// It is separate from SetRelayStatus because the two describe different
+// things: the status is the socket's, reported by the transport as it dials
+// and loses and regains it; the identity is the configuration's, true from the
+// first welcome even while the transport is still connecting.
+func (s *Server) SetRelayMachine(id, name string) {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	s.relayMachineID, s.relayMachineName = id, name
+}
+
 // relayInfo is what a welcome carries, or nil when this daemon has no relay.
 //
 // Nil rather than an object saying "off": the field is optional on both sides,
@@ -863,7 +885,12 @@ func (s *Server) relayInfo() *wire.RelayInfo {
 	if s.relayStatus == "" || s.relayStatus == RelayOff {
 		return nil
 	}
-	return &wire.RelayInfo{Status: s.relayStatus, Origin: s.relayOrigin}
+	return &wire.RelayInfo{
+		Status:      s.relayStatus,
+		Origin:      s.relayOrigin,
+		MachineID:   s.relayMachineID,
+		MachineName: s.relayMachineName,
+	}
 }
 
 // pairingOrigin is the origin a pairing URL should name, given the origin the

@@ -230,6 +230,18 @@ export interface RelayInfo {
   status: 'off' | 'connecting' | 'connected'
   /** Absent unless `status` is `connected`. */
   origin?: string
+  /**
+   * The slot this daemon holds on the relay — the `<id>` of the
+   * `/client/<id>` URL a browser opens to reach this machine. From the
+   * daemon's relay.json rather than the socket, so it is present whenever a
+   * relay is configured, `connecting` and `connected` alike.
+   */
+  machineId?: string
+  /**
+   * The machine's human label, free text from the same file. For lists and
+   * titles, never for URLs — that is what `machineId` is for.
+   */
+  machineName?: string
 }
 
 export interface Welcome {
