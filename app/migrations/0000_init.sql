@@ -1,6 +1,7 @@
 CREATE TABLE `device_auth` (
 	`user_code` text PRIMARY KEY NOT NULL,
 	`device_code` text NOT NULL,
+	`label` text NOT NULL,
 	`created_at` integer NOT NULL,
 	`expires_at` integer NOT NULL,
 	`approved_user_id` text,
@@ -40,6 +41,13 @@ CREATE TABLE `login_codes` (
 );
 --> statement-breakpoint
 CREATE INDEX `login_codes_email_idx` ON `login_codes` (`email`);--> statement-breakpoint
+CREATE TABLE `rate_limits` (
+	`key` text PRIMARY KEY NOT NULL,
+	`window_start` integer NOT NULL,
+	`count` integer DEFAULT 0 NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX `rate_limits_window_start_idx` ON `rate_limits` (`window_start`);--> statement-breakpoint
 CREATE TABLE `sessions` (
 	`id` text PRIMARY KEY NOT NULL,
 	`user_id` text NOT NULL,
