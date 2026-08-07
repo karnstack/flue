@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>flue · architecture</title>
+  <meta name="description" content="How flue is wired: a loopback daemon, a relay Worker in your own Cloudflare account, and end-to-end encryption between the two things you own.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 2.5rem 1.25rem;
+      background: #fdfdfc;
+    }
+    figure {
+      margin: 0;
+      max-width: 72.5rem;
+      width: 100%;
+    }
+    img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+  </style>
+</head>
+<body>
+  <figure>
+    <img src="/architecture.svg" width="1160" height="584"
+      alt="Architecture of flue: on your machine, a browser tab talks to the flue daemon over a loopback websocket. The daemon and your other devices each dial outbound into a relay Worker in your own Cloudflare account; the relay forwards ciphertext it holds no key for. A Noise IK channel runs end to end from the daemon to the remote browser, with the daemon's key pinned at pairing. flue.sh is never part of the data path.">
+  </figure>
+</body>
+</html>

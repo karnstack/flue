@@ -205,48 +205,24 @@ h1 {
   .cursor { animation: none; }
 }
 
-/* Providers table: horizontal hairline rules only */
+/* The architecture figure: wider than the measure, because 1160 units of
+   diagram squeezed into a 42rem column is unreadable. It centers itself on
+   the column (which is itself centered), grows to 66rem when the viewport
+   has it, and scrolls sideways on screens that do not. */
 
-.table-wrap {
-  margin-top: 2rem;
+.arch {
+  --arch-w: min(100vw - 2.5rem, 66rem);
+  width: var(--arch-w);
+  margin: 2.5rem 0 0 calc((100% - var(--arch-w)) / 2);
   overflow-x: auto;
 }
 
-table {
+.arch img {
+  display: block;
   width: 100%;
-  min-width: 34rem;
-  border-collapse: collapse;
-  font-size: 0.9375rem;
-  line-height: 1.5;
-}
-
-th,
-td {
-  padding: 0.625rem 1.5rem 0.625rem 0;
-  text-align: left;
-  vertical-align: top;
-}
-
-th:last-child,
-td:last-child {
-  padding-right: 0;
-}
-
-th {
-  border-bottom: 1px solid var(--rule);
-  font-family: var(--mono);
-  font-size: 0.75rem;
-  font-weight: 500;
-  letter-spacing: 0.05em;
-  color: var(--ink-2);
-}
-
-td {
-  border-bottom: 1px solid var(--hairline);
-}
-
-.table-wrap + p {
-  margin-top: 1.5rem;
+  min-width: 46rem;
+  height: auto;
+  border-radius: 12px;
 }
 
 /* The thesis */
@@ -267,4 +243,9 @@ footer {
   border-top: 1px solid var(--hairline);
   font-size: 0.875rem;
   color: var(--ink-2);
+}
+
+footer p a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }

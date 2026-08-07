@@ -603,7 +603,9 @@ export function Terminal({
           <div
             role="status"
             className={cn(
-              'rounded-lg px-3 py-1.5 text-base/6 font-medium sm:text-sm/6',
+              // /4 line-height: 16px text box + py-1.5 = the same 28px as the
+              // icon buttons beside it (size-4 in py-1.5), one strip height.
+              'rounded-lg px-3 py-1.5 text-base/4 font-medium sm:text-sm/4',
               'bg-(--chip-bg) text-(--chip-fg) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             )}
           >

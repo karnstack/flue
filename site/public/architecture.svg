@@ -1,0 +1,86 @@
+<svg viewBox="0 0 1160 584" xmlns="http://www.w3.org/2000/svg" role="img"
+  aria-label="Architecture of flue. On your machine, a browser tab talks to the flue daemon over a loopback websocket. The daemon and your other devices each dial outbound into a relay Worker running in your own Cloudflare account; the relay forwards ciphertext it holds no key for. A Noise IK channel runs end to end from the daemon to the remote browser, with the daemon's key pinned at pairing. flue.sh is never part of the data path.">
+  <style>
+    text {
+      font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    .eyebrow { font-size: 11px; letter-spacing: 0.14em; fill: #71717a; }
+    .title   { font-size: 15px; font-weight: 600; fill: #e4e4e7; }
+    .body    { font-size: 12.5px; fill: #9f9fa8; }
+    .label   { font-size: 12px; fill: #9f9fa8; paint-order: stroke; stroke: #09090b; stroke-width: 6px; stroke-linejoin: round; }
+    .noise   { font-size: 12.5px; fill: #fe9a00; paint-order: stroke; stroke: #09090b; stroke-width: 6px; stroke-linejoin: round; }
+    .foot    { font-size: 12px; fill: #71717a; }
+    .zone    { fill: none; stroke: #3a3a41; stroke-dasharray: 4 6; }
+    .box     { fill: #101014; stroke: #2e2e35; }
+    .wire    { stroke: #71717a; stroke-width: 1.5; fill: none; }
+    .e2e     { stroke: #fe9a00; stroke-width: 1.5; fill: none; stroke-dasharray: 2 7; stroke-linecap: round; stroke-linejoin: round; }
+  </style>
+
+  <rect x="0" y="0" width="1160" height="584" rx="12" fill="#09090b"/>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0.6 L7.4,4 L0,7.4" fill="none" stroke="#71717a" stroke-width="1.5" stroke-linecap="round"/>
+    </marker>
+  </defs>
+
+  <g transform="translate(0,-56)">
+    <!-- zone: your machine -->
+    <rect class="zone" x="48" y="120" width="300" height="330" rx="10"/>
+    <text class="eyebrow" x="64" y="150">YOUR MACHINE</text>
+
+    <rect class="box" x="64" y="170" width="268" height="84" rx="8"/>
+    <text class="title" x="80" y="197">browser tab</text>
+    <text class="body" x="80" y="218">the web app, from the daemon</text>
+    <text class="body" x="80" y="238">127.0.0.1:7717</text>
+
+    <line class="wire" x1="198" y1="254" x2="198" y2="286" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <text class="label" x="212" y="275">ws, loopback</text>
+
+    <rect class="box" x="64" y="286" width="268" height="130" rx="8"/>
+    <text class="title" x="80" y="313">flue daemon</text>
+    <text class="body" x="80" y="334">one static Go binary</text>
+    <text class="body" x="80" y="354">owns the PTYs and scrollback</text>
+    <text class="body" x="80" y="374">binds loopback only</text>
+    <text class="body" x="80" y="394">dials out, never listens out</text>
+
+    <!-- zone: your cloudflare account -->
+    <rect class="zone" x="480" y="120" width="260" height="330" rx="10"/>
+    <text class="eyebrow" x="496" y="150">YOUR CLOUDFLARE ACCOUNT</text>
+
+    <rect class="box" x="496" y="225" width="228" height="145" rx="8"/>
+    <text class="title" x="512" y="252">flue-relay</text>
+    <text class="body" x="512" y="273">Worker + Durable Objects</text>
+    <text class="body" x="512" y="293">one hub per machine</text>
+    <text class="body" x="512" y="313">serves the same web app</text>
+    <text class="body" x="512" y="333">forwards ciphertext</text>
+    <text class="body" x="512" y="353">holds no key for it</text>
+
+    <!-- zone: your other devices -->
+    <rect class="zone" x="852" y="120" width="260" height="330" rx="10"/>
+    <text class="eyebrow" x="868" y="150">YOUR OTHER DEVICES</text>
+
+    <rect class="box" x="868" y="225" width="228" height="145" rx="8"/>
+    <text class="title" x="884" y="252">phone · iPad · laptop</text>
+    <text class="body" x="884" y="273">the same web app,</text>
+    <text class="body" x="884" y="293">served by the relay</text>
+    <text class="body" x="884" y="313">paired once per browser,</text>
+    <text class="body" x="884" y="333">from a QR the daemon shows</text>
+
+    <!-- outbound dials into the relay -->
+    <line class="wire" x1="332" y1="340" x2="492" y2="340" marker-end="url(#arrow)"/>
+    <text class="label" x="412" y="330" text-anchor="middle">wss /daemon/&lt;id&gt;</text>
+
+    <line class="wire" x1="868" y1="297" x2="728" y2="297" marker-end="url(#arrow)"/>
+    <text class="label" x="798" y="287" text-anchor="middle">wss /client/&lt;id&gt;</text>
+
+    <!-- the end-to-end channel, under everything the relay touches -->
+    <path class="e2e" d="M198,416 V500 H982 V370"/>
+    <circle cx="198" cy="416" r="3" fill="#fe9a00"/>
+    <circle cx="982" cy="370" r="3" fill="#fe9a00"/>
+    <text class="noise" x="590" y="490" text-anchor="middle">Noise IK, end to end · the daemon's key, pinned at pairing</text>
+
+    <!-- footer -->
+    <text class="foot" x="48" y="596">no hosted service: every hop above runs on hardware, or an account, that you own. flue.sh is docs and downloads, never part of the data path.</text>
+  </g>
+</svg>

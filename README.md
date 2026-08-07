@@ -15,16 +15,17 @@
 </p>
 
 > Status: the local terminal works, and `flue enable` installs the login
-> service. Pairing works over `local` — pair a second device from the UI, see
-> it listed, revoke it — and the end-to-end crypto it pins is in place. The
-> Cloudflare relay is built: `flue relay setup` deploys it to your own
-> account, `flue relay join` points your other machines at the same Worker,
-> and each daemon dials its own slot on it. It has not yet been through its
-> manual end-to-end gate against a real account
+> service. The end-to-end crypto pairing pins is in place, and the devices
+> UI lists and revokes what is paired; pairing a new device needs the relay
+> connected, because the daemon binds loopback only and the UI refuses to
+> offer a QR that says 127.0.0.1, an address every other device resolves to
+> itself. The Cloudflare relay is built: `flue relay setup` deploys it to
+> your own account, `flue relay join` points your other machines at the same
+> Worker, and each daemon dials its own slot on it. It has not yet been
+> through its manual end-to-end gate against a real account
 > ([docs/RELAY.md](docs/RELAY.md)), so treat it as ready to try rather than
-> ready to rely on. Tailscale is still designed, not built. No release is
-> tagged yet — the pipeline is live, and the first tag ships binaries, a brew
-> formula, and the installer.
+> ready to rely on. No release is tagged yet: the pipeline is live, and the
+> first tag ships binaries, a brew formula, and the installer.
 >
 > flue is open source and always free. There is no hosted service and none is
 > planned: remote access runs through a Worker you deploy into your own
@@ -70,27 +71,35 @@ replays what you missed. Two devices on one session mirror live — typing on
 the phone shows up on the laptop, and the phone's 40 columns don't shrink
 the laptop.
 
+<p align="center">
+  <img src="docs/architecture.png" width="830"
+    alt="Architecture of flue: on your machine, a browser tab talks to the flue daemon over a loopback websocket. The daemon and your other devices each dial outbound into a flue-relay Worker in your own Cloudflare account, which forwards ciphertext it holds no key for. A Noise IK channel runs end to end from the daemon to the remote browser, the daemon's key pinned at pairing. No hosted service; flue.sh is never part of the data path.">
+</p>
+
 The CLI stays small on purpose:
 
 ```
-flue enable       # install the login service, start the daemon, open the UI
-flue disable      # remove it
-flue status       # version, daemon state, session count
-flue open [path]  # spawn a session here — handy from a shell prompt
-flue relay setup  # deploy a relay to your own Cloudflare account (see below)
-flue relay join   # point this machine at a relay another machine deployed
+flue enable        # install the login service, start the daemon, open the UI
+flue disable       # remove it
+flue status        # daemon, login service, and session diagnostics
+flue open [path]   # spawn a session here — handy from a shell prompt
+flue relay setup   # deploy a relay to your own Cloudflare account (see below)
+flue relay join    # point this machine at a relay another machine deployed
+flue relay status  # show the configured relay
+flue serve         # run the daemon in the foreground, no login service
 ```
 
 ## Remote access
 
-Remote access is opt-in and provider-agnostic. flue has no preferred option;
-the UI orders them by what you already have.
+Remote access is opt-in. One remote path exists today: a relay Worker you
+deploy into your own Cloudflare account. The Remote screen in the UI shows
+`flue relay setup` until a relay is configured, then the state of the one
+you have.
 
 | provider | what it needs | intermediary | state |
 |---|---|---|---|
 | local | nothing, always on | none | works |
 | Cloudflare | a Cloudflare account, free tier is enough | your own Worker, ciphertext only | works — `flue relay setup` |
-| Tailscale | Tailscale on each device | none, often direct peer-to-peer | designed |
 | Cloudflare + your domain | a domain on Cloudflare | your own Worker | designed |
 
 One relay fronts every machine you own, and only the first machine ever
