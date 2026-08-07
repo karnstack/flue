@@ -96,6 +96,14 @@ describe('compiled stylesheet', () => {
       expect(css.slice(at, at + 80)).not.toContain('teal')
     }
   })
+
+  it('leaves the pinch gesture to the browser on the terminal surface', () => {
+    // touch-action: none once shipped here and made the page unzoomable on
+    // phones; pinch-zoom keeps single-finger drags for the scrollback
+    // handler while two fingers still zoom.
+    expect(css).toContain('touch-action:pinch-zoom')
+    expect(css).not.toContain('touch-action:none')
+  })
 })
 
 /**

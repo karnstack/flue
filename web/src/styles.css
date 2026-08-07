@@ -296,9 +296,11 @@
 @utility flue-term-surface {
   block-size: 100%;
   inline-size: 100%;
-  /* The gesture is ours: touches become scrollLines() calls (terminal.tsx),
-   * and a browser allowed to pan or pinch the page would eat them first. */
-  touch-action: none;
+  /* Single-finger gestures are ours: touches become scrollLines() calls
+   * (terminal.tsx), and a browser allowed to pan the page would eat them
+   * first. The pinch stays with the browser — `none` here once made the
+   * page unzoomable on phones, which is too much to take. */
+  touch-action: pinch-zoom;
 }
 
 /* xterm v6's overlay scrollbar, hidden. It draws over the last column and
