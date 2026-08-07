@@ -204,13 +204,13 @@ type Server struct {
 	// so the last element is the one promoted when the primary leaves.
 	attached map[string][]*conn
 	// desired is each attached connection's own fitted size, as its last
-	// resize reported it. The PTY is sized to the componentwise maximum of
-	// these — the largest attached view — which is the whole of "the phone's
-	// 40 columns don't shrink the laptop": the phone reports 40, the laptop
-	// reports 200, the PTY is 200, and the phone renders it scaled. A view
-	// leaving takes its entry with it, so when the laptop goes the maximum
-	// falls to the phone and the PTY follows without any ownership changing
-	// hands.
+	// resize reported it. The PTY wears one of them — the entry belonging to
+	// the most recently active view, which attached above already orders (see
+	// effectiveLocked). Every view's report is kept rather than only the
+	// winner's, because an idle view's desire is not discarded but waiting:
+	// the moment that view is used again it is what the PTY takes. A view
+	// leaving takes its entry with it, so the size falls to whichever
+	// remaining view was active last without any ownership changing hands.
 	desired map[string]map[*conn]viewSize
 }
 
@@ -1242,11 +1242,10 @@ func (s *Server) touch(id string, c *conn) {
 	}
 }
 
-// recordDesire notes c's fitted size for a session and returns the effective
-// size — the componentwise maximum across every attached view — along with
-// whether one exists. The maximum, not the reporter's own ask, is what the
-// PTY is set to.
-func (s *Server) recordDesire(id string, c *conn, cols, rows uint16) (viewSize, bool) {
+// recordDesire notes c's fitted size for a session. What the PTY is actually
+// set to is effective's business: the desire of the most recently active
+// view, which after a report is usually — but not necessarily — the reporter.
+func (s *Server) recordDesire(id string, c *conn, cols, rows uint16) {
 	s.primaryMu.Lock()
 	defer s.primaryMu.Unlock()
 	m := s.desired[id]
@@ -1255,27 +1254,40 @@ func (s *Server) recordDesire(id string, c *conn, cols, rows uint16) (viewSize, 
 		s.desired[id] = m
 	}
 	m[c] = viewSize{cols: cols, rows: rows}
+}
+
+// effective is effectiveLocked behind its lock, for callers outside the
+// primaryMu critical sections.
+func (s *Server) effective(id string) (viewSize, bool) {
+	s.primaryMu.Lock()
+	defer s.primaryMu.Unlock()
 	return s.effectiveLocked(id)
 }
 
-// effectiveLocked computes the largest-view size under primaryMu.
+// effectiveLocked computes, under primaryMu, the size the PTY should wear:
+// the fitted size of the most recently active view that has reported one.
+// The attachment list already encodes recency — touch keeps each session's
+// most recent client at the back — so the walk is from the back, skipping
+// views that have yet to report. One pty has one grid, so someone must be
+// chosen; choosing the view being *used* is what lets a phone pick a session
+// up at phone size and a laptop take it back with a keystroke.
 func (s *Server) effectiveLocked(id string) (viewSize, bool) {
-	var eff viewSize
-	found := false
-	for _, v := range s.desired[id] {
-		found = true
-		eff.cols = max(eff.cols, v.cols)
-		eff.rows = max(eff.rows, v.rows)
+	list := s.attached[id]
+	desires := s.desired[id]
+	for i := len(list) - 1; i >= 0; i-- {
+		if v, ok := desires[list[i]]; ok {
+			return v, true
+		}
 	}
-	return eff, found
+	return viewSize{}, false
 }
 
 // releasePrimary drops c from the session — role, activity order and desired
 // size alike — and promotes the most recently active remaining client if c
 // was primary. It returns the promoted connection (nil when none), the
-// effective size the remaining views want, and whether any view remains to
-// want one; the caller resizes the PTY to it, which is how a departing
-// laptop's columns are handed back.
+// effective size of what remains — the most recently active surviving view's
+// desire — and whether any view remains to want one; the caller resizes the
+// PTY to it, which is how a departing laptop's columns are handed back.
 func (s *Server) releasePrimary(id string, c *conn) (promoted *conn, eff viewSize, ok bool) {
 	s.primaryMu.Lock()
 	defer s.primaryMu.Unlock()

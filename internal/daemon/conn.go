@@ -350,9 +350,31 @@ func (c *conn) handleBinary(data []byte) {
 		return
 	}
 	c.srv.touch(a.s.ID(), c)
+	c.syncSize(a)
 	if err := a.s.Write(payload); err != nil {
 		c.sendError("write_failed", err.Error())
 	}
+}
+
+// syncSize points the PTY at the effective size — the most recently active
+// view's desire — and broadcasts when that is a change. Called wherever
+// activity may have moved which view is effective: after a size report, and
+// after every input frame, because typing is how a view takes the size back
+// without re-reporting it.
+func (c *conn) syncSize(a *attachment) {
+	eff, ok := c.srv.effective(a.s.ID())
+	if !ok {
+		return
+	}
+	info := a.s.Info()
+	if eff.cols == info.Cols && eff.rows == info.Rows {
+		return
+	}
+	if err := a.s.Resize(eff.cols, eff.rows); err != nil {
+		c.sendError("resize_failed", err.Error())
+		return
+	}
+	c.srv.broadcastSize(a.s.ID(), eff.cols, eff.rows)
 }
 
 func (c *conn) attachment(ref uint32) *attachment {
@@ -420,26 +442,14 @@ func (c *conn) handleControl(msg any) {
 		if m.Primary {
 			c.srv.setPrimary(a.s.ID(), c)
 		}
-		// Every view reports the size that fits it; the PTY takes the
-		// componentwise maximum across them. This is what stops a phone from
-		// shrinking a laptop's view — the phone's 40 columns raise no
-		// maximum — and what hands the columns back when the laptop leaves,
-		// because a departed view's report leaves with it (releasePrimary).
-		// The primary role above still decides who answers device queries;
-		// it no longer owns the dimensions.
-		eff, ok := c.srv.recordDesire(a.s.ID(), c, m.Cols, m.Rows)
-		if !ok {
-			return
-		}
-		info := a.s.Info()
-		if eff.cols == info.Cols && eff.rows == info.Rows {
-			return
-		}
-		if err := a.s.Resize(eff.cols, eff.rows); err != nil {
-			c.sendError("resize_failed", err.Error())
-			return
-		}
-		c.srv.broadcastSize(a.s.ID(), eff.cols, eff.rows)
+		// The report is recorded for every view, but the PTY follows the most
+		// recently active one — which this reporter, having just been touched,
+		// now is. An idle view's desire therefore waits, and is applied the
+		// moment that view speaks again (see syncSize on the input path). The
+		// primary role above still decides who answers device queries; it
+		// does not own the dimensions.
+		c.srv.recordDesire(a.s.ID(), c, m.Cols, m.Rows)
+		c.syncSize(a)
 
 	case wire.Signal:
 		a := c.attachment(m.Ref)
@@ -740,10 +750,10 @@ func (c *conn) detach(ref uint32) {
 
 	promoted, eff, ok := c.srv.releasePrimary(a.s.ID(), c)
 
-	// The departed view's size is out of the maximum now. If it was the
-	// largest, the PTY shrinks to the largest remaining view — this is the
-	// laptop closing and the phone getting a phone-sized terminal back —
-	// and everyone still attached hears the new size.
+	// The departed view's desire left with it. If it was the one the PTY was
+	// wearing, the size passes to whichever remaining view was active last —
+	// this is the laptop closing and the phone getting a phone-sized terminal
+	// back — and everyone still attached hears the new size.
 	if ok {
 		info := a.s.Info()
 		if eff.cols != info.Cols || eff.rows != info.Rows {

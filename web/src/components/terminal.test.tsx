@@ -606,10 +606,10 @@ describe('Terminal', () => {
     })
 
     it('scales its surface to the larger view and reports only its own fit', async () => {
-      // The whole point of the policy: a phone at 400px must not drag a
-      // laptop's terminal down to 40 columns. The pty stays at the largest
-      // view — the phone renders it scaled, and the one thing it sends the
-      // daemon is what fits *itself*, which cannot lower the maximum.
+      // The rendering half of the policy: when the pty is wearing another
+      // view's fit, this one shows the whole screen scaled down rather than
+      // reflowing it, and the one thing it ever sends the daemon is what fits
+      // *itself*.
       paneOf(400, 400)
       const { sock, em } = mountTerminal((e) => (
         <Terminal sessionId="s1" createEmulator={e.create} />

@@ -87,27 +87,25 @@ export const RESIZE_SETTLE_MS = 150
  * ## The sizing policy
  *
  * Every attached view measures its own pane and reports the cells that fit
- * it; the daemon sizes the pty to the componentwise maximum across the
- * views and broadcasts the result (`recordDesire` in internal/daemon). A
- * view whose own fit matches or exceeds the pty renders it one-to-one; a
- * smaller view renders the full screen and scales the whole surface down
- * with a CSS transform, staying fully interactive. That is what stops a
- * phone at 40 columns from shrinking a laptop's terminal — and what hands
- * the columns back the moment the laptop detaches, because a departed
- * view's report leaves the maximum with it. Ownership never moves, so a
- * socket blip on either device reshapes nothing.
+ * it; the daemon sizes the pty to the fit of the most recently active view
+ * (`effectiveLocked` in internal/daemon) — activity being input, a report,
+ * a signal or the attach itself. A view whose own fit matches or exceeds
+ * the pty renders it one-to-one; a smaller view renders the full screen and
+ * scales the whole surface down, staying fully interactive. Picking up the
+ * phone therefore reshapes the session to the phone the moment its report
+ * lands, and the first keystroke back on the laptop reshapes it back; a
+ * detaching view hands the size to whichever remaining view was active
+ * last. Ownership of the *primary* role never moves with any of this — the
+ * daemon keeps one client primary purely to answer device queries.
  *
- * The daemon still keeps one client primary — first attacher, most recently
- * active promoted on departure — but the role now governs exactly one
- * thing: who answers device queries. Size never follows it.
- *
- * Known cost of the transform, and it is a real one: xterm derives mouse
+ * Known cost of that scaling, and it is a real one: xterm derives mouse
  * coordinates from `getBoundingClientRect`, which reports the *scaled* box, so
  * click-to-position and drag-select land off by the scale factor on a
  * scaled view. Keyboard input, which is what a terminal is for, is
  * unaffected. The alternative — scaling by font size instead — keeps mouse
- * coordinates honest but reflows the larger view's screen into a different
- * shape, which is the one thing the policy exists to prevent.
+ * coordinates honest but makes what a view reports depend on how small a
+ * font it is willing to draw, so the session's shape would follow rendering
+ * choices rather than the pane a human is looking at.
  *
  * ## One view per session per tab
  *
@@ -253,17 +251,19 @@ export function Terminal({
       if (!cell) return
       const want = cellsThatFit(paneBox(), cell)
 
-      // Every view reports its own fit — the daemon keeps the largest — but
-      // only after RESIZE_SETTLE_MS without further movement, one report per
-      // settled layout rather than one per animation frame.
+      // Every view reports its own fit — the daemon hands the pty to whichever
+      // view was active last — but only after RESIZE_SETTLE_MS without further
+      // movement, one report per settled layout rather than one per animation
+      // frame.
       if (reported === null || want.cols !== reported.cols || want.rows !== reported.rows) {
         if (settleTimer) clearTimeout(settleTimer)
         settleTimer = window.setTimeout(sendFittedSize, RESIZE_SETTLE_MS)
       }
 
       if (want.cols >= dims.cols && want.rows >= dims.rows) {
-        // The pty fits this pane — this is the largest view, or its equal —
-        // so the surface simply fills the pane and nothing is transformed.
+        // The pty fits this pane — whatever view set the size, this one can
+        // show it whole — so the surface simply fills the pane and nothing is
+        // transformed.
         surface.style.removeProperty('width')
         surface.style.removeProperty('height')
         surface.style.removeProperty('scale')

@@ -291,11 +291,12 @@ func TestSecondAttacherIsNotPrimary(t *testing.T) {
 	})
 }
 
-// TestResizeKeepsTheLargestAttachedView pins the sizing policy: the PTY is
-// the componentwise maximum of what the attached views report, so a phone's
-// 40 columns cannot shrink a laptop's 120 — and when the laptop leaves, its
-// columns leave with it and the phone finally gets a phone-sized terminal.
-func TestResizeKeepsTheLargestAttachedView(t *testing.T) {
+// TestPtySizeFollowsTheActiveView pins the sizing policy: the PTY wears the
+// fitted size of the most recently active view — attaching, reporting a size
+// and typing all count as activity. A phone that attaches beside a laptop
+// gets a phone-sized terminal the moment it reports, and the laptop takes
+// the size back with its first keystroke, no re-report needed.
+func TestPtySizeFollowsTheActiveView(t *testing.T) {
 	ts, reg := newTestServer(t)
 	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "2"}, Cols: 80, Rows: 24})
 	if err != nil {
@@ -329,17 +330,28 @@ func TestResizeKeepsTheLargestAttachedView(t *testing.T) {
 		return ok
 	})
 
-	// The phone reports what fits it. The maximum is unmoved, so the PTY is.
+	// The phone just attached and reported, which makes it the active view:
+	// the PTY reshapes to the phone rather than staying with the largest.
 	writeControl(t, phone, wire.Resize{Ref: phoneRef, Cols: 40, Rows: 10, Primary: false})
-	time.Sleep(200 * time.Millisecond)
-	if got := s.Info(); got.Cols != 120 || got.Rows != 40 {
-		t.Fatalf("size = %dx%d after the phone's report, want the laptop's 120x40", got.Cols, got.Rows)
-	}
-
-	// The laptop leaves; the largest remaining view is the phone's, and the
-	// PTY follows it down without the phone asking again.
-	writeControl(t, laptop, wire.Detach{Ref: laptopRef})
 	waitFor(t, func() bool { return s.Info().Cols == 40 && s.Info().Rows == 10 })
+
+	// A keystroke on the laptop moves the activity back; its recorded desire
+	// is applied without the laptop re-reporting anything.
+	frame := wire.EncodeBinary(wire.FrameInput, laptopRef, []byte("k"))
+	if err := laptop.Write(context.Background(), websocket.MessageBinary, frame); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	waitFor(t, func() bool { return s.Info().Cols == 120 && s.Info().Rows == 40 })
+
+	// The phone's keyboard opening is a fresh report, and a report is
+	// activity: the size follows the phone again.
+	writeControl(t, phone, wire.Resize{Ref: phoneRef, Cols: 40, Rows: 15, Primary: false})
+	waitFor(t, func() bool { return s.Info().Cols == 40 && s.Info().Rows == 15 })
+
+	// The phone leaves; the laptop is what remains, and its desire returns
+	// without anyone asking again.
+	writeControl(t, phone, wire.Detach{Ref: phoneRef})
+	waitFor(t, func() bool { return s.Info().Cols == 120 && s.Info().Rows == 40 })
 }
 
 // waitFor polls cond briefly; the daemon's side of these flows is

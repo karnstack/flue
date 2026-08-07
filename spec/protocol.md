@@ -52,12 +52,16 @@ Every control message is a JSON object with a `type` discriminator.
 ### Sizing
 
 Every attached view sends `resize` with the cells that fit its own pane. The
-daemon records one desired size per attachment and keeps the PTY at the
-componentwise maximum across them — the largest attached view — recomputing
-when a report changes and when an attachment ends, and broadcasting the
-result as `sizeChanged`. A view whose fit is below the broadcast size renders
-the full screen scaled down; a phone therefore never shrinks a laptop, and a
-laptop detaching hands its columns back without anyone asking again.
+daemon records one desired size per attachment and keeps the PTY at the fit
+of the **most recently active** view — activity being an input frame, a size
+report, a signal, or the attach itself. It recomputes when a report lands,
+when activity moves between views, and when an attachment ends, broadcasting
+the result as `sizeChanged`. A view whose fit is below the broadcast size
+renders the full screen scaled down; one whose fit is at or above it renders
+the grid one-to-one. One pty has one grid, so someone must be chosen, and it
+is the view being used: picking up the phone reshapes the session to the
+phone as soon as it reports, and the laptop's next keystroke reshapes it
+back — an idle view's report is never lost, only waiting.
 
 `primary` marks exactly one attachment per session — first attacher, most
 recently active promoted when it leaves — and governs one thing: which
