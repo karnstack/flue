@@ -74,7 +74,7 @@
 
 <span class="prompt">$</span> <span class="cursor"></span></pre>
       </figure>
-      <p>Setup runs once, on one machine, with a Cloudflare API token that is never stored. Every other machine runs the join line setup prints, with no token and nothing to deploy, and each browser pairs once from the QR the machine shows. The relay is new: built and working, but not yet through its release gate, so treat it as ready to try rather than ready to rely on.</p>
+      <p>Setup runs once, on one machine. The Cloudflare API token stays on it — one file only you can read, kept so updating the relay never asks for the token again, deleted whenever you want it forgotten. Every other machine runs the join line setup prints, with no token and nothing to deploy, and each browser pairs once from the QR the machine shows. The relay is new: built and working, but not yet through its release gate, so treat it as ready to try rather than ready to rely on.</p>
       <p>Everything that crosses the relay is end-to-end encrypted with Noise IK, the daemon's key pinned at pairing, so the Worker forwards ciphertext it holds no key for.</p>
     </section>
 
