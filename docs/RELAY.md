@@ -46,12 +46,6 @@ daemon  ---- wss /daemon ---->  Worker + Durable Object  <---- wss /client ---- 
   because Noise is the confidentiality boundary and a browser credential would
   add none. What a credential-less leg does expose is denial of service, and
   that is what the caps below are for.
-  This is the relay you deploy — one daemon, one shared secret, one hub — and
-  it is what the rest of this document is about. The same Worker has a second
-  mode it enters only when a `RELAY_SIGNING_SECRET` is bound: flue.sh's relay
-  serves many accounts, so there every leg presents a token its control plane
-  signed and lands on a hub named by that token (`spec/relay-protocol.md`,
-  Auth). `flue relay setup` never binds that secret, and nothing below changes.
 - **Keepalive:** either leg may send the text frame `flue-ping`, which the
   Cloudflare edge answers `flue-pong` from the Durable Object's auto-response
   without waking it. The daemon and the browser each send one every 30 s, which

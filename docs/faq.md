@@ -33,17 +33,13 @@ daemon and can read what crosses it. That is the single action that turns
 "carries ciphertext" into "reads your terminal", and it needs no cryptographic
 weakness whatsoever.
 
-**On flue.sh it is simpler than that, and worse.** The hosted service does not
-use the pairing ceremony at all — a machine joins an account with `flue link`,
-and the browser is handed that machine's public key by the control plane along
-with the session (`docs/SAAS.md`). So a hostile hosted origin would not need to
-pair itself as a device: the JavaScript it serves is the code that holds your
-browser's Noise keys, runs the handshake and decrypts every frame, and an
-origin that shipped a modified bundle would be reading the plaintext where the
-plaintext already is. There is no arrangement of the cryptography that fixes
-this for a web app, ours included. Using flue.sh means trusting flue.sh to
-serve the published code; self-hosting moves that trust to an origin you
-deployed yourself, which is why self-hosting comes first in this document.
+**The deeper version of the same move needs no pairing at all.** The
+JavaScript the relay origin serves is the code that holds your browser's Noise
+keys, runs the handshake and decrypts every frame — an origin that shipped a
+modified bundle would be reading the plaintext where the plaintext already is.
+There is no arrangement of the cryptography that fixes this for a web app.
+Self-hosting keeps that trust at an origin you deployed yourself, which is the
+reason it is the only deployment flue has.
 
 One thing bounds the pairing version of the move, and it is not a fix: it only
 works during a pairing window *you* opened, so a relay cannot enrol itself
@@ -126,76 +122,15 @@ reach the machine directly: same LAN, or a private network like Tailscale.
 A phone that is off the network has no such path, and there the relay is the
 only way to pair at all.
 
-## What does flue.sh store?
+## Does flue run any servers?
 
-The hosted service is built — invite-only, two Workers and a database — and not
-yet open. So this stops being a promise about a design and becomes a list you
-can check against the source: its whole database is seven tables
-(`app/src/db/schema.ts`), and this is all of them.
-
-- **`users`** — an email address, a created-at, and a disabled flag. No name,
-  no password (there are none), no billing, nothing else.
-- **`invites`** — the invite code, optionally the one address it was issued to,
-  and who redeemed it.
-- **`login_codes`** — an address and an **HMAC** of the eight-digit code, never
-  the code. Ten-minute expiry, five guesses, then the row is gone.
-- **`sessions`** — a **SHA-256 of the session cookie**, the account it belongs
-  to, and an eight-hour expiry. Never the cookie itself, so a dump of this
-  table cannot be replayed at the front door.
-- **`devices`** — one row per machine you enrol: its id (which *is*
-  `sha256(public key)[:12]`), the account it belongs to, the label you gave it,
-  its **public** Noise key, a SHA-256 of its enrollment token, a created-at, a
-  last-seen column that nothing writes yet, and a disabled flag.
-- **`device_auth`** — the `flue link` handshake while it is in flight, for ten
-  minutes: the short code you type, a digest of the daemon's code, and the
-  label that machine proposed. Single-use.
-- **`rate_limits`** — a count and a window under a **digest** of what is being
-  counted, so the table is counters rather than a list of every address and IP
-  that has touched the service.
-
-That is the lot, and rows are collected rather than kept: an hourly cron
-deletes expired login codes, expired sessions, spent or expired link grants,
-and rate-limit counters past their window. What persists is your account, your
-invites, and your machines — a machine until you remove it from the directory,
-which deletes the row.
-
-**No terminal content, ever** — no scrollback, no commands, no output, no
-environment, no working directory. That is not a policy promise about data we
-could read and choose not to keep. The relay carries Noise ciphertext it holds
-no key for; terminal content is not something it declines to store, it is
-something the bytes crossing it cannot be turned into. What the relay does see
-is the same metadata a self-hosted one sees: which account and machine a
-channel belongs to, when it opened and closed, and how many frames and bytes
-went each way — enough for traffic analysis of a session, never its content.
-
-The qualifier from the first answer stays attached to every sentence above,
-because it is the same trust boundary and the hosted service is the case it was
-written for. The guarantee is about what crosses the relay, not about the
-JavaScript the origin serves you — and on flue.sh that JavaScript is the code
-holding your keys. It is stated plainly up there rather than softened here.
-
-One more thing worth knowing, since it is about your machines rather than your
-data: flue.sh can switch an account or a single machine off, and both are
-`update` statements an operator runs by hand ([`SAAS.md`](SAAS.md)). It stops
-new connections — within a minute for a browser, five for a daemon — and it
-does not reach into a session that is already open. `/terms` says the same
-thing, and it is the last thing this project would want to overstate.
-
-## Can I run it without flue.sh?
-
-Yes, and that path exists first. `flue relay setup` takes a Cloudflare API
-token, deploys the same Worker and the same web bundle into **your** account,
-sets a fresh daemon secret, and writes the config the daemon dials. No flue
-account, no flue server, nothing of ours between your browser and your
-machine. Cloudflare's free plan is enough for personal use.
+No. There is no hosted service and none is planned. `flue relay setup` takes a
+Cloudflare API token, deploys the Worker and the web bundle into **your**
+account, sets a fresh daemon secret, and writes the config the daemon dials. No
+flue account, no flue server, nothing of anyone else's between your browser and
+your machine. Cloudflare's free plan is enough for personal use.
 
 The runbook — what gets deployed, what it costs, what the caps are, and how to
-read the relay's own counters — is [`docs/RELAY.md`](RELAY.md).
-
-That the hosted service now exists changes nothing here. Self-hosting is not a
-fallback for people who did not get an invite: it is the deployment with the
-smaller trust boundary, and the one the second answer above keeps pointing at.
-flue.sh is for the case where running a Worker yourself is not the part you
-wanted to do. The whole of it is open in this repository — the control plane is
-`app/`, the relay is `relay/` — so "run it yourself" includes running the
-hosted stack yourself if you ever want to ([`SAAS.md`](SAAS.md)).
+read the relay's own counters — is [`docs/RELAY.md`](RELAY.md). flue.sh itself
+is a landing page with instructions and the install script, and stores
+nothing.

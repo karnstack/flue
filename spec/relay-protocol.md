@@ -167,14 +167,6 @@ almost-free Durable Object.
 
 ## Auth
 
-The relay has **two auth modes, chosen by its environment**, and the same
-Worker is both. `RELAY_SIGNING_SECRET` bound (a Worker secret, never a `vars`
-entry) is SaaS mode; unbound is self-host mode. Nothing else selects it: there
-is no build flag, and a deployment is one mode or the other for as long as that
-binding says so.
-
-### Self-host mode
-
 The daemon's upgrade request carries `Authorization: Bearer <daemon secret>` —
 the Worker's deploy-time `DAEMON_SECRET`, shared with the one daemon it serves.
 A browser upgrade carries **nothing**, and every leg lands on one hub.
@@ -205,83 +197,6 @@ concurrent parked requests — over it the relay answers `429`
 `{"error":"too many pairing attempts"}` without spending a `pair` id or waking
 the daemon.
 
-### SaaS mode
-
-One relay serves many accounts and many machines, so "may this socket open" and
-"which daemon does it reach" become the same question, and both are answered by
-a **channel token**: a compact statement the control plane signs and this relay
-verifies **offline**. The relay never calls the control plane on the channel
-path — it holds `RELAY_SIGNING_SECRET` and nothing else, has no database, and
-asks nobody.
-
-```
-<base64url(JSON claims)>.<base64url(HMAC-SHA-256 over the payload text)>
-
-claims: {"acc": <account id>, "dev": <device id>, "role": "daemon"|"client",
-         "exp": <unix seconds>}
-```
-
-Signed by `app/src/lib/tokens.ts` (`signChannelToken`), verified by
-`relay/src/channel-auth.ts` (`verifyChannelToken`) — a port, not an import,
-pinned across the two implementations by `app/test/channel-token-vector.json`,
-which both suites read from the one file. Deliberately not a JWT: no header, no
-`alg`, no negotiation. The verifier refuses, without saying which check
-refused: a token over **1024 characters**, either part outside unpadded
-base64url, anything but exactly two dot-separated parts, a signature that is
-not the canonical base64url spelling of the HMAC (the hex spelling of the same
-bytes is *not* a valid signature), a payload that is not an object carrying all
-four claims, a role that is neither of the two, and `exp <= now` — strictly, so
-a token whose second has arrived is dead.
-
-**Where each leg presents its token:**
-
-| leg | how |
-|---|---|
-| daemon | `Authorization: Bearer <token>`, `role: "daemon"` |
-| browser | `Sec-WebSocket-Protocol: flue.v1, flue.token.<token>`, `role: "client"` |
-| `POST /api/pair` | `Authorization: Bearer <token>`, `role: "client"` |
-
-The browser's is a subprotocol because a browser cannot set a header on a
-WebSocket upgrade — the `protocols` argument to `new WebSocket(url, protocols)`
-is the only one it controls — and it is **never a query parameter**: the
-upgrade is a request to this Worker, and a token in the URL is a token in the
-Worker's logs, in every proxy's access log, and in the browser's history. For
-the same reason the control plane navigates the browser here with the token in
-the URL **fragment** (`https://<relay>/#t=<token>`), which is never put on the
-wire; the page reads it once and `replaceState`s it away before anything else
-reads the location.
-
-Two subprotocol values and not one: the relay **must** echo an accepted
-subprotocol on the 101 or the browser fails the connection itself (RFC 6455
-§4.1), and the one thing it will never echo is the credential. It answers
-`Sec-WebSocket-Protocol: flue.v1`. An offer carrying `flue.token.…` without
-`flue.v1` is refused, because there would be nothing safe to answer with.
-
-**Hub keying is the isolation.** In SaaS mode a leg lands on
-`idFromName("<acc>:<dev>")` — one Durable Object per account *and* device, named
-from the claims a signature was checked over. A browser and a daemon meet only
-if two independently signed tokens agree on both fields; a token naming another
-account addresses another object, one that daemon was never in. Cross-account
-isolation is therefore a property of *addressing*, not of a check someone has
-to remember to write. A request the relay could not verify gets `401` and no
-hub at all.
-
-**Revocation is the TTL.** The relay holds no revocation list. The control
-plane checks the account's and the device's kill switches when it *mints*
-(`app/src/server/channel-token.ts`), and the tokens live 60 seconds for a
-browser and 300 for a daemon: that window is the revocation latency of the
-whole system. A disabled device stops being minted tokens, its last one dies on
-its own, and the hub keying means it could never have reached another account's
-daemon in the meantime.
-
-`POST /api/pair` is *not* credential-less here, and cannot be: with a hub per
-device the request has to name one, and the only name this Worker accepts is
-one it has verified a signature over. It carries the same `role: "client"`
-token as a bearer — an ordinary `fetch` can set that header, which is why no
-subprotocol trick is needed — and the relay's own refusals (`400`, `413`,
-`429`, `503`, `504`) keep their meanings, with `401` added for a request that
-presented no valid token and `403` still reserved for the daemon's verdict.
-
 ## What the relay sees
 
 Terminal traffic is Noise ciphertext and the relay has no key for it. Channel 0
@@ -292,15 +207,7 @@ observe is:
 - channel ids, message counts and message sizes — enough for traffic analysis
   of a session, not its content;
 - the whole pairing exchange: the single-use pairing token, the device's public
-  key, and the daemon's;
-- in SaaS mode, every channel token presented to it, and therefore the account
-  and device ids each socket belongs to — it has to, because those two fields
-  are what it routes by. And because the signature is an HMAC, the key that
-  verifies is the key that signs: a relay operator could mint a token for any
-  account on that control plane. Under flue.sh the two are the same operator,
-  which is the only reason that is acceptable, and a self-hosted relay is never
-  given the secret at all. It buys nothing against the terminal traffic either
-  way — that is Noise, and the relay has no key for it.
+  key, and the daemon's.
 
 Public-key material is public by design. The **token is not**: a hostile relay
 could spend a live one with a key of its own and register itself as a paired

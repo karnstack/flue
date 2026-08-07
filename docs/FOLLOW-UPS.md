@@ -2,10 +2,10 @@
 
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size. Items 7–9 are the same exercise for the
-crypto+pairing milestone, items 10–13 for the relay, item 14 for the SaaS
-control plane's browser leg, item 15 for what its kill switch does and does
-not reach, and item 16 for what standing the hosted service up depends on that
-nothing enforces.
+crypto+pairing milestone, items 10–13 for the relay. Items 14–16 covered the
+SaaS control plane, which the open-source-only pivot (2026-08-07,
+docs/superpowers/specs/2026-08-07-flue-oss-only-design.md) deleted — mentions
+of it below are history, not description.
 
 ## Done
 
@@ -117,8 +117,8 @@ terminal see a login shell under the login service too.
   every loopback service. Defence in depth only, given `script-src 'self'`.
 
   **Half done** — the relay origin, which is the one reachable from the internet,
-  no longer carries them: `daemon.RelayCSP` drops that clause and adds the
-  control plane in its place (see item 14), and the two policies are composed
+  no longer carries them: `daemon.RelayCSP` drops that clause (and since the
+  pivot grants nothing beyond `'self'`), and the two policies are composed
   from a shared head and tail so the rest cannot drift. The daemon's own origin
   still carries the wildcards, because `'self'` really does not cover
   `ws://127.0.0.1:7717` from an `http://127.0.0.1:7717` page — narrowing it needs
@@ -348,12 +348,11 @@ refusing to run a bundle whose digest changed — a different worker, and one th
 has to be right about updates or it bricks the app offline. The FAQ now says
 plainly that the PWA is an offline cache and a speed-up rather than a defence.
 
-**Restated rather than resolved by the hosted service — and now the default
-case, so `docs/faq.md` says it in its own words.** flue.sh does not run the
-pairing ceremony at all: a machine joins an account with `flue link`, and the
-browser is handed that machine's public key by the control plane along with the
-session ([`SAAS.md`](SAAS.md)). So the move described above is not the hosted
-attack. The hosted one is shorter and worse: the origin serves the page that
+**Restated rather than resolved by the hosted service** (which the pivot later
+deleted). flue.sh did not run the pairing ceremony at all: a machine joined an
+account with `flue link`, and the browser was handed that machine's public key
+by the control plane along with the session. So the move described above was
+not the hosted attack. The hosted one was shorter and worse: the origin serves the page that
 holds the browser's Noise keys, runs the handshake and decrypts every frame, so
 a modified bundle reads the plaintext where the plaintext already is, with no
 device to pair and no window to wait for. That is not a new finding — it is
@@ -461,15 +460,10 @@ documented promise depends on.
   daemon id. The seam is deliberately in place and the implementation is Plan
   2.~~
 
-  **Done** (Plan 2, Task 9) — the seam was filled where it was left.
-  `authorizeClient`, `authorizeDaemon` and `authorizePair` all run
-  `authorizeToken` when `RELAY_SIGNING_SECRET` is bound (its presence *is* the
-  mode selector), which verifies the control plane's HMAC offline —
-  `relay/src/channel-auth.ts`, a port of `app/src/lib/tokens.ts` pinned to it
-  by a shared vector both suites read — and `hubIdFor` names the hub from the
-  verified claims' account and device rather than from a constant. Self-host is
-  untouched: with no secret bound the Worker is Plan 1's relay, and its whole
-  suite still runs as its own vitest project.
+  **Done** (Plan 2, Task 9), then **deleted whole** by the open-source-only
+  pivot: the signed-token mode, `channel-auth.ts` and the second vitest
+  project went with the control plane they served. The relay is Plan 1's
+  again — one secret, one hub.
 - ~~**Relay-served assets carry none of the daemon's security headers.** The
   daemon wraps every response in `securityHeaders`
   (`internal/daemon/server.go`) — `Referrer-Policy: no-referrer` and a CSP with
@@ -494,15 +488,10 @@ documented promise depends on.
   *including* the ones the Worker asks for through `env.ASSETS.fetch`, which
   `relay/test/routing.test.ts` checks on both paths.
 
-  `RelayCSP` differs from the daemon's policy in `connect-src` alone, in both
-  directions. It drops the loopback wildcards, since the relay's own socket is
-  a same-origin `wss://`; and it adds `https://app.flue.sh`, since the token
-  refresh is a cross-origin POST from a document on the relay origin and
-  `'self'` refused it before the network — which cost every hosted session its
-  first reconnect past a minute until this landed. Named exactly and never as a
-  scheme or a wildcard: it is the outer bound on where a tab's session cookie
-  can be sent, and the fragment's `a=` is pinned same-site against the same
-  threat (item 14).
+  `RelayCSP` differs from the daemon's policy in `connect-src` alone: it drops
+  the loopback wildcards, since the relay's own socket is a same-origin
+  `wss://`. (It briefly also granted the control plane's origin for the hosted
+  token refresh; the pivot removed both the refresh and the grant.)
   The field is absent from Cloudflare's published multipart-metadata reference,
   which documents only `html_handling` and `not_found_handling`; it is what
   every `wrangler deploy` sends, which is as attested as this API gets.
@@ -530,333 +519,6 @@ documented promise depends on.
   CPU, so a published macOS digest is unfalsifiable from a Linux machine until
   a container-pinned build makes it portable. Publish the platform beside the
   digest at minimum.
-
-## 14. SaaS browser sessions
-
-The gaps between the web client as built — one daemon, one origin, one token
-taken once — and a SaaS relay that is one origin fronting many machines.
-Tracked here for a dedicated task (Task 15 builds them), not fixed piecemeal:
-each one is a small design decision, and two of them need a control-plane
-endpoint that does not exist yet.
-
-- **The pinned daemon key is per-origin; a SaaS relay is one origin for many
-  machines.** `loadPinnedDaemonKey()` (`web/src/crypto/keys.ts`, read by
-  `web/src/relay/mode.ts`) stores exactly ONE pinned daemon static key per
-  origin — the right shape for a self-hosted relay, where the origin *is* the
-  machine. On the SaaS relay every device shares `app.flue.sh`, so opening a
-  session for device B builds the Noise IK handshake against device A's pinned
-  static key: `readMessageB` throws, `shutdown()` reports an ordinary close,
-  and FlueClient reconnects into the same failure forever — a silent loop with
-  no UI. Fix direction: the control plane already stores each device's
-  `publicKey` (the devices table), so "open a session" must hand the browser
-  the TARGET device's public key — in the fragment alongside the channel
-  token, or via a fetch — and the web client must pin per-device (keyed by
-  device id), not per-origin.
-- **SaaS pairing sends no bearer.** `web/src/routes/pair.tsx` POSTs
-  `/api/pair` with only a `Content-Type` header, and the SaaS relay now
-  requires `Authorization: Bearer <client token>` — so SaaS pairing 401s, and
-  because 401 is not `REFUSED_STATUS` the page renders the raw refusal rather
-  than the refusal copy. Possibly moot: SaaS enrollment is `flue link` and
-  device authorization, not the QR pair flow — but if `/pair` stays reachable
-  on the SaaS origin it must either carry the bearer or say why it cannot.
-- **The channel token lives 60 seconds and is captured once.** `main.tsx`
-  reads the client token from the fragment destructively (`takeChannelToken`
-  scrubs as it reads) and every reconnect through the socket factory presents
-  that same token. It is good for 60 seconds, so the first reconnect past a
-  minute — a laptop lid, a train tunnel — is refused, and the tab dies into an
-  endless silent reconnect loop. Fix direction: a control-plane endpoint the
-  tab calls before each (re)dial to re-mint a fresh client token for the
-  device; the web client refreshes on reconnect instead of reusing the
-  captured token.
-
-**Done** (Task 15) — all three, and the shape of the fix is in
-[`SAAS.md`](SAAS.md).
-
-`openSession` now hands the browser the whole session in the fragment:
-`#t=<token>&k=<base64url pubkey>&d=<device id>&a=<control-plane origin>`. The
-tab reads all four at the entry point and scrubs all four (`takeRelayHandoff`,
-not just the secret — a leftover `#d=…&k=…` is the address of somebody's
-machine in every screenshot). The key is pinned under the **device id**
-(`savePinnedDaemonKeyFor`), so two machines are two records and neither can
-overwrite the other; the self-hosted single-key record is untouched and a
-browser that paired before this does not have to pair again.
-
-Tokens are fetched **per dial**. `RelayIdentity.channelToken: string | null`
-became `token: (() => Promise<string>) | null`; the handoff's token is spent on
-the first dial and every dial after it calls
-`POST app.flue.sh/api/relay-token` — credentialed, form-encoded (so it costs no
-preflight), answered only for the relay's origin and the control plane's own.
-A refusal — and a fetch that hangs past ten seconds — is reported as an
-ordinary close, which FlueClient already backs off and retries from. The
-endpoint has its own rate-limit buckets, not `open-session:user`: a reconnect
-loop legitimately spends far more than a person clicking a button does, and
-`withinLimit` counts refused calls too, so a cap a real loop can reach is one it
-then holds itself over for the rest of the window. There are two of them, and
-the first is keyed by **(account, machine)** — `refresh-token:device`,
-600/15min. Per machine rather than per account because a refresh loop is not
-spread evenly over an account's machines: a tab pointed at a laptop that is
-shut, asleep or revoked loops forever and gets nowhere, so on one shared bucket
-a few tabs nobody is watching spend the account's whole budget and 429 the
-session the person *is* watching. `refresh-token:user` survives as an
-account-wide ceiling at 6000/15min — the per-machine bucket bounds a loop, but
-the caller names the machine and can name a new one every request, so without a
-ceiling one stolen session cookie is an unbounded supply of tokens. (Tokens,
-not counter rows — the per-machine row is written before the ceiling is
-consulted, so rows it does not bound; see "Left standing" below.) The ceiling
-is counted only after the per-machine bucket passes, so a tab that has
-exhausted its own machine's share stops spending the account's.
-
-The browser checks the handoff against itself before it believes any of it: a
-device id **is** `hex(sha256(publicKey))[:12]`, so `namesItsOwnKey`
-(`web/src/relay/session.ts`) refuses a fragment whose `k` does not hash to its
-`d`, on adopt and again on the way out of the key store. What that closes is
-*poisoning*: without it a crafted link could pin a wrong key under a victim's
-machine's id, and that machine then reconnect-loops in that browser forever,
-silently. What it does not close is *substitution* — an attacker's own key
-*and* id hash consistently and pass — which stays open, below.
-
-A reload works too, which it never did: the tab remembers the device id and the
-control plane in `sessionStorage` (neither is a secret; the token deliberately
-is not there) and re-mints from the key it pinned.
-
-The `/pair` bullet is answered rather than fixed: the QR ceremony is self-host
-only, hosted enrolment is `flue link`, and the browser never pairs on flue.sh
-because the key arrives with the session. `/pair` stays reachable on the hosted
-origin — the same bundle is served three ways and the page cannot tell a
-self-hosted relay from flue.sh by origin alone — and fails there with the
-relay's 401, which is the correct outcome for a page with nothing to pair with.
-SAAS.md says so, and says what a hosted pairing UI would have to do instead.
-
-**Left standing: the account ceiling still couples an account's machines to
-each other, a long way up.** Per-machine bucketing removes the case that
-actually happens — one or two dead tabs taking down a working session — but
-`refresh-token:user` is shared by construction, and a loop spends it whether it
-is refused at the far end or not. At 180 refreshes per window per looping tab,
-6000 is about thirty-three tabs all broken at once: implausible for a person,
-not implausible for a fleet, and the failure is the same one — every session on
-the account answered 429 for the rest of the fixed window, with nothing on
-screen.
-
-That arithmetic only holds now, and it is worth saying why. It assumes a looping
-tab escalates to the ten-second ceiling; the browser client reset its backoff on
-`onopen`, and opening is not the same as being kept, so a *flapping* channel —
-one that establishes and dies, which is what the hub's "replaced" close and a
-daemon reconnecting in a loop both look like — never left the 125 ms floor. A
-hundred times that rate: the whole per-machine bucket in about two minutes.
-`MIN_STABLE_MS` in `web/src/client/client.ts` now requires a connection to have
-lasted five seconds before the run of failures starts over, which is
-`minStableConn` in `internal/transport/relay` on the other leg.
-
-Closing the ceiling properly is not a bigger number; it is either not counting
-refusals that the *control plane itself* refused for a stable reason (a revoked
-or disabled machine, which is a fact about that machine and not about load), or
-telling the tab to stop looping at all. The latter is item 15's territory —
-there is still no UI for "this machine was revoked" — and the two want doing
-together.
-
-**Left standing: a self-consistent handoff can still name the attacker's own
-machine — the substitution residual is OPEN.** `namesItsOwnKey` proves `k` and
-`d` are one machine's pair; it cannot prove they are a machine of the *user's*.
-An attacker who enrolls a box of their own holds a `k` and `d` that hash
-correctly, and the real control plane mints them a live `t` for it — so a
-crafted link opens one dial into the attacker's machine on the genuine
-`relay.flue.sh` origin with its genuine certificate, and everything on screen
-says flue.sh. One dial is all a shell needs. The real fix is to stop accepting
-`k` from the fragment at all: the tab holds a session cookie, so it can fetch
-the named device's public key from the authenticated control plane, which
-answers only for machines the caller owns — then a link cannot name a machine
-the user does not own, and a `d` alone in the fragment is inert.
-
-It is *one dial* and not a session, and that bound is enforced rather than
-free — which is worth spelling out, because it was stated unconditionally here
-and in `SAAS.md` while nothing was enforcing it. The victim's next refresh names
-a device their cookie does not own and `POST /api/relay-token` answers 403, so
-nothing re-mints — but only if the refresh reaches the *real* control plane. The
-same crafted link also carries `a=`, the origin the tab refreshes from, and
-`originOf` (`web/src/relay/session.ts`) took any `https:` origin at all: an
-`a=https://evil.example` relays the refresh through the attacker's proxy to the
-real control plane, which mints them a genuine token for their own machine, and
-one dial becomes a session lasting as long as the tab stays open. Two checks now
-hold the bound. `a` must be same-site with the page (`sameSite`, same file),
-which is the pairing `SameSite=Lax` already forced on any working deployment;
-and `connect-src` on the hosted relay names `https://app.flue.sh` exactly
-(`daemon.RelayCSP`), so the browser refuses any other target before the network.
-Neither is decoration, and neither may be widened to a scheme or a wildcard.
-
-**Left standing: the account ceiling bounds tokens, not `rate_limits` rows —
-and the ordering is paid on the reconnect hot path.** `withinLimit` writes
-before it answers (every call counts, refused ones included — ratelimit.ts),
-and `refreshClientToken` consults the per-machine bucket first, the ceiling
-second — so the per-device counter row exists before the ceiling is ever asked.
-An authenticated caller, or a stolen cookie, inventing a fresh device id per
-request (any string up to 64 characters — the route bounds length, and
-existence is only checked at the mint, after both counters) writes one new row
-per request, past 6000 and for as long as it cares to, bounded only by the
-fifteen-minute sweep (`sweepRateLimits`: the cron, plus the one-in-a-hundred
-fallback). It needs a valid session and the rows die with the window, so this
-is a cost and DoS amplifier rather than a hole — but it is real, and neither
-the ceiling's comment nor this file claims otherwise any more. The other half
-of the same ledger entry: every refresh — every reconnect of every healthy tab
-— now costs two sequential D1 upserts before the mint. Both accepted for now;
-recorded so the bill is not a surprise.
-
-## 15. What the SaaS kill switch reaches
-
-Carried out of the control plane's abuse controls (`app/src/server/kill-switch.ts`,
-the `disabled` flags on `users` and `devices`, `/terms`). Both items are
-statements of what the switch actually does, recorded here so nobody has to
-rediscover them during an incident. Neither is a bug: the first is a gap with a
-known workaround, the second is the intended behaviour written down.
-
-- **Revocation does not reach a channel that is already open.** Both mints
-  (`app/src/server/channel-token.ts`) re-read `users.disabled` and
-  `devices.disabled` in the same `where` as ownership, so disabling either one
-  stops the *next* mint immediately. The relay does not ask: `authorizeToken`
-  runs once, at the WebSocket upgrade (`relay/src/index.ts`), and nothing
-  re-reads the claims or the database for the life of that connection. So a
-  terminal somebody already has open outlives both the revocation and the token
-  that opened it — it ends when it is closed, or when the daemon next reconnects
-  and its refresh is refused. The bound on "next dial" is the token TTL: 60
-  seconds for a browser, 300 for a daemon.
-
-  What an operator does today, and what `/terms` and `kill-switch.ts` both say:
-  to end a live session *now*, stop the daemon on the machine. Closing it
-  properly needs revocation the relay can hear about, and there are two shapes —
-  a hub-side check on a schedule (the Durable Object re-validating its live
-  channels against the control plane, which costs a request per channel per
-  interval), or a channel that closes when its own token's `exp` passes (free,
-  and it converts the TTL from "how stale a *new* dial can be" into "how long a
-  live session survives revocation" — which is the property everyone assumes it
-  already has). The second is the smaller change and probably the right one.
-
-- **A device revocation is sticky, and un-revoking is an operator action.**
-  `devices.id` is sha256(publicKey)[:12], so a machine that re-enrolls lands on
-  the row it already had. The mint upsert in `app/src/server/enroll.ts`
-  deliberately carries the existing `disabled` value over rather than resetting
-  it, because the documented recipe disables a machine while *leaving its owner
-  signed in* — and a flag that a re-run of `flue link` cleared would have made
-  the revocation last exactly as long as it took the person it was aimed at to
-  reinstall. So: the re-enrolment succeeds (new token, new label, no last-seen,
-  and no refusal that would tell whoever holds the machine that this id has been
-  singled out), and both mints still refuse it. `enableDevice` — or
-  `update devices set disabled = 0` — is the only thing that turns it back on.
-  Pinned by `app/test/enroll.test.ts` ("does not clear a revocation when the key
-  comes back", plus the enabled-device case beside it).
-
-  Carrying the flag over is only half of it, because it needs a row to carry it
-  on. `revokeDevice` (`app/src/server/devices.ts`) therefore states
-  `disabled = 0` in the same `where` as ownership: the dashboard's own "remove"
-  refuses a machine an operator has switched off, and says so in a sentence
-  written for that case rather than the undistinguished "no longer on your
-  account" (that machine is on the owner's list, flagged, so there is nothing to
-  hide from them — a device that is *not* theirs still gets the one generic
-  refusal whether it is disabled or not, or the message becomes an oracle).
-  Without that guard the whole switch was one click and one reinstall away from
-  being undone: delete the row, run `flue link`, and the INSERT writes a fresh
-  `disabled = 0` with no conflict to carry anything over from. An operator's
-  revocation outranks its owner's. Pinned by `app/test/devices.test.ts`
-  ("refuses to remove a machine flue has switched off, and says so", plus the
-  non-owner case beside it).
-
-  The residue, stated so it is a decision rather than an oversight, and it is now
-  only this one: a person whose machine was revoked can generate a *different*
-  Noise static key on the same hardware and enroll that, which is a different
-  device id and so a new row, since the id follows the key. That is a new device
-  by every definition this service has, and stopping it means revoking the
-  account rather than the machine — which is what `disableUser` is for. The
-  same-key path — delete the row from the dashboard, re-enroll, get a clean flag
-  — is closed.
-
-## 16. Standing flue.sh up
-
-Carried out of the deploy runbook ([`SAAS.md`](SAAS.md)), the custom-domain
-routes now in both wrangler configs, and the FAQ reconciliation. None of these
-is a defect in code that shipped; each is something a hosted deployment depends
-on that nothing in this repository enforces. (The browser-session gaps
-themselves are §14, closed except for the residuals recorded there — SAAS.md's
-session diagram is the shape that was built.)
-
-- **`devices.last_seen` has no writer, and the directory has stopped pretending
-  otherwise.** The column exists (`app/src/db/schema.ts`), `enroll.ts` writes it
-  null on every mint, and no other statement in the codebase touches it. The
-  device directory shipped an online / offline / never-connected badge derived
-  from it, which meant every machine on every account read "Never connected"
-  whatever it was doing — including one the reader had a terminal open on a
-  second earlier. A status control that can only be wrong is worse than none,
-  and this is the one somebody checks before deciding a machine has been taken:
-  so the badge now says enrolled or switched off, which is what the database
-  knows, and `lastSeenLabel` renders nothing while the stamp is null.
-
-  What it wants is a heartbeat the *relay* writes, because the relay is the only
-  part of this system that knows a daemon is connected — the control plane sees
-  a machine once per daemon-token mint, which is every five minutes at best and
-  says nothing about whether the socket that token opened is still up. So:
-  a hub-side call to the control plane when a daemon leg attaches and detaches,
-  or a periodic stamp while one is held, authenticated the way the mint already
-  is. Both cost a request per machine per interval on the relay's hot path,
-  which is the thing to size before writing it. Once something writes the
-  column, "seen 3h ago" appears beside the badge on its own, and the
-  reachability distinction can come back as a claim with something behind it.
-
-- **Email delivery is a placeholder, and it is the one thing left for the
-  operator to build.** `app/src/server/email/sender.ts` ships the `Sender`
-  interface and `LogSender`, which prints the login code to the Worker's log —
-  the only place a plaintext code is written anywhere. Deliberate: the plan
-  refused to commit a half-integration nobody could test. It is also exactly
-  the shape of thing that gets forgotten, because the *operator's own* sign-in
-  works fine from `wrangler tail`. Until a real `Sender` comes back from
-  `sender()`, anyone who can read the logs can sign in as anyone, and no invite
-  should go out. SAAS.md step 6 is the whole of what it takes.
-
-- **The hosted relay's assets directory is populated by hand.** `relay/public/`
-  holds a one-line placeholder `index.html` beside the `_headers` document, and
-  `flue relay setup` reads neither — it uploads the bundle compiled into the
-  binary. A `wrangler deploy` of the hosted relay uploads whatever is in that
-  directory, so the runbook's `cp -R dist/. ../relay/public/` is load-bearing,
-  and skipping it is a deploy that *succeeds* and then serves that placeholder
-  to every session. The fix is to make it a build step — a `make` target, or a
-  CI check that the directory holds an `index.html` naming a hashed bundle —
-  and what exists is a documented `cp`. `relay/.gitignore` at least keeps the
-  copy out of the repository.
-
-- **Nothing enforces that the two Workers hold the same
-  `RELAY_SIGNING_SECRET`.** It is the entire authorization of a bridge, it is
-  set twice by hand, and a mismatch raises nothing anywhere: every dial from
-  every browser and every daemon is refused at the upgrade, and it reads as a
-  network fault. SAAS.md warns twice and the release checklist catches it,
-  which is not the same as the system catching it. The cheap version is a
-  health path on the relay that verifies a token the control plane minted for
-  the purpose and answers yes or no; there is nowhere for one to live today,
-  and it would want to be unauthenticated-but-useless-to-a-stranger, which is
-  the part that needs thinking about.
-
-- **§12's twin configuration is now deployed from both copies.** `flue relay
-  setup` builds its deploy request in `cmd/flue/relay.go`; `relay/wrangler.jsonc`
-  is what `wrangler deploy` sends for flue.sh. Until now the second was
-  development-only, so drift between them was a developer/user split. It is now
-  a self-host/hosted split — two populations running relays configured from two
-  files nothing compares — and the custom-domain route added here is the first
-  key that deliberately exists in one and not the other. The test §12 asks for
-  — one that parses the `.jsonc` and compares the keys the two copies share —
-  still does not exist, and is worth more than it was.
-
-- **§10's blast radius is unchanged by multi-tenancy; its frequency is not.** A
-  daemon's outbound socket carries only its own machine's channels, and the
-  hosted relay names one Durable Object per (account, device), so the
-  whole-socket fate-sharing §10 describes cannot spill across accounts — it
-  stays inside one machine's browsers. What changes is how often it happens
-  (more sessions, more networks, more lids closing) and who hears about it: a
-  self-hoster who loses a socket debugs their own Worker, while the same event
-  on flue.sh is a support conversation that looks from outside like the service
-  dropping sessions. Per-channel outbound credit is still the fix, still
-  unwritten, and now belongs to the same scale pass as the rate cap in §13.
-
-- **The kill switch is a recipe, not a tool.** No admin UI, deliberately — an
-  endpoint that can disable any account is an endpoint worth attacking — so an
-  incident is an operator pasting SQL out of SAAS.md at three in the morning.
-  Both statements are idempotent and the flag goes first, which is the whole of
-  the safety net; the failure mode is a typo in a `where` clause. Fine for one
-  operator, and the thing to revisit when there is a second.
 
 ## Things worth knowing before touching this code
 
