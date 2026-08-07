@@ -330,9 +330,13 @@ describe('the handshake deadline', () => {
     const daemon = await dial(hub, '/daemon')
     const seen = await dial(hub, '/client') // channel 1
     seen.ws.send(Uint8Array.of(1))
-    const idle = await dial(hub, '/client') // channel 2
+    // Wait for the byte to come out the daemon side before dialing the idle
+    // client: the send and the dial travel different paths to the hub, and on
+    // a loaded runner the dial can overtake it — the daemon then sees `open 2`
+    // before this frame, and the strictly-ordered queue below misreads both.
     await daemon.nextControl()
     await daemon.nextFrame()
+    const idle = await dial(hub, '/client') // channel 2
     await daemon.nextControl()
     await sleep(TIMEOUT_MS + 30)
     await runDurableObjectAlarm(hub) // a no-op if the real alarm already fired
