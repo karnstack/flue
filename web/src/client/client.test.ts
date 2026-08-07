@@ -1106,12 +1106,9 @@ describe('FlueClient reconnect', () => {
     // being kept. A channel that establishes and dies — the relay hub handing
     // the daemon leg to a newcomer and closing the incumbent, a daemon
     // reconnecting in a loop — reset the exponent every cycle, so the tab sat
-    // at the 125 ms floor forever. On a hosted relay every dial costs a
-    // `POST /api/relay-token`, and the per-machine bucket is 600 per window:
-    // roughly two minutes to spend it, after which every session on that
-    // machine is answered 429 with nothing on screen. The Go transport already
-    // required a socket to have lasted (`minStableConn`); this is the same
-    // rule on the other leg.
+    // at the 125 ms floor forever: dials by the half-dozen per second against
+    // a Worker someone pays for. The Go transport already required a socket to
+    // have lasted (`minStableConn`); this is the same rule on the other leg.
     vi.useFakeTimers()
     vi.spyOn(Math, 'random').mockReturnValue(0)
     const { c, sockets } = harness()

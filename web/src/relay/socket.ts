@@ -56,60 +56,15 @@ const KEEPALIVE_MS = 30_000
  */
 const STALE_INTERVALS = 3
 
-/**
- * The subprotocol the relay answers a browser with, and the one the credential
- * hides beside it.
- *
- * A browser cannot set a header on a WebSocket upgrade. It can name
- * subprotocols — the second argument to `new WebSocket(url, protocols)` — and
- * those travel as `Sec-WebSocket-Protocol`, which is a header, which is how a
- * channel token reaches the relay without being in the URL. In the URL it
- * would be in the request line and therefore in the Worker's logs.
- *
- * Two values go out: `flue.v1`, which the relay echoes on the 101 (a browser
- * that offered subprotocols and is answered without one fails the connection
- * itself), and `flue.token.<token>`, which it never echoes. Spelled out here
- * rather than imported because the relay is another package in another
- * runtime; spec/relay-protocol.md is where the two agree.
- */
-export const RELAY_SUBPROTOCOL = 'flue.v1'
-export const RELAY_TOKEN_SUBPROTOCOL_PREFIX = 'flue.token.'
-
 export interface RelayIdentity {
   /** This browser's static Noise key, from `@/crypto/keys`. */
   deviceKey: DeviceKey
   /**
-   * The daemon's static public key.
-   *
-   * Pinned at pairing time on a self-hosted relay, and handed over with the
-   * session on a hosted one — where it is per *device*, because one origin
-   * fronts every machine on every account (see ./session).
+   * The daemon's static public key, pinned at pairing time. The relay
+   * authorizes no browser — Noise against this key is what proves the far
+   * end, and the handshake fails closed against anything else.
    */
   daemonPub: Uint8Array
-  /**
-   * How this dial gets its channel token, or null on a self-hosted relay,
-   * which authorizes no browser at all — and where offering a subprotocol
-   * nobody will echo would break the connection rather than secure it.
-   *
-   * A function, not a string, and that is the whole fix for the second half of
-   * the SaaS bug. A token lives sixty seconds; a captured one covers the first
-   * dial and nothing after it, so the first reconnect past a minute was refused
-   * and the tab reconnected into the identical refusal forever. Asking per dial
-   * is what makes a reconnect an hour later work — and it is also where
-   * revocation lands, since a machine that has been switched off stops being
-   * given tokens (app/src/server/refresh-token.ts).
-   *
-   * A rejection is an ordinary close: the socket never opens, FlueClient backs
-   * off, and the next attempt asks again. That is right for every reason the
-   * call can fail — an expired session, a revoked machine, a network that is
-   * simply down — and telling them apart here would only move the decision.
-   *
-   * Required rather than optional, and explicitly null: a call site that forgot
-   * the field would compile clean and dial a hosted relay with no credential,
-   * which presents as a silent 401 reconnect loop. Making the caller write
-   * `null` makes the caller decide.
-   */
-  token: (() => Promise<string>) | null
 }
 
 /** The subset of WebSocket this socket drives, so tests can substitute one. */
@@ -131,18 +86,14 @@ const decoder = new TextDecoder()
 export function relaySocket(
   origin: string,
   identity: RelayIdentity,
-  wsFactory: (url: string, protocols?: string[]) => RawSocket = browserSocket,
+  wsFactory: (url: string) => RawSocket = browserSocket,
 ): SocketLike {
   const hs = initiatorHandshake(identity.deviceKey.privateKey, identity.daemonPub)
 
   /**
-   * Null until the transport exists.
-   *
-   * Which is immediately on a self-hosted relay, and one microtask later on a
-   * hosted one, because that dial has to fetch a token first (see
-   * `identity.token`). Nothing else in this file may assume it is there: a
-   * consumer can `close()` inside the same tick it asked for the socket, and a
-   * React effect cleanup does exactly that.
+   * Null until `dial` runs at the bottom of this function. Nothing else in
+   * this file may assume it is there: a consumer can `close()` inside the same
+   * tick it asked for the socket, and a React effect cleanup does exactly that.
    */
   let ws: RawSocket | null = null
   /** Null until message B verifies; that is also what `onopen` waits for. */
@@ -203,17 +154,13 @@ export function relaySocket(
   }
 
   /**
-   * Open the transport with the credential this dial is to present, and wire
-   * every handler onto it.
-   *
-   * Called once per `relaySocket`, either synchronously or after the token
-   * resolves. It is never called after `shutdown` — the guard is the first
-   * line, because a consumer that gave up while the fetch was in flight would
-   * otherwise get a live socket it has already been told is closed.
+   * Open the transport and wire every handler onto it. Called once per
+   * `relaySocket`; the dead-guard stays because a consumer can close inside
+   * the tick it asked for the socket.
    */
-  const dial = (token: string | null) => {
+  const dial = () => {
     if (dead) return
-    const sock = wsFactory(clientUrl(origin), subprotocols(token))
+    const sock = wsFactory(clientUrl(origin))
     ws = sock
 
     sock.onopen = () => {
@@ -310,29 +257,7 @@ export function relaySocket(
     }
   }
 
-  // Self-host dials in this tick, exactly as it always did: there is no
-  // credential to fetch, and a socket that only appeared a microtask later
-  // would be a behaviour change for a deployment this task must not touch.
-  if (identity.token === null) {
-    dial(null)
-  } else {
-    // `.then(dial).catch(...)`, never `.then(dial, onRejected)`: the two-arm
-    // form does not catch a throw from `dial` itself, and `wsFactory` can throw
-    // — `new WebSocket` raises SyntaxError for a subprotocol value that is not
-    // a token. That would be an unhandled rejection with no `onclose` behind
-    // it, which is the one failure FlueClient cannot recover from: it parks at
-    // `reconnecting` with no socket and no retry armed, for the life of the tab.
-    identity
-      .token()
-      .then(dial)
-      .catch(() => {
-        // No token, no dial. Reported as an ordinary close rather than a
-        // special state, because that is what FlueClient recovers from — and
-        // its next attempt asks for a token again, which is how a tab whose
-        // session outlived a control-plane blip comes back on its own.
-        shutdown()
-      })
-  }
+  dial()
 
   return wrapper
 }
@@ -347,23 +272,9 @@ function clientUrl(origin: string): string {
   return url.toString()
 }
 
-/**
- * What to offer as `Sec-WebSocket-Protocol`, or nothing.
- *
- * Nothing, and not `['flue.v1']`, when this browser holds no token: a
- * self-hosted relay (Plan 1) echoes no subprotocol, and by RFC 6455 §4.1 a
- * client that offered one and was answered without it must fail the
- * connection. Offering unconditionally would break every self-hosted deployment
- * to no purpose.
- */
-function subprotocols(token: string | null): string[] | undefined {
-  if (!token) return undefined
-  return [RELAY_SUBPROTOCOL, `${RELAY_TOKEN_SUBPROTOCOL_PREFIX}${token}`]
-}
-
 /** The default transport: a real WebSocket, in the shape this file drives. */
-function browserSocket(url: string, protocols?: string[]): RawSocket {
-  const ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url)
+function browserSocket(url: string): RawSocket {
+  const ws = new WebSocket(url)
   ws.binaryType = 'arraybuffer'
   const raw: RawSocket = {
     send: (d) => ws.send(d),

@@ -14,7 +14,6 @@
  * build time would be a second artefact to keep honest.
  */
 import { loadOrCreateDeviceKey, loadPinnedDaemonKey } from '@/crypto/keys'
-import type { RelaySession } from './session'
 import type { RelayIdentity } from './socket'
 
 /**
@@ -47,17 +46,7 @@ export function isRelayOrigin(loc: { hostname: string } = location): boolean {
  *
  * Null means one screen: the explainer at src/routes/unpaired.tsx. It is not a
  * failure to retry — a browser with no daemon key has no daemon to retry
- * against — and pairing, or opening a session from flue.sh, is the only thing
- * that changes the answer.
- *
- * **Two ways to hold a daemon key, and the argument turns on how many machines
- * are behind the origin.** A self-hosted relay is one origin in front of one
- * machine, so the key pinned by the /pair ceremony is *the* key and this reads
- * it. A hosted relay is one origin in front of every machine on every account,
- * where that sentence is not true of anything — so the key comes with the
- * session the control plane handed this tab, pinned per device (./session).
- * Passing the session in rather than reaching for it keeps this function the
- * one place that decides *which* of those a tab is.
+ * against — and pairing is the only thing that changes the answer.
  *
  * The daemon key is read first and this browser's own key only after it. A
  * browser that has never paired must leave here with nothing written: minting a
@@ -68,21 +57,9 @@ export function isRelayOrigin(loc: { hostname: string } = location): boolean {
  * quota refused — lands on the same null. There is no identity to be had either
  * way, and the alternative is a rejected promise at the entry point, which
  * mounts no app and tells the user even less than the explainer does.
- *
- * The channel token is deliberately not here: on a hosted relay it is fetched
- * per dial (./session, `channelTokenSource`), and on every other deployment
- * there is none. Hence the `Omit` — the caller who assembles the full
- * `RelayIdentity` must supply `token` itself, explicitly.
  */
-export async function loadRelayIdentity(
-  session: RelaySession | null = null,
-): Promise<Omit<RelayIdentity, 'token'> | null> {
+export async function loadRelayIdentity(): Promise<RelayIdentity | null> {
   try {
-    // The session already carries the key, pinned under the id of the machine
-    // it names, so there is nothing to look up: this tab knows exactly which
-    // daemon it is for.
-    if (session) return { deviceKey: await loadOrCreateDeviceKey(), daemonPub: session.daemonPub }
-
     const daemonPub = await loadPinnedDaemonKey()
     if (daemonPub === null) return null
     return { deviceKey: await loadOrCreateDeviceKey(), daemonPub }

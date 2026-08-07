@@ -18,15 +18,6 @@ import { cn } from '@/lib/utils'
  * key with the session itself, from the control plane that holds the device row
  * (src/relay/session.ts).
  *
- * The page is still *reachable* on a hosted relay's origin, because the daemon,
- * a self-hosted relay and flue.sh all serve this same bundle and nothing here
- * can tell the last two apart from the origin alone. What it does there is
- * fail: the SaaS relay requires `Authorization: Bearer <channel token>` on
- * `/api/pair` and this POST carries none, so the request is refused before it
- * reaches any daemon. That is the right outcome — there is nothing on flue.sh
- * to pair with — but it is a dead end rather than an explanation, and
- * docs/SAAS.md says so. A hosted UI that ever surfaced pairing would have to
- * carry the bearer or say why it cannot.
  */
 const PAIR_ENDPOINT = '/api/pair'
 

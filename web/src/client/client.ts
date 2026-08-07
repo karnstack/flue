@@ -48,17 +48,13 @@ const BACKOFF_MAX_MS = 10_000
 /**
  * How long a connection has to last before the backoff forgets it ever failed.
  *
- * "Reset on open" is not enough, because opening is not the same as being kept,
- * and on a hosted relay every dial costs a token. A channel that establishes
- * and dies immediately — the Durable Object handing the daemon leg to a
- * newcomer and closing the incumbent with 4000 "replaced" (relay/src/hub.ts), a
- * daemon that reconnects in a loop, an edge that drops the socket at the
- * upgrade — used to reset the exponent on every cycle, so the tab sat at the
- * 125–250 ms floor forever. That is four to eight dials a second, each one a
- * `POST /api/relay-token` against a bucket of 600 per fixed window
- * (app/src/server/ratelimit.ts): about two minutes to spend the machine's whole
- * refresh budget, after which every session on that machine is answered 429
- * with nothing on screen to say why.
+ * "Reset on open" is not enough, because opening is not the same as being kept.
+ * A channel that establishes and dies immediately — the Durable Object handing
+ * the daemon leg to a newcomer and closing the incumbent with 4000 "replaced"
+ * (relay/src/hub.ts), a daemon that reconnects in a loop, an edge that drops
+ * the socket at the upgrade — used to reset the exponent on every cycle, so the
+ * tab sat at the 125–250 ms floor forever: four to eight dials a second against
+ * a Worker someone pays for, with nothing on screen to say why.
  *
  * Requiring the socket to have *lasted* lets a flapping channel escalate to the
  * ten-second ceiling and sit there instead. Five seconds, and the same five as
