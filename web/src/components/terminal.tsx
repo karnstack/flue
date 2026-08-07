@@ -19,6 +19,7 @@ import {
 } from '@/lib/geometry'
 import { createKeyboardModes, type KeyboardMode } from '@/lib/keyboard'
 import { cn } from '@/lib/utils'
+import { trackVisualViewport } from '@/lib/viewport'
 
 /** What the view is showing, which is not the same as what the socket is doing. */
 type Phase = 'connecting' | 'live' | 'reconnecting' | 'exited' | 'gone'
@@ -322,8 +323,9 @@ export function Terminal({
     // nothing else, so without this a phone cannot reach the scrollback at
     // all. Drags become whole-line scrollLines() calls, with the fractional
     // remainder carried between moves so slow drags still add up. The
-    // surface's own CSS sets touch-action: none (styles.css), which is what
-    // keeps the browser from spending the gesture on panning the page.
+    // surface's own CSS sets touch-action: pinch-zoom (styles.css), which is
+    // what keeps the browser from spending the gesture on panning the page
+    // while still leaving two fingers to the zoom.
     let touchY: number | null = null
     let touchCarry = 0
     const lineHeightPx = () => {
@@ -358,6 +360,15 @@ export function Terminal({
     surface.addEventListener('touchmove', touchMove, { passive: false })
     surface.addEventListener('touchend', touchEnd, { passive: true })
     surface.addEventListener('touchcancel', touchEnd, { passive: true })
+
+    // The pane hugs the visual viewport: a phone keyboard shrinks it and the
+    // ResizeObserver below refits the terminal above the keyboard. While
+    // pinch-zoomed it instead releases the surface so one finger pans.
+    const untrackViewport = trackVisualViewport({
+      pane,
+      surface,
+      viewport: window.visualViewport,
+    })
 
     // Every registration returns an unsubscribe, and all of them are released
     // on cleanup: the client outlives this view by design.
@@ -559,6 +570,7 @@ export function Terminal({
       surface.removeEventListener('touchmove', touchMove)
       surface.removeEventListener('touchend', touchEnd)
       surface.removeEventListener('touchcancel', touchEnd)
+      untrackViewport()
       window.removeEventListener('storage', onStorage)
       window.removeEventListener('keydown', onKey, true)
       observer.disconnect()
