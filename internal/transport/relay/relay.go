@@ -355,12 +355,10 @@ func (t *Transport) runOnce(ctx context.Context) (connectedAt time.Time, err err
 	// moment the handshake returns — so cancelling it here does not touch the
 	// connection it produced.
 	dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
-	// Inside the dial's deadline, and inside runOnce rather than New: on the
-	// hosted path this is a request to the control plane, and the credential it
-	// returns is short-lived. Reading it here is what makes every dial present a
-	// live one — a transport that captured a token at construction would come
-	// back from its first long outage with an expired credential and back off on
-	// the 401 it earned.
+	// Inside runOnce rather than New, so every dial reads the credential
+	// fresh: a transport that captured it at construction could never present
+	// anything newer, and bearer staying a per-dial call is what keeps that
+	// property if the credential ever stops being a constant.
 	bearer, err := t.bearer(dialCtx)
 	if err != nil {
 		cancelDial()

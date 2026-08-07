@@ -33,10 +33,9 @@ type fakeRelay struct {
 	ts     *httptest.Server
 	secret string
 
-	// admits replaces the constant-secret compare, for the SaaS tests: there
-	// the credential is a short-lived channel token the daemon minted, so which
-	// strings are acceptable is the test's business rather than one value's.
-	// Set before the transport is started, and read-only after.
+	// admits replaces the constant-secret compare for the tests that need to
+	// judge a credential themselves — a wrong secret, an empty one. Set before
+	// the transport is started, and read-only after.
 	admits func(auth string) bool
 
 	// conns carries every socket the relay accepted, oldest first. It is

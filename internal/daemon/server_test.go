@@ -1106,15 +1106,6 @@ func TestSecurityHeaders(t *testing.T) {
 			t.Errorf("CSP %q is missing %q", csp, want)
 		}
 	}
-	// The relay's `connect-src` carries the control-plane origin, because the
-	// bundle refreshes a channel token from it on every dial past the first
-	// minute. A tab on loopback has no relay session and mints no such token,
-	// so this policy must not carry it: the daemon's UI is served over plain
-	// http to whatever else is on this machine's loopback, and the narrower
-	// policy is free here.
-	if strings.Contains(csp, "app.flue.sh") {
-		t.Errorf("the daemon's CSP carries the control-plane origin: %q", csp)
-	}
 	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("Access-Control-Allow-Origin = %q, want none", got)
 	}

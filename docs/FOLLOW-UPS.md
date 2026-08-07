@@ -2,9 +2,7 @@
 
 Carried out of the local-terminal build, triaged by a whole-branch review. Ranked
 roughly by value, not by size. Items 7–9 are the same exercise for the
-crypto+pairing milestone, items 10–13 for the relay. Items 14–16 covered the
-SaaS control plane, which the open-source-only pivot (2026-08-07) deleted —
-mentions of it below are history, not description.
+crypto+pairing milestone, items 10–13 for the relay.
 
 ## Done
 
@@ -347,20 +345,13 @@ refusing to run a bundle whose digest changed — a different worker, and one th
 has to be right about updates or it bricks the app offline. The FAQ now says
 plainly that the PWA is an offline cache and a speed-up rather than a defence.
 
-**Restated rather than resolved by the hosted service** (which the pivot later
-deleted). flue.sh did not run the pairing ceremony at all: a machine joined an
-account with `flue link`, and the browser was handed that machine's public key
-by the control plane along with the session. So the move described above was
-not the hosted attack. The hosted one was shorter and worse: the origin serves the page that
-holds the browser's Noise keys, runs the handshake and decrypts every frame, so
-a modified bundle reads the plaintext where the plaintext already is, with no
-device to pair and no window to wait for. That is not a new finding — it is
-item 8's original observation with the pairing step deleted — but it stops
-being a footnote the moment anyone takes an invite, which is why the FAQ's
-first answer now states it for the hosted case directly instead of leaving it
-attached to a sentence about pairing. The fixes are unchanged and still
-unbuilt: a native client, an integrity-pinned bundle, or a published and
-attested digest (§13, last bullet).
+**The deeper form needs no pairing at all.** The relay origin serves the page
+that holds the browser's Noise keys, runs the handshake and decrypts every
+frame, so a modified bundle reads the plaintext where the plaintext already is
+— item 8's original observation with the pairing step deleted, and the FAQ's
+first answer states it directly. The fixes are unchanged and still unbuilt: a
+native client, an integrity-pinned bundle, or a published and attested digest
+(§13, last bullet).
 
 The other half of the same problem *is* fixed: the loopback QR that started this
 work — Pair, over a `local`-only daemon, printing a `127.0.0.1` URL no other
@@ -451,18 +442,6 @@ documented promise depends on.
   use. Doing it in the Worker instead would mean per-IP state in the Durable
   Object, which is a hibernation cost paid on every request to save one the edge
   can refuse for nothing.
-- ~~**The browser leg has no auth, and the SaaS needs one.**
-  `authorizeClient` (`relay/src/index.ts`) returns `true` and `hubIdFor` returns
-  `idFromName('hub')` — correct for self-hosting, where one daemon owns the
-  Worker and Noise is the confidentiality boundary. A multi-tenant relay has to
-  verify a signed token on `/client` and route to the right hub by account and
-  daemon id. The seam is deliberately in place and the implementation is Plan
-  2.~~
-
-  **Done** (Plan 2, Task 9), then **deleted whole** by the open-source-only
-  pivot: the signed-token mode, `channel-auth.ts` and the second vitest
-  project went with the control plane they served. The relay is Plan 1's
-  again — one secret, one hub.
 - ~~**Relay-served assets carry none of the daemon's security headers.** The
   daemon wraps every response in `securityHeaders`
   (`internal/daemon/server.go`) — `Referrer-Policy: no-referrer` and a CSP with
@@ -489,8 +468,7 @@ documented promise depends on.
 
   `RelayCSP` differs from the daemon's policy in `connect-src` alone: it drops
   the loopback wildcards, since the relay's own socket is a same-origin
-  `wss://`. (It briefly also granted the control plane's origin for the hosted
-  token refresh; the pivot removed both the refresh and the grant.)
+  `wss://`.
   The field is absent from Cloudflare's published multipart-metadata reference,
   which documents only `html_handling` and `not_found_handling`; it is what
   every `wrangler deploy` sends, which is as attested as this API gets.

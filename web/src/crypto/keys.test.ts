@@ -74,11 +74,11 @@ describe('a daemon key pinned per device', () => {
   })
 
   it('holds two machines’ keys at once, and hands back the right one', async () => {
-    // The whole reason this exists. A SaaS relay is ONE origin in front of
-    // every machine on every account, so a store with one slot per origin
-    // means opening machine B overwrites machine A's key — and the *next*
-    // session on A builds its Noise IK handshake against B's static, fails
-    // silently, and reconnects into the same failure forever.
+    // The whole reason this exists. One relay origin fronts every machine
+    // you own, so a store with one slot per origin means opening machine B
+    // overwrites machine A's key — and the *next* session on A builds its
+    // Noise IK handshake against B's static, fails silently, and reconnects
+    // into the same failure forever.
     const db = new IDBFactory()
     await savePinnedDaemonKeyFor('aaaaaaaaaaaa', KEY_A, db)
     await savePinnedDaemonKeyFor('bbbbbbbbbbbb', KEY_B, db)
