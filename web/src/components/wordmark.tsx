@@ -2,7 +2,7 @@ import { cn } from '@/lib/utils'
 
 /**
  * The favicon's mark, drawn in the markup so the sidebar, the tab icon and
- * the installed app icon are one image. Amber here is the mark rather than
+ * the installed app icon are one image. Teal here is the mark rather than
  * an accent — theme.ts draws the same distinction for the app icon — and the
  * geometry is the favicon's own: chevron, cursor bar, 22.5 corner.
  */
@@ -18,7 +18,7 @@ export function Mark() {
         strokeWidth="10.5"
         strokeLinecap="round"
         strokeLinejoin="round"
-        className="stroke-amber-500"
+        className="stroke-teal-500"
       />
     </svg>
   )

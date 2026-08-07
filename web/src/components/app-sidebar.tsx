@@ -53,7 +53,7 @@ export function AppSidebar({ currentPath, ...props }: AppSidebarProps) {
                     {/*
                       Active styling rides on `active` rather than the
                       button's isActive prop: the prop's data-active classes
-                      (zinc surface, a font-medium step) fight the amber
+                      (zinc surface, a font-medium step) fight the teal
                       treatment and the equal-weight rule at the same variant
                       level, where which one wins is a question of emission
                       order. Plain classes through cn() let tailwind-merge
@@ -72,7 +72,7 @@ export function AppSidebar({ currentPath, ...props }: AppSidebarProps) {
                           // high-contrast fill — and pinned across hover and
                           // press so the current page cannot look momentarily
                           // deselected.
-                          'bg-amber-500/10 text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 active:bg-amber-500/10 active:text-amber-700 dark:text-amber-400 dark:hover:text-amber-400 dark:active:text-amber-400',
+                          'bg-teal-500/10 text-teal-700 hover:bg-teal-500/10 hover:text-teal-700 active:bg-teal-500/10 active:text-teal-700 dark:text-teal-400 dark:hover:text-teal-400 dark:active:text-teal-400',
                       )}
                     >
                       {/*

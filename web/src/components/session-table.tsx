@@ -37,7 +37,7 @@ function ordered(sessions: SessionInfo[]): SessionInfo[] {
 /**
  * The state cell: a dot and a word.
  *
- * The dot is neutral, and deliberately. Amber is this app's single accent and
+ * The dot is neutral, and deliberately. Teal is this app's single accent and
  * it is spent on the one primary button per screen — a dot per row would put
  * ten of them beside it and leave the eye nowhere to land. Contrast carries the
  * distinction instead: full-strength for a live session, faded for one that has
@@ -92,7 +92,7 @@ export function SessionTable({ sessions, onOpen }: SessionTableProps) {
     /*
      * The empty state quotes the landing page's terminal figure: a dark card
      * carrying the one command that matters, ending in the emulator's own
-     * amber cursor. The card keeps its dark ground in both themes, exactly
+     * teal cursor. The card keeps its dark ground in both themes, exactly
      * as a terminal does — in the light theme it is the landing's figure, in
      * the dark one it sits a step above the canvas, as panels here do.
      */
@@ -103,7 +103,7 @@ export function SessionTable({ sessions, onOpen }: SessionTableProps) {
             <span className="text-zinc-400">$</span> flue open
             <span
               aria-hidden="true"
-              className="ml-2 inline-block h-[1.1em] w-[0.6em] align-text-bottom bg-amber-400 motion-safe:animate-blink"
+              className="ml-2 inline-block h-[1.1em] w-[0.6em] align-text-bottom bg-teal-400 motion-safe:animate-blink"
             />
           </p>
         </div>

@@ -86,14 +86,14 @@ describe('compiled stylesheet', () => {
     expect(css).toContain('-zinc-')
   })
 
-  it('keeps amber out of every neutral surface token', () => {
-    // Amber is the single accent: active nav state, focus rings, and the one
+  it('keeps teal out of every neutral surface token', () => {
+    // Teal is the single accent: active nav state, focus rings, and the one
     // primary button. It reaches components only through --primary and
     // --ring, never a background or body-text token.
     for (const token of ['--background:', '--foreground:', '--muted-foreground:']) {
       const at = css.indexOf(token)
       expect(at).toBeGreaterThan(-1)
-      expect(css.slice(at, at + 80)).not.toContain('amber')
+      expect(css.slice(at, at + 80)).not.toContain('teal')
     }
   })
 })

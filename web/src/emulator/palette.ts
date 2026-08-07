@@ -8,9 +8,9 @@ import type { TerminalTheme } from './types'
  *
  * The split that matters: the four surface roles — background, foreground,
  * cursor, selection — are flue's, and follow the design system's zinc neutrals
- * with amber for the cursor, the one place an accent belongs in a terminal.
+ * with teal for the cursor, the one place an accent belongs in a terminal.
  * The sixteen ANSI slots are the *program's*, and stay a conventional palette:
- * a program that asked for red asked for red, and answering in amber would be
+ * a program that asked for red asked for red, and answering in teal would be
  * flue misreporting its own output. They are drawn from the same Tailwind
  * ramps as the chrome, so the two read as one product without either pretending
  * to be the other.
@@ -19,7 +19,7 @@ import type { TerminalTheme } from './types'
  * from them. xterm parses hex, rgb() and named colours; Tailwind v4 emits its
  * palette as `oklch(...)`, which xterm's colour parser does not accept, and
  * WebGL rendering never touches CSS at all. So the values below are the sRGB
- * renderings of --color-zinc-* and --color-amber-*, kept by hand. If the
+ * renderings of --color-zinc-* and --color-teal-*, kept by hand. If the
  * design system's neutral ever moves off zinc, this file moves with it.
  */
 
@@ -31,10 +31,10 @@ const ZINC_800 = '#27272a'
 const ZINC_900 = '#18181b'
 const ZINC_950 = '#09090b'
 
-// Tailwind amber, as sRGB. The accent, and in a terminal the cursor is the
+// Tailwind teal, as sRGB. The accent, and in a terminal the cursor is the
 // only thing that should carry it.
-const AMBER_400 = '#fbbf24'
-const AMBER_600 = '#d97706'
+const TEAL_400 = '#00d5be'
+const TEAL_600 = '#009689'
 
 /**
  * Dark: zinc-950 canvas, matching --flue-canvas in the dark block.
@@ -46,7 +46,7 @@ const AMBER_600 = '#d97706'
 export const TERMINAL_PALETTE_DARK: TerminalTheme = {
   background: ZINC_950,
   foreground: '#e4e4e7',
-  cursor: AMBER_400,
+  cursor: TEAL_400,
   cursorAccent: ZINC_950,
   // Alpha rather than a flat colour, so a selection over coloured output still
   // shows what it is sitting on.
@@ -82,7 +82,7 @@ export const TERMINAL_PALETTE_DARK: TerminalTheme = {
 export const TERMINAL_PALETTE_LIGHT: TerminalTheme = {
   background: '#ffffff',
   foreground: ZINC_900,
-  cursor: AMBER_600,
+  cursor: TEAL_600,
   cursorAccent: '#ffffff',
   selectionBackground: 'rgba(9, 9, 11, 0.16)',
   selectionInactiveBackground: 'rgba(9, 9, 11, 0.08)',

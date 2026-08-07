@@ -599,7 +599,7 @@ export function Terminal({
           // glance: pulsing while an answer is still expected, still once the
           // state is final and waiting will not change it. Like the dot on a
           // session row it stays neutral — waiting reads as motion, not
-          // colour, and amber's short list of jobs does not include this pill.
+          // colour, and teal's short list of jobs does not include this pill.
           <div
             role="status"
             className={cn(

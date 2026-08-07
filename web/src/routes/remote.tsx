@@ -182,7 +182,7 @@ function StatusBadge({ status }: { status: RelayInfo['status'] | null }) {
     )
   }
   if (status === 'connected') {
-    // The screen's one amber element, taking it from --primary rather than
+    // The screen's one teal element, taking it from --primary rather than
     // naming a colour — the same treatment the single primary button gets.
     return <Badge className="shrink-0">Connected</Badge>
   }
@@ -340,7 +340,7 @@ function Reachable({ origin }: { origin: string }) {
         <Copyable text={origin} breakable />
         <div className="flex flex-wrap items-center gap-3">
           {/*
-            The one filled control on the screen, taking its amber from
+            The one filled control on the screen, taking its teal from
             --primary rather than naming a colour. A router Link, never a plain
             anchor: a page reload would tear down the tab's one socket.
           */}

@@ -223,7 +223,7 @@ export function SessionsRoute() {
           </p>
         </div>
         {/*
-          The one filled button on this screen, and it takes its amber from
+          The one filled button on this screen, and it takes its teal from
           --primary rather than naming a colour, so the accent stays a token.
           Every other control here is the bordered variant.
 

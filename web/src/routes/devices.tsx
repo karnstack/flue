@@ -604,7 +604,7 @@ export function DevicesRoute() {
           )}
         </div>
         {/*
-          The one filled button on this screen, taking its amber from --primary
+          The one filled button on this screen, taking its teal from --primary
           rather than naming a colour. Every other control here is bordered or
           quiet.
 

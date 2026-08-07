@@ -8,7 +8,7 @@ import palette from 'tailwindcss/colors'
  * carry a hand-picked hex either, or the installed app drifts away from the
  * stylesheet the moment a token moves. Everything here is resolved from the
  * same `tailwindcss/colors` module that produces the `--color-zinc-*` and
- * `--color-amber-*` variables in styles.css.
+ * `--color-teal-*` variables in styles.css.
  */
 
 // `none` is a legal component and Tailwind uses it: every achromatic swatch
@@ -94,13 +94,13 @@ function encodeChannel(linear: number): string {
  * flue's installable-app chrome.
  *
  * Both the manifest's `theme_color` and its `background_color` are the dark
- * canvas, not the accent. Amber is the single accent and carries active nav
+ * canvas, not the accent. Teal is the single accent and carries active nav
  * state, focus rings and the one primary button per screen; browser chrome
- * and the splash screen are surfaces, so they take the canvas colour. Amber
+ * and the splash screen are surfaces, so they take the canvas colour. Teal
  * appears in the app icon, where it is a mark rather than a surface.
  */
 export const chrome = {
   canvasLight: toHex(palette.white),
   canvasDark: toHex(palette.zinc[950]),
-  accent: toHex(palette.amber[500]),
+  accent: toHex(palette.teal[500]),
 } as const

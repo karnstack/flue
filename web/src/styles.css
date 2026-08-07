@@ -87,9 +87,9 @@
 /*
  * flue design tokens.
  *
- * Neutral is zinc, never gray or slate. Accent is amber — it carries active
+ * Neutral is zinc, never gray or slate. Accent is teal — it carries active
  * nav state, focus rings, and the one primary button per screen, and is
- * never used for body text, where amber on dark would fail contrast.
+ * never used for body text, where teal on dark would fail contrast.
  *
  * Both themes ship and follow prefers-color-scheme. There is no toggle, and
  * therefore no `.dark` class: `dark:` resolves through Tailwind's built-in
@@ -124,8 +124,8 @@
   --font-mono:
     ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, monospace;
 
-  --color-accent-fg: var(--color-amber-600);
-  --color-accent-bg: var(--color-amber-500);
+  --color-accent-fg: var(--color-teal-600);
+  --color-accent-bg: var(--color-teal-500);
 }
 
 /*
@@ -151,7 +151,7 @@
  *
  * Note the one name that means different things in the two vocabularies:
  * shadcn's `--accent` is a subtle hover surface (zinc here), while flue's
- * accent is amber and lives in --color-accent-fg / --color-accent-bg. Amber
+ * accent is teal and lives in --color-accent-fg / --color-accent-bg. Teal
  * reaches shadcn through `--primary` and `--ring`, which is precisely the
  * "one primary button per screen, plus focus rings" rule.
  */
@@ -234,7 +234,7 @@
      * is the page gutter the content panel floats on, so it is one step off
      * the canvas — zinc-50 here, the canvas itself in dark, where the panel
      * (zinc-900) supplies the step instead. `-accent` is the hover surface,
-     * zinc like shadcn's `--accent` above; amber reaches the sidebar the same
+     * zinc like shadcn's `--accent` above; teal reaches the sidebar the same
      * way it reaches everything else, through the ring.
      */
     --sidebar: var(--color-zinc-50);
@@ -254,7 +254,7 @@
       --flue-panel: var(--color-zinc-900);
       --flue-line: --alpha(var(--color-white) / 10%);
       --flue-muted: var(--color-zinc-400);
-      --color-accent-fg: var(--color-amber-400);
+      --color-accent-fg: var(--color-teal-400);
 
       --foreground: var(--color-zinc-50);
       --card-foreground: var(--color-zinc-50);

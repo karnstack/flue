@@ -562,7 +562,7 @@ export function PairRoute() {
             <p className={PROSE}>It is what the paired browser lists this device as.</p>
           </div>
           {/*
-            The one filled control on the page, taking its amber from --primary
+            The one filled control on the page, taking its teal from --primary
             rather than naming a colour. Shut until the key is in hand and while
             the request is out: pairing without a key would enrol nothing, and a
             second press spends a token the first press is already spending.
