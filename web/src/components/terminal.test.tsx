@@ -361,9 +361,11 @@ describe('Terminal', () => {
     expect(screen.getByRole('status').textContent).toContain('gone')
 
     // And it stays given up on: the plan no longer names the session, so the
-    // next reconnect asks for nothing at all.
+    // next reconnect asks for nothing at all. The second wait is longer than
+    // the first because sockets[1] did not live MIN_STABLE_MS, so the backoff
+    // escalates instead of resetting.
     act(() => sockets[1]!.close())
-    await act(() => vi.advanceTimersByTimeAsync(125))
+    await act(() => vi.advanceTimersByTimeAsync(250))
     act(() => sockets[2]!.open())
     expect(sockets[2]!.ofType('attach')).toEqual([])
     vi.useRealTimers()
