@@ -10,6 +10,8 @@ flued
 /dist/
 .DS_Store
 .superpowers/
+# Claude Code session state and worktrees; never part of the tree.
+.claude/
 # Deploy-time copy of scripts/install.sh; `make site-deploy` stages it.
 /site/public/install.sh
 # Wrangler's local cache from site deploys.

@@ -8,7 +8,7 @@
 # Both dist directories are gitignored on purpose and must stay that way — see
 # web/embed.go and relay/embed.go.
 
-.PHONY: all web relay app build run web-dev test test-go test-web test-relay test-app lint clean site-dev site-deploy
+.PHONY: all web relay build run web-dev test test-go test-web test-relay lint clean site-dev site-deploy
 
 all: build
 
@@ -20,13 +20,6 @@ web:
 # `flue relay setup` deploy it with no Node on the user's machine.
 relay:
 	cd relay && pnpm install --frozen-lockfile && pnpm build
-
-# app/ is the flue.sh control plane: a TanStack Start app deployed to Workers
-# on its own. Nothing embeds it in the flue binary, so `build` does not depend
-# on it — but its tests run against the built worker (dist/server), which is
-# why test-app depends on this target.
-app:
-	cd app && pnpm install --frozen-lockfile && pnpm build
 
 build: web relay
 	mkdir -p bin
@@ -43,7 +36,7 @@ run:
 web-dev:
 	cd web && pnpm install --frozen-lockfile && pnpm dev
 
-test: test-go test-web test-relay test-app
+test: test-go test-web test-relay
 
 test-go: web relay
 	go test ./...
@@ -54,20 +47,16 @@ test-web:
 test-relay: relay
 	cd relay && pnpm test
 
-test-app: app
-	cd app && pnpm test
-
-lint: web relay app
+lint: web relay
 	go vet ./...
 	# The dev-tagged build (make run) has no CI job of its own; vetting it
 	# here is what keeps web/dev.go from drifting out of compilability.
 	go vet -tags dev ./...
 	cd web && pnpm lint
 	cd relay && pnpm lint
-	cd app && pnpm lint
 
 clean:
-	rm -rf bin web/dist relay/dist app/dist
+	rm -rf bin web/dist relay/dist
 
 # The landing site (site/) has no build step; these targets exist for the
 # one moving part: install.sh's canonical source is scripts/install.sh (the
