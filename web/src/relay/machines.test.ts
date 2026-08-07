@@ -103,6 +103,22 @@ describe('forgetMachine', () => {
 
     expect(await loadPinnedDaemonKeyFor(ATTIC.id)).toEqual(PUB)
   })
+
+  it('keeps the record when the key will not go, so forget can be tried again', async () => {
+    // The key goes first and the record only after it: a forget that failed
+    // halfway must leave the half the user sees — the row — so they can try
+    // again, where a record dropped first would hide a credential the browser
+    // still holds.
+    saveMachine(MESA)
+    vi.stubGlobal('indexedDB', {
+      open() {
+        throw new Error('the key store is gone')
+      },
+    })
+
+    await expect(forgetMachine(MESA.id)).rejects.toThrow()
+    expect(listMachines()).toEqual([MESA])
+  })
 })
 
 describe('bootMachine', () => {

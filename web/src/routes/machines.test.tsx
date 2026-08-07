@@ -95,11 +95,32 @@ describe('the machine picker', () => {
     render(<MachinesRoute />)
     await userEvent.click(screen.getByRole('button', { name: 'Forget Blue Mesa' }))
 
-    // The row goes at once, and the pinned key goes with the record: what is
-    // left holds nothing that could open a channel to that machine.
-    expect(screen.queryByText('Blue Mesa')).toBeNull()
+    // The row goes once the forget has finished — the key first, then the
+    // record: what is left holds nothing that could open a channel there.
+    await waitFor(() => expect(screen.queryByText('Blue Mesa')).toBeNull())
     expect(screen.getByText('Attic Pi')).toBeTruthy()
-    await waitFor(async () => expect(await loadPinnedDaemonKeyFor(MESA.id)).toBeNull())
+    expect(await loadPinnedDaemonKeyFor(MESA.id)).toBeNull()
+  })
+
+  it('keeps the row and says so when the key will not go', async () => {
+    // A quota refused, a store that will not open. A row that vanished while
+    // the browser still held the credential would be the forget claiming what
+    // it could not do — so the row stays, and the failure is said in words.
+    saveMachine(MESA)
+    saveMachine(ATTIC)
+    watchLocation('/machines')
+
+    render(<MachinesRoute />)
+    vi.stubGlobal('indexedDB', {
+      open() {
+        throw new Error('the key store is gone')
+      },
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Forget Blue Mesa' }))
+
+    expect(await screen.findByText(/still paired here/)).toBeTruthy()
+    expect(screen.getByText('Blue Mesa')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Forget Blue Mesa' })).toBeTruthy()
   })
 
   it('returns to the picker when the forgotten machine was the selected one', async () => {
@@ -113,8 +134,8 @@ describe('the machine picker', () => {
 
     // The tab's client was built against that machine at boot, so the honest
     // move is the same reload every other selection change makes.
+    await waitFor(() => expect(reload).toHaveBeenCalled())
     expect(sessionStorage.getItem(SELECTED_KEY)).toBeNull()
-    expect(reload).toHaveBeenCalled()
   })
 
   it('does not reload for forgetting a machine that was not selected', async () => {
@@ -126,6 +147,7 @@ describe('the machine picker', () => {
     render(<MachinesRoute />)
     await userEvent.click(screen.getByRole('button', { name: 'Forget Blue Mesa' }))
 
+    await waitFor(() => expect(screen.queryByText('Blue Mesa')).toBeNull())
     expect(sessionStorage.getItem(SELECTED_KEY)).toBe(ATTIC.id)
     expect(reload).not.toHaveBeenCalled()
   })

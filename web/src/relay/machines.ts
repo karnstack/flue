@@ -105,17 +105,21 @@ export function saveMachine(record: MachineRecord): void {
 }
 
 /**
- * Forget one machine: the record now, the pinned key with it.
+ * Forget one machine: the pinned key first, the record only after it.
  *
- * The record goes synchronously so a caller re-reading the list sees the row
- * gone; the key ride is awaited by whoever cares. Both halves are idempotent —
- * forgetting a machine that was never written succeeds — because the state the
- * caller asked for is "not there", and it is.
+ * The order is the promise. The record is the half the user sees — the row
+ * — and the key is the credential behind it, so a forget that fails halfway
+ * must fail with the row still standing: the user sees it, is told, and tries
+ * again. Dropped the other way round, a refused key delete would leave a
+ * browser that lists nothing and can still handshake — a credential the UI no
+ * longer admits to holding. Both halves are idempotent — forgetting a machine
+ * that was never written succeeds — because the state the caller asked for is
+ * "not there", and it is.
  */
 export async function forgetMachine(id: string): Promise<void> {
+  await deletePinnedDaemonKeyFor(id)
   const rest = listMachines().filter((m) => m.id !== id)
   localStorage.setItem(MACHINES_KEY, JSON.stringify(rest))
-  await deletePinnedDaemonKeyFor(id)
 }
 
 /**

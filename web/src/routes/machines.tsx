@@ -23,6 +23,7 @@
 import { useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 import {
   forgetMachine,
   listMachines,
@@ -60,6 +61,8 @@ function Frame({ title, children }: { title: string; children: React.ReactNode }
 
 export function MachinesRoute() {
   const [machines, setMachines] = useState(() => ordered(listMachines()))
+  /** What the last forget had to say for itself, when it could not finish. */
+  const [failure, setFailure] = useState<string | null>(null)
 
   function connect(id: string) {
     sessionStorage.setItem(SELECTED_KEY, id)
@@ -71,12 +74,20 @@ export function MachinesRoute() {
     else location.reload()
   }
 
-  function forget(id: string) {
-    // The record goes synchronously and the key rides behind it — see
-    // forgetMachine. Nothing waits on the key: the record is what the boot
-    // and this list read, and a stale pin under an id with no record can
-    // never be dialled again.
-    void forgetMachine(id)
+  async function forget(id: string, name: string) {
+    // Awaited, because forgetMachine deletes the key before it drops the
+    // record: a row taken off the screen ahead of the answer would be this
+    // page claiming a forget the key store then refused — a machine listed
+    // nowhere that this browser can still handshake with.
+    try {
+      await forgetMachine(id)
+    } catch {
+      setFailure(
+        `This browser would not let go of ${name}’s key, so it is still paired here — try again.`,
+      )
+      return
+    }
+    setFailure(null)
     setMachines(ordered(listMachines()))
     // Forgetting the machine this tab is riding takes the tab's client with
     // it, and the client was built at boot — so the selection is cleared and
@@ -148,7 +159,7 @@ export function MachinesRoute() {
                 size="sm"
                 aria-label={`Forget ${m.name}`}
                 className="text-zinc-500 dark:text-zinc-400"
-                onClick={() => forget(m.id)}
+                onClick={() => void forget(m.id, m.name)}
               >
                 Forget
               </Button>
@@ -159,6 +170,17 @@ export function MachinesRoute() {
           </li>
         ))}
       </ul>
+      {/*
+        Always on the page, never mounted with its text: several screen
+        readers announce only changes to a live region that was already in the
+        accessibility tree, so a region that appears alongside its first
+        message is a message nobody hears — which is also why it is not
+        dropped when empty. Empty, it contributes no line box at all, and
+        `empty:mt-0` takes its own spacing with it.
+      */}
+      <p role="status" className={cn(PROSE, 'empty:mt-0')}>
+        {failure}
+      </p>
     </Frame>
   )
 }
