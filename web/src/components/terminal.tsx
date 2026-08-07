@@ -19,7 +19,7 @@ import {
 } from '@/lib/geometry'
 import { createKeyboardModes, type KeyboardMode } from '@/lib/keyboard'
 import { cn } from '@/lib/utils'
-import { trackVisualViewport } from '@/lib/viewport'
+import { trackVisualViewport, zoomedIn } from '@/lib/viewport'
 
 /** What the view is showing, which is not the same as what the socket is doing. */
 type Phase = 'connecting' | 'live' | 'reconnecting' | 'exited' | 'gone'
@@ -333,7 +333,11 @@ export function Terminal({
       return content && dims.rows > 0 ? content.height / dims.rows : 17
     }
     const touchStart = (e: TouchEvent) => {
-      if (e.touches.length !== 1) {
+      // A magnified page belongs to the browser, and releasing touch-action
+      // is not enough to give it back: touch-action only says the browser
+      // *may* pan, while the preventDefault() below cancels that pan whatever
+      // it says. So while zoomed this takes no gesture at all.
+      if (e.touches.length !== 1 || zoomedIn(window.visualViewport)) {
         touchY = null
         return
       }
@@ -342,6 +346,14 @@ export function Terminal({
     }
     const touchMove = (e: TouchEvent) => {
       if (touchY === null || e.touches.length !== 1) return
+      // The zoom can arrive after the finger is already down, so the same
+      // question is asked again here. Dropping the anchor rather than merely
+      // returning keeps a later unzoom from scrolling by the whole distance
+      // the finger travelled while panning.
+      if (zoomedIn(window.visualViewport)) {
+        touchY = null
+        return
+      }
       e.preventDefault()
       const y = e.touches[0]!.clientY
       // Dragging the content down (finger moves down) shows older lines:

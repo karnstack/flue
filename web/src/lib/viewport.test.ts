@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { trackVisualViewport, type ViewportLike } from './viewport'
+import { trackVisualViewport, zoomedIn, type ViewportLike } from './viewport'
 
 /** A hand-cranked visualViewport double; fire() plays both handler slots. */
 function fakeViewport(init: { height: number; offsetTop?: number; scale?: number }) {
@@ -15,6 +15,22 @@ function fakeViewport(init: { height: number; offsetTop?: number; scale?: number
   }
   return vv
 }
+
+describe('zoomedIn', () => {
+  it('leaves a resting page alone, through the rounding browsers report at 1', () => {
+    expect(zoomedIn(fakeViewport({ height: 700 }))).toBe(false)
+    expect(zoomedIn(fakeViewport({ height: 700, scale: 1.0000001 }))).toBe(false)
+  })
+
+  it('answers for a page a pinch has magnified', () => {
+    expect(zoomedIn(fakeViewport({ height: 350, scale: 2 }))).toBe(true)
+  })
+
+  it('says no where there is no viewport to ask, so nothing stands down', () => {
+    expect(zoomedIn(null)).toBe(false)
+    expect(zoomedIn(undefined)).toBe(false)
+  })
+})
 
 describe('trackVisualViewport', () => {
   let pane: HTMLElement
@@ -56,8 +72,11 @@ describe('trackVisualViewport', () => {
     vv.scale = 2
     vv.height = 350
     vv.fire()
-    // One finger must pan the zoomed page, and a zoom is not a layout change:
-    // the pane keeps its unzoomed size so the pty never refits on a pinch.
+    // One finger must pan the zoomed page — which takes this *and* the drag
+    // handler's own zoomedIn bail-out in terminal.tsx, since releasing
+    // touch-action alone leaves its preventDefault() cancelling the pan. And
+    // a zoom is not a layout change: the pane keeps its unzoomed size, so the
+    // pty never refits on a pinch.
     expect(surface.style.touchAction).toBe('auto')
     expect(pane.style.height).toBe('700px')
 

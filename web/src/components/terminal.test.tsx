@@ -73,6 +73,32 @@ const pane = () => document.querySelector<HTMLElement>('[data-flue-mode]')!
 const inset = () => document.querySelector<HTMLElement>('[data-flue-inset]')!
 const surfaceEl = () => document.querySelector<HTMLElement>('[data-flue-surface]')!
 
+/**
+ * A touch event jsdom will really dispatch.
+ *
+ * jsdom ships no `Touch` constructor, so a genuine TouchEvent cannot be built
+ * with any points in it. The handlers under test read exactly three things —
+ * how many touches there are, the first one's clientY, and preventDefault —
+ * so this carries those. `cancelable` is the load-bearing part: whether the
+ * event comes back prevented is what decides if the browser may pan.
+ */
+function touch(type: 'touchstart' | 'touchmove' | 'touchend', ys: number[]) {
+  const e = new Event(type, { bubbles: true, cancelable: true })
+  Object.defineProperty(e, 'touches', { value: ys.map((clientY) => ({ clientY })) })
+  return e
+}
+
+/** jsdom has no visualViewport at all, so tests that need one say so. */
+function pinchZoomedTo(scale: number) {
+  vi.stubGlobal('visualViewport', {
+    scale,
+    height: 350,
+    offsetTop: 0,
+    onresize: null,
+    onscroll: null,
+  })
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
@@ -425,6 +451,60 @@ describe('Terminal', () => {
 
     act(() => show(null))
     expect(document.title).toBe('flue')
+  })
+
+  describe('touch scrolling', () => {
+    /** Attached at 80x24 with a 17px line, ready to be dragged. */
+    function mountDraggable() {
+      const mounted = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() =>
+        mounted.sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24 })),
+      )
+      mounted.em.live().measured = { width: 800, height: 408 }
+      return mounted
+    }
+
+    it('scrolls the scrollback, and takes the gesture from the browser to do it', () => {
+      const { em } = mountDraggable()
+
+      act(() => void surfaceEl().dispatchEvent(touch('touchstart', [200])))
+      const move = touch('touchmove', [166])
+      act(() => void surfaceEl().dispatchEvent(move))
+
+      // 34px of finger over a 17px line: two lines toward the newer end.
+      expect(em.live().scrolled).toBe(2)
+      expect(move.defaultPrevented).toBe(true)
+    })
+
+    it('leaves the gesture to the browser while the page is pinch-zoomed', () => {
+      // Releasing touch-action cannot deliver this on its own. It only tells
+      // the browser it *may* pan; the preventDefault() above cancels that pan
+      // regardless, so the handler has to stand down as well or a zoomed page
+      // scrolls the scrollback instead of panning under the finger.
+      pinchZoomedTo(2)
+      const { em } = mountDraggable()
+
+      act(() => void surfaceEl().dispatchEvent(touch('touchstart', [200])))
+      const move = touch('touchmove', [166])
+      act(() => void surfaceEl().dispatchEvent(move))
+
+      expect(em.live().scrolled).toBe(0)
+      expect(move.defaultPrevented).toBe(false)
+      // Both halves of the same promise, asserted together.
+      expect(surfaceEl().style.touchAction).toBe('auto')
+    })
+
+    it('drops a drag already under way when the zoom arrives mid-gesture', () => {
+      const { em } = mountDraggable()
+
+      act(() => void surfaceEl().dispatchEvent(touch('touchstart', [200])))
+      pinchZoomedTo(2)
+      const move = touch('touchmove', [166])
+      act(() => void surfaceEl().dispatchEvent(move))
+
+      expect(em.live().scrolled).toBe(0)
+      expect(move.defaultPrevented).toBe(false)
+    })
   })
 
   describe('the sizing policy', () => {

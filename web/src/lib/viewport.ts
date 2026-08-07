@@ -13,6 +13,19 @@ export interface ViewportLike {
 }
 
 /**
+ * Is the page pinch-zoomed?
+ *
+ * The slack matters: browsers report a resting scale of 1.0000001 as readily
+ * as 1, so an exact comparison would call an idle page zoomed. Shared with
+ * terminal.tsx's touch handlers rather than written twice — the tracker
+ * hands the zoomed page's gestures to the browser, and a handler that drew
+ * the line anywhere else would take them straight back.
+ */
+export function zoomedIn(viewport: ViewportLike | null | undefined): boolean {
+  return !!viewport && viewport.scale > 1.01
+}
+
+/**
  * Keep the pane inside the *visual* viewport.
  *
  * The pane fills the layout viewport, but a phone's keyboard shrinks only the
@@ -34,7 +47,10 @@ export interface ViewportLike {
  * change, so the pane is left alone — refitting the pty on a pinch would
  * reflow the very text being magnified — and the surface's touch-action is
  * released so a single finger pans the zoomed page, which the stylesheet
- * otherwise reserves for the scrollback drag handler.
+ * otherwise reserves for the scrollback drag handler. Releasing it is only
+ * half the job: that handler asks `zoomedIn` the same question and stands
+ * down, because its preventDefault() would cancel the very pan touch-action
+ * had just permitted.
  */
 export function trackVisualViewport(opts: {
   pane: HTMLElement
@@ -45,7 +61,7 @@ export function trackVisualViewport(opts: {
   if (!viewport) return () => {}
 
   const apply = () => {
-    if (viewport.scale > 1.01) {
+    if (zoomedIn(viewport)) {
       surface.style.touchAction = 'auto'
       return
     }
