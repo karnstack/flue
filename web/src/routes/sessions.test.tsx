@@ -19,12 +19,16 @@ import { SessionsRoute } from './sessions'
 function info(over: Partial<SessionInfo> & { id: string }): SessionInfo {
   return {
     title: 'zsh',
+    name: '',
+    tags: [],
+    pinned: false,
     cwd: '/Users/karn/code/flue',
     cmd: ['zsh', '-l'],
     state: 'running',
     exitCode: 0,
     cols: 80,
     rows: 24,
+    createdAt: '2026-07-28T09:00:00Z',
     lastActive: '2026-07-28T10:00:00Z',
     ...over,
   }

@@ -1343,12 +1343,16 @@ function session(over: Partial<SessionInfo> = {}): SessionInfo {
   return {
     id: 's1',
     title: '',
+    name: '',
+    tags: [],
+    pinned: false,
     cwd: '/home/karn/code',
     cmd: [],
     state: 'running',
     exitCode: 0,
     cols: 80,
     rows: 24,
+    createdAt: '2026-08-05T00:00:00Z',
     lastActive: '2026-08-05T00:00:00Z',
     ...over,
   }

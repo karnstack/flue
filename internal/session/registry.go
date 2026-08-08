@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"os/exec"
 	"os/user"
@@ -13,6 +14,12 @@ import (
 
 	"github.com/creack/pty"
 )
+
+// ErrNotFound is what the registry answers for an id it does not hold. A
+// client editing a session that has just exited and been reaped is ordinary
+// rather than exceptional, so callers get a sentinel to turn into a polite
+// answer instead of a message they would have to match on.
+var ErrNotFound = errors.New("session: not found")
 
 // Registry owns every session on this daemon.
 type Registry struct {
@@ -162,6 +169,11 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string
 		cwd, _ = os.Getwd()
 	}
 
+	// One reading for both stamps. A session that has just started has been
+	// active for exactly as long as it has existed, and taking the clock twice
+	// would let the two disagree by however long a spawn happens to take.
+	born := r.clock()
+
 	s := &Session{
 		id:        id,
 		pty:       f,
@@ -177,12 +189,16 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string
 		title:     NewTitleScanner(),
 		subs:      map[*Sub]struct{}{},
 		info: Info{
-			Cwd:        cwd,
-			Cmd:        argv,
-			State:      "running",
-			Cols:       cols,
-			Rows:       rows,
-			LastActive: r.clock(),
+			Cwd:   cwd,
+			Cmd:   argv,
+			State: "running",
+			Cols:  cols,
+			Rows:  rows,
+			// Empty rather than nil: see normalizeTags on why no reader
+			// should ever meet a null here.
+			Tags:       []string{},
+			CreatedAt:  born,
+			LastActive: born,
 		},
 	}
 	s.info.ID = s.id
@@ -208,6 +224,23 @@ func (r *Registry) Get(id string) (*Session, bool) {
 	defer r.mu.Unlock()
 	s, ok := r.sessions[id]
 	return s, ok
+}
+
+// UpdateMeta patches one session's metadata by id and returns the resulting
+// snapshot, ready to answer the request and to broadcast to everyone else
+// watching. An id the registry does not hold is ErrNotFound.
+//
+// Get releases r.mu before ApplyMeta takes s.mu, which keeps this on the right
+// side of the one ordering rule between the two locks (see Session). It costs
+// nothing worth having: the session could be reaped a moment after either
+// lock, so holding both would not make the edit any less racy against the
+// world, only more likely to stall it.
+func (r *Registry) UpdateMeta(id string, p MetaPatch) (Info, error) {
+	s, ok := r.Get(id)
+	if !ok {
+		return Info{}, ErrNotFound
+	}
+	return s.ApplyMeta(p), nil
 }
 
 func (r *Registry) List() []*Session {

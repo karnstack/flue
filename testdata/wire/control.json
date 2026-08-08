@@ -15,8 +15,8 @@
   { "name": "welcomeRelay","json": { "type": "welcome", "daemonId": "local", "host": "macbook", "ver": "0.1.0", "relay": { "status": "connected", "origin": "https://flue-relay.karn.workers.dev", "machineId": "karns-macbook-pro-a1b2", "machineName": "Karn's MacBook Pro" } } },
   { "name": "welcomeRelayConnecting", "json": { "type": "welcome", "daemonId": "local", "host": "macbook", "ver": "0.1.0", "relay": { "status": "connecting" } } },
   { "name": "sessions",    "json": { "type": "sessions", "sessions": [
-    { "id": "s1", "title": "zsh", "cwd": "/home/karn/code", "cmd": ["zsh", "-l"], "state": "running", "exitCode": 0, "cols": 120, "rows": 40, "lastActive": "2026-07-28T10:30:00Z" },
-    { "id": "s2", "title": "vim", "cwd": "/home/karn/work", "cmd": ["vim", "file.txt"], "state": "exited", "exitCode": 1, "cols": 80, "rows": 24, "lastActive": "2026-07-28T09:00:00Z" }
+    { "id": "s1", "title": "zsh", "name": "api server", "tags": ["api", "prod"], "pinned": true, "cwd": "/home/karn/code", "cmd": ["zsh", "-l"], "state": "running", "exitCode": 0, "cols": 120, "rows": 40, "createdAt": "2026-07-28T08:00:00Z", "lastActive": "2026-07-28T10:30:00Z" },
+    { "id": "s2", "title": "vim", "name": "", "tags": [], "pinned": false, "cwd": "/home/karn/work", "cmd": ["vim", "file.txt"], "state": "exited", "exitCode": 1, "cols": 80, "rows": 24, "createdAt": "2026-07-28T07:15:00Z", "lastActive": "2026-07-28T09:00:00Z" }
   ] } },
   { "name": "attached",    "json": { "type": "attached", "ref": 3, "id": "a1b2c3d4e5f60718", "cols": 120, "rows": 40, "title": "zsh", "seq": 4096, "head": 8192, "truncated": false, "primary": true, "reqId": 7 } },
   { "name": "attachedTrunc","json": { "type": "attached", "ref": 4, "id": "a1b2c3d4e5f60718", "cols": 120, "rows": 40, "title": "zsh", "seq": 99000, "head": 99512, "truncated": true, "primary": false } },

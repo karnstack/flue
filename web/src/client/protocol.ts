@@ -73,16 +73,24 @@ export function decodeBinary(buf: ArrayBuffer): BinaryFrame {
 /** A session's lifecycle state, as `session.Info.State` reports it. */
 export type SessionState = 'running' | 'exited'
 
-/** One record of `session.Info`. All nine fields, in the daemon's spelling. */
+/** One record of `session.Info`. All thirteen fields, in the daemon's spelling. */
 export interface SessionInfo {
   id: string
+  /** What the program running inside says it is, scraped from OSC 0/2. */
   title: string
+  /** What a human called it. Empty until someone does; it outranks `title`. */
+  name: string
+  /** Trimmed, deduped and sorted by the daemon. Empty, never absent. */
+  tags: string[]
+  pinned: boolean
   cwd: string
   cmd: string[]
   state: SessionState
   exitCode: number
   cols: number
   rows: number
+  /** RFC 3339. The one timestamp output cannot move, so it sorts stably. */
+  createdAt: string
   /** RFC 3339, as Go marshals a time.Time. */
   lastActive: string
 }

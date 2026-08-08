@@ -326,30 +326,42 @@ describe('control message golden file', () => {
     expect(fixture('welcomeRelayConnecting')).toStrictEqual(want)
   })
 
-  it('decodes sessions, including all nine fields of every record', () => {
+  // The two records are deliberately unalike in their metadata: one named,
+  // tagged and pinned, one carrying the empty values a freshly spawned
+  // session has. An empty `tags` is the case worth pinning — a daemon that
+  // let it marshal as null would put a guard in every consumer.
+  it('decodes sessions, including all thirteen fields of every record', () => {
     const want: Sessions = {
       type: 'sessions',
       sessions: [
         {
           id: 's1',
           title: 'zsh',
+          name: 'api server',
+          tags: ['api', 'prod'],
+          pinned: true,
           cwd: '/home/karn/code',
           cmd: ['zsh', '-l'],
           state: 'running',
           exitCode: 0,
           cols: 120,
           rows: 40,
+          createdAt: '2026-07-28T08:00:00Z',
           lastActive: '2026-07-28T10:30:00Z',
         },
         {
           id: 's2',
           title: 'vim',
+          name: '',
+          tags: [],
+          pinned: false,
           cwd: '/home/karn/work',
           cmd: ['vim', 'file.txt'],
           state: 'exited',
           exitCode: 1,
           cols: 80,
           rows: 24,
+          createdAt: '2026-07-28T07:15:00Z',
           lastActive: '2026-07-28T09:00:00Z',
         },
       ],
