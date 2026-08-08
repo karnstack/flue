@@ -6,7 +6,9 @@
   --ink-2: #52525c;
   --hairline: #e4e4e7;
   --rule: #d4d4d8;
-  --accent: #fe9a00;
+  /* teal-500, the same accent web/src/lib/theme.ts resolves from the Tailwind
+     palette. The site has no build step, so it is stated here as a literal. */
+  --accent: #00bba7;
   --term-bg: #09090b;
   --term-fg: #d4d4d8;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -46,7 +48,7 @@ a:hover {
 }
 
 /* Near-black for ≥3:1 non-text contrast on the light ground;
-   amber stays inside the terminal figure. */
+   the accent stays inside the terminal figure. */
 :focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 3px;
@@ -192,7 +194,7 @@ h1 {
   display: inline-block;
   width: 0.6em;
   height: 1.1em;
-  background: #fe9a00;
+  background: var(--accent);
   vertical-align: text-bottom;
   animation: blink 1.2s steps(1) infinite;
 }
