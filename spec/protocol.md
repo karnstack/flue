@@ -31,6 +31,7 @@ Every control message is a JSON object with a `type` discriminator.
 | `resize` | `ref`, `cols`, `rows`, `primary` | report this view's dimensions |
 | `signal` | `ref`, `sig` | send a signal to the session's process |
 | `close` | `ref` | end the session |
+| `update` | `id`, `name?`, `tags[]?`, `pinned?` | edit a session's human-owned metadata |
 | `devices` | — | list the paired devices |
 | `revoke` | `deviceId` | unpair a device and cut its connections |
 | `pairStart` | — | enter pairing mode |
@@ -86,6 +87,36 @@ up, in which case `origin` is the https origin the relay serves browsers on. A
 daemon with no relay configured omits the field entirely rather than sending
 `off`. It is not a stream: nothing pushes an update when the relay reconnects,
 so a client learns the current state from the `welcome` of its next connection.
+
+### Metadata
+
+`update` edits what a human owns on a session — `name`, `tags[]`, `pinned` —
+and nothing else. It is addressed by `id` rather than by `ref`, because naming a
+session is not something you have to be attached to do. `title` is not editable:
+it is scraped from the session's own output and overwritten whenever the program
+inside says something new, which is why `name` exists beside it. A UI shows
+`name` when there is one and falls back to `title`.
+
+The edit is **partial**. A field the message does not carry is a field it leaves
+alone, so `{"type":"update","id":"s1","pinned":true}` pins a session without
+touching its name or its tags, and two views editing different fields of the
+same session cannot undo each other. That makes an empty value and an absent one
+different instructions:
+
+- `"tags": []` clears every tag; no `tags` key leaves the tags as they were.
+- `"name": ""` clears the name; no `name` key leaves the name as it was.
+
+Tags are normalised by the daemon on the way in — trimmed, empties dropped,
+duplicates collapsed, sorted — so the list a later `sessions` reports is not
+always the list that was sent, and a client should render what came back rather
+than what it typed. Comparison is exact: `Prod` and `prod` are two tags.
+
+An `update` that lands is answered by a fresh `sessions`, broadcast like any
+other change to the set, so every connection sees the edit and the sender needs
+no separate acknowledgement. One naming a session that does not exist is
+answered by `error{not_found}`. Editing metadata is not activity in the session:
+`lastActive` does not move, so tidying a list cannot reorder the list being
+tidied.
 
 ## Pairing
 

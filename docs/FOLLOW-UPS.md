@@ -198,6 +198,10 @@ see §11.
   `SessionInfo[]` (`internal/wire/control.go:80`). Exactly the gap this branch
   closed for `DeviceList` with a `MarshalJSON` (`control.go:143`) — it pre-dates
   the branch, and was left rather than widened mid-milestone.
+
+  **Done** — `Sessions` has the same `MarshalJSON` now, written for the same
+  reason, and a test pins the empty case the way `deviceListEmpty` is pinned:
+  a daemon running nothing sends `[]`.
 - `exemptStaticPath` returns true for a bare `/assets`
   (`internal/daemon/server.go:431`), which the doc comment two lines above says
   it does not. Unreachable today because the mux 307s the bare directory first,
