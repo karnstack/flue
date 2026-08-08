@@ -4,6 +4,7 @@ import { useNavigate } from '@tanstack/react-router'
 import type { ConnStatus } from '@/client/client'
 import { useFlueClient } from '@/client/provider'
 import type { SessionInfo } from '@/client/protocol'
+import { PageHeader } from '@/components/page-header'
 import { SessionTable } from '@/components/session-table'
 import { Button } from '@/components/ui/button'
 import { takeCwd } from '@/lib/url'
@@ -203,48 +204,48 @@ export function SessionsRoute() {
 
   return (
     <div className="flex flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
-      <div className="flex items-start justify-between gap-x-4">
-        <div className="min-w-0">
-          <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
-            Sessions
-          </h1>
-          <p className="mt-1 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
-            Closing a tab detaches. Whatever the shell is doing carries on.
-          </p>
-          {/*
-            Always rendered, never mounted with its text. Several screen
-            readers announce only changes to a live region that was already in
-            the accessibility tree, so a region that appears alongside its
-            first message is a message nobody hears. Which is also why this is
-            not `hidden` when empty: display:none takes it back out of the tree
-            and puts the same problem back.
+      <PageHeader
+        crumbs={[{ label: 'Sessions' }]}
+        actions={
+          /*
+            The one filled button on this screen, and it takes its teal from
+            --primary rather than naming a colour, so the accent stays a token.
+            Every other control here is the bordered variant.
 
-            It sits inside this block rather than below the heading row because
-            the column outside is gapped, and a gap is paid for an empty child.
-            Empty, this contributes no line box at all, and `empty:mt-0` takes
-            the margin with it.
-          */}
-          <p
-            role="status"
-            className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 empty:mt-0 sm:text-sm/6 dark:text-zinc-400"
-          >
-            {message}
-          </p>
-        </div>
+            Held shut while a spawn is unanswered. Without it, a second click
+            starts a second shell whose `attached` arrives after this screen
+            has navigated away on the first, and unmount abandons the reqId it
+            never saw settled — this closes the common path before it ever
+            needs to.
+          */
+          <Button size="sm" disabled={starting} onClick={startSession}>
+            New session
+          </Button>
+        }
+      >
+        <p className="max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+          Closing a tab detaches. Whatever the shell is doing carries on.
+        </p>
         {/*
-          The one filled button on this screen, and it takes its teal from
-          --primary rather than naming a colour, so the accent stays a token.
-          Every other control here is the bordered variant.
+          Always rendered, never mounted with its text. Several screen readers
+          announce only changes to a live region that was already in the
+          accessibility tree, so a region that appears alongside its first
+          message is a message nobody hears. Which is also why this is not
+          `hidden` when empty: display:none takes it back out of the tree and
+          puts the same problem back.
 
-          Held shut while a spawn is unanswered. Without it, a second click
-          starts a second shell whose `attached` arrives after this screen has
-          navigated away on the first, and unmount abandons the reqId it never
-          saw settled — this closes the common path before it ever needs to.
+          It rides in the header's second row beside the blurb, rather than as
+          a row of its own, because the header is a gapped column and a gap is
+          paid for an empty child. Here, empty, it contributes no line box at
+          all, and `empty:mt-0` takes the margin with it.
         */}
-        <Button size="sm" className="shrink-0" disabled={starting} onClick={startSession}>
-          New session
-        </Button>
-      </div>
+        <p
+          role="status"
+          className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 empty:mt-0 sm:text-sm/6 dark:text-zinc-400"
+        >
+          {message}
+        </p>
+      </PageHeader>
 
       {sessions !== null && <SessionTable sessions={sessions} onOpen={open} />}
     </div>

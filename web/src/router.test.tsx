@@ -209,8 +209,12 @@ describe('createFlueRouter', () => {
   it('wraps a management route in the app shell when it renders', async () => {
     await renderAt('/sessions')
     // The shell's chrome, by its landmarks: the nav inside the sidebar, and
-    // the content region the sidebar primitives render as <main>.
-    expect(screen.getByRole('navigation')).toBeTruthy()
+    // the content region the sidebar primitives render as <main>. The nav is
+    // asked for by name — a screen also carries its own header's breadcrumb
+    // landmark, and that one belongs to the route, not to the shell.
+    const landmarks = screen.getAllByRole('navigation')
+    expect(landmarks.filter((n) => n.getAttribute('aria-label') === null)).toHaveLength(1)
+    expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeTruthy()
     expect(screen.getByRole('main')).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Sessions' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Sessions' })).toBeTruthy()

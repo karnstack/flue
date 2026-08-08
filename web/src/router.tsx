@@ -8,6 +8,7 @@ import {
 import type { FlueClient } from '@/client/client'
 import { FleetProvider } from '@/fleet/provider'
 import { AppShell } from '@/components/app-shell'
+import { PageHeader } from '@/components/page-header'
 import { DevicesRoute } from '@/routes/devices'
 import { MachinesRoute } from '@/routes/machines'
 import { PairRoute } from '@/routes/pair'
@@ -131,12 +132,11 @@ const sessionsRoute = createRoute({
 function Placeholder({ title, blurb }: { title: string; blurb: string }) {
   return (
     <div className="p-4 sm:p-6 lg:p-8">
-      <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
-        {title}
-      </h1>
-      <p className="mt-2 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
-        {blurb}
-      </p>
+      <PageHeader crumbs={[{ label: title }]}>
+        <p className="max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+          {blurb}
+        </p>
+      </PageHeader>
     </div>
   )
 }

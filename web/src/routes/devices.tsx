@@ -8,6 +8,7 @@ import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
 import { useRelayTransport } from '@/hooks/use-relay-transport'
 import { useFlueClient } from '@/client/provider'
 import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
+import { PageHeader } from '@/components/page-header'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { MACHINE_ID } from '@/relay/machines'
@@ -592,82 +593,81 @@ export function DevicesRoute() {
 
   return (
     <div className="flex flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
-      <div className="flex items-start justify-between gap-x-4">
-        <div className="min-w-0">
-          <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
-            Devices
-          </h1>
-          <p className="mt-1 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
-            Anything paired here can open a session on this machine. Revoking one cuts it off while
-            you watch.
-          </p>
-          {/*
-            Always on the page, never mounted with its text. Several screen
-            readers announce only changes to a live region that was already in
-            the accessibility tree, so a region that appears alongside its first
-            message is a message nobody hears — which is also why this is not
-            dropped when empty. Empty, it contributes no line box at all, and
-            `empty:mt-0` takes the margin with it.
-          */}
-          <p
-            role="status"
-            className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 empty:mt-0 sm:text-sm/6 dark:text-zinc-400"
-          >
-            {message}
-          </p>
-          {/*
-            The gate's explainer, and not part of the live region above it: it
-            states a standing fact about this daemon rather than announcing an
-            event, and stuffing it into `role="status"` would have a screen
-            reader interrupt with it on every welcome that reaffirms it.
-          */}
-          {!reachable && (
-            <p
-              id={UNREACHABLE_ID}
-              className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400"
-            >
-              {UNREACHABLE}{' '}
-              {/*
-                Where the command is explained, and the only screen that can do
-                anything about this one. A router Link, never a plain anchor: a
-                page load would tear down the tab's one socket, and this daemon
-                is what that socket is to.
-              */}
-              <Link
-                to="/remote"
-                className="font-medium text-zinc-950 underline underline-offset-4 dark:text-white"
-              >
-                Set up remote access
-              </Link>
-            </p>
-          )}
-        </div>
-        {/*
-          The one filled button on this screen, taking its teal from --primary
-          rather than naming a colour. Every other control here is bordered or
-          quiet.
+      <PageHeader
+        crumbs={[{ label: 'Devices' }]}
+        actions={
+          /*
+            The one filled button on this screen, taking its teal from
+            --primary rather than naming a colour. Every other control here is
+            bordered or quiet.
 
-          Held shut while the connection is not up: `pairStart` is dropped when
-          it cannot be sent, and a token that never arrives looks exactly like
-          a button that does nothing. Held shut just the same while no device
-          could reach the address the QR would carry — see `reachable` — since
-          a pairing that succeeds against 127.0.0.1 is worse than one refused:
-          it mints a device that can never connect.
+            Held shut while the connection is not up: `pairStart` is dropped
+            when it cannot be sent, and a token that never arrives looks
+            exactly like a button that does nothing. Held shut just the same
+            while no device could reach the address the QR would carry — see
+            `reachable` — since a pairing that succeeds against 127.0.0.1 is
+            worse than one refused: it mints a device that can never connect.
+          */
+          <Button
+            size="sm"
+            disabled={!connected || !reachable}
+            // Only when that is the reason it is shut. A button held shut by a
+            // socket that is down is already explained by the live region
+            // below, and pointing at a paragraph that is not on the page names
+            // nothing.
+            aria-describedby={!reachable ? UNREACHABLE_ID : undefined}
+            onClick={pair}
+          >
+            <QrCodeIcon data-icon="inline-start" aria-hidden="true" />
+            Pair device
+          </Button>
+        }
+      >
+        <p className="max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+          Anything paired here can open a session on this machine. Revoking one cuts it off while
+          you watch.
+        </p>
+        {/*
+          Always on the page, never mounted with its text. Several screen
+          readers announce only changes to a live region that was already in
+          the accessibility tree, so a region that appears alongside its first
+          message is a message nobody hears — which is also why this is not
+          dropped when empty. Empty, it contributes no line box at all, and
+          `empty:mt-0` takes the margin with it.
         */}
-        <Button
-          size="sm"
-          className="shrink-0"
-          disabled={!connected || !reachable}
-          // Only when that is the reason it is shut. A button held shut by a
-          // socket that is down is already explained by the live region above,
-          // and pointing at a paragraph that is not on the page names nothing.
-          aria-describedby={!reachable ? UNREACHABLE_ID : undefined}
-          onClick={pair}
+        <p
+          role="status"
+          className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 empty:mt-0 sm:text-sm/6 dark:text-zinc-400"
         >
-          <QrCodeIcon data-icon="inline-start" aria-hidden="true" />
-          Pair device
-        </Button>
-      </div>
+          {message}
+        </p>
+        {/*
+          The gate's explainer, and not part of the live region above it: it
+          states a standing fact about this daemon rather than announcing an
+          event, and stuffing it into `role="status"` would have a screen
+          reader interrupt with it on every welcome that reaffirms it.
+        */}
+        {!reachable && (
+          <p
+            id={UNREACHABLE_ID}
+            className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400"
+          >
+            {UNREACHABLE}{' '}
+            {/*
+              Where the command is explained, and the only screen that can do
+              anything about this one. A router Link, never a plain anchor: a
+              page load would tear down the tab's one socket, and this daemon
+              is what that socket is to.
+            */}
+            <Link
+              to="/remote"
+              className="font-medium text-zinc-950 underline underline-offset-4 dark:text-white"
+            >
+              Set up remote access
+            </Link>
+          </p>
+        )}
+      </PageHeader>
 
       {pairing !== null && (
         <PairingWindow
