@@ -33,6 +33,7 @@ class FakeClient {
   closes = 0
   lists = 0
   updates: Array<{ id: string; name?: string; tags?: string[]; pinned?: boolean }> = []
+  closedIds: string[] = []
   spawns: Array<{ cwd?: string; cmd?: string[]; cols: number; rows: number }> = []
   spawnReply: number | null = 7
 
@@ -61,6 +62,9 @@ class FakeClient {
   }
   update(patch: { id: string; name?: string; tags?: string[]; pinned?: boolean }) {
     this.updates.push(patch)
+  }
+  closeById(id: string) {
+    this.closedIds.push(id)
   }
   spawn(opts: { cwd?: string; cmd?: string[]; cols: number; rows: number }): number | null {
     this.spawns.push(opts)
@@ -337,6 +341,25 @@ describe('FleetClient', () => {
     h.fleet.update('nope', patch)
     expect(h.fake('attic-pi').updates).toEqual([])
     expect(h.fake('blue-mesa').updates).toHaveLength(1)
+  })
+
+  it('routes closeOn to the named machine and no-ops for an unknown one', () => {
+    const h = harness([
+      ['attic-pi', 'Attic Pi'],
+      ['blue-mesa', 'Blue Mesa'],
+    ])
+
+    h.fleet.closeOn('blue-mesa', 's1')
+
+    expect(h.fake('blue-mesa').closedIds).toEqual(['s1'])
+    expect(h.fake('attic-pi').closedIds).toEqual([])
+
+    // An unknown machine is a no-op, as update treats one: there is nothing
+    // on the wire to correlate a refusal to, and the row it would have acted
+    // on is not on screen either.
+    h.fleet.closeOn('nope', 's1')
+    expect(h.fake('blue-mesa').closedIds).toEqual(['s1'])
+    expect(h.fake('attic-pi').closedIds).toEqual([])
   })
 
   it('routes spawnOn to the named machine and answers null for an unknown one', () => {

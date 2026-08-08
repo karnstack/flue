@@ -232,6 +232,17 @@ export class FleetClient {
   }
 
   /**
+   * End a session on the machine that owns it, addressed by id — the
+   * attach-free close the sessions list needs, routed exactly as `update`
+   * routes an edit. An unknown machine is a no-op for the same reason: there
+   * is nothing on the wire to correlate a refusal to, and the row this would
+   * have acted on is not on screen either.
+   */
+  closeOn(machineId: string, id: string) {
+    this.clientFor(machineId)?.closeById(id)
+  }
+
+  /**
    * Spawn on the named machine. Null for a machine the fleet does not hold,
    * exactly as FlueClient answers null for a socket that is down — to the
    * caller both mean "nothing was started", and both surface immediately.

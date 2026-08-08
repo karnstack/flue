@@ -30,7 +30,7 @@ Every control message is a JSON object with a `type` discriminator.
 | `detach` | `ref` | release an attachment |
 | `resize` | `ref`, `cols`, `rows`, `primary` | report this view's dimensions |
 | `signal` | `ref`, `sig` | send a signal to the session's process |
-| `close` | `ref` | end the session |
+| `close` | `ref` *or* `id` | end the session |
 | `update` | `id`, `name?`, `tags[]?`, `pinned?` | edit a session's human-owned metadata |
 | `devices` | — | list the paired devices |
 | `revoke` | `deviceId` | unpair a device and cut its connections |
@@ -87,6 +87,25 @@ up, in which case `origin` is the https origin the relay serves browsers on. A
 daemon with no relay configured omits the field entirely rather than sending
 `off`. It is not a stream: nothing pushes an update when the relay reconnects,
 so a client learns the current state from the `welcome` of its next connection.
+
+### Closing
+
+`close` ends a session, addressed one of two ways. `ref` is an attachment
+handle, for a view that is looking at the session it closes. `id` is the
+attach-free form for the sessions list, which acts on rows it never attached
+to — attaching first just to earn a ref would cost a subscribe, a backlog
+replay and a detach to deliver one verb. A message carries one address or the
+other; when both appear the non-zero `ref` wins and `id` is ignored, so the
+ref semantics are exactly what they always were.
+
+There is **no reply on success**, by either address. The session's end
+announces itself: every attached view is sent `exit`, and a list poll sees
+`state: "exited"` on its next `sessions`. A client closing from a list it is
+not attached through therefore learns the close landed the same way it learns
+everything else about the set — by asking again. Failures are answered: an
+`id` the daemon does not hold with `error{not_found}` (exactly as `update`
+answers one — a list acting on a row that has just been reaped is ordinary),
+and a `ref` the connection does not hold with `error{bad_ref}`.
 
 ### Metadata
 

@@ -486,6 +486,58 @@ func TestUpdateKeepsClearedTagsDistinctFromAbsent(t *testing.T) {
 	}
 }
 
+// TestCloseSessionCarriesOneAddress pins the two ways a close can name its
+// target, and that each encoding carries only the address it was given. A ref
+// is a connection-scoped attachment handle; an id is the session itself, for
+// the list screen that closes without ever attaching. An encoder that wrote
+// `ref: 0` beside an id would hand the daemon two addresses — one of them a
+// value no attachment ever holds, since refs are numbered from 1.
+func TestCloseSessionCarriesOneAddress(t *testing.T) {
+	cases := []struct {
+		name    string
+		msg     CloseSession
+		present []string
+		absent  []string
+	}{
+		{"byRef", CloseSession{Ref: 3}, []string{"ref"}, []string{"id"}},
+		{"byID", CloseSession{ID: "a1b2c3d4e5f60708"}, []string{"id"}, []string{"ref"}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b, err := EncodeControl(c.msg)
+			if err != nil {
+				t.Fatalf("EncodeControl: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(b, &fields); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if string(fields["type"]) != `"close"` {
+				t.Fatalf("type = %s, want \"close\"", fields["type"])
+			}
+			for _, k := range c.present {
+				if _, ok := fields[k]; !ok {
+					t.Errorf("encoding dropped %q: %s", k, b)
+				}
+			}
+			for _, k := range c.absent {
+				if _, ok := fields[k]; ok {
+					t.Errorf("encoding carried %q, which this close does not name: %s", k, b)
+				}
+			}
+
+			got, err := DecodeControl(b)
+			if err != nil {
+				t.Fatalf("DecodeControl: %v", err)
+			}
+			if !reflect.DeepEqual(got, c.msg) {
+				t.Fatalf("round trip = %#v, want %#v", got, c.msg)
+			}
+		})
+	}
+}
+
 // TestSessionsEncodesEmptyAsArray holds `sessions` to the invariant deviceList
 // already keeps: a daemon with nothing running sends [], never null. The field
 // is not optional, the TypeScript side declares it `SessionInfo[]`, and the

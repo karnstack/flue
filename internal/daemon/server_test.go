@@ -1656,6 +1656,74 @@ func TestCloseSessionReportsExit(t *testing.T) {
 	})
 }
 
+// TestCloseByIDClosesTheSession is the attach-free close: the sessions list
+// acts on rows it never attached to, so a close addressed by id — ref zero,
+// which no attachment ever holds — must reach the session all the same. The
+// closer here *is* attached, but only as a witness: the id path is what is
+// being exercised, and the exit arriving on the attachment proves the close
+// landed on the session rather than on the ref.
+func TestCloseByIDClosesTheSession(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "30"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c, ref := attach(t, ts, s.ID())
+	writeControl(t, c, wire.CloseSession{ID: s.ID()})
+
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Exit)
+		if ok && e.Ref != ref {
+			t.Fatalf("Exit.Ref = %d, want %d", e.Ref, ref)
+		}
+		return ok
+	})
+}
+
+// TestCloseByIDUnknownSessionReturnsError mirrors the update handler: the one
+// thing an id-addressed close can get wrong is naming a session the daemon
+// does not hold, and a list acting on a row that has just been reaped is
+// ordinary rather than exceptional — so it is answered, not ignored.
+func TestCloseByIDUnknownSessionReturnsError(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.CloseSession{ID: "does-not-exist"})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "not_found"
+	})
+}
+
+// TestCloseWithARefIgnoresTheID pins the precedence: a non-zero ref keeps the
+// ref semantics exactly as they were, id or no id. A close carrying a stale
+// ref beside a live id must fail on the ref rather than quietly closing by
+// id — the ref is what the sender believed it held, and acting on the other
+// address would close a session behind a view that was told "no such
+// attachment".
+func TestCloseWithARefIgnoresTheID(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "30"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.CloseSession{Ref: 999, ID: s.ID()})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "bad_ref"
+	})
+
+	if got := s.Info().State; got != "running" {
+		t.Fatalf("State = %q after a bad-ref close, want running", got)
+	}
+}
+
 // --- carried constraint 3: refuse to serve without an authenticator ---
 
 // TestServerWithoutAuthFailsClosed pins the fail-closed default. A daemon

@@ -172,9 +172,25 @@ export interface SignalMsg {
   sig: string
 }
 
+/**
+ * End a session, addressed one of two ways.
+ *
+ * `ref` is the original spelling: an attachment handle, for a view that is
+ * looking at the session it closes. `id` is the attach-free spelling the
+ * sessions list uses — it acts on rows it never attached to, and attaching
+ * just to earn a ref would cost a subscribe, a backlog replay and a detach to
+ * deliver one verb. A message carries one address or the other; the daemon
+ * lets a non-zero ref win when both appear, so ref semantics never move.
+ *
+ * No reply on success. The session's end announces itself: attached views get
+ * `exit`, and the list sees state `exited` on its next poll. An unknown id is
+ * answered with `error{not_found}` exactly as `update` answers one; a ref the
+ * connection does not hold with `error{bad_ref}`.
+ */
 export interface CloseMsg {
   type: 'close'
-  ref: number
+  ref?: number
+  id?: string
 }
 
 /**

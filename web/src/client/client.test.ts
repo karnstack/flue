@@ -196,6 +196,7 @@ describe('control message golden file', () => {
       'resize',
       'signal',
       'close',
+      'closeById',
       'update',
       'updateTagsAndPinned',
       'updateClearTags',
@@ -271,6 +272,14 @@ describe('control message golden file', () => {
   it('decodes close', () => {
     const want: CloseMsg = { type: 'close', ref: 3 }
     expect(fixture('close')).toStrictEqual(want)
+  })
+
+  it('decodes a close addressed by id, with no ref beside it', () => {
+    // The attach-free close the sessions list sends. `ref: 0` here would hand
+    // the daemon two addresses, one of which no attachment ever holds — refs
+    // are numbered from 1 — so the id travels alone.
+    const want: CloseMsg = { type: 'close', id: 'a1b2c3d4e5f60708' }
+    expect(fixture('closeById')).toStrictEqual(want)
   })
 
   // The four update cases exist to pin partiality in both directions. An
@@ -1471,6 +1480,39 @@ describe('FlueClient sending', () => {
     expect(frames[1]).toContain('"name":""')
     expect(frames[1]).toContain('"pinned":false')
     expect(frames[2]).toContain('"tags":[]')
+  })
+
+  it('sends a close by id carrying the id and nothing else', () => {
+    const { c, sock } = connected()
+    c.closeById('a1b2c3d4e5f60708')
+
+    const want: CloseMsg = { type: 'close', id: 'a1b2c3d4e5f60708' }
+    const sent = sock.sentControl()[1]!
+    expect(sent).toStrictEqual(want)
+    // No ref, not ref 0: zero is a value no attachment ever holds, and a
+    // frame carrying both addresses would leave the daemon to pick one.
+    expect('ref' in sent).toBe(false)
+  })
+
+  it('drops rather than holds a close by id issued while the socket is down', async () => {
+    // Like update, not like list. A close surfacing from behind a ten-second
+    // backoff would kill whatever the session had become in the meantime —
+    // possibly one restarted on purpose — and the list screen visibly keeps
+    // the row, so the user retries with the truth in front of them.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    expect(() => c.closeById('a1b2c3d4e5f60708')).not.toThrow()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    c.closeById('a1b2c3d4e5f60708')
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[0]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
   })
 
   it('drops rather than holds a metadata update issued while the socket is down', async () => {

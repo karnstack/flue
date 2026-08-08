@@ -523,6 +523,22 @@ func (c *conn) handleControl(msg any) {
 		}
 
 	case wire.CloseSession:
+		// The id path serves the sessions list, which closes rows it never
+		// attached to. It is taken only when no ref was named at all — refs are
+		// numbered from 1, so zero is "absent", not a very low ref — and a
+		// message carrying both takes the ref path below unchanged, since the
+		// ref is what the sender believed it held. An unknown id is answered
+		// the way update answers one: a list acting on a row that has just
+		// been reaped is ordinary, and the client is owed the word.
+		if m.Ref == 0 && m.ID != "" {
+			s, ok := c.srv.reg.Get(m.ID)
+			if !ok {
+				c.sendError("not_found", "no such session")
+				return
+			}
+			_ = s.Close()
+			return
+		}
 		a := c.attachment(m.Ref)
 		if a == nil {
 			c.sendError("bad_ref", "no such attachment")

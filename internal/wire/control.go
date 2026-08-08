@@ -49,8 +49,28 @@ type Signal struct {
 	Sig string `json:"sig"`
 }
 
+// CloseSession ends a session, addressed one of two ways.
+//
+// Ref is the original spelling: an attachment handle, for a view that is
+// looking at the session it is closing. ID arrived with the all-machines
+// sessions list, which closes rows it never attached to — attaching first
+// just to earn a ref would cost a subscribe, a backlog replay and a detach,
+// all to deliver one verb. A message carries one address or the other; when
+// both appear, the ref wins and the id is ignored, so the ref semantics are
+// exactly what they always were.
+//
+// Both fields are omitempty because each is absent in the other's message.
+// Zero is no loss to either: refs are numbered from 1, so ref 0 never names
+// an attachment, and an empty id never names a session.
+//
+// No reply on success, by either address. The session's end announces itself:
+// attached views get exit, and the list sees state "exited" on its next poll.
+// An id the daemon does not hold is answered with error{not_found}, exactly
+// as update answers it, and a ref this connection does not hold with
+// error{bad_ref}.
 type CloseSession struct {
-	Ref uint32 `json:"ref"`
+	Ref uint32 `json:"ref,omitempty"`
+	ID  string `json:"id,omitempty"`
 }
 
 // Update edits the metadata a human owns on a session — its name, its tags,

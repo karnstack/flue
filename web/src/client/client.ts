@@ -584,6 +584,24 @@ export class FlueClient {
     this.sendForRef(ref, { type: 'close', ref })
   }
 
+  /**
+   * Ask the daemon to end a session by its id, with no attachment in hand —
+   * how the sessions list closes a row it never attached to.
+   *
+   * Dropped rather than held while the socket is down, for `update`'s reason
+   * with sharper teeth: a close replayed from behind a ten-second backoff
+   * would kill whatever the session had become in the meantime, and unlike a
+   * rename there is no snapping back from it. The list keeps showing the row,
+   * so the user retries with the truth in front of them.
+   *
+   * Nothing to correlate: success has no reply — the exit reaches attached
+   * views and the next list — and a failure comes back as an uncorrelated
+   * `error{not_found}` through `onError`.
+   */
+  closeById(id: string) {
+    this.send({ type: 'close', id })
+  }
+
   // -------------------------------------------------------------------------
 
   private openSocket() {
