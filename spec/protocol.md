@@ -48,6 +48,7 @@ Every control message is a JSON object with a `type` discriminator.
 | `error` | `code`, `msg`, `reqId?` | a request failed, or a stream did |
 | `deviceList` | `devices[]` | answers `devices`, and is broadcast after a pairing or a `revoke` |
 | `pairing` | `token`, `url`, `daemonPub`, `expiresAt` | answers `pairStart` |
+| `revoked` | `reason` | this device was unpaired; the connection is about to close |
 
 ### Sizing
 
@@ -63,11 +64,16 @@ is the view being used: picking up the phone reshapes the session to the
 phone as soon as it reports, and the laptop's next keystroke reshapes it
 back — an idle view's report is never lost, only waiting.
 
+A report carrying a zero `cols` or `rows` is refused with `error{bad_size}`. It
+is not a very small view but a broken measurement — a pane sized before layout,
+a tab the browser has put to sleep — and one client sending it would otherwise
+collapse the grid every other view is reading. A refused report counts as
+neither activity nor a recorded desire.
+
 `primary` marks exactly one attachment per session — first attacher, most
 recently active promoted when it leaves — and governs one thing: which
 emulator answers device queries (DA, DSR, OSC color) arriving in the
 broadcast output. It has no effect on dimensions.
-| `revoked` | `reason` | this device was unpaired; the connection is about to close |
 
 Each record of `deviceList.devices[]` carries `id`, `label`, `pairedAt` and
 `lastSeen`. Both timestamps are unix **seconds**, not the RFC 3339 strings

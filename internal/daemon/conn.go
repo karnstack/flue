@@ -438,6 +438,18 @@ func (c *conn) handleControl(msg any) {
 			c.sendError("bad_ref", "no such attachment")
 			return
 		}
+		// A zero dimension is not a very small view, it is a broken report — a
+		// pane measured before layout, or one belonging to a tab the browser
+		// has put to sleep. Under latest-active a single such report would
+		// reshape the shared PTY to nothing for every healthy view attached to
+		// it, so it is refused at the door: not touched, so it does not become
+		// the active view, and not recorded, so it cannot be applied later
+		// either. The reporter keeps the size it last stood by and speaks
+		// again once it can measure.
+		if m.Cols == 0 || m.Rows == 0 {
+			c.sendError("bad_size", "cols and rows must be non-zero")
+			return
+		}
 		c.srv.touch(a.s.ID(), c)
 		if m.Primary {
 			c.srv.setPrimary(a.s.ID(), c)

@@ -1930,6 +1930,45 @@ func TestUnknownRefIsRejected(t *testing.T) {
 	})
 }
 
+// TestZeroSizeReportIsRejected holds the floor under the shared grid: one
+// client reporting 0x0 — a pane measured before layout, a sleeping tab — must
+// not be able to collapse the PTY every other view is reading.
+func TestZeroSizeReportIsRejected(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "10"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c, ref := attach(t, ts, s.ID())
+	writeControl(t, c, wire.Resize{Ref: ref, Cols: 0, Rows: 0, Primary: true})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "bad_size"
+	})
+
+	if info := s.Info(); info.Cols != 80 || info.Rows != 24 {
+		t.Fatalf("PTY = %dx%d after a 0x0 report, want 80x24", info.Cols, info.Rows)
+	}
+
+	// And it was not recorded either: a later, honest report from this same
+	// view is what moves the PTY, at the size that report names.
+	writeControl(t, c, wire.Resize{Ref: ref, Cols: 100, Rows: 30, Primary: false})
+	deadline := time.After(3 * time.Second)
+	for {
+		info := s.Info()
+		if info.Cols == 100 && info.Rows == 30 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("PTY = %dx%d after an honest report, want 100x30", info.Cols, info.Rows)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 // TestClientsMayNotSendOutputFrames stops a client from injecting bytes into
 // its own scrollback as though the PTY had produced them.
 func TestClientsMayNotSendOutputFrames(t *testing.T) {
