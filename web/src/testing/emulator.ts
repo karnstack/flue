@@ -23,6 +23,8 @@ export interface FakeEmulator extends Emulator {
   readonly scrolled: number
   /** What contentSize() reports. jsdom lays nothing out, so this is set by hand. */
   measured: PixelSize | null
+  /** What applicationCursorKeys() reports; set by hand like measured. */
+  appCursor: boolean
   /** Simulate the user typing. */
   send(text: string): void
 }
@@ -55,6 +57,7 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
     focusCalls: 0,
     scrolled: 0,
     measured: null,
+    appCursor: false,
 
     text: () => written.join(''),
 
@@ -108,6 +111,8 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
     },
 
     contentSize: () => self.measured,
+
+    applicationCursorKeys: () => self.appCursor,
 
     injectForTest(data: string) {
       self.send(data)

@@ -142,9 +142,13 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       term.dispose()
     },
 
-    // The three below are all reachable after disposal: a queued animation
+    // Everything from here on can be called after disposal: a queued animation
     // frame, a media-query change landing mid-teardown, a focus effect racing
-    // an unmount. xterm throws from a disposed terminal, so each checks.
+    // an unmount, a key bar tap that arrives as the view goes away. xterm
+    // throws from a disposed terminal, so each of the four that reach into
+    // `term` checks first. answerQueries needs no check — it writes the local
+    // flag the parser handlers read and touches nothing of xterm's — and
+    // injectForTest is reached from tests alone, which own their teardown.
 
     setTheme(theme: TerminalTheme) {
       if (disposed) return
@@ -158,6 +162,14 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
 
     answerQueries(on: boolean) {
       answers = on
+    },
+
+    applicationCursorKeys() {
+      // A key bar tap can outrun the unmount that disposed this. CSI is the
+      // honest answer for a terminal that no longer exists — and the bytes go
+      // nowhere anyway, because the view drops them with no ref to send on.
+      if (disposed) return false
+      return term.modes.applicationCursorKeysMode
     },
 
     contentSize(): PixelSize | null {

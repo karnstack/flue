@@ -138,16 +138,21 @@ describe('Emulator interface', () => {
     em.dispose()
   })
 
-  it('survives focus, setTheme and contentSize after disposal', () => {
-    // All three are called from React effects and from event handlers that can
-    // outlive the view by a frame — a queued animation frame, a media-query
-    // change mid-teardown. xterm throws on a disposed terminal.
+  it('survives every read and write that can outlive disposal', () => {
+    // All of these are called from React effects and from event handlers that
+    // can outlive the view by a frame — a queued animation frame, a
+    // media-query change mid-teardown, a key bar tapped as the view goes
+    // away. xterm throws on a disposed terminal — from the mode reads only by
+    // luck of where they land today, which is why the answer this pins is the
+    // seam's own and not whatever the wreckage still holds.
     const em = createXtermEmulator({ cols: 20, rows: 4 })
     em.dispose()
 
     expect(() => em.focus()).not.toThrow()
     expect(() => em.setTheme({ background: '#000000' })).not.toThrow()
     expect(em.contentSize()).toBeNull()
+    expect(() => em.answerQueries(true)).not.toThrow()
+    expect(em.applicationCursorKeys()).toBe(false)
   })
 
   it('attaches to an element with no WebGL context available', () => {

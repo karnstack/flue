@@ -3,6 +3,7 @@ import { LayoutGridIcon, PlusIcon } from 'lucide-react'
 
 import { useFlueClient } from '@/client/provider'
 import { ExitOverlay } from '@/components/exit-overlay'
+import { KeyBar } from '@/components/key-bar'
 import { ThemeMenu } from '@/components/theme-menu'
 import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
 import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
@@ -17,7 +18,9 @@ import {
   type Box,
   type Dimensions,
 } from '@/lib/geometry'
+import { startGlide } from '@/lib/glide'
 import { createKeyboardModes, type KeyboardMode } from '@/lib/keyboard'
+import { barKeyBytes, ctrlTransform, type BarKey } from '@/lib/keys'
 import { cn } from '@/lib/utils'
 import { trackVisualViewport, zoomedIn } from '@/lib/viewport'
 
@@ -131,6 +134,15 @@ export function Terminal({
     client.status === 'reconnecting' ? 'reconnecting' : 'connecting',
   )
   const [mode, setMode] = useState<KeyboardMode>('tab')
+  // Coarse pointer once per mount: whether this device's primary pointer is a
+  // finger decides the key bar's existence, and a pointer does not change
+  // class mid-session in any way worth re-rendering for.
+  const [coarse] = useState(() => globalThis.matchMedia?.('(pointer: coarse)')?.matches ?? false)
+  // The latched Ctrl: state for the chip's pressed look, a ref for the input
+  // path, which lives inside the effect and must read it without re-running.
+  const [ctrlArmed, setCtrlArmed] = useState(false)
+  const ctrlArmedRef = useRef(ctrlArmed)
+  ctrlArmedRef.current = ctrlArmed
   const [exitCode, setExitCode] = useState<number | null>(null)
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
@@ -156,6 +168,7 @@ export function Terminal({
   const actionsRef = useRef<{
     restart: (dir: string | null) => void
     applyTheme: (id: string) => void
+    sendKey: (key: BarKey) => void
   } | null>(null)
   // The latest onRestarted, readable from inside the effect without putting
   // a prop identity in its dependency array.
@@ -260,17 +273,24 @@ export function Terminal({
         settleTimer = window.setTimeout(sendFittedSize, RESIZE_SETTLE_MS)
       }
 
-      if (want.cols >= dims.cols && want.rows >= dims.rows) {
-        // The pty fits this pane — whatever view set the size, this one can
-        // show it whole — so the surface simply fills the pane and nothing is
-        // transformed.
+      if (want.cols >= dims.cols) {
+        // Every column fits, so the surface lays out one-to-one whatever the
+        // row count says. Rows overflowing alone is almost always this view's
+        // own keyboard sliding over the pane: for the settle window the bottom
+        // rows clip behind it and then the pty takes the new height. Scaling
+        // here instead used to pinch both axes for that window — a lurch on
+        // every keyboard open. The cost is deliberate: a view whose columns
+        // fit while its rows do not shows the top of the screen until the pty
+        // follows, and in the rare enduring cross-device shape of that kind,
+        // scrollback still reaches what the pane cannot.
         surface.style.removeProperty('width')
         surface.style.removeProperty('height')
         surface.style.removeProperty('scale')
         return
       }
 
-      // A larger view is setting the size. Lay the surface out at the
+      // Columns overflow: a wider view is setting the size, and columns
+      // clipping would amputate lines mid-word. Lay the surface out at the
       // screen's true size and scale the whole thing down, rather than
       // reflowing text.
       //
@@ -316,7 +336,18 @@ export function Terminal({
     emulator.onData((bytes) => {
       // No ref, no destination — and no input while the backlog replays.
       if (ref === null || consumed < muteUntil) return
-      client.sendInput(ref, bytes)
+      let out = bytes
+      if (ctrlArmedRef.current) {
+        // The bar's latched Ctrl folds this keystroke, and is spent on it
+        // whether or not it could fold — like a real latched modifier.
+        out = ctrlTransform(bytes) ?? bytes
+        // The ref by hand, beside the state and not through it: the render
+        // that would re-sync it is a flush away, and two keystrokes delivered
+        // inside one task would both read the arming and both fold.
+        ctrlArmedRef.current = false
+        setCtrlArmed(false)
+      }
+      client.sendInput(ref, out)
     })
 
     // Touch scrolling, by hand: xterm's viewport scrolls on wheel events and
@@ -325,14 +356,24 @@ export function Terminal({
     // remainder carried between moves so slow drags still add up. The
     // surface's own CSS sets touch-action: pinch-zoom (styles.css), which is
     // what keeps the browser from spending the gesture on panning the page
-    // while still leaving two fingers to the zoom.
+    // while still leaving two fingers to the zoom. A finger that lifts while
+    // still moving hands its speed to a glide (lib/glide.ts), which is what
+    // every other scrolling surface on a phone does.
     let touchY: number | null = null
     let touchCarry = 0
+    // The flick record: the last few moves' clocks and positions, enough to
+    // read a release velocity from. Cleared whenever a gesture starts.
+    let flick: Array<{ t: number; y: number }> = []
+    let glide: (() => void) | null = null
     const lineHeightPx = () => {
       const content = emulator.contentSize()
       return content && dims.rows > 0 ? content.height / dims.rows : 17
     }
     const touchStart = (e: TouchEvent) => {
+      // A finger on the glass pins the content — any glide in flight ends.
+      glide?.()
+      glide = null
+      flick = []
       // A magnified page belongs to the browser, and releasing touch-action
       // is not enough to give it back: touch-action only says the browser
       // *may* pan, while the preventDefault() below cancels that pan whatever
@@ -343,6 +384,11 @@ export function Terminal({
       }
       touchY = e.touches[0]!.clientY
       touchCarry = 0
+      // The anchor counts as a sample. A flick is often three moves long at a
+      // 60Hz touch rate, and reading its speed from the moves alone would
+      // throw away a third of the evidence and most of the window. The lift
+      // trims it back off again if the finger rested here before setting off.
+      flick.push({ t: e.timeStamp, y: touchY })
     }
     const touchMove = (e: TouchEvent) => {
       if (touchY === null || e.touches.length !== 1) return
@@ -362,16 +408,53 @@ export function Terminal({
       const lines = Math.trunc(delta)
       touchCarry = delta - lines
       touchY = y
+      flick.push({ t: e.timeStamp, y })
+      if (flick.length > 6) flick.shift()
       if (lines !== 0) emulator.scrollLines(lines)
     }
-    const touchEnd = () => {
+    const touchEnd = (e: TouchEvent) => {
+      const wasDragging = touchY !== null
       touchY = null
       touchCarry = 0
+      // Velocity is the recent motion, not the whole gesture: a hesitation
+      // after touchdown, or a drag that turned around mid-way, is no part of
+      // the speed at the lift and averaging across it would divide the answer
+      // by the length of the pause. Two samples are always kept, so a flick
+      // short enough to be three samples still reads.
+      while (flick.length > 2 && flick[flick.length - 1]!.t - flick[0]!.t > 100) flick.shift()
+      // Two samples and thirty milliseconds are the floor, so a tap reads as
+      // no flick at all. The lift's own clock is the other half: moves stop
+      // arriving the instant the finger stops, so a thumb that parks the
+      // content and lets go a moment later leaves fast samples behind it, and
+      // only their age gives it away.
+      const a = flick[0]
+      const b = flick[flick.length - 1]
+      flick = []
+      if (!wasDragging || !a || !b || b.t - a.t < 30) return
+      if (e.timeStamp - b.t > 100) return
+      const dt = (b.t - a.t) / 1000
+      const lps = (a.y - b.y) / lineHeightPx() / dt
+      glide = startGlide({ velocity: lps, onLines: (n) => emulator.scrollLines(n) })
+    }
+    /**
+     * The gesture taken away rather than finished: a notification shade pulled
+     * down over it, an alert, a call. No finger ever lifted, so there is no
+     * release to read a speed from — the drag simply stops where it was.
+     *
+     * Its own handler rather than touchEnd's, because the samples a
+     * system-stolen drag leaves behind are indistinguishable from a flick's:
+     * fast, recent, and promptly followed by an event. Sharing the lift path
+     * would send the scrollback coasting with nothing on the glass.
+     */
+    const touchCancel = () => {
+      touchY = null
+      touchCarry = 0
+      flick = []
     }
     surface.addEventListener('touchstart', touchStart, { passive: true })
     surface.addEventListener('touchmove', touchMove, { passive: false })
     surface.addEventListener('touchend', touchEnd, { passive: true })
-    surface.addEventListener('touchcancel', touchEnd, { passive: true })
+    surface.addEventListener('touchcancel', touchCancel, { passive: true })
 
     // The pane hugs the visual viewport: a phone keyboard shrinks it and the
     // ResizeObserver below refits the terminal above the keyboard. While
@@ -556,6 +639,19 @@ export function Terminal({
         emulator.setTheme(next)
         pane.style.backgroundColor = next.background ?? ''
       },
+      sendKey: (key) => {
+        if (ref === null || consumed < muteUntil) return
+        const bytes = barKeyBytes(key, {
+          appCursor: emulator.applicationCursorKeys(),
+          ctrl: ctrlArmedRef.current,
+        })
+        if (ctrlArmedRef.current) {
+          // Spent here too, ref first: see the onData path above.
+          ctrlArmedRef.current = false
+          setCtrlArmed(false)
+        }
+        client.sendInput(ref, bytes)
+      },
     }
 
     // Another tab choosing a theme lands here: the preference is global, and
@@ -581,7 +677,8 @@ export function Terminal({
       surface.removeEventListener('touchstart', touchStart)
       surface.removeEventListener('touchmove', touchMove)
       surface.removeEventListener('touchend', touchEnd)
-      surface.removeEventListener('touchcancel', touchEnd)
+      surface.removeEventListener('touchcancel', touchCancel)
+      glide?.()
       untrackViewport()
       window.removeEventListener('storage', onStorage)
       window.removeEventListener('keydown', onKey, true)
@@ -644,6 +741,7 @@ export function Terminal({
         data-flue-inset=""
         className={cn(
           'absolute inset-3 transition-opacity',
+          coarse && 'bottom-16',
           phase === 'exited' && 'opacity-60',
         )}
       >
@@ -653,6 +751,13 @@ export function Terminal({
           className="flue-term-surface absolute top-0 left-0 origin-top-left"
         />
       </div>
+      {coarse && (
+        <KeyBar
+          ctrl={ctrlArmed}
+          onCtrl={() => setCtrlArmed((v) => !v)}
+          onKey={(k) => actionsRef.current?.sendKey(k)}
+        />
+      )}
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar
           eats their clicks. */}

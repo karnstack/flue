@@ -77,14 +77,22 @@ const surfaceEl = () => document.querySelector<HTMLElement>('[data-flue-surface]
  * A touch event jsdom will really dispatch.
  *
  * jsdom ships no `Touch` constructor, so a genuine TouchEvent cannot be built
- * with any points in it. The handlers under test read exactly three things —
- * how many touches there are, the first one's clientY, and preventDefault —
- * so this carries those. `cancelable` is the load-bearing part: whether the
- * event comes back prevented is what decides if the browser may pan.
+ * with any points in it. The handlers under test read exactly four things —
+ * how many touches there are, the first one's clientY, the clock, and
+ * preventDefault — so this carries those. `cancelable` is the load-bearing
+ * part: whether the event comes back prevented is what decides if the browser
+ * may pan. `at` overrides the stamp jsdom writes at construction time, which
+ * is the only way consecutive events can be told apart within one tick; the
+ * drag tests that never lift a finger pass none and read a real clock.
  */
-function touch(type: 'touchstart' | 'touchmove' | 'touchend', ys: number[]) {
+function touch(
+  type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel',
+  ys: number[],
+  at?: number,
+) {
   const e = new Event(type, { bubbles: true, cancelable: true })
   Object.defineProperty(e, 'touches', { value: ys.map((clientY) => ({ clientY })) })
+  if (at !== undefined) Object.defineProperty(e, 'timeStamp', { value: at })
   return e
 }
 
@@ -464,6 +472,51 @@ describe('Terminal', () => {
       return mounted
     }
 
+    /**
+     * An animation frame queue that honours cancellation.
+     *
+     * A no-op cancelAnimationFrame would let a glide nobody wants keep running
+     * with no test able to tell, which is the one thing these are here to
+     * catch. Ids start high on purpose: the component cancels its own relayout
+     * frame on unmount, and that id was handed out by the real clock before
+     * these stubs existed, so a low counter here would collide with it and a
+     * glide would look cancelled by the wrong hand.
+     */
+    function frameQueue() {
+      const queued = new Map<number, (t: number) => void>()
+      let nextId = 1000
+      let now = 48
+      vi.stubGlobal('requestAnimationFrame', (cb: (t: number) => void) => {
+        const id = nextId++
+        queued.set(id, cb)
+        return id
+      })
+      vi.stubGlobal('cancelAnimationFrame', (id: number) => void queued.delete(id))
+      return {
+        pending: () => queued.size,
+        /** Runs up to `n` frames on a 16ms clock, each free to queue the next. */
+        run(n: number) {
+          act(() => {
+            for (let i = 0; i < n && queued.size; i++) {
+              const [id, cb] = [...queued][0]!
+              queued.delete(id)
+              cb((now += 16))
+            }
+          })
+        },
+      }
+    }
+
+    /** A fast upward drag, lifted while still moving: 34px (2 lines) per 16ms. */
+    function flick(surface: HTMLElement, liftAt = 48) {
+      act(() => {
+        surface.dispatchEvent(touch('touchstart', [300], 0))
+        surface.dispatchEvent(touch('touchmove', [266], 16))
+        surface.dispatchEvent(touch('touchmove', [232], 32))
+        surface.dispatchEvent(touch('touchend', [], liftAt))
+      })
+    }
+
     it('scrolls the scrollback, and takes the gesture from the browser to do it', () => {
       const { em } = mountDraggable()
 
@@ -492,6 +545,126 @@ describe('Terminal', () => {
       expect(move.defaultPrevented).toBe(false)
       // Both halves of the same promise, asserted together.
       expect(surfaceEl().style.touchAction).toBe('auto')
+    })
+
+    it('glides on after a flick, and a new touch stops the glide', () => {
+      // Mounted before the stubs: the relayout frame the mount schedules would
+      // otherwise land in this queue and be drained as if it were the glide.
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+      const surface = surfaceEl()
+
+      flick(surface)
+      // 68px of finger over a 17px line, all of it while the finger is down.
+      const dragged = em.live().scrolled
+      expect(dragged).toBe(4)
+
+      // The glide keeps scrolling with no finger on the glass at all.
+      frames.run(4)
+      const glided = em.live().scrolled
+      expect(glided).toBeGreaterThan(dragged)
+      // Still asking for frames, which is what makes the next part a test.
+      expect(frames.pending()).toBe(1)
+
+      // A finger back on the glass pins the content: no glide survives it.
+      act(() => void surface.dispatchEvent(touch('touchstart', [200], 400)))
+      expect(frames.pending()).toBe(0)
+      frames.run(4)
+      expect(em.live().scrolled).toBe(glided)
+    })
+
+    it('comes to rest on its own', () => {
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+
+      flick(surfaceEl())
+      // Far more frames than a glide this size can use; it stops when the
+      // velocity dies, not when the caller runs out of patience.
+      frames.run(2000)
+
+      expect(frames.pending()).toBe(0)
+      // 4 lines in 32ms is 125 lines/s, and 0.998^ms friction spends that over
+      // about 63 further lines — bounded rather than pinned, because the exact
+      // total is an artifact of the frame clock a test happens to crank.
+      expect(em.live().scrolled).toBeGreaterThan(40)
+      expect(em.live().scrolled).toBeLessThan(90)
+    })
+
+    it('reads the speed of the flick, not of the pause before it', () => {
+      // The commonest gesture there is: touch to stop the last glide, hesitate,
+      // then flick. The reaction gap belongs to the gesture but to no part of
+      // its speed, and a window measured from touchdown divides the answer by
+      // however long the thumb took to make up its mind.
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+      const surface = surfaceEl()
+
+      act(() => {
+        surface.dispatchEvent(touch('touchstart', [300], 0))
+        surface.dispatchEvent(touch('touchmove', [283], 200))
+        surface.dispatchEvent(touch('touchmove', [249], 216))
+        surface.dispatchEvent(touch('touchmove', [215], 232))
+        surface.dispatchEvent(touch('touchend', [], 240))
+      })
+      expect(em.live().scrolled).toBe(5)
+
+      frames.run(2000)
+
+      // 68px over the last 32ms is 125 lines/s, worth about 63 lines. Measured
+      // from touchdown it would read 21 lines/s instead and stop inside 15.
+      expect(em.live().scrolled).toBeGreaterThan(40)
+      expect(em.live().scrolled).toBeLessThan(90)
+    })
+
+    it('does not glide when the finger came to rest before it lifted', () => {
+      // The samples still describe a fast drag; the release does not. A thumb
+      // that parks the content and lets go expects it to stay parked, and the
+      // moves stop arriving the moment the finger stops, so only the lift's
+      // own clock can tell this apart from a flick.
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+
+      flick(surfaceEl(), 400)
+
+      expect(em.live().scrolled).toBe(4)
+      expect(frames.pending()).toBe(0)
+    })
+
+    it('takes no glide from a gesture the system cancelled', () => {
+      // The notification shade, an alert, an incoming call: the browser fires
+      // touchcancel, promptly and with the drag's fast samples still on the
+      // record, so every test a lift is judged by passes. But no finger left
+      // the glass — nothing was thrown — and a scrollback that coasted here
+      // would be moving after the interruption put it down.
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+      const surface = surfaceEl()
+
+      act(() => {
+        surface.dispatchEvent(touch('touchstart', [300], 0))
+        surface.dispatchEvent(touch('touchmove', [266], 16))
+        surface.dispatchEvent(touch('touchmove', [232], 32))
+        surface.dispatchEvent(touch('touchcancel', [], 48))
+      })
+
+      // The 68px the finger did travel stand; nothing is added to them.
+      expect(em.live().scrolled).toBe(4)
+      expect(frames.pending()).toBe(0)
+    })
+
+    it('drops the glide when the terminal goes away', () => {
+      // A glide outliving its effect would go on calling scrollLines into an
+      // emulator that has already been disposed.
+      const { view } = mountDraggable()
+      const frames = frameQueue()
+
+      flick(surfaceEl())
+      frames.run(2)
+      expect(frames.pending()).toBe(1)
+
+      act(() => view.unmount())
+
+      expect(frames.pending()).toBe(0)
     })
 
     it('drops a drag already under way when the zoom arrives mid-gesture', () => {
@@ -633,6 +806,38 @@ describe('Terminal', () => {
       expect(report.primary).toBe(false)
       expect(report.cols).toBeLessThan(160)
       expect(report.rows).toBeLessThan(47)
+    })
+
+    it('stays one-to-one when only rows stop fitting, so a keyboard cannot pinch the width', async () => {
+      const observers = resizeObservers()
+      const box = paneOf(800 + GUTTER_PX, 408)
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      // 80x24 rendered at 800x408 puts a cell at 10 x 17.
+      em.live().measured = { width: 800, height: 408 }
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24, primary: true })))
+
+      // The keyboard takes half the pane's height: same columns, half the rows.
+      box.mockReturnValue({ width: 800 + GUTTER_PX, height: 204 } as DOMRect)
+      act(() => observers.fire())
+
+      // The settled report proves the whole relayout → settle path ran…
+      await waitFor(() =>
+        expect(sock.ofType('resize')).toContainEqual({
+          type: 'resize',
+          ref: 1,
+          cols: 80,
+          rows: 12,
+          primary: true,
+        }),
+      )
+      // …and through all of it the surface was never scaled or resized: the
+      // bottom rows clip behind the keyboard until the pty follows, and the
+      // width never moves.
+      expect(surfaceEl().style.scale).toBe('')
+      expect(surfaceEl().style.width).toBe('')
+      expect(surfaceEl().style.height).toBe('')
     })
 
     it('reshapes nothing when promoted — the role moves voices, not sizes', async () => {
@@ -970,6 +1175,165 @@ describe('Terminal', () => {
       act(() => em.live().send('live'))
 
       expect(sock.input()).toEqual([{ ref: 2, text: 'live' }])
+    })
+  })
+
+  describe('the key bar', () => {
+    /** jsdom has no matchMedia; a coarse pointer is claimed explicitly. */
+    function coarsePointer() {
+      vi.stubGlobal('matchMedia', (query: string) => ({
+        matches: query.includes('coarse'),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    }
+    const bar = () => document.querySelector<HTMLElement>('[data-flue-keybar]')
+    const key = (label: string) =>
+      Array.from(document.querySelectorAll<HTMLButtonElement>('[data-flue-keybar] button')).find(
+        (b) => b.textContent?.startsWith(label),
+      )!
+
+    it('exists only for touch', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+      expect(bar()).toBeNull()
+    })
+
+    it('sends CSI arrows for a shell and SS3 once the program asks', () => {
+      coarsePointer()
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('↑'))
+      expect(sock.input()).toEqual([{ ref: 1, text: '\x1b[A' }])
+
+      em.live().appCursor = true
+      fireEvent.pointerDown(key('↓'))
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '\x1b[A' },
+        { ref: 1, text: '\x1bOB' },
+      ])
+    })
+
+    it('arms Ctrl for exactly one following keystroke', () => {
+      coarsePointer()
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('ctrl'))
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('true')
+      act(() => em.live().send('c'))
+      act(() => em.live().send('c'))
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '\x03' },
+        { ref: 1, text: 'c' },
+      ])
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+    })
+
+    it('spends the arming on the first of two keystrokes in one task', () => {
+      // The spend cannot wait on a render. Both deliveries here land before
+      // React flushes the state change, so the input path reads the ref it was
+      // given — and a ref left true until the flush folds the second keystroke
+      // too, on one press of ctrl.
+      coarsePointer()
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('ctrl'))
+      act(() => {
+        em.live().send('c')
+        em.live().send('c')
+      })
+
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '\x03' },
+        { ref: 1, text: 'c' },
+      ])
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+    })
+
+    it('spends the arming on a keystroke it cannot fold', () => {
+      // A digit has no control code, and neither does a paste or a multi-byte
+      // character: ctrlTransform returns null and the bytes go out untouched.
+      // The arming is spent all the same, as a latched modifier on a real
+      // keyboard would be — otherwise Ctrl stays armed for good and the next
+      // letter typed is silently folded into a control code nobody asked for.
+      coarsePointer()
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('ctrl'))
+      act(() => em.live().send('7'))
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+
+      act(() => em.live().send('c'))
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '7' },
+        { ref: 1, text: 'c' },
+      ])
+    })
+
+    it('answers a screen reader’s activation without double-sending a real tap', () => {
+      // VoiceOver's and TalkBack's double-tap, and Enter or Space on a hybrid
+      // device's keyboard, all synthesise a click and dispatch no pointer
+      // event at all. A bar wired to pointerdown alone advertises itself to
+      // assistive technology — aria-pressed, an accessible name each — and
+      // then does nothing when that technology activates it, on exactly the
+      // devices the bar exists for. `detail` is 0 for a synthesised click and
+      // counts the presses behind a real one, which is what keeps a finger's
+      // own follow-up click from sending the key twice.
+      coarsePointer()
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.click(key('esc'), { detail: 0 })
+      expect(sock.input()).toEqual([{ ref: 1, text: '\x1b' }])
+      fireEvent.click(key('ctrl'), { detail: 0 })
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('true')
+      fireEvent.click(key('ctrl'), { detail: 0 })
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+
+      // A finger: pointerdown, and then a click of its own that must not
+      // send a second tab.
+      fireEvent.pointerDown(key('tab'))
+      fireEvent.click(key('tab'), { detail: 1 })
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '\x1b' },
+        { ref: 1, text: '\x09' },
+      ])
+    })
+
+    it('chords Ctrl with an arrow', () => {
+      coarsePointer()
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('ctrl'))
+      fireEvent.pointerDown(key('→'))
+      expect(sock.input()).toEqual([{ ref: 1, text: '\x1b[1;5C' }])
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+    })
+
+    it('drops bar keys pressed before the attach comes back', () => {
+      coarsePointer()
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      fireEvent.pointerDown(key('esc'))
+      expect(sock.input()).toEqual([])
+    })
+
+    it('reserves bottom room in the inset so the bar covers no rows', () => {
+      coarsePointer()
+      mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      expect(inset().className).toContain('bottom-16')
     })
   })
 })
