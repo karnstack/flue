@@ -94,6 +94,12 @@ terminal see a login shell under the login service too.
   Darwin stayed green), and the master-vs-leader stream semantics differ
   exactly there (`noteMasterEnded`). One observation is not a diagnosis;
   worth instrumenting if it fires again.
+  **It fired again** (2026-08-08, run 31259207719, on a PR touching only
+  web/ and docs): the same signature to the byte — closed, empty, 0.00s.
+  Twice on ubuntu-latest, still never on Darwin. The instrumentation this
+  note asked for is now due: log the close's caller (`noteMasterEnded` vs
+  `Close`) and the ring's seq bounds when `waitFor` finds the subscriber
+  closed, so the third occurrence names the path instead of the symptom.
 - `Subscribe(fromSeq > EndSeq)` returns `StartSeq` unclamped. The one place a
   client-supplied number enters server state unchecked.
 - `outboxDepth` and `subChanDepth` were each chosen as 256 by different tasks. The
