@@ -189,9 +189,16 @@ export function Terminal({
     // Restored on unmount so the rest of the app keeps its stylesheet colour.
     const canvas = document.documentElement
     const priorCanvas = canvas.style.backgroundColor
+    // What this effect last painted, read back so the value carries the
+    // style engine's own serialisation. The cleanup compares before it
+    // restores, for the reason the viewport tracker's disposer does: a
+    // replacement owner can paint before this one tears down, and a stale
+    // cleanup must surrender only what it still owns.
+    let paintedCanvas = ''
     const paintGround = (bg: string | undefined) => {
       pane.style.backgroundColor = bg ?? ''
       canvas.style.backgroundColor = bg ?? ''
+      paintedCanvas = canvas.style.backgroundColor
     }
 
     const palette = resolveTheme(themeIdRef.current, prefersDark())
@@ -708,7 +715,9 @@ export function Terminal({
       if (ref !== null) client.detach(ref)
       else client.forget(sessionId)
       document.title = priorTitle
-      canvas.style.backgroundColor = priorCanvas
+      if (canvas.style.backgroundColor === paintedCanvas) {
+        canvas.style.backgroundColor = priorCanvas
+      }
       emulator.dispose()
     }
   }, [client, sessionId, createEmulator])

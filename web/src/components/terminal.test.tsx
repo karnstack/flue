@@ -111,6 +111,9 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   document.title = 'flue'
+  // The terminal paints the document canvas inline; a leak here would fail
+  // in whichever test runs next rather than the one that leaked.
+  document.documentElement.style.backgroundColor = ''
   localStorage.clear()
 })
 
@@ -1476,8 +1479,11 @@ describe('the terminal theme', () => {
     // the rubber-band overscroll past the page — both show the document's
     // canvas, which wears the app scheme's colour unless the terminal claims
     // it. Dark OS plus a light terminal theme was a black flash on every
-    // keyboard open.
+    // keyboard open. jsdom serializes the preset's #282a36 to rgb() form.
     expect(document.documentElement.style.backgroundColor).toBe('rgb(40, 42, 54)')
+    // The pane wears the same ground; canvas and pane paint through one
+    // helper precisely so they cannot drift apart again.
+    expect(pane().style.backgroundColor).toBe('rgb(40, 42, 54)')
 
     // A theme change repaints the canvas along with the pane.
     act(() => {
@@ -1491,6 +1497,19 @@ describe('the terminal theme', () => {
     // sessions screen must not inherit a preset's colour.
     view.unmount()
     expect(document.documentElement.style.backgroundColor).toBe('')
+  })
+
+  it('does not claw back a canvas someone newer has painted', () => {
+    localStorage.setItem('flue:theme', 'dracula')
+    const { view } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    expect(document.documentElement.style.backgroundColor).toBe('rgb(40, 42, 54)')
+
+    // A replacement owner paints before this view's cleanup runs — the same
+    // teardown-order question the viewport tracker's disposer answers with
+    // the same restraint: a cleanup surrenders only what it still owns.
+    document.documentElement.style.backgroundColor = 'rgb(1, 2, 3)'
+    view.unmount()
+    expect(document.documentElement.style.backgroundColor).toBe('rgb(1, 2, 3)')
   })
 })
 
