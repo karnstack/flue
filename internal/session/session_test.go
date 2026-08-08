@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -974,4 +975,117 @@ func TestGroupSignalRequestIsAnsweredWhileTheSessionLockIsHeld(t *testing.T) {
 	s.mu.Unlock()
 
 	waitExited(t, s, 5*time.Second)
+}
+
+// TestExitDeliversTheTailBeforeClosingSubscribers pins the ordering the CI
+// flake (docs/FOLLOW-UPS.md §6) violated: a child that writes and exits in
+// the same breath must have that write delivered to every subscriber before
+// the exit closes their channels. Before the drain-then-drop rule the
+// supervisor could reap the leader and drop every subscriber while the tail
+// still sat unread in the pty buffer — subscriber closed over an empty ring
+// in the test's first millisecond. The race needs the reaper to outrun the
+// pump, so a single spawn rarely catches it; the loop widens the net, and
+// under the fix the ordering holds by construction rather than by schedule.
+func TestExitDeliversTheTailBeforeClosingSubscribers(t *testing.T) {
+	for i := 0; i < 40; i++ {
+		r := NewRegistry(time.Now)
+		s, err := r.Spawn(SpawnOpts{
+			Cmd:  []string{"sh", "-c", "echo the-whole-tail"},
+			Cols: 80, Rows: 24,
+		})
+		if err != nil {
+			t.Fatalf("Spawn: %v", err)
+		}
+		sub := s.Subscribe(0)
+		waitFor(t, sub, "the-whole-tail", 5*time.Second)
+		s.Unsubscribe(sub)
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+}
+
+// TestMasterReadable exercises the poll the drain rule rests on: bytes a
+// child wrote before exiting are visible on the master without being
+// consumed, and a drained master reads as quiet.
+func TestMasterReadable(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+
+	if masterReadable(master) {
+		t.Fatal("a fresh master reads as readable; the poll is measuring nothing")
+	}
+	if _, err := slave.Write([]byte("tail")); err != nil {
+		t.Fatalf("slave write: %v", err)
+	}
+	if !masterReadable(master) {
+		t.Fatal("bytes written on the slave are invisible to the master's poll")
+	}
+	buf := make([]byte, 16)
+	if _, err := master.Read(buf); err != nil {
+		t.Fatalf("master read: %v", err)
+	}
+	if masterReadable(master) {
+		t.Fatal("a drained master still reads as readable")
+	}
+}
+
+// TestExitWithOutOfGroupSlaveHolderClosesSubscribers pins that a leader
+// exiting with a setsid'd grandchild still holding the slave — a session and
+// process group of its own, so the leader's group empties at the very reap
+// that arms the exit drain — closes the subscribers promptly rather than
+// leaving them to the registry's ten-minute reap.
+//
+// Measured rather than assumed: Linux hangs the tty up when the session
+// leader exits, whatever still holds a slave descriptor, so the pump drains
+// and ends and is the closer here — this cannot exercise the supervisor's
+// two-look fallback or the drainSettled gate on its exit, both of which are
+// written for tty semantics this shape turned out not to have. They stay
+// because they are cheap and the semantics are the platforms' to change;
+// this test holds the observable invariant either way.
+//
+// Linux-only: macOS ships no setsid binary, and Darwin's leader-exit
+// semantics make the shape unassemblable regardless.
+func TestExitWithOutOfGroupSlaveHolderClosesSubscribers(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("needs the leader-exit tty hangup shape and the setsid binary, both Linux")
+	}
+	r := NewRegistry(time.Now)
+	// The leader lingers a beat after echoing so Subscribe below provably
+	// registers before the exit's drop visits the set — a subscriber that
+	// arrives after the drop sits on an open channel by design (see
+	// conn.stream's contract) and would fail this test's closure wait for
+	// the wrong reason. The holder sleeps just long enough to outlive the
+	// test: it is outside the group, so Close's kill cannot reach it and a
+	// long sleep would linger after the run.
+	s, err := r.Spawn(SpawnOpts{
+		Cmd:  []string{"sh", "-c", "setsid sh -c 'exec sleep 3' & echo held-open; sleep 0.2"},
+		Cols: 80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	sub := s.Subscribe(0)
+	waitFor(t, sub, "held-open", 5*time.Second)
+	waitExited(t, s, 5*time.Second)
+
+	// The exit is on record and nothing more is coming; the subscriber's
+	// channel must close on the supervisor's cadence, not the registry's.
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case _, ok := <-sub.C:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("subscriber never closed after the exit: the drain found no closer")
+		}
+	}
 }

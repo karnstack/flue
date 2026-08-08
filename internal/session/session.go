@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // ExitedRetention is how long an exited session stays listable so its final
@@ -145,6 +147,30 @@ type Session struct {
 	info     Info
 	exitedAt time.Time
 	closed   bool
+	// pumpDone records that pump has returned: the master's stream is over
+	// and nothing will ever be read from it again.
+	pumpDone bool
+	// pumpParked and pumpReads are the supervisor's evidence against a byte
+	// in flight: the master can poll quiet while the pump holds a just-read
+	// tail it has not yet delivered. parked is true only while the pump is
+	// inside Read — holding nothing — and reads counts Read's returns, so a
+	// wake-deliver-park cycle between two looks moves the counter even
+	// though both looks saw the pump parked. A look believes quiet only
+	// with the pump parked and the counter still; the one unobservable
+	// instant left is the pump entering Read with nothing in hand, which is
+	// exactly the state quiet claims. Atomics because the pump maintains
+	// both without the lock.
+	pumpParked atomic.Bool
+	pumpReads  atomic.Uint64
+
+	// drainPending is set by markExitedLocked instead of dropping subscribers:
+	// the child has exited but its final output may still sit unread in the
+	// pty buffer, and closing the stream first is how a CI run once watched
+	// a subscriber die over an empty ring in the test's first millisecond
+	// (docs/FOLLOW-UPS.md §6). While it is set, the drop belongs to whoever
+	// can prove the drain is finished — pump, after the chunk that empties
+	// the master, or the supervisor, after two spaced looks agree; see both.
+	drainPending bool
 }
 
 func (s *Session) ID() string { return s.id }
@@ -333,12 +359,27 @@ func (s *Session) Close() error {
 // pump copies PTY output into the ring and fans it out to subscribers.
 func (s *Session) pump() {
 	// A read error on the master ends the output stream and nothing else. It
-	// is reported to the supervisor as a hint, never as an exit.
-	defer s.noteMasterEnded()
+	// is reported to the supervisor as a hint, never as an exit — but a
+	// stream that is over is also the end of any drain the exit was waiting
+	// on, and if the exit is already on record the subscribers close here,
+	// because no other event is coming to close them.
+	defer func() {
+		s.mu.Lock()
+		s.pumpDone = true
+		if s.drainPending || s.info.State == "exited" {
+			s.drainPending = false
+			s.dropSubsLocked()
+		}
+		s.mu.Unlock()
+		s.noteMasterEnded()
+	}()
 
 	buf := make([]byte, 32*1024)
 	for {
+		s.pumpParked.Store(true)
 		n, err := s.pty.Read(buf)
+		s.pumpParked.Store(false)
+		s.pumpReads.Add(1)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
@@ -358,6 +399,14 @@ func (s *Session) pump() {
 					s.dropLocked(sub)
 				}
 			}
+			// The pump's own quiet verdict is authoritative: it is the only
+			// reader, so under this lock any byte it has not delivered is
+			// still visible on the master. Nothing visible and an exit
+			// waiting means the drain the exit deferred to is finished.
+			if s.drainPending && !masterReadable(s.pty) {
+				s.drainPending = false
+				s.dropSubsLocked()
+			}
 			s.mu.Unlock()
 		}
 		if err != nil {
@@ -373,21 +422,25 @@ func (s *Session) pump() {
 // be conflated. The platforms disagree about what the master's stream even
 // tracks:
 //
-//   - On Linux it tracks the slave descriptors. It ends when the last one is
-//     released, which skews in both directions: a script that does
-//     `exec >log 2>&1 </dev/null` and then works for an hour ends the stream
-//     immediately while its process group runs on and still needs killing,
-//     and conversely a background job holding the slave keeps the master
-//     readable long after the leader has gone.
+//   - On Linux it tracks the slave descriptors *and* the leader. It ends
+//     when the last slave descriptor is released — a script that does
+//     `exec >log 2>&1 </dev/null` and then works for an hour ends the
+//     stream immediately while its process group runs on and still needs
+//     killing — and it also ends when the session leader exits, whatever
+//     still holds a slave: the kernel hangs the tty up as it disassociates
+//     the leader's controlling terminal, measured here with a setsid'd
+//     grandchild whose open descriptors did not keep the stream alive.
+//     Buffered output survives the hangup — the master delivers what was
+//     written before erroring — which is what the exit drain leans on.
 //   - On Darwin it tracks the session leader. BSD ctty semantics keep the
 //     master readable while the leader lives even after every slave
 //     descriptor is released, and error it when the leader exits even though
 //     a background job still holds one. So the early-EOF case above cannot be
 //     reproduced on Darwin at all.
 //
-// No platform makes the two events coincide reliably, so the supervisor uses
-// this only to shorten its poll interval — never to decide the session's
-// state.
+// On no platform does the master ending imply the child is reapable or its
+// group empty, so the supervisor uses this only to shorten its poll interval
+// — never to decide the session's state.
 //
 // The hint is delivered at most once per call and dropped if one is already
 // pending, so it is safe to call more than once and from more than one place.
@@ -441,6 +494,16 @@ func (s *Session) supervise() {
 		// to publish the exit to callers, and conflating them is what let a
 		// signal go out with no probe behind it.
 		groupEmpty bool
+		// The supervisor's view of the exit drain across turns: quiet is
+		// only believed when two looks spaced at least reapPollMin apart
+		// agree, and neither the ring nor the pump's read counter has moved
+		// between them. drainSettled gates this goroutine's exit — see the
+		// note at the return below.
+		drainQuiet   bool
+		drainSeq     uint64
+		drainReads   uint64
+		drainLook    time.Time
+		drainSettled bool
 	)
 	for {
 		if !reaped {
@@ -473,9 +536,52 @@ func (s *Session) supervise() {
 		if reaped && !groupEmpty {
 			groupEmpty = s.groupGone()
 		}
-		if recorded && groupEmpty {
+		// The drain the exit deferred (markExitedLocked): the pump settles
+		// it after its next chunk, but a pump blocked in read with nothing
+		// buffered never wakes — a background job holding the slave in
+		// silence is the ordinary shape of that. The supervisor is the
+		// actor that still runs, so it confirms quiet from outside: two
+		// looks at least reapPollMin apart that agree the master polls
+		// quiet, the pump sits parked inside a read, the ring has not
+		// grown, and the read counter has not moved between them. Un-spaced
+		// looks would not do: the select below also wakes for signal
+		// requests and the master hint, which would compress "two
+		// consecutive polls" into microseconds — the spacing comes from the
+		// wall clock, not the loop. The parked flag is what rules out a
+		// tail lifted off the master but not yet under the lock, and the
+		// counter rules out a whole wake-deliver-park cycle hiding between
+		// the looks.
+		if recorded && s.mu.TryLock() {
+			if s.drainPending {
+				delay = reapPollMin
+				if now := time.Now(); now.Sub(drainLook) >= reapPollMin {
+					quiet := !masterReadable(s.pty) && s.pumpParked.Load()
+					seq := s.ring.EndSeq()
+					reads := s.pumpReads.Load()
+					if quiet && drainQuiet && seq == drainSeq && reads == drainReads {
+						s.drainPending = false
+						s.dropSubsLocked()
+						drainSettled = true
+					}
+					drainQuiet, drainSeq, drainReads, drainLook = quiet, seq, reads, now
+				}
+			} else {
+				// Nothing pending: either the exit never had a drain to
+				// wait for, or the pump has settled it. Either way the
+				// supervisor's part is done.
+				drainSettled = true
+			}
+			s.mu.Unlock()
+		}
+		if recorded && groupEmpty && drainSettled {
 			// Nothing pins the pgid any more, so from here it may name a
-			// stranger. Stop signalling, permanently.
+			// stranger. Stop signalling, permanently. Gated on the drain
+			// having settled, and that gate is load-bearing: the child's
+			// own group can empty at the very reap that armed the drain —
+			// a job-control background job lives in a group of its own —
+			// and a supervisor that returned here after a single look
+			// would leave a parked pump's subscribers with no closer at
+			// all until the registry reaps the session ten minutes on.
 			close(s.gone)
 			return
 		}
@@ -584,20 +690,56 @@ func (s *Session) reapIfExited() (int, bool) {
 	}
 }
 
-// markExitedLocked records the child's exit and closes out its subscribers.
-// The caller must hold s.mu.
+// markExitedLocked records the child's exit. The caller must hold s.mu.
 //
 // It runs only once reapIfExited has confirmed the child is actually gone, so
 // State never reports "exited" on the strength of a read error on the master.
 // Note that it says nothing about the child's process group, which may well
 // outlive it.
+//
+// It no longer closes the subscribers itself. A child that writes and exits
+// in the same breath is reaped while its last bytes still sit unread in the
+// pty buffer, and dropping the subscribers here closed their stream ahead of
+// its own tail — observed twice on CI as a subscriber dead over an empty
+// ring (docs/FOLLOW-UPS.md §6). With the stream already over the drop is
+// safe and immediate; otherwise drainPending hands it to the pump and the
+// supervisor, whichever proves the drain finished first.
 func (s *Session) markExitedLocked(code int) {
 	s.info.State = "exited"
 	s.info.ExitCode = code
 	s.exitedAt = s.clock()
+	if s.pumpDone {
+		s.dropSubsLocked()
+		return
+	}
+	s.drainPending = true
+}
+
+// dropSubsLocked closes out every subscriber. The caller must hold s.mu.
+func (s *Session) dropSubsLocked() {
 	for sub := range s.subs {
 		s.dropLocked(sub)
 	}
+}
+
+// masterReadable reports whether the PTY master holds bytes its reader has
+// not consumed, without blocking and without consuming them. It is the
+// probe the drain-then-drop rule rests on: a child's write completes into
+// the pty buffer before its exit can be reaped, so at reap time the tail is
+// either already in the ring or visible here. A master that cannot be
+// polled — closed, or already past end of stream — reads as quiet.
+func masterReadable(f *os.File) bool {
+	conn, err := f.SyscallConn()
+	if err != nil {
+		return false
+	}
+	readable := false
+	_ = conn.Control(func(fd uintptr) {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, err := unix.Poll(fds, 0)
+		readable = err == nil && n > 0 && fds[0].Revents&unix.POLLIN != 0
+	})
+	return readable
 }
 
 // exitStatus reports whether the child has exited and, if so, when — the two
