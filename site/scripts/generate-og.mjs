@@ -25,7 +25,7 @@ const MARK = 360
 // These mirror web/src/lib/theme.ts (`chrome.canvasDark`, `chrome.accent`);
 // the site/ -> web/ boundary forbids importing them, so they are hardcoded.
 const CANVAS_DARK = '#09090b'
-const ACCENT = '#fe9a00'
+const ACCENT = '#00bba7'
 
 /**
  * The mark in the favicon's 0-100 viewBox: a prompt chevron
