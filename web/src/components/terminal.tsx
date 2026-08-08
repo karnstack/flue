@@ -181,11 +181,31 @@ export function Terminal({
     const surface = surfaceRef.current
     if (!pane || !inner || !surface) return
 
+    // The document's canvas, painted along with the pane wherever the theme
+    // lands. The pane stops at the visual viewport while a phone keyboard is
+    // up, and rubber-band overscroll runs past the page: both bands show the
+    // canvas, which otherwise wears the app scheme's colour — a dark OS under
+    // a light terminal theme put a black flash behind every keyboard open.
+    // Restored on unmount so the rest of the app keeps its stylesheet colour.
+    const canvas = document.documentElement
+    const priorCanvas = canvas.style.backgroundColor
+    // What this effect last painted, read back so the value carries the
+    // style engine's own serialisation. The cleanup compares before it
+    // restores, for the reason the viewport tracker's disposer does: a
+    // replacement owner can paint before this one tears down, and a stale
+    // cleanup must surrender only what it still owns.
+    let paintedCanvas = ''
+    const paintGround = (bg: string | undefined) => {
+      pane.style.backgroundColor = bg ?? ''
+      canvas.style.backgroundColor = bg ?? ''
+      paintedCanvas = canvas.style.backgroundColor
+    }
+
     const palette = resolveTheme(themeIdRef.current, prefersDark())
     const emulator = createEmulator({ cols: 80, rows: 24, theme: palette })
     emulator.attachTo(surface)
     emulator.focus()
-    pane.style.backgroundColor = palette.background ?? ''
+    paintGround(palette.background)
 
     // Everything below is effect-local rather than a ref, because all of it
     // belongs to one emulator and one attachment: a second mount gets its own.
@@ -619,8 +639,9 @@ export function Terminal({
       const next = resolveTheme(themeIdRef.current, media?.matches ?? true)
       emulator.setTheme(next)
       // The pane shows through wherever a scaled surface does not reach, so it
-      // has to follow the terminal's background and not the app's.
-      pane.style.backgroundColor = next.background ?? ''
+      // has to follow the terminal's background and not the app's — and the
+      // document canvas with it.
+      paintGround(next.background)
       setDark(media?.matches ?? true)
     }
     media?.addEventListener?.('change', onScheme)
@@ -637,7 +658,7 @@ export function Terminal({
       applyTheme: (id) => {
         const next = resolveTheme(id, prefersDark())
         emulator.setTheme(next)
-        pane.style.backgroundColor = next.background ?? ''
+        paintGround(next.background)
       },
       sendKey: (key) => {
         if (ref === null || consumed < muteUntil) return
@@ -694,6 +715,9 @@ export function Terminal({
       if (ref !== null) client.detach(ref)
       else client.forget(sessionId)
       document.title = priorTitle
+      if (canvas.style.backgroundColor === paintedCanvas) {
+        canvas.style.backgroundColor = priorCanvas
+      }
       emulator.dispose()
     }
   }, [client, sessionId, createEmulator])

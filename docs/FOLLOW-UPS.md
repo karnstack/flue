@@ -89,7 +89,9 @@ terminal see a login shell under the login service too.
 
 - `TestCloseTerminatesBackgroundChildren` flaked twice on CI (2026-08-07 run
   31212710318; 2026-08-08 run 31259207719): subscriber closed over an empty
-  ring in the test's first millisecond. **Diagnosed and fixed.** The old
+  ring in the test's first millisecond — a state only `Close()` should have
+  produced, and the test had not called it. **Diagnosed and fixed** (the
+  instrumentation the earlier note asked for was never needed). The old
   `markExitedLocked` dropped every subscriber at reap time, and a child that
   writes and exits in the same breath can be reaped on Linux while its last
   bytes still sit unread in the pty buffer — the supervisor's poll beating
