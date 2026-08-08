@@ -29,6 +29,7 @@ import {
   type SignalMsg,
   type SizeChanged,
   type SpawnMsg,
+  type UpdateMsg,
   type Welcome,
 } from './protocol'
 import { daemonSocketUrl, FlueClient, type ConnStatus, type SocketLike } from './client'
@@ -195,6 +196,10 @@ describe('control message golden file', () => {
       'resize',
       'signal',
       'close',
+      'update',
+      'updateTagsAndPinned',
+      'updateClearTags',
+      'updateClearName',
       'devices',
       'revoke',
       'pairStart',
@@ -266,6 +271,48 @@ describe('control message golden file', () => {
   it('decodes close', () => {
     const want: CloseMsg = { type: 'close', ref: 3 }
     expect(fixture('close')).toStrictEqual(want)
+  })
+
+  // The four update cases exist to pin partiality in both directions. An
+  // absent field means "leave this alone", so a decoder that filled the gap
+  // with a zero value would rename a session every time somebody pinned it.
+  it('decodes an update carrying one field, the other two absent', () => {
+    const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', name: 'api server' }
+    expect(fixture('update')).toStrictEqual(want)
+  })
+
+  it('decodes an update carrying tags and pinned together', () => {
+    const want: UpdateMsg = {
+      type: 'update',
+      id: 'a1b2c3d4e5f60708',
+      tags: ['api', 'feat-x'],
+      pinned: true,
+    }
+    expect(fixture('updateTagsAndPinned')).toStrictEqual(want)
+  })
+
+  it('decodes an update clearing tags as [], not as an absent field', () => {
+    // The distinction the whole message rests on: `[]` says the user removed
+    // the last tag, absent says this edit was never about tags. A codec that
+    // let the empty array fall out on either side would make the last tag
+    // impossible to remove, silently.
+    const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', tags: [] }
+    const got = fixture('updateClearTags') as UpdateMsg
+    expect(got).toStrictEqual(want)
+    expect(got.tags).toEqual([])
+    expect('tags' in got).toBe(true)
+  })
+
+  it('decodes an update clearing a name and unpinning', () => {
+    // The same hazard as an empty `tags`, in the two shapes JSON makes easy to
+    // drop: `""` and `false`. Both are edits a user asks for by hand, so both
+    // have to survive a round trip that an omitempty on the wrong side of the
+    // Go struct would quietly eat.
+    const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', name: '', pinned: false }
+    const got = fixture('updateClearName') as UpdateMsg
+    expect(got).toStrictEqual(want)
+    expect(got.name).toBe('')
+    expect(got.pinned).toBe(false)
   })
 
   it('decodes devices', () => {

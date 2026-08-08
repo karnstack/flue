@@ -177,6 +177,31 @@ export interface CloseMsg {
   ref: number
 }
 
+/**
+ * Edit the metadata a human owns on a session — its name, its tags, whether it
+ * is pinned. Nothing the program inside the session says can reach these
+ * fields, and nothing here touches what that program says.
+ *
+ * Partial by construction: a field this message does not carry is a field the
+ * edit leaves alone. Two views on one session is the ordinary case, so a
+ * message that had to restate everything would undo whatever the other view
+ * changed in between. Which makes the empty values load-bearing rather than
+ * skippable — `tags: []` clears the tags and `name: ''` clears the name, where
+ * omitting either says only that this edit was not about it.
+ *
+ * Mirrors `wire.Update`. Answered by a fresh `sessions` to the connection that
+ * asked, or by `error` with code `not_found`. Only that connection: nothing
+ * broadcasts the edit, so a second browser sees it on its next list rather than
+ * the instant it lands.
+ */
+export interface UpdateMsg {
+  type: 'update'
+  id: string
+  name?: string
+  tags?: string[]
+  pinned?: boolean
+}
+
 /** Ask for the paired-device list. Answered by `deviceList`. */
 export interface DevicesMsg {
   type: 'devices'
@@ -210,6 +235,7 @@ export type ClientMessage =
   | ResizeMsg
   | SignalMsg
   | CloseMsg
+  | UpdateMsg
   | DevicesMsg
   | RevokeMsg
   | PairStartMsg
