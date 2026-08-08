@@ -9,13 +9,18 @@ import {
   encoder,
   frame,
   freshHub,
+  handshakeDeadline,
   MACHINE,
   open,
   sleep,
   within,
 } from './harness'
 
-/** Mirrors the HANDSHAKE_TIMEOUT_MS binding in vitest.config.ts. */
+/**
+ * The handshake deadline the tests below bind for themselves with
+ * `handshakeDeadline()`. It is not what vitest.config.ts binds — that is ten
+ * minutes, so the reaper only ever fires where a test asked it to.
+ */
 const TIMEOUT_MS = 50
 
 afterEach(() => {
@@ -281,17 +286,12 @@ describe('the message-size cap', () => {
 describe('the channel cap', () => {
   it('refuses the 65th concurrent client: 503 relay full', async () => {
     const hub = freshHub()
-    // None of the 64 clients below ever handshakes, and on a slow runner the
-    // 50 ms deadline this config binds would reap them before the 65th dial —
-    // the cap check would then find free slots and hand out a 101. Reap-then-
-    // accept is the hub behaving correctly; this test is about the cap alone,
-    // so give this one instance a deadline the test cannot outlive. The sleep
-    // stands in for the slow runner, and keeps the reap from ever going quiet
-    // here by accident.
-    await runInDurableObject(hub, (instance) => {
-      const hubInstance = instance as unknown as { env: Record<string, unknown> }
-      hubInstance.env = { ...hubInstance.env, HANDSHAKE_TIMEOUT_MS: 600_000 }
-    })
+    // None of the 64 clients below ever handshakes. Were the reaper live they
+    // would be reaped before the 65th dial, the cap check would find free slots
+    // and hand out a 101, and this test would fail for a reason that has nothing
+    // to do with the cap — reap-then-accept is the hub behaving correctly. It
+    // needs no opt-out to say so any more: the default deadline outlasts every
+    // test. The sleep stays as the assertion that it does.
     const daemon = await dial(hub, `/daemon/${MACHINE}`)
     await Promise.all(Array.from({ length: 64 }, () => dial(hub, `/client/${MACHINE}`)))
     await sleep(TIMEOUT_MS + 30)
@@ -329,6 +329,7 @@ describe('hibernation', () => {
 describe('the handshake deadline', () => {
   it('reaps a client that never sends, tells the daemon, spares one that did', async () => {
     const hub = freshHub()
+    await handshakeDeadline(hub, TIMEOUT_MS)
     const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const seen = await dial(hub, `/client/${MACHINE}`) // channel 1
     seen.ws.send(Uint8Array.of(1))
@@ -356,6 +357,7 @@ describe('the handshake deadline', () => {
 
   it('re-arms while unseen clients remain, then reaps them too', async () => {
     const hub = freshHub()
+    await handshakeDeadline(hub, TIMEOUT_MS)
     const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const b1 = await dial(hub, `/client/${MACHINE}`)
     await sleep(40)
