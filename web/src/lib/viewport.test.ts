@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { trackVisualViewport, zoomedIn, type ViewportLike } from './viewport'
 
-/** A hand-cranked visualViewport double; fire() plays both handler slots. */
+/**
+ * A hand-cranked visualViewport double. fire() plays both handler slots, as a
+ * browser does when the keyboard both resizes and slides the viewport; scroll()
+ * plays only the scroll slot, which is the iOS focus case — the viewport slides
+ * off the top of the page without changing size, and nothing but that slot's
+ * wiring makes the pane follow.
+ */
 function fakeViewport(init: { height: number; offsetTop?: number; scale?: number }) {
   const vv = {
     height: init.height,
@@ -11,6 +17,10 @@ function fakeViewport(init: { height: number; offsetTop?: number; scale?: number
     onscroll: null as ViewportLike['onscroll'],
     fire() {
       vv.onresize?.(new Event('x'))
+      vv.onscroll?.(new Event('x'))
+    },
+    scroll() {
+      vv.onscroll?.(new Event('x'))
     },
   }
   return vv
@@ -65,6 +75,19 @@ describe('trackVisualViewport', () => {
     expect(pane.style.translate).toBe('0px 120px')
   })
 
+  it('slides after a focus scroll that moves the viewport without resizing it', () => {
+    const vv = fakeViewport({ height: 400 })
+    trackVisualViewport({ pane, surface, viewport: vv })
+    expect(pane.style.translate).toBe('0px 0px')
+
+    // Only the scroll slot is played: on iOS, focusing an input scrolls the
+    // visual viewport off the top of the page at an unchanged height, so the
+    // resize slot never fires and the follow rides entirely on this wiring.
+    vv.offsetTop = 90
+    vv.scroll()
+    expect(pane.style.translate).toBe('0px 90px')
+  })
+
   it('releases the surface to the browser while pinch-zoomed', () => {
     const vv = fakeViewport({ height: 700 })
     trackVisualViewport({ pane, surface, viewport: vv })
@@ -98,6 +121,26 @@ describe('trackVisualViewport', () => {
 
     vv.height = 300
     vv.fire() // a dead handler set would throw or restyle; neither may happen
+    expect(pane.style.height).toBe('')
+  })
+
+  it('does not unwire a newer tracker when an older one disposes', () => {
+    // A remount can install the replacement before tearing the old one down.
+    // The stale disposer must clear only its own pane, never the live
+    // tracker's handlers — otherwise the pane stops following the keyboard.
+    const vv = fakeViewport({ height: 700 })
+    const disposeOld = trackVisualViewport({ pane, surface, viewport: vv })
+
+    const newPane = document.createElement('div')
+    const newSurface = document.createElement('div')
+    trackVisualViewport({ pane: newPane, surface: newSurface, viewport: vv })
+
+    disposeOld()
+    expect(pane.getAttribute('style')).toBe('')
+
+    vv.height = 400 // keyboard up, after the old tracker is gone
+    vv.fire()
+    expect(newPane.style.height).toBe('400px')
     expect(pane.style.height).toBe('')
   })
 })

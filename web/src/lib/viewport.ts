@@ -75,8 +75,13 @@ export function trackVisualViewport(opts: {
   apply()
 
   return () => {
-    viewport.onresize = null
-    viewport.onscroll = null
+    // Each slot is surrendered only if it is still this tracker's. Nulling
+    // unconditionally would be a disposer reaching past its own lifetime:
+    // a remount can install the replacement before tearing down the old
+    // tracker, and the old one would then strip the handlers the new one
+    // just wired, leaving the pane stuck at whatever the keyboard last did.
+    if (viewport.onresize === apply) viewport.onresize = null
+    if (viewport.onscroll === apply) viewport.onscroll = null
     surface.style.touchAction = ''
     pane.style.height = ''
     pane.style.translate = ''
