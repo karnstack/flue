@@ -260,17 +260,24 @@ export function Terminal({
         settleTimer = window.setTimeout(sendFittedSize, RESIZE_SETTLE_MS)
       }
 
-      if (want.cols >= dims.cols && want.rows >= dims.rows) {
-        // The pty fits this pane — whatever view set the size, this one can
-        // show it whole — so the surface simply fills the pane and nothing is
-        // transformed.
+      if (want.cols >= dims.cols) {
+        // Every column fits, so the surface lays out one-to-one whatever the
+        // row count says. Rows overflowing alone is almost always this view's
+        // own keyboard sliding over the pane: for the settle window the bottom
+        // rows clip behind it and then the pty takes the new height. Scaling
+        // here instead used to pinch both axes for that window — a lurch on
+        // every keyboard open. The cost is deliberate: a view whose columns
+        // fit while its rows do not shows the top of the screen until the pty
+        // follows, and in the rare enduring cross-device shape of that kind,
+        // scrollback still reaches what the pane cannot.
         surface.style.removeProperty('width')
         surface.style.removeProperty('height')
         surface.style.removeProperty('scale')
         return
       }
 
-      // A larger view is setting the size. Lay the surface out at the
+      // Columns overflow: a wider view is setting the size, and columns
+      // clipping would amputate lines mid-word. Lay the surface out at the
       // screen's true size and scale the whole thing down, rather than
       // reflowing text.
       //

@@ -635,6 +635,38 @@ describe('Terminal', () => {
       expect(report.rows).toBeLessThan(47)
     })
 
+    it('stays one-to-one when only rows stop fitting, so a keyboard cannot pinch the width', async () => {
+      const observers = resizeObservers()
+      const box = paneOf(800 + GUTTER_PX, 408)
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      // 80x24 rendered at 800x408 puts a cell at 10 x 17.
+      em.live().measured = { width: 800, height: 408 }
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24, primary: true })))
+
+      // The keyboard takes half the pane's height: same columns, half the rows.
+      box.mockReturnValue({ width: 800 + GUTTER_PX, height: 204 } as DOMRect)
+      act(() => observers.fire())
+
+      // The settled report proves the whole relayout → settle path ran…
+      await waitFor(() =>
+        expect(sock.ofType('resize')).toContainEqual({
+          type: 'resize',
+          ref: 1,
+          cols: 80,
+          rows: 12,
+          primary: true,
+        }),
+      )
+      // …and through all of it the surface was never scaled or resized: the
+      // bottom rows clip behind the keyboard until the pty follows, and the
+      // width never moves.
+      expect(surfaceEl().style.scale).toBe('')
+      expect(surfaceEl().style.width).toBe('')
+      expect(surfaceEl().style.height).toBe('')
+    })
+
     it('reshapes nothing when promoted — the role moves voices, not sizes', async () => {
       // The daemon promotes the most recently active client when a primary
       // leaves, and the promotion arrives as a sizeChanged. Under the
