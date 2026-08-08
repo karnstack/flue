@@ -42,7 +42,7 @@ Every control message is a JSON object with a `type` discriminator.
 | type | fields | meaning |
 |---|---|---|
 | `welcome` | `daemonId`, `host`, `ver`, `caps[]`, `relay?` | answers `hello` |
-| `sessions` | `sessions[]` | answers `list`, and follows any change to the set |
+| `sessions` | `sessions[]` | answers `list`, and answers `update` on the connection that sent it |
 | `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `head`, `truncated`, `primary`, `reqId?` | answers `attach` or `spawn` |
 | `exit` | `ref`, `code` | the session's process ended |
 | `sizeChanged` | `ref`, `cols`, `rows`, `primary` | the PTY's dimensions changed |
@@ -131,7 +131,7 @@ always the list that was sent, and a client should render what came back rather
 than what it typed. Comparison is exact: `Prod` and `prod` are two tags.
 
 An `update` that lands is answered by a fresh `sessions` to the requesting
-connection only; other clients converge on their next 3s list poll. One naming
+connection only; other clients converge on their next `list` poll. One naming
 a session that does not exist is answered by `error{not_found}`. Editing
 metadata is not activity in the session: `lastActive` does not move, so tidying
 a list cannot reorder the list being tidied.

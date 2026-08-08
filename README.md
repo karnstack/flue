@@ -71,6 +71,13 @@ replays what you missed. Two devices on one session mirror live — typing on
 the phone shows up on the laptop, and the phone's 40 columns don't shrink
 the laptop.
 
+The sessions list holds every machine at once: one tab lists what is running
+on every machine you have paired, not just the one serving the page. Rows
+carry the directory each shell is in now rather than the one it started in,
+and a session can be renamed, tagged, or pinned there without attaching to
+it. Group by machine, state, tag, or directory, search the whole set, and
+keep an arrangement you come back to as a saved view.
+
 <p align="center">
   <img src="docs/architecture.png" width="830"
     alt="Architecture of flue: on your machine, a browser tab talks to the flue daemon over a loopback websocket. The daemon and your other devices each dial outbound into a flue-relay Worker in your own Cloudflare account, which forwards ciphertext it holds no key for. A Noise IK channel runs end to end from the daemon to the remote browser, the daemon's key pinned at pairing. No hosted service; flue.sh is never part of the data path.">

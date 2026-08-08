@@ -199,9 +199,9 @@ see §11.
   closed for `DeviceList` with a `MarshalJSON` (`control.go:143`) — it pre-dates
   the branch, and was left rather than widened mid-milestone.
 
-  **Done** — `Sessions` has the same `MarshalJSON` now, written for the same
-  reason, and a test pins the empty case the way `deviceListEmpty` is pinned:
-  a daemon running nothing sends `[]`.
+  **Done** (`eb102894`) — `Sessions` has the same `MarshalJSON` now, written
+  for the same reason, and a test pins the empty case the way `deviceListEmpty`
+  is pinned: a daemon running nothing sends `[]`.
 - `exemptStaticPath` returns true for a bare `/assets`
   (`internal/daemon/server.go:431`), which the doc comment two lines above says
   it does not. Unreachable today because the mux 307s the bare directory first,
@@ -248,10 +248,12 @@ see §11.
   `internal/crypto` imports it directly. `go mod tidy` fixes exactly that, and
   also adds three unrelated `go.sum` lines — left for a dedicated cleanup rather
   than smuggled in behind a docs commit.
-- The CreateTemp+rename pattern named twice in item 6 is now five copies —
-  `internal/crypto/keys.go:72`, `internal/crypto/devices.go:62`,
-  `internal/config/paths.go:85`, `internal/daemon/discover.go:47`,
-  `internal/session/snapshot.go:117`. The dedupe was not done inline.
+- The CreateTemp+rename pattern named twice in item 6 is now seven copies —
+  `internal/crypto/keys.go:72`, `internal/crypto/devices.go:63`,
+  `internal/config/paths.go:92`, `internal/config/cloudflare.go:81`,
+  `internal/daemon/discover.go:47`, `internal/session/snapshot.go:150`, and
+  `internal/session/meta.go:59`, the last of them written beside the snapshot
+  one rather than through it. The dedupe was not done inline.
 - `internal/crypto/handshake_test.go` is not gofmt-clean (inherited from the task
   brief), and its wrong-pinned-key case spends a fixed five seconds waiting out a
   context where it could signal off the responder's error.
