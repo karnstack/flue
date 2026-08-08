@@ -1,0 +1,144 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { DEFAULT_VIEW } from './view'
+import { deleteView, listViews, saveView, type SavedView } from './views-store'
+
+/** Written out rather than imported, so the key itself is part of the pin. */
+const VIEWS_KEY = 'flue.views'
+
+const WORK: SavedView = { ...DEFAULT_VIEW, name: 'Work', search: 'flue' }
+const OPS: SavedView = {
+  ...DEFAULT_VIEW,
+  name: 'Ops',
+  grouping: 'tag',
+  ordering: 'name',
+  columns: ['name', 'state'],
+  showExited: false,
+}
+
+/** What a hand edit, an extension or a half-shipped migration left behind. */
+function stored(value: unknown): void {
+  localStorage.setItem(VIEWS_KEY, JSON.stringify(value))
+}
+
+beforeEach(() => {
+  localStorage.clear()
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+describe('listViews and saveView', () => {
+  it('round-trips a view', () => {
+    saveView(WORK)
+    expect(listViews()).toEqual([WORK])
+  })
+
+  it('is empty in a browser that never saved one', () => {
+    expect(listViews()).toEqual([])
+  })
+
+  it('keeps them in the order they were written', () => {
+    saveView(WORK)
+    saveView(OPS)
+    expect(listViews().map((v) => v.name)).toEqual(['Work', 'Ops'])
+  })
+
+  it('keeps one view per name, the newest', () => {
+    saveView(WORK)
+    saveView({ ...WORK, search: 'db' })
+    expect(listViews()).toEqual([{ ...WORK, search: 'db' }])
+  })
+
+  it('leaves an edited view where it was, rather than moving it to the end', () => {
+    // These are shown as tabs, and a tab that hops to the far end because
+    // somebody changed its ordering would move the target as it was clicked.
+    saveView(WORK)
+    saveView(OPS)
+    saveView({ ...WORK, search: 'db' })
+    expect(listViews().map((v) => v.name)).toEqual(['Work', 'Ops'])
+  })
+
+  it('tells two names apart by case', () => {
+    saveView(WORK)
+    saveView({ ...WORK, name: 'work' })
+    expect(listViews().map((v) => v.name)).toEqual(['Work', 'work'])
+  })
+
+  it('lets a write failure reach the caller', () => {
+    // Storage full, or a browser that refuses it: the caller is the one that
+    // can say "that did not save", and a swallowed error would leave a tab on
+    // screen that vanishes at the next load.
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota')
+    })
+    expect(() => saveView(WORK)).toThrow()
+  })
+})
+
+describe('listViews on a store it cannot believe', () => {
+  it('reads unparseable storage as no views at all', () => {
+    for (const raw of ['not json', '{"a":1}', '"a string"', '42', 'null']) {
+      localStorage.setItem(VIEWS_KEY, raw)
+      expect(listViews(), raw).toEqual([])
+    }
+  })
+
+  it('reads a storage the browser will not open as no views at all', () => {
+    // Private modes exist, and a saved-view tab strip is not worth an
+    // exception at the entry point.
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('denied')
+    })
+    expect(listViews()).toEqual([])
+  })
+
+  const rotten: Array<{ what: string; row: unknown }> = [
+    { what: 'a row that is not an object', row: 'Work' },
+    { what: 'a null row', row: null },
+    { what: 'a nameless row', row: { ...DEFAULT_VIEW } },
+    { what: 'a row named with a number', row: { ...DEFAULT_VIEW, name: 7 } },
+    { what: 'a row with an empty name', row: { ...DEFAULT_VIEW, name: '' } },
+    { what: 'a grouping nothing groups by', row: { ...WORK, grouping: 'folder' } },
+    { what: 'an ordering nothing orders by', row: { ...WORK, ordering: 'size' } },
+    { what: 'a search that is not text', row: { ...WORK, search: 3 } },
+    { what: 'columns that are not a list', row: { ...WORK, columns: 'name' } },
+    { what: 'a column no row has', row: { ...WORK, columns: ['name', 'colour'] } },
+    { what: 'a column that is not text', row: { ...WORK, columns: [1] } },
+    { what: 'a show-exited that is not a yes or a no', row: { ...WORK, showExited: 'yes' } },
+  ]
+
+  for (const { what, row } of rotten) {
+    it(`drops ${what}, and keeps the rows around it`, () => {
+      stored([OPS, row, WORK])
+      expect(listViews()).toEqual([OPS, WORK])
+    })
+  }
+
+  it('carries no property out that it did not ask for', () => {
+    stored([{ ...WORK, injected: 'not mine' }])
+    expect(listViews()).toEqual([WORK])
+    expect(Object.keys(listViews()[0]!).sort()).toEqual(Object.keys(WORK).sort())
+  })
+})
+
+describe('deleteView', () => {
+  it('removes the view by name and leaves the rest', () => {
+    saveView(WORK)
+    saveView(OPS)
+    deleteView('Work')
+    expect(listViews()).toEqual([OPS])
+  })
+
+  it('succeeds on a name that was never saved', () => {
+    saveView(WORK)
+    deleteView('Nothing')
+    expect(listViews()).toEqual([WORK])
+  })
+
+  it('succeeds on an empty store', () => {
+    expect(() => deleteView('Work')).not.toThrow()
+    expect(listViews()).toEqual([])
+  })
+})
