@@ -1467,6 +1467,31 @@ describe('the terminal theme', () => {
     const themes = em.live().themes
     expect(themes[themes.length - 1]?.background).toBe('#2e3440')
   })
+
+  it('paints the document canvas with the terminal background, and hands it back', () => {
+    localStorage.setItem('flue:theme', 'dracula')
+    const { view } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    // The band a phone keyboard reveals below the viewport-pinned pane — and
+    // the rubber-band overscroll past the page — both show the document's
+    // canvas, which wears the app scheme's colour unless the terminal claims
+    // it. Dark OS plus a light terminal theme was a black flash on every
+    // keyboard open.
+    expect(document.documentElement.style.backgroundColor).toBe('rgb(40, 42, 54)')
+
+    // A theme change repaints the canvas along with the pane.
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'flue:theme', newValue: 'nord' }),
+      )
+    })
+    expect(document.documentElement.style.backgroundColor).toBe('rgb(46, 52, 64)')
+
+    // Leaving the terminal hands the canvas back to the stylesheet: the
+    // sessions screen must not inherit a preset's colour.
+    view.unmount()
+    expect(document.documentElement.style.backgroundColor).toBe('')
+  })
 })
 
 describe('the new-session link', () => {
