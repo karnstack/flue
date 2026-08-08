@@ -48,6 +48,19 @@ const (
 	// exitPoll is how often that wait re-reads the state. Session exposes no
 	// exit channel, so this is a poll by necessity, over a bounded window.
 	exitPoll = 10 * time.Millisecond
+
+	// peekBytes is how much scrollback a peek returns when the client names no
+	// size, and peekMaxBytes the ceiling on what it may ask for.
+	//
+	// The default is sized for what a preview actually shows — a dozen lines of
+	// a wide terminal, plus the escape sequences threaded through them, plus
+	// enough slack that a screenful of colour does not push the visible text
+	// off the front of the window. The ceiling exists because a list peeks at
+	// many rows at once and the answers all queue on one socket: a client that
+	// asked for the whole 2 MiB ring per row could stall its own connection
+	// behind its own previews.
+	peekBytes    = 16 << 10
+	peekMaxBytes = 128 << 10
 )
 
 var (
@@ -448,6 +461,30 @@ func (c *conn) handleControl(msg any) {
 		// alone — nothing here broadcasts — so another browser learns of the edit
 		// on its next poll rather than the instant it happens.
 		c.sendSessions()
+
+	case wire.Peek:
+		// A look, not an attachment: no ref is minted and no stream starts, so
+		// there is nothing for the client to detach from afterwards and nothing
+		// left on the session if the client goes away mid-answer. An id the
+		// daemon does not hold is answered the way update and close answer one
+		// — a list peeking at a row that has just been reaped is ordinary.
+		s, ok := c.srv.reg.Get(m.ID)
+		if !ok {
+			c.sendErrorFor(m.ReqID, "not_found", "no such session")
+			return
+		}
+		want := m.Bytes
+		if want <= 0 {
+			want = peekBytes
+		}
+		// Clamped rather than refused: a client asking for more than it may
+		// have wants as much as it can get, and an error here would leave a
+		// preview blank over a number nobody chose deliberately.
+		if want > peekMaxBytes {
+			want = peekMaxBytes
+		}
+		data, cols, rows := s.Tail(want)
+		_ = c.sendControl(wire.Preview{ID: m.ID, Data: data, Cols: cols, Rows: rows, ReqID: m.ReqID})
 
 	case wire.Spawn:
 		s, err := c.srv.reg.Spawn(session.SpawnOpts{

@@ -7,6 +7,7 @@ import {
   StarIcon,
 } from '@heroicons/react/16/solid'
 
+import { SessionPreview } from '@/components/session-preview'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -24,6 +25,20 @@ import { COLUMN_KEYS, displayName, type ColumnKey, type Group } from '@/sessions
 
 /** What a row's ⋯ menu can ask of a session. */
 export type RowAction = 'rename' | 'tags' | 'pin' | 'unpin' | 'close'
+
+/**
+ * How a row asks the daemon what it is doing, for the hover preview.
+ *
+ * A function rather than a client, so this component keeps its one useful
+ * property: it renders from data and reports clicks, and a test can put a
+ * whole list on screen without a fleet, a socket or a daemon behind it.
+ * Omitting it turns the previews off entirely, which is what the callers that
+ * have nothing to peek with do.
+ */
+export type PeekFn = (
+  s: FleetSession,
+  bytes: number,
+) => Promise<{ data: string; cols: number; rows: number }>
 
 /**
  * The terminal's path, written out rather than imported from src/router.tsx —
@@ -153,18 +168,35 @@ function SessionRow({
   selected,
   onToggleSelect,
   onAction,
+  peek,
 }: {
   s: FleetSession
   shown: ColumnKey[]
   selected: ReadonlySet<string>
   onToggleSelect: (key: string) => void
   onAction: (action: RowAction, s: FleetSession) => void
+  peek?: PeekFn
 }) {
   const key = keyOf(s)
   const name = displayName(s)
   const ended = s.state === 'exited'
+  const link = (
+    <Link
+      to={TERMINAL_PATH}
+      params={{ deviceId: s.machineId, sessionId: s.id }}
+      aria-label={`Open ${name}`}
+      className="flex min-w-0 flex-1 items-baseline gap-x-2 outline-none after:absolute after:inset-0 after:rounded-md focus-visible:after:outline-2 focus-visible:after:-outline-offset-1 focus-visible:after:outline-ring"
+    >
+      <span className="truncate text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
+        {name}
+      </span>
+      <span className="truncate font-mono text-xs/6 text-zinc-500 max-sm:hidden dark:text-zinc-400">
+        {s.cmd.join(' ')}
+      </span>
+    </Link>
+  )
   return (
-    <li className="group/row relative flex items-center gap-x-3 rounded-md px-2 py-2 transition-colors hover:bg-zinc-950/[0.04] dark:hover:bg-white/[0.06]">
+    <li className="group/row relative flex items-center gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-row-hover">
       <Checkbox
         checked={selected.has(key)}
         onCheckedChange={() => onToggleSelect(key)}
@@ -183,19 +215,22 @@ function SessionRow({
         </span>
       )}
       {shown.includes('state') && <StateDot session={s} />}
-      <Link
-        to={TERMINAL_PATH}
-        params={{ deviceId: s.machineId, sessionId: s.id }}
-        aria-label={`Open ${name}`}
-        className="flex min-w-0 flex-1 items-baseline gap-x-2 outline-none after:absolute after:inset-0 after:rounded-md focus-visible:after:ring-3 focus-visible:after:ring-ring/50"
-      >
-        <span className="truncate text-base/6 font-medium text-zinc-950 sm:text-sm/6 dark:text-white">
-          {name}
-        </span>
-        <span className="truncate font-mono text-xs/6 text-zinc-500 max-sm:hidden dark:text-zinc-400">
-          {s.cmd.join(' ')}
-        </span>
-      </Link>
+      {/*
+        The preview hangs off the link rather than off the row, and that is
+        not merely tidier — the link's stretched ::after is part of the
+        anchor's own rendered box, so a pointer anywhere on the row that is
+        not one of the z-10 controls enters the anchor and opens the card.
+        Hanging it off the `li` instead would put the hover handlers on an
+        element that is not a control, and the card would follow the pointer
+        over the checkbox and the ⋯ menu as well.
+      */}
+      {peek === undefined ? (
+        link
+      ) : (
+        <SessionPreview session={s} peek={peek}>
+          {link}
+        </SessionPreview>
+      )}
       {/*
         The details, right-ranged in the order a reader resolves a row: what
         it is tagged, where it runs, where it sits, how it ended, when it was
@@ -349,6 +384,8 @@ export function SessionTable({
   collapsed,
   onAction,
   onSpawnIn,
+  spawnLabel,
+  peek,
 }: {
   groups: Group[]
   columns: ColumnKey[]
@@ -357,7 +394,17 @@ export function SessionTable({
   onToggleGroup(groupKey: string): void
   collapsed: ReadonlySet<string>
   onAction(action: RowAction, s: FleetSession): void
-  onSpawnIn?(groupKey: string): void
+  /** Start a session belonging to this group. See `spawnFromGroup`. */
+  onSpawnIn?(group: Group): void
+  /**
+   * What that control is called for a given group, or undefined for a group
+   * that cannot have one. The caller owns both halves because it is the caller
+   * that knows what the grouping *is* — this component is handed labelled runs
+   * of rows and could not tell a machine's heading from a tag's.
+   */
+  spawnLabel?(group: Group): string | undefined
+  /** How a row asks what it is doing, for the hover preview. See PeekFn. */
+  peek?: PeekFn
 }) {
   if (groups.length === 0) {
     /*
@@ -369,7 +416,7 @@ export function SessionTable({
      */
     return (
       <div className="flex flex-col items-center py-12 text-center sm:py-16">
-        <div className="w-full max-w-xs rounded-xl bg-zinc-950 px-4 py-3 text-left shadow-md shadow-zinc-950/10 ring-1 ring-white/10 dark:bg-zinc-900 dark:shadow-none">
+        <div className="w-full max-w-xs rounded-lg bg-zinc-950 px-4 py-3 text-left shadow-medium ring-1 ring-white/10 dark:bg-zinc-900">
           <p className="font-mono text-sm/6 text-zinc-300">
             <span className="text-zinc-400">$</span> flue open
             <span
@@ -402,41 +449,65 @@ export function SessionTable({
         const open = !collapsed.has(g.key)
         // Where the pinned prefix ends; 0 and -1 both mean "no rule".
         const boundary = ungrouped ? g.sessions.findIndex((s) => !s.pinned) : 0
+        /*
+         * What this heading's `+` would be called, and therefore whether it
+         * exists at all.
+         *
+         * Resolved once, per group, and checked — not merely passed to
+         * aria-label. A group that refuses one answers undefined (see
+         * `spawnFromGroup`, and "Exited" for the case that motivates it), and
+         * an unchecked answer rendered a button with no accessible name: a
+         * `+` a pointer can press, a click the caller then refuses, and
+         * nothing for a screen reader to announce it as.
+         */
+        const spawn = onSpawnIn === undefined ? undefined : spawnLabel?.(g)
         return (
           <section key={g.key} className="flex flex-col">
             {/*
-              One real control in the band. The toggle owns the chevron and
-              the label so its accessible name is the group's; the tally is
-              read-along text; and the spawn control — offered only when the
-              caller can honour it — stands apart so that folding a group and
-              starting a session on it can never be the same click.
+              Two real controls in the band, and they are kept apart on
+              purpose: folding a group and starting a session in it must never
+              be the same click. The toggle owns the chevron and the label so
+              its accessible name is the group's; the tally is read-along
+              text; and the `+` is ranged right, where a new-thing control
+              belongs and where a pointer aimed at the fold cannot reach it.
+              It appears only when the caller can honour it — see
+              `spawnFromGroup`, which is what decides that a heading like
+              "Exited" has nothing to offer.
             */}
-            <div className="flex items-center gap-x-1 rounded-md bg-zinc-950/[0.03] px-2 py-1 dark:bg-white/[0.04]">
+            <div className="group/band flex items-center gap-x-1.5 rounded-md px-2 py-1 transition-colors hover:bg-row-hover">
               <button
                 type="button"
                 aria-expanded={open}
                 onClick={() => onToggleGroup(g.key)}
-                className="-ml-1 flex items-center gap-x-1 rounded-md px-1 py-0.5 text-sm/6 font-medium text-zinc-950 transition-colors outline-none hover:bg-zinc-950/5 focus-visible:ring-3 focus-visible:ring-ring/50 dark:text-white dark:hover:bg-white/5"
+                className="-ml-1 flex min-w-0 items-center gap-x-1 rounded-sm px-1 py-0.5 text-control font-medium text-zinc-950 transition-colors outline-none focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring dark:text-white"
               >
                 <ChevronDownIcon
                   aria-hidden="true"
                   className={cn(
-                    'size-4 shrink-0 text-zinc-400 transition-transform dark:text-zinc-500',
+                    'size-3.5 shrink-0 text-zinc-400 transition-transform dark:text-zinc-500',
                     !open && '-rotate-90',
                   )}
                 />
-                {g.label}
+                <span className="truncate">{g.label}</span>
               </button>
-              <span className="text-sm/6 text-zinc-500 dark:text-zinc-400">
+              <span className="shrink-0 text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
                 {tally(g.sessions)}
               </span>
-              {onSpawnIn && (
+              {spawn !== undefined && onSpawnIn !== undefined && (
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  aria-label={`New session on ${g.label}`}
-                  className="text-zinc-500 dark:text-zinc-400"
-                  onClick={() => onSpawnIn(g.key)}
+                  // Named after its own group, as every repeated control in a
+                  // list is: without it a screen reader announces "New
+                  // session" once per heading with nothing to tell them apart.
+                  aria-label={spawn}
+                  // Quiet until the band is under the pointer or the button
+                  // itself has focus — a column of `+` signs down the left of
+                  // every heading would read as the loudest thing on a screen
+                  // whose ordinary use is reading it. Full strength for a
+                  // coarse pointer, which has no hover to reveal it with.
+                  className="ml-auto text-zinc-500 opacity-0 transition-opacity group-hover/band:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100 dark:text-zinc-400"
+                  onClick={() => onSpawnIn(g)}
                 >
                   <PlusIcon aria-hidden="true" />
                 </Button>
@@ -456,6 +527,7 @@ export function SessionTable({
                       selected={selected}
                       onToggleSelect={onToggleSelect}
                       onAction={onAction}
+                      peek={peek}
                     />
                   </Fragment>
                 ))}

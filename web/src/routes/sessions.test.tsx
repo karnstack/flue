@@ -520,6 +520,68 @@ describe('SessionsRoute', () => {
       expect(sock.ofType('spawn')).toEqual([])
     })
 
+    it('spawns into a tag group tagged with that group\'s tag', async () => {
+      // The heading names a property its rows share, so the `+` on it makes
+      // one of *these* — which for a tag means a session that will land under
+      // the same heading rather than under "No tag" beside it.
+      const user = userEvent.setup()
+      const { sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [info({ id: 's1', tags: ['api'] })])
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await pick(user, 'Grouping', 'Tag')
+      await user.keyboard('{Escape}')
+
+      await user.click(screen.getByRole('button', { name: 'New session tagged api' }))
+
+      expect(sock.ofType('spawn')).toHaveLength(1)
+      // `spawn` carries no metadata, so the tag can only be applied once the
+      // session exists — which is the `attached` that answers it.
+      expect(sock.ofType('update')).toEqual([])
+      act(() => sock.emitControl(attached({ ref: 3, id: 'fresh1', reqId: 1 })))
+
+      expect(sock.ofType('update')).toEqual([{ type: 'update', id: 'fresh1', tags: ['api'] }])
+    })
+
+    it('spawns into a directory group in that group\'s directory', async () => {
+      const user = userEvent.setup()
+      const { sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [info({ id: 's1', cwd: '/Users/karn/code/flue' })])
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await pick(user, 'Grouping', 'Directory')
+      await user.keyboard('{Escape}')
+
+      await user.click(
+        screen.getByRole('button', { name: 'New session in /Users/karn/code/flue' }),
+      )
+
+      expect(sock.ofType('spawn')).toEqual([
+        { type: 'spawn', cwd: '/Users/karn/code/flue', cols: 80, rows: 24, reqId: 1 },
+      ])
+    })
+
+    it('offers no spawn control on the Exited heading', async () => {
+      // The one heading whose members cannot be made: a session is exited
+      // because its process ended, so anything started here would leave the
+      // heading it was started from on its first frame.
+      const user = userEvent.setup()
+      const { sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [
+        info({ id: 's1' }),
+        info({ id: 's2', state: 'exited', exitCode: 1 }),
+      ])
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await pick(user, 'Grouping', 'State')
+      await user.keyboard('{Escape}')
+
+      // Two, not three: the toolbar's own button and the Running heading's.
+      // Grouped by state there are two headings on screen and only one of them
+      // may offer to make something.
+      expect(screen.getAllByRole('button', { name: 'New session' })).toHaveLength(2)
+    })
+
     it('hands back the attachment the daemon gave it, then opens the new session', async () => {
       // The daemon attaches whoever spawns. This screen renders no terminal,
       // and the terminal route attaches on its own — so keeping the ref would

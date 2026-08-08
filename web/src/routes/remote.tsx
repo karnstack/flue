@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { ArrowPathIcon, GlobeAltIcon, QrCodeIcon } from '@heroicons/react/16/solid'
 import { Link } from '@tanstack/react-router'
 
@@ -15,8 +15,6 @@ import { Command, Copyable } from '@/components/copyable'
 import { PageHeader } from '@/components/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useRelayTransport } from '@/hooks/use-relay-transport'
 import { cn } from '@/lib/utils'
@@ -40,7 +38,6 @@ const STATUS_COMMAND = 'flue relay status'
  * a single-word name pasted together in a constant is beyond its reach.
  */
 const PROSE = 'text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400'
-const NOTE = 'text-sm/6 text-pretty text-zinc-600 sm:text-xs/5 dark:text-zinc-400'
 
 /**
  * What to say about a connection that is not currently carrying anything.
@@ -104,6 +101,68 @@ function StatusBadge({ status }: { status: RelayInfo['status'] | null }) {
 }
 
 /**
+ * The screen's state panel: one icon, one sentence about where this daemon
+ * stands, and whatever that state has to hand over.
+ *
+ * Every one of the four states used to render a surface of its own — two dashed
+ * `Empty` blocks and two `Card`s — which is why the screen read as four
+ * unrelated screens that happened to share a heading. They are one thing said
+ * four ways, so they get one shape, and the state is what changes inside it.
+ *
+ * The dashes are gone with them. A dashed border says "something is missing
+ * here that you could add", which is right for an empty list and wrong for
+ * this: "no relay configured" is a fact about the daemon, not a placeholder,
+ * and the panel that states it should look as solid as the one that says the
+ * relay is up.
+ */
+function StatePanel({
+  icon: Icon,
+  title,
+  children,
+}: {
+  icon: typeof GlobeAltIcon
+  title: string
+  children: ReactNode
+}) {
+  return (
+    <section className="flex max-w-3xl flex-col gap-y-4 rounded-lg bg-card p-4 shadow-low ring-1 ring-hairline sm:p-5">
+      <div className="flex items-start gap-x-3">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-zinc-950/5 dark:bg-white/5">
+          <Icon aria-hidden="true" className="size-4 text-zinc-500 dark:text-zinc-400" />
+        </span>
+        <div className="flex min-w-0 flex-col gap-y-1.5">
+          <h2 className="text-control font-medium text-zinc-950 dark:text-white">{title}</h2>
+          {children}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/**
+ * The heading over the integration cards.
+ *
+ * A named section, because there is one integration today and the shape has to
+ * survive the second: a card floating under the state panel with nothing over
+ * it reads as part of that panel's argument rather than as a thing this app
+ * connects to.
+ */
+function Integrations({ children }: { children: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-y-3">
+      <div className="flex flex-col gap-y-1">
+        <h2 className="text-control font-medium text-zinc-950 dark:text-white">Integrations</h2>
+        <p className={cn(PROSE, 'max-w-[65ch]')}>
+          Where flue borrows somebody else's infrastructure. Everything here is deployed into an
+          account you own, and nothing is hosted by flue.
+        </p>
+      </div>
+      {children}
+    </section>
+  )
+}
+
+/**
  * A daemon with no relay: the state every fresh install is in.
  *
  * One route out of it: a Worker deployed into the reader's own Cloudflare
@@ -114,23 +173,17 @@ function StatusBadge({ status }: { status: RelayInfo['status'] | null }) {
 function NotConfigured({ info }: { info: RelayUIInfo | null }) {
   return (
     <>
-      <Empty className="border border-dashed border-zinc-950/10 py-8 dark:border-white/10">
-        <EmptyHeader className="max-w-[48ch]">
-          <EmptyMedia variant="icon">
-            <GlobeAltIcon aria-hidden="true" />
-          </EmptyMedia>
-          <EmptyTitle className="text-base/6 sm:text-sm/6">
-            Nothing outside this computer can reach these sessions
-          </EmptyTitle>
-          <EmptyDescription className={PROSE}>
-            Pairing a device is held shut until something can: a device paired against 127.0.0.1
-            would be one that never connects. Deploying a relay below is what opens it — from this
-            page, or from a terminal on this machine.
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <StatePanel icon={GlobeAltIcon} title="Nothing outside this computer can reach these sessions">
+        <p className={cn(PROSE, 'max-w-[65ch]')}>
+          Pairing a device is held shut until something can: a device paired against 127.0.0.1
+          would be one that never connects. Deploying a relay below is what opens it — from this
+          page, or from a terminal on this machine.
+        </p>
+      </StatePanel>
 
-      <CloudflareConnectCard info={info} setupCommand={SETUP_COMMAND} />
+      <Integrations>
+        <CloudflareConnectCard info={info} setupCommand={SETUP_COMMAND} />
+      </Integrations>
     </>
   )
 }
@@ -146,26 +199,19 @@ function NotConfigured({ info }: { info: RelayUIInfo | null }) {
  */
 function Dialling() {
   return (
-    // Capped at a readable measure rather than run out to the panel's width,
-    // as the two cards in the not-configured state are by being a pair.
-    <Card className="max-w-3xl">
-      <CardHeader>
-        <CardTitle>Dialling the relay</CardTitle>
-        <CardDescription className={PROSE}>
-          This daemon has a relay configured and is trying to reach it. A daemon that has just
-          started, a network that went away, and a relay being redeployed all look like this, and it
-          keeps trying on its own — but nothing outside this computer can connect until the socket
-          is up.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-y-3">
-        <p className={PROSE}>
-          The daemon names no address until then, so there is none to show here. This prints the one
-          it is dialling:
-        </p>
-        <Command command={STATUS_COMMAND} />
-      </CardContent>
-    </Card>
+    <StatePanel icon={ArrowPathIcon} title="Dialling the relay">
+      <p className={cn(PROSE, 'max-w-[65ch]')}>
+        This daemon has a relay configured and is trying to reach it. A daemon that has just
+        started, a network that went away, and a relay being redeployed all look like this, and it
+        keeps trying on its own — but nothing outside this computer can connect until the socket is
+        up.
+      </p>
+      <p className={cn(PROSE, 'max-w-[65ch]')}>
+        The daemon names no address until then, so there is none to show here. This prints the one
+        it is dialling:
+      </p>
+      <Command command={STATUS_COMMAND} />
+    </StatePanel>
   )
 }
 
@@ -178,39 +224,33 @@ function Dialling() {
  */
 function Reachable({ origin }: { origin: string }) {
   return (
-    <Card className="max-w-3xl">
-      <CardHeader>
-        <CardTitle>Reachable from anywhere</CardTitle>
-        <CardDescription className={PROSE}>
-          The relay carries this machine at the address below, and you can pair a device against
-          this address now — the code Devices offers names it rather than 127.0.0.1.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-y-4">
+    <StatePanel icon={GlobeAltIcon} title="Reachable from anywhere">
+      <p className={cn(PROSE, 'max-w-[65ch]')}>
+        The relay carries this machine at the address below, and you can pair a device against this
+        address now — the code Devices offers names it rather than 127.0.0.1.
+      </p>
+      {/*
+        Copyable, and breakable, as the pairing URL on Devices is: this is a
+        string somebody may want to send to themselves, and a relay origin on
+        a workers.dev subdomain is longer than a phone is wide. It gets the
+        same strip the commands elsewhere get, because it is the same kind of
+        thing — a quotation the page hands over rather than something it says.
+      */}
+      <Copyable text={origin} breakable />
+      <div className="flex flex-wrap items-center gap-3">
         {/*
-          Copyable, and breakable, as the pairing URL on Devices is: this is a
-          string somebody may want to send to themselves, and a relay origin on
-          a workers.dev subdomain is longer than a phone is wide. It gets the
-          same strip the commands above it get, because it is the same kind of
-          thing — a quotation the page hands over rather than something it
-          says.
+          The one filled control on the screen, taking its teal from --primary
+          rather than naming a colour. A router Link, never a plain anchor: a
+          page reload would tear down the tab's one socket.
         */}
-        <Copyable text={origin} breakable />
-        <div className="flex flex-wrap items-center gap-3">
-          {/*
-            The one filled control on the screen, taking its teal from
-            --primary rather than naming a colour. A router Link, never a plain
-            anchor: a page reload would tear down the tab's one socket.
-          */}
-          <Button size="sm" asChild>
-            <Link to="/devices">
-              <QrCodeIcon data-icon="inline-start" aria-hidden="true" />
-              Pair a device
-            </Link>
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+        <Button size="sm" asChild>
+          <Link to="/devices">
+            <QrCodeIcon data-icon="inline-start" aria-hidden="true" />
+            Pair a device
+          </Link>
+        </Button>
+      </div>
+    </StatePanel>
   )
 }
 
@@ -332,7 +372,11 @@ export function RemoteRoute() {
       {greeted && status === 'connected' && (
         <>
           <Reachable origin={origin} />
-          {relayUI?.configured && <CloudflareConfiguredCard info={relayUI} />}
+          {relayUI?.configured && (
+            <Integrations>
+              <CloudflareConfiguredCard info={relayUI} />
+            </Integrations>
+          )}
         </>
       )}
     </div>
@@ -361,33 +405,24 @@ function AwaitingWelcome({ connecting }: { connecting: boolean }) {
     // can do about it is nothing, and saying so is better than a placeholder
     // that implies otherwise.
     return (
-      <Empty className="border border-dashed border-zinc-950/10 py-8 dark:border-white/10">
-        <EmptyHeader className="max-w-[48ch]">
-          <EmptyMedia variant="icon">
-            <GlobeAltIcon aria-hidden="true" />
-          </EmptyMedia>
-          <EmptyTitle className="text-base/6 sm:text-sm/6">
-            Waiting for the flue daemon
-          </EmptyTitle>
-          <EmptyDescription className={PROSE}>
-            Whether anything outside this computer can reach these sessions is something only the
-            daemon can say, and it has not said it yet. This page keeps trying; nothing here needs
-            doing.
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <StatePanel icon={GlobeAltIcon} title="Waiting for the flue daemon">
+        <p className={cn(PROSE, 'max-w-[65ch]')}>
+          Whether anything outside this computer can reach these sessions is something only the
+          daemon can say, and it has not said it yet. This page keeps trying; nothing here needs
+          doing.
+        </p>
+      </StatePanel>
     )
   }
   return (
-    <Card aria-hidden="true" className="max-w-3xl">
-      <CardHeader>
-        <Skeleton className="h-5 w-48" />
-      </CardHeader>
-      <CardContent className="flex flex-col gap-y-3">
-        <Skeleton className="h-4 w-full" />
-        <Skeleton className="h-4 w-4/5" />
-        <Skeleton className="h-8 w-full" />
-      </CardContent>
-    </Card>
+    <section
+      aria-hidden="true"
+      className="flex max-w-3xl flex-col gap-y-3 rounded-lg bg-card p-4 shadow-low ring-1 ring-hairline sm:p-5"
+    >
+      <Skeleton className="h-5 w-48" />
+      <Skeleton className="h-4 w-full" />
+      <Skeleton className="h-4 w-4/5" />
+      <Skeleton className="h-8 w-full" />
+    </section>
   )
 }

@@ -24,7 +24,7 @@
  * same place: one source per reachable machine, each id appearing once.
  */
 import { daemonSocketUrl, FlueClient, type ConnStatus } from '@/client/client'
-import type { ErrorMsg, SessionInfo, Welcome } from '@/client/protocol'
+import type { ErrorMsg, Preview, SessionInfo, Welcome } from '@/client/protocol'
 import { loadOrCreateDeviceKey, loadPinnedDaemonKeyFor, type DeviceKey } from '@/crypto/keys'
 import { listMachines } from '@/relay/machines'
 import { relaySocket, type RawSocket } from '@/relay/socket'
@@ -273,6 +273,22 @@ export class FleetClient {
    */
   closeOn(machineId: string, id: string) {
     this.clientFor(machineId)?.closeById(id)
+  }
+
+  /**
+   * The tail of one session's scrollback, from the machine that owns it.
+   *
+   * Routed exactly as `update` and `closeOn` route their verbs, with one
+   * difference the promise makes plain: a machine the fleet does not hold is
+   * a rejection rather than a silent no-op. The other two aim at a row the
+   * reader just acted on and can retry; this one is asked *for* the reader, by
+   * a card that has to decide between showing bytes and showing why it cannot,
+   * and a promise that never settled would leave it deciding neither.
+   */
+  peekOn(machineId: string, id: string, bytes?: number): Promise<Preview> {
+    const client = this.clientFor(machineId)
+    if (client === null) return Promise.reject(new Error('flue: no such machine'))
+    return client.peek(id, bytes)
   }
 
   /**

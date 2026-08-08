@@ -294,6 +294,23 @@ func normalizeTags(tags []string) []string {
 	return slices.Clip(out)
 }
 
+// Tail returns the last n bytes of this session's scrollback, with the
+// dimensions they were drawn at.
+//
+// It is deliberately not a Subscribe: a caller that only wants to look does
+// not want the delivery channel, the backlog bookkeeping or the eventual
+// Unsubscribe that a real attachment costs, and a list that peeked at twenty
+// rows by attaching to each of them would leave twenty subscribers on the
+// session for as long as the daemon took to notice. Nothing about the session
+// changes here — LastActive in particular is left alone, because reading a
+// preview is not activity *in* the session, and moving the stamp would
+// reshuffle the very list the preview is being drawn for.
+func (s *Session) Tail(n int) (data []byte, cols, rows uint16) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ring.Tail(n), s.info.Cols, s.info.Rows
+}
+
 // Write sends bytes to the PTY.
 func (s *Session) Write(p []byte) error {
 	s.mu.Lock()

@@ -14,6 +14,7 @@ import {
   ORDERING_LABELS,
   ORDERINGS,
   orderSessions,
+  spawnFromGroup,
 } from './view'
 
 /**
@@ -490,5 +491,54 @@ describe('applyView', () => {
     const input = [...rows]
     applyView(input, DEFAULT_VIEW)
     expect(input).toEqual(rows)
+  })
+})
+
+describe('spawnFromGroup', () => {
+  it('hands a machine heading its own machine', () => {
+    expect(spawnFromGroup('machine', 'machine:m1')).toEqual({ machineId: 'm1' })
+  })
+
+  it('hands a tag heading its own tag', () => {
+    expect(spawnFromGroup('tag', 'tag:api')).toEqual({ tag: 'api' })
+  })
+
+  it('asks for no tag under the untagged heading', () => {
+    // "No tag" is not a tag, so a session made there carries none — which is
+    // an empty request rather than a refusal: it is a plain new session.
+    expect(spawnFromGroup('tag', 'untagged')).toEqual({})
+  })
+
+  it('hands a directory heading its own directory', () => {
+    expect(spawnFromGroup('directory', 'dir:/Users/karn/code/flue')).toEqual({
+      cwd: '/Users/karn/code/flue',
+    })
+  })
+
+  it('keeps a colon that belongs to the path rather than to the prefix', () => {
+    // Cut at the known prefix, never at the first separator: a path may
+    // legally contain a colon and half of one is a directory that is not
+    // there.
+    expect(spawnFromGroup('directory', 'dir:/tmp/a:b')).toEqual({ cwd: '/tmp/a:b' })
+  })
+
+  it('offers nothing under Exited', () => {
+    // The one heading whose members cannot be created: a session is exited
+    // because its process ended, so anything made here would leave the
+    // heading it was made from on its first frame.
+    expect(spawnFromGroup('state', 'state:exited')).toBeNull()
+  })
+
+  it('offers a plain session under Running, No grouping and All sessions', () => {
+    expect(spawnFromGroup('state', 'state:running')).toEqual({})
+    expect(spawnFromGroup('none', 'all')).toEqual({})
+  })
+
+  it('answers for every grouping there is', () => {
+    // The union grows; a switch that stopped covering it would return
+    // undefined and the heading's control would silently disappear.
+    for (const grouping of GROUPINGS) {
+      expect(spawnFromGroup(grouping, 'nonsense')).not.toBeUndefined()
+    }
   })
 })

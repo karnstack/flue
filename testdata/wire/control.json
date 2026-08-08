@@ -1,39 +1,372 @@
 [
-  { "name": "hello",       "json": { "type": "hello", "ver": "0.1.0", "caps": ["binary"] } },
-  { "name": "list",        "json": { "type": "list" } },
-  { "name": "spawn",       "json": { "type": "spawn", "cwd": "/home/karn/code", "cmd": ["zsh", "-l"], "cols": 120, "rows": 40, "reqId": 6 } },
-  { "name": "attach",      "json": { "type": "attach", "id": "a1b2c3d4e5f60718", "lastSeq": 4096, "reqId": 7 } },
-  { "name": "detach",      "json": { "type": "detach", "ref": 3 } },
-  { "name": "resize",      "json": { "type": "resize", "ref": 3, "cols": 200, "rows": 50, "primary": true } },
-  { "name": "signal",      "json": { "type": "signal", "ref": 3, "sig": "SIGINT" } },
-  { "name": "close",       "json": { "type": "close", "ref": 3 } },
-  { "name": "closeById",   "json": { "type": "close", "id": "a1b2c3d4e5f60708" } },
-  { "name": "update",      "json": { "type": "update", "id": "a1b2c3d4e5f60708", "name": "api server" } },
-  { "name": "updateTagsAndPinned", "json": { "type": "update", "id": "a1b2c3d4e5f60708", "tags": ["api", "feat-x"], "pinned": true } },
-  { "name": "updateClearTags", "json": { "type": "update", "id": "a1b2c3d4e5f60708", "tags": [] } },
-  { "name": "updateClearName", "json": { "type": "update", "id": "a1b2c3d4e5f60708", "name": "", "pinned": false } },
-  { "name": "devices",     "json": { "type": "devices" } },
-  { "name": "revoke",      "json": { "type": "revoke", "deviceId": "d1b2c3d4e5f60718" } },
-  { "name": "pairStart",   "json": { "type": "pairStart" } },
-  { "name": "pairCancel",  "json": { "type": "pairCancel" } },
-  { "name": "welcome",     "json": { "type": "welcome", "daemonId": "local", "host": "macbook", "ver": "0.1.0" } },
-  { "name": "welcomeRelay","json": { "type": "welcome", "daemonId": "local", "host": "macbook", "ver": "0.1.0", "relay": { "status": "connected", "origin": "https://flue-relay.karn.workers.dev", "machineId": "karns-macbook-pro-a1b2", "machineName": "Karn's MacBook Pro" } } },
-  { "name": "welcomeRelayConnecting", "json": { "type": "welcome", "daemonId": "local", "host": "macbook", "ver": "0.1.0", "relay": { "status": "connecting" } } },
-  { "name": "sessions",    "json": { "type": "sessions", "sessions": [
-    { "id": "s1", "title": "zsh", "name": "api server", "tags": ["api", "prod"], "pinned": true, "cwd": "/home/karn/code", "cmd": ["zsh", "-l"], "state": "running", "exitCode": 0, "cols": 120, "rows": 40, "createdAt": "2026-07-28T08:00:00Z", "lastActive": "2026-07-28T10:30:00Z" },
-    { "id": "s2", "title": "vim", "name": "", "tags": [], "pinned": false, "cwd": "/home/karn/work", "cmd": ["vim", "file.txt"], "state": "exited", "exitCode": 1, "cols": 80, "rows": 24, "createdAt": "2026-07-28T07:15:00Z", "lastActive": "2026-07-28T09:00:00Z" }
-  ] } },
-  { "name": "attached",    "json": { "type": "attached", "ref": 3, "id": "a1b2c3d4e5f60718", "cols": 120, "rows": 40, "title": "zsh", "seq": 4096, "head": 8192, "truncated": false, "primary": true, "reqId": 7 } },
-  { "name": "attachedTrunc","json": { "type": "attached", "ref": 4, "id": "a1b2c3d4e5f60718", "cols": 120, "rows": 40, "title": "zsh", "seq": 99000, "head": 99512, "truncated": true, "primary": false } },
-  { "name": "exit",        "json": { "type": "exit", "ref": 3, "code": 130 } },
-  { "name": "sizeChanged", "json": { "type": "sizeChanged", "ref": 4, "cols": 200, "rows": 50, "primary": false } },
-  { "name": "error",       "json": { "type": "error", "code": "unauthenticated", "msg": "spawn requires an authenticated connection" } },
-  { "name": "errorForRequest", "json": { "type": "error", "code": "not_found", "msg": "no such session", "reqId": 7 } },
-  { "name": "deviceList",  "json": { "type": "deviceList", "devices": [
-    { "id": "d1b2c3d4e5f60718", "label": "iPhone", "pairedAt": 1754380800, "lastSeen": 1754384400 },
-    { "id": "d9a8b7c6d5e4f302", "label": "iPad", "pairedAt": 1754294400, "lastSeen": 1754298000 }
-  ] } },
-  { "name": "deviceListEmpty", "json": { "type": "deviceList", "devices": [] } },
-  { "name": "pairing",     "json": { "type": "pairing", "token": "Zm91cnRlZW4tY2hhcnM", "url": "https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM&k=3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hG6YwjhyZxaYQpb8k", "daemonPub": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=", "expiresAt": 1754384520 } },
-  { "name": "revoked",     "json": { "type": "revoked", "reason": "revoked by another device" } }
+  {
+    "name": "hello",
+    "json": {
+      "type": "hello",
+      "ver": "0.1.0",
+      "caps": [
+        "binary"
+      ]
+    }
+  },
+  {
+    "name": "list",
+    "json": {
+      "type": "list"
+    }
+  },
+  {
+    "name": "spawn",
+    "json": {
+      "type": "spawn",
+      "cwd": "/home/karn/code",
+      "cmd": [
+        "zsh",
+        "-l"
+      ],
+      "cols": 120,
+      "rows": 40,
+      "reqId": 6
+    }
+  },
+  {
+    "name": "attach",
+    "json": {
+      "type": "attach",
+      "id": "a1b2c3d4e5f60718",
+      "lastSeq": 4096,
+      "reqId": 7
+    }
+  },
+  {
+    "name": "detach",
+    "json": {
+      "type": "detach",
+      "ref": 3
+    }
+  },
+  {
+    "name": "resize",
+    "json": {
+      "type": "resize",
+      "ref": 3,
+      "cols": 200,
+      "rows": 50,
+      "primary": true
+    }
+  },
+  {
+    "name": "signal",
+    "json": {
+      "type": "signal",
+      "ref": 3,
+      "sig": "SIGINT"
+    }
+  },
+  {
+    "name": "close",
+    "json": {
+      "type": "close",
+      "ref": 3
+    }
+  },
+  {
+    "name": "closeById",
+    "json": {
+      "type": "close",
+      "id": "a1b2c3d4e5f60708"
+    }
+  },
+  {
+    "name": "update",
+    "json": {
+      "type": "update",
+      "id": "a1b2c3d4e5f60708",
+      "name": "api server"
+    }
+  },
+  {
+    "name": "updateTagsAndPinned",
+    "json": {
+      "type": "update",
+      "id": "a1b2c3d4e5f60708",
+      "tags": [
+        "api",
+        "feat-x"
+      ],
+      "pinned": true
+    }
+  },
+  {
+    "name": "updateClearTags",
+    "json": {
+      "type": "update",
+      "id": "a1b2c3d4e5f60708",
+      "tags": []
+    }
+  },
+  {
+    "name": "updateClearName",
+    "json": {
+      "type": "update",
+      "id": "a1b2c3d4e5f60708",
+      "name": "",
+      "pinned": false
+    }
+  },
+  {
+    "name": "peek",
+    "json": {
+      "type": "peek",
+      "id": "s1",
+      "bytes": 16384,
+      "reqId": 9
+    }
+  },
+  {
+    "name": "peekDefaultSize",
+    "json": {
+      "type": "peek",
+      "id": "s1"
+    }
+  },
+  {
+    "name": "preview",
+    "json": {
+      "type": "preview",
+      "id": "s1",
+      "data": "aGVsbG8=",
+      "cols": 80,
+      "rows": 24,
+      "reqId": 9
+    }
+  },
+  {
+    "name": "previewEmpty",
+    "json": {
+      "type": "preview",
+      "id": "s1",
+      "data": "",
+      "cols": 80,
+      "rows": 24
+    }
+  },
+  {
+    "name": "devices",
+    "json": {
+      "type": "devices"
+    }
+  },
+  {
+    "name": "revoke",
+    "json": {
+      "type": "revoke",
+      "deviceId": "d1b2c3d4e5f60718"
+    }
+  },
+  {
+    "name": "pairStart",
+    "json": {
+      "type": "pairStart"
+    }
+  },
+  {
+    "name": "pairCancel",
+    "json": {
+      "type": "pairCancel"
+    }
+  },
+  {
+    "name": "welcome",
+    "json": {
+      "type": "welcome",
+      "daemonId": "local",
+      "host": "macbook",
+      "ver": "0.1.0"
+    }
+  },
+  {
+    "name": "welcomeRelay",
+    "json": {
+      "type": "welcome",
+      "daemonId": "local",
+      "host": "macbook",
+      "ver": "0.1.0",
+      "relay": {
+        "status": "connected",
+        "origin": "https://flue-relay.karn.workers.dev",
+        "machineId": "karns-macbook-pro-a1b2",
+        "machineName": "Karn's MacBook Pro"
+      }
+    }
+  },
+  {
+    "name": "welcomeRelayConnecting",
+    "json": {
+      "type": "welcome",
+      "daemonId": "local",
+      "host": "macbook",
+      "ver": "0.1.0",
+      "relay": {
+        "status": "connecting"
+      }
+    }
+  },
+  {
+    "name": "sessions",
+    "json": {
+      "type": "sessions",
+      "sessions": [
+        {
+          "id": "s1",
+          "title": "zsh",
+          "name": "api server",
+          "tags": [
+            "api",
+            "prod"
+          ],
+          "pinned": true,
+          "cwd": "/home/karn/code",
+          "cmd": [
+            "zsh",
+            "-l"
+          ],
+          "state": "running",
+          "exitCode": 0,
+          "cols": 120,
+          "rows": 40,
+          "createdAt": "2026-07-28T08:00:00Z",
+          "lastActive": "2026-07-28T10:30:00Z"
+        },
+        {
+          "id": "s2",
+          "title": "vim",
+          "name": "",
+          "tags": [],
+          "pinned": false,
+          "cwd": "/home/karn/work",
+          "cmd": [
+            "vim",
+            "file.txt"
+          ],
+          "state": "exited",
+          "exitCode": 1,
+          "cols": 80,
+          "rows": 24,
+          "createdAt": "2026-07-28T07:15:00Z",
+          "lastActive": "2026-07-28T09:00:00Z"
+        }
+      ]
+    }
+  },
+  {
+    "name": "attached",
+    "json": {
+      "type": "attached",
+      "ref": 3,
+      "id": "a1b2c3d4e5f60718",
+      "cols": 120,
+      "rows": 40,
+      "title": "zsh",
+      "seq": 4096,
+      "head": 8192,
+      "truncated": false,
+      "primary": true,
+      "reqId": 7
+    }
+  },
+  {
+    "name": "attachedTrunc",
+    "json": {
+      "type": "attached",
+      "ref": 4,
+      "id": "a1b2c3d4e5f60718",
+      "cols": 120,
+      "rows": 40,
+      "title": "zsh",
+      "seq": 99000,
+      "head": 99512,
+      "truncated": true,
+      "primary": false
+    }
+  },
+  {
+    "name": "exit",
+    "json": {
+      "type": "exit",
+      "ref": 3,
+      "code": 130
+    }
+  },
+  {
+    "name": "sizeChanged",
+    "json": {
+      "type": "sizeChanged",
+      "ref": 4,
+      "cols": 200,
+      "rows": 50,
+      "primary": false
+    }
+  },
+  {
+    "name": "error",
+    "json": {
+      "type": "error",
+      "code": "unauthenticated",
+      "msg": "spawn requires an authenticated connection"
+    }
+  },
+  {
+    "name": "errorForRequest",
+    "json": {
+      "type": "error",
+      "code": "not_found",
+      "msg": "no such session",
+      "reqId": 7
+    }
+  },
+  {
+    "name": "deviceList",
+    "json": {
+      "type": "deviceList",
+      "devices": [
+        {
+          "id": "d1b2c3d4e5f60718",
+          "label": "iPhone",
+          "pairedAt": 1754380800,
+          "lastSeen": 1754384400
+        },
+        {
+          "id": "d9a8b7c6d5e4f302",
+          "label": "iPad",
+          "pairedAt": 1754294400,
+          "lastSeen": 1754298000
+        }
+      ]
+    }
+  },
+  {
+    "name": "deviceListEmpty",
+    "json": {
+      "type": "deviceList",
+      "devices": []
+    }
+  },
+  {
+    "name": "pairing",
+    "json": {
+      "type": "pairing",
+      "token": "Zm91cnRlZW4tY2hhcnM",
+      "url": "https://macbook.local:7717/pair?t=Zm91cnRlZW4tY2hhcnM&k=3p7bfXt9wbTTW2HC7OQ1Nz-DQ8hG6YwjhyZxaYQpb8k",
+      "daemonPub": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hG6YwjhyZxaYQpb8k=",
+      "expiresAt": 1754384520
+    }
+  },
+  {
+    "name": "revoked",
+    "json": {
+      "type": "revoked",
+      "reason": "revoked by another device"
+    }
+  }
 ]

@@ -500,11 +500,32 @@ describe('SessionTable', () => {
       bare.unmount()
 
       const onSpawnIn = vi.fn()
-      await renderTable({ onSpawnIn })
+      const spawnLabel = (g: Group) => `New session on ${g.label}`
+      const { props } = await renderTable({ onSpawnIn, spawnLabel })
 
       await userEvent.click(screen.getByRole('button', { name: 'New session on MacBook Pro' }))
 
-      expect(onSpawnIn).toHaveBeenCalledWith('machine:m1')
+      // The whole group, not its key: what a `+` inherits depends on the
+      // grouping, which only the caller knows — see spawnFromGroup.
+      expect(onSpawnIn).toHaveBeenCalledWith(props.groups[0])
+    })
+
+    it('hides the spawn control for a group whose label answers undefined', async () => {
+      // How "Exited" says it has no `+`: the caller refuses to name one, and
+      // the band must not draw a control whose click the caller would refuse.
+      const { container } = await renderTable({
+        groups: [group('state:exited', 'Exited', [fs({ id: 'a1', state: 'exited' })])],
+        onSpawnIn: vi.fn(),
+        spawnLabel: () => undefined,
+      })
+
+      // Counted rather than queried by name, and that is the whole point of
+      // the case: a `+` rendered without an accessible name is invisible to
+      // every by-name query, so an assertion phrased as one passes while the
+      // button sits there taking clicks.
+      const band = container.querySelector('[class*="group/band"]')!
+      expect(band.querySelectorAll('button')).toHaveLength(1)
+      expect(band.querySelector('button')!.textContent).toContain('Exited')
     })
   })
 

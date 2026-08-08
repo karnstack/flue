@@ -8,12 +8,12 @@ import {
 import type { FlueClient } from '@/client/client'
 import { FleetProvider } from '@/fleet/provider'
 import { AppShell } from '@/components/app-shell'
-import { PageHeader } from '@/components/page-header'
 import { DevicesRoute } from '@/routes/devices'
 import { MachinesRoute } from '@/routes/machines'
 import { PairRoute } from '@/routes/pair'
 import { RemoteRoute } from '@/routes/remote'
 import { SessionsRoute } from '@/routes/sessions'
+import { SettingsRoute } from '@/routes/settings'
 import { TerminalRoute } from '@/routes/terminal'
 
 /** The pairing page's path. Its own constant because two routing decisions
@@ -126,21 +126,6 @@ const sessionsRoute = createRoute({
   component: SessionsRoute,
 })
 
-/** Thin placeholder so the nav link resolves. Settings are a later build
- *  step; a Link to a route that does not exist is a type error and a dead
- *  link. */
-function Placeholder({ title, blurb }: { title: string; blurb: string }) {
-  return (
-    <div className="p-4 sm:p-6 lg:p-8">
-      <PageHeader crumbs={[{ label: title }]}>
-        <p className="max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
-          {blurb}
-        </p>
-      </PageHeader>
-    </div>
-  )
-}
-
 const devicesRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/devices',
@@ -162,12 +147,7 @@ const remoteRoute = createRoute({
 const settingsRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/settings',
-  component: () => (
-    <Placeholder
-      title="Settings"
-      blurb="Scrollback size, keyboard bindings, and themes arrive with the next build step."
-    />
-  ),
+  component: SettingsRoute,
 })
 
 /**

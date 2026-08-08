@@ -32,6 +32,7 @@ Every control message is a JSON object with a `type` discriminator.
 | `signal` | `ref`, `sig` | send a signal to the session's process |
 | `close` | `ref` *or* `id` | end the session |
 | `update` | `id`, `name?`, `tags[]?`, `pinned?` | edit a session's human-owned metadata |
+| `peek` | `id`, `bytes?`, `reqId?` | read the tail of a session's scrollback without attaching |
 | `devices` | — | list the paired devices |
 | `revoke` | `deviceId` | unpair a device and cut its connections |
 | `pairStart` | — | enter pairing mode |
@@ -47,6 +48,7 @@ Every control message is a JSON object with a `type` discriminator.
 | `exit` | `ref`, `code` | the session's process ended |
 | `sizeChanged` | `ref`, `cols`, `rows`, `primary` | the PTY's dimensions changed |
 | `error` | `code`, `msg`, `reqId?` | a request failed, or a stream did |
+| `preview` | `id`, `data`, `cols`, `rows`, `reqId?` | answers `peek` |
 | `deviceList` | `devices[]` | answers `devices`, and is broadcast after a pairing or a `revoke` |
 | `pairing` | `token`, `url`, `daemonPub`, `expiresAt` | answers `pairStart` |
 | `revoked` | `reason` | this device was unpaired; the connection is about to close |
@@ -135,6 +137,41 @@ connection only; other clients converge on their next `list` poll. One naming
 a session that does not exist is answered by `error{not_found}`. Editing
 metadata is not activity in the session: `lastActive` does not move, so tidying
 a list cannot reorder the list being tidied.
+
+### Previews
+
+`peek` answers the question a list cannot: not what a session is called, but
+what it is *doing*. It returns the tail of the session's scrollback — raw, with
+every escape sequence in it — and nothing else happens: no `ref` is minted, no
+stream starts, and the connection is not subscribed to anything. That is the
+whole reason it exists beside `attach`, which would do the same job at the cost
+of a ref, a backlog replay, a delivery channel and a `detach` per row; a list
+hovering twenty sessions would leave twenty subscriptions behind it.
+
+`bytes` caps the answer. Absent means the daemon's default; anything above its
+ceiling is **clamped rather than refused**, because a client asking for more
+than it may have wants as much as it can get, and an error there would blank a
+preview over a number nobody chose deliberately.
+
+`preview.data` is base64 (as every `[]byte` is on this wire) and is empty —
+`""`, never `null` — for a session that has drawn nothing. It is the *tail*, so
+it will usually begin partway through an escape sequence: a consumer must
+expect to discard a partial sequence at the front rather than read it as
+content. `cols` and `rows` are the dimensions the bytes were drawn at, so a
+consumer replaying them into an emulator can size it the way the session is.
+
+Rendering is deliberately left to the client, which already owns a terminal
+emulator. A daemon that flattened this to text would have to make every
+decision an emulator makes — wrapping at which width, what a cursor move means,
+which of two overwrites won — and would make them differently from the emulator
+the same client uses to draw the session for real.
+
+Peeking is not activity in the session. `lastActive` does not move, which
+matters more than it sounds: the sessions list orders by that stamp by default,
+so a preview that counted as activity would sort the row under the reader's
+pointer to the top of the list underneath it. An `id` the daemon does not hold
+is answered with `error{not_found}`, correlated by `reqId` — a list peeks at
+many rows at once and the refusals have to find their own askers.
 
 ## Pairing
 

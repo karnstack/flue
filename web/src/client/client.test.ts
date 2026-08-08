@@ -29,6 +29,8 @@ import {
   type SignalMsg,
   type SizeChanged,
   type SpawnMsg,
+  type PeekMsg,
+  type Preview,
   type UpdateMsg,
   type Welcome,
 } from './protocol'
@@ -201,6 +203,10 @@ describe('control message golden file', () => {
       'updateTagsAndPinned',
       'updateClearTags',
       'updateClearName',
+      'peek',
+      'peekDefaultSize',
+      'preview',
+      'previewEmpty',
       'devices',
       'revoke',
       'pairStart',
@@ -285,6 +291,31 @@ describe('control message golden file', () => {
   // The four update cases exist to pin partiality in both directions. An
   // absent field means "leave this alone", so a decoder that filled the gap
   // with a zero value would rename a session every time somebody pinned it.
+  it('decodes a peek, with and without a size', () => {
+    const sized: PeekMsg = { type: 'peek', id: 's1', bytes: 16384, reqId: 9 }
+    expect(fixture('peek')).toStrictEqual(sized)
+    // Absent `bytes` is "the daemon's default", not zero bytes, so it has to
+    // stay off the wire rather than be filled in on the way past.
+    const bare: PeekMsg = { type: 'peek', id: 's1' }
+    expect(fixture('peekDefaultSize')).toStrictEqual(bare)
+  })
+
+  it('decodes a preview, and an empty tail as a string rather than null', () => {
+    const full: Preview = {
+      type: 'preview',
+      id: 's1',
+      data: 'aGVsbG8=',
+      cols: 80,
+      rows: 24,
+      reqId: 9,
+    }
+    expect(fixture('preview')).toStrictEqual(full)
+    // A session that has drawn nothing is the ordinary path, and this side
+    // base64-decodes the field: null would throw on exactly those sessions.
+    const empty: Preview = { type: 'preview', id: 's1', data: '', cols: 80, rows: 24 }
+    expect(fixture('previewEmpty')).toStrictEqual(empty)
+  })
+
   it('decodes an update carrying one field, the other two absent', () => {
     const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', name: 'api server' }
     expect(fixture('update')).toStrictEqual(want)
@@ -2314,5 +2345,114 @@ describe('FlueClient listeners', () => {
       expect(typeof off).toBe('function')
       off()
     }
+  })
+})
+
+describe('FlueClient peek', () => {
+  it('asks by id and resolves with the preview that echoes its reqId', async () => {
+    const { c, sock } = connected()
+
+    const answer = c.peek('s1', 4096)
+    const sent = sock.sentControl().find((m) => m.type === 'peek')!
+    expect(sent).toMatchObject({ type: 'peek', id: 's1', bytes: 4096 })
+
+    sock.emitControl({
+      type: 'preview',
+      id: 's1',
+      data: btoa('hello'),
+      cols: 80,
+      rows: 24,
+      reqId: sent.reqId,
+    })
+
+    await expect(answer).resolves.toMatchObject({ id: 's1', data: btoa('hello') })
+  })
+
+  it('hands each concurrent peek its own answer', async () => {
+    // A list peeks at rows as the pointer crosses them, and the daemon may
+    // answer in any order; without correlation the second card would show the
+    // first row's output.
+    const { c, sock } = connected()
+
+    const first = c.peek('s1')
+    const second = c.peek('s2')
+    const asks = sock.sentControl().filter((m) => m.type === 'peek')
+
+    sock.emitControl({ type: 'preview', id: 's2', data: btoa('two'), cols: 80, rows: 24, reqId: asks[1]!.reqId })
+    sock.emitControl({ type: 'preview', id: 's1', data: btoa('one'), cols: 80, rows: 24, reqId: asks[0]!.reqId })
+
+    await expect(first).resolves.toMatchObject({ data: btoa('one') })
+    await expect(second).resolves.toMatchObject({ data: btoa('two') })
+  })
+
+  it('rejects when the daemon refuses the id', async () => {
+    const { c, sock } = connected()
+
+    const answer = c.peek('gone')
+    const sent = sock.sentControl().find((m) => m.type === 'peek')!
+    sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: sent.reqId })
+
+    await expect(answer).rejects.toThrow('no such session')
+  })
+
+  it('does not retire a reattach plan when a peek is refused', async () => {
+    // not_found answers both a peek and an attach. Only the attach's version
+    // means "stop asking for this session"; a peek's must not take a live
+    // terminal's reattach plan with it.
+    const { c, sock } = connected()
+    c.attach('s1', 0)
+    const gone = vi.fn()
+    c.onSessionGone(gone)
+
+    const answer = c.peek('s1')
+    const sent = sock.sentControl().find((m) => m.type === 'peek')!
+    sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: sent.reqId })
+    await expect(answer).rejects.toThrow()
+
+    expect(gone).not.toHaveBeenCalled()
+  })
+
+  it('rejects rather than holding while the socket is down', async () => {
+    // A preview is a thing somebody is looking at right now; one that
+    // surfaced from behind a ten-second backoff would draw stale output over
+    // a row the pointer left long ago.
+    const h = harness()
+    h.c.connect()
+
+    await expect(h.c.peek('s1')).rejects.toThrow(/not connected/)
+  })
+
+  it('rejects whatever was on the wire when the connection goes', async () => {
+    const { c, sock } = connected()
+    const answer = c.peek('s1')
+
+    sock.onclose?.()
+
+    await expect(answer).rejects.toThrow(/connection lost/)
+  })
+
+  it('gives up rather than waiting forever on a daemon that never answers', async () => {
+    // The case that motivated the deadline: a daemon older than this page does
+    // not know `peek` and answers `error{bad_message}` with no reqId on it, so
+    // the refusal reaches no asker at all. Without the timer the hover card
+    // would sit at "Reading…" on every row, for as long as the tab is open.
+    vi.useFakeTimers()
+    const { c, sock } = connected()
+
+    const answer = c.peek('s1')
+    sock.emitControl({ type: 'error', code: 'bad_message', msg: 'unknown control message type' })
+    const settled = expect(answer).rejects.toThrow(/did not answer/)
+    await vi.advanceTimersByTimeAsync(10_000)
+    await settled
+  })
+
+  it('ignores a preview nobody is waiting for', () => {
+    // An answer whose asker unmounted, or a daemon volunteering one: neither
+    // may throw on the receive path, which serves every other message too.
+    const { c, sock } = connected()
+    expect(() =>
+      sock.emitControl({ type: 'preview', id: 's1', data: '', cols: 80, rows: 24, reqId: 999 }),
+    ).not.toThrow()
+    expect(c.status).toBe('open')
   })
 })

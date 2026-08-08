@@ -218,6 +218,25 @@ export interface UpdateMsg {
   pinned?: boolean
 }
 
+/**
+ * Ask for the tail of a session's scrollback without attaching to it.
+ *
+ * A look, not an attachment: no ref is minted, no stream starts, and the
+ * session's `lastActive` is left alone — reading a preview is not activity
+ * inside the session, and moving the stamp would reshuffle the very list the
+ * preview is drawn for.
+ *
+ * `bytes` caps the answer; absent means the daemon's default, and anything
+ * over its ceiling is clamped rather than refused. Answered by `preview`
+ * echoing `reqId`, or by `error{not_found}` for an id the daemon has reaped.
+ */
+export interface PeekMsg {
+  type: 'peek'
+  id: string
+  bytes?: number
+  reqId?: number
+}
+
 /** Ask for the paired-device list. Answered by `deviceList`. */
 export interface DevicesMsg {
   type: 'devices'
@@ -252,6 +271,7 @@ export type ClientMessage =
   | SignalMsg
   | CloseMsg
   | UpdateMsg
+  | PeekMsg
   | DevicesMsg
   | RevokeMsg
   | PairStartMsg
@@ -369,6 +389,27 @@ export interface ErrorMsg {
   reqId?: number
 }
 
+/**
+ * Answers `peek` with raw terminal output — escape sequences and all, exactly
+ * as the daemon's ring holds them.
+ *
+ * Raw rather than rendered, because rendering is this side's job and it
+ * already owns an emulator. `data` is base64 (as encoding/json carries every
+ * Go `[]byte`) and is the *tail*, so it will usually begin mid-escape-sequence:
+ * a consumer must expect to discard a partial sequence at the front rather
+ * than read it as content.
+ */
+export interface Preview {
+  type: 'preview'
+  id: string
+  /** Base64. Empty string, never absent, for a session with no output yet. */
+  data: string
+  /** The dimensions the bytes were drawn at. */
+  cols: number
+  rows: number
+  reqId?: number
+}
+
 export interface DeviceList {
   type: 'deviceList'
   /** Empty rather than absent when nothing is paired. */
@@ -413,6 +454,7 @@ export type ServerMessage =
   | Exit
   | SizeChanged
   | ErrorMsg
+  | Preview
   | DeviceList
   | Pairing
   | Revoked

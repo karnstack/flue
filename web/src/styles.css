@@ -126,6 +126,21 @@
 
   --color-accent-fg: var(--color-teal-600);
   --color-accent-bg: var(--color-teal-500);
+
+  /*
+   * The control type size: 13px, not the 14px a stock shadcn button carries.
+   *
+   * This is the single most visible number in the whole overhaul. flue's
+   * screens are dense lists of short labels — a row of chips, a split button,
+   * a menu of one-word verbs — and at 14px those labels crowd their own
+   * paddings and the app reads like a form. Dropping one step lets the same
+   * controls keep 32px targets while the text inside them stops being the
+   * loudest thing in the row. It is a token rather than a literal because
+   * every control has to agree: a menu item at 13px beside a button at 14px
+   * is worse than either size chosen consistently.
+   */
+  --text-control: 0.8125rem;
+  --text-control--line-height: 1.25rem;
 }
 
 /*
@@ -157,6 +172,26 @@
  */
 @theme inline {
   --font-heading: var(--font-sans);
+
+  /*
+   * The list vocabulary and the elevation scale, as utilities.
+   *
+   * `inline` rather than `static` for the same reason everything else here
+   * is: the :root blocks re-point the --flue-* values per theme, and a
+   * non-inline copy would freeze whichever theme was compiled first. The
+   * names are deliberately about *use* rather than about colour — `row-hover`
+   * rather than `zinc-950/4` — because that is the whole point of extracting
+   * them: five screens each spelled their own version of the same tint and
+   * three of them disagreed.
+   */
+  --color-hairline: var(--flue-hairline);
+  --color-row-hover: var(--flue-hover);
+  --color-row-press: var(--flue-press);
+
+  --shadow-low: var(--flue-shadow-low);
+  --shadow-medium: var(--flue-shadow-medium);
+  --shadow-high: var(--flue-shadow-high);
+  --shadow-lip: var(--flue-lip);
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -203,7 +238,69 @@
     --flue-line: --alpha(var(--color-zinc-950) / 10%);
     --flue-muted: var(--color-zinc-500);
 
-    --radius: 0.625rem;
+    /*
+     * The hairline a dense list is ruled with, and the two tints a row
+     * answers a pointer and a press with.
+     *
+     * They are tokens because a list is where this app spends most of its
+     * pixels and the three of them have to agree across five screens that
+     * each used to spell their own. `--flue-hairline` is deliberately fainter
+     * than `--flue-line`: a border around a card is structure and should be
+     * seen, whereas fifty of them stacked down a table is a grid, and a list
+     * of sessions is not a spreadsheet.
+     */
+    --flue-hairline: --alpha(var(--color-zinc-950) / 6%);
+    --flue-hover: --alpha(var(--color-zinc-950) / 4%);
+    --flue-press: --alpha(var(--color-zinc-950) / 7%);
+
+    /*
+     * Elevation, in three steps, spelled as shadows rather than as borders.
+     *
+     * A menu that floats over a list has to read as *over* it, and the border
+     * that used to say so is the same hairline the list itself is ruled with
+     * — so the two cancelled out and every overlay in the app looked pasted
+     * on. Each step pairs a tight contact shadow with a wide ambient one,
+     * which is what stops a large surface reading as a sticker: the contact
+     * shadow says where the edge touches, the ambient one says how far above
+     * it floats.
+     *
+     * `low` is for something resting on the page — a card. `medium` is for
+     * something summoned over it — a menu, a popover, the hover preview.
+     * `high` is for something that takes the page over: a dialog.
+     */
+    --flue-shadow-low:
+      0 1px 2px --alpha(var(--color-zinc-950) / 6%),
+      0 1px 3px -1px --alpha(var(--color-zinc-950) / 4%);
+    --flue-shadow-medium:
+      0 1px 2px --alpha(var(--color-zinc-950) / 8%),
+      0 8px 24px -6px --alpha(var(--color-zinc-950) / 12%);
+    --flue-shadow-high:
+      0 2px 4px --alpha(var(--color-zinc-950) / 10%),
+      0 16px 48px -12px --alpha(var(--color-zinc-950) / 22%);
+
+    /*
+     * The lip along the top of a filled control.
+     *
+     * One inset highlight, at the strength a real edge catches light. It is
+     * what keeps a solid teal button from reading as a rectangle of paint,
+     * and it is a token so that the one place it is wanted — the primary
+     * button — cannot drift from the one place it is defined. In the dark
+     * theme it stays white and merely weakens; a highlight that inverted
+     * would be a shadow, which is the opposite of the shape being described.
+     */
+    --flue-lip: inset 0 1px 0 --alpha(var(--color-white) / 25%);
+
+    /*
+     * 8px, down from 10px.
+     *
+     * The whole scale hangs off this one number: --radius-md lands on 6px,
+     * which is what buttons, menu items and chips take, and --radius-lg on
+     * 8px for cards and panels. Ten was a shadcn default and it rounded the
+     * app's small controls into pills — at 28px tall a 10px corner is more
+     * than a third of the height, and a row of them reads soft rather than
+     * precise.
+     */
+    --radius: 0.5rem;
 
     /*
      * Custom properties resolve at use, not at declaration, so every token
@@ -255,6 +352,30 @@
       --flue-line: --alpha(var(--color-white) / 10%);
       --flue-muted: var(--color-zinc-400);
       --color-accent-fg: var(--color-teal-400);
+
+      --flue-hairline: --alpha(var(--color-white) / 6%);
+      --flue-hover: --alpha(var(--color-white) / 5%);
+      --flue-press: --alpha(var(--color-white) / 8%);
+
+      /*
+       * Darker and wider than the light theme's, which is not a stylistic
+       * preference: a shadow is the absence of light, and on a near-black
+       * canvas there is very little of it to take away. Anything at the light
+       * theme's strength is invisible here, so the app looked flat in dark
+       * mode and layered in light — the one asymmetry a reader notices
+       * without being able to name.
+       */
+      --flue-shadow-low:
+        0 1px 2px --alpha(var(--color-black) / 40%),
+        0 1px 3px -1px --alpha(var(--color-black) / 30%);
+      --flue-shadow-medium:
+        0 1px 2px --alpha(var(--color-black) / 50%),
+        0 8px 24px -6px --alpha(var(--color-black) / 55%);
+      --flue-shadow-high:
+        0 2px 4px --alpha(var(--color-black) / 55%),
+        0 16px 48px -12px --alpha(var(--color-black) / 70%);
+
+      --flue-lip: inset 0 1px 0 --alpha(var(--color-white) / 15%);
 
       --foreground: var(--color-zinc-50);
       --card-foreground: var(--color-zinc-50);

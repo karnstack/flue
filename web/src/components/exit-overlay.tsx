@@ -24,7 +24,7 @@ export function ExitOverlay({
         role="alertdialog"
         aria-label={`shell exited (${code})`}
         className={cn(
-          'pointer-events-auto flex flex-col items-center gap-y-4 rounded-xl px-8 py-6',
+          'pointer-events-auto flex flex-col items-center gap-y-4 rounded-lg px-8 py-6',
           'bg-(--chip-bg) text-(--chip-fg) shadow-xl ring-1 ring-(--chip-ring) backdrop-blur-sm',
         )}
       >
