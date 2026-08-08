@@ -103,6 +103,31 @@ describe('SessionTable', () => {
       expect(screen.queryByText('zsh')).toBeNull()
     })
 
+    it('renders the rows of a group exactly as given, never re-sorted', () => {
+      // The one ordering rule this component has is to have none: order is
+      // decided by orderSessions, 30-second buckets and all, and a helpful
+      // sort here would quietly undo it. These rows are deliberately out of
+      // order by every key such a sort might reach for — name, directory,
+      // recency, id — in either direction, so any comparison at all breaks
+      // the expectation.
+      renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'z9', title: 'zeta', cwd: '/b', lastActive: '2026-07-28T09:00:00Z' }),
+            fs({ id: 'a1', title: 'alpha', cwd: '/a', lastActive: '2026-07-28T10:00:00Z' }),
+            fs({ id: 'm5', title: 'mid', cwd: '/c', lastActive: '2026-07-28T08:00:00Z' }),
+          ]),
+        ],
+      })
+
+      const body = screen.getAllByRole('rowgroup')[1]!
+      const names = within(body)
+        .getAllByRole('row')
+        .filter((row) => within(row).queryAllByRole('cell').length > 0)
+        .map((row) => within(row).getAllByRole('cell')[1]!.querySelector('p')!.textContent)
+      expect(names).toEqual(['zeta', 'alpha', 'mid'])
+    })
+
     it('asks for a toggle rather than deciding one', async () => {
       // Collapse state lives in the route; this component only reports the
       // click and renders whatever `collapsed` says next time.
