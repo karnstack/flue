@@ -4,7 +4,7 @@
 // Not a `.test.ts` file, so vitest does not collect it — importing one test
 // file from another would re-register its describe blocks.
 
-import { env } from 'cloudflare:test'
+import { env, runInDurableObject } from 'cloudflare:test'
 import { expect } from 'vitest'
 
 import { decodeFrame, encodeFrame } from '../src/frame'
@@ -55,6 +55,25 @@ export const decoder = new TextDecoder()
  */
 export function freshHub(): DurableObjectStub {
   return env.HUB.get(env.HUB.idFromName(crypto.randomUUID()))
+}
+
+/**
+ * Bind one hub's handshake deadline, for the tests that are about reaping.
+ *
+ * vitest.config.ts binds a deadline no test can outlive, so the reaper never
+ * fires behind a test's back; a test that wants it to fire asks here. See that
+ * file for why the default runs that way round.
+ *
+ * Call this *before* anything dials the hub. The deadline is read twice — once
+ * to arm the alarm as each client is accepted, once inside `alarm()` to decide
+ * who is overdue — and only the second would see a later change, which leaves
+ * an alarm armed minutes out and a test waiting on a reap that never lands.
+ */
+export async function handshakeDeadline(hub: DurableObjectStub, ms: number): Promise<void> {
+  await runInDurableObject(hub, (instance) => {
+    const withEnv = instance as unknown as { env: Record<string, unknown> }
+    withEnv.env = { ...withEnv.env, HANDSHAKE_TIMEOUT_MS: ms }
+  })
 }
 
 export function sleep(ms: number): Promise<void> {
