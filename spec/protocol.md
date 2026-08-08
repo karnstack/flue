@@ -111,12 +111,11 @@ duplicates collapsed, sorted — so the list a later `sessions` reports is not
 always the list that was sent, and a client should render what came back rather
 than what it typed. Comparison is exact: `Prod` and `prod` are two tags.
 
-An `update` that lands is answered by a fresh `sessions`, broadcast like any
-other change to the set, so every connection sees the edit and the sender needs
-no separate acknowledgement. One naming a session that does not exist is
-answered by `error{not_found}`. Editing metadata is not activity in the session:
-`lastActive` does not move, so tidying a list cannot reorder the list being
-tidied.
+An `update` that lands is answered by a fresh `sessions` to the requesting
+connection only; other clients converge on their next 3s list poll. One naming
+a session that does not exist is answered by `error{not_found}`. Editing
+metadata is not activity in the session: `lastActive` does not move, so tidying
+a list cannot reorder the list being tidied.
 
 ## Pairing
 

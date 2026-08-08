@@ -69,7 +69,9 @@ type CloseSession struct {
 // straight to the registry rather than rebuild it — a translation being exactly
 // where that distinction would go missing.
 //
-// Answered by a fresh sessions to every connection, or by error{not_found}.
+// Answered by a fresh sessions to the connection that asked, or by
+// error{not_found}. Only that connection: nothing broadcasts the edit, so a
+// second browser sees it on its next list rather than the instant it lands.
 type Update struct {
 	ID     string    `json:"id"`
 	Name   *string   `json:"name,omitempty"`
