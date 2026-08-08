@@ -42,6 +42,29 @@ describe('BulkBar', () => {
     expect(within(bar).getByText('3 selected')).toBeTruthy()
   })
 
+  it('announces the count as rows are checked and unchecked', () => {
+    // The rows are being checked somewhere else on the screen, so a count
+    // that only changed on screen would change in silence.
+    const { props, rerender } = renderBar()
+
+    expect(screen.getByText('3 selected').getAttribute('aria-live')).toBe('polite')
+
+    rerender(<BulkBar {...props} count={4} />)
+
+    expect(screen.getByText('4 selected')).toBeTruthy()
+  })
+
+  it('takes a className from the caller, which lands on the bar itself', () => {
+    // The caller cannot reach a position pinned to the window from outside,
+    // so the one it sets has to win over the one written in here.
+    renderBar({ className: 'bottom-20 md:pl-64' })
+
+    const bar = screen.getByRole('toolbar')
+    expect(bar.className).toContain('md:pl-64')
+    expect(bar.className).toContain('bottom-20')
+    expect(bar.className).not.toContain('bottom-4')
+  })
+
   it('counts a single selection in the singular', () => {
     renderBar({ count: 1 })
     expect(screen.getByText('1 selected')).toBeTruthy()
@@ -150,6 +173,22 @@ describe('BulkBar', () => {
     expect(props.onClear).not.toHaveBeenCalled()
     expect(screen.queryByRole('dialog')).toBeNull()
     // The selection survived the near miss: the bar is still counting it.
+    expect(screen.getByText('3 selected')).toBeTruthy()
+  })
+
+  it('fires nothing when the confirm is dismissed from its corner X', async () => {
+    // The corner X is named "Close" to a screen reader, one tab stop from a
+    // button that kills three sessions. It is a dismissal and nothing else,
+    // and that has to stay true no matter what the two words have in common.
+    const user = userEvent.setup()
+    const { props } = renderBar()
+
+    const confirm = await openConfirm(user)
+    await user.click(within(confirm).getByRole('button', { name: 'Close' }))
+
+    expect(props.onClose).not.toHaveBeenCalled()
+    expect(props.onClear).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
     expect(screen.getByText('3 selected')).toBeTruthy()
   })
 

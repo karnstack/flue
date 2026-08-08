@@ -12,6 +12,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Separator } from '@/components/ui/separator'
+import { cn } from '@/lib/utils'
 
 export interface BulkBarProps {
   /** How many rows are checked. 0 is not a state this bar has. */
@@ -29,6 +30,21 @@ export interface BulkBarProps {
   onClose(): void
   /** Drop the selection without doing anything to it. */
   onClear(): void
+  /**
+   * Merged last onto the bar itself, so a caller's utility beats the one
+   * written here.
+   *
+   * This exists for one reason and it is not decoration. The bar is pinned to
+   * the window, and from md up the sidebar takes `--sidebar-width` off the
+   * left of the content — which the window knows nothing about. Centred on the
+   * window, the bar reads left of the list it acts on at every desktop width,
+   * and in the band just past the md breakpoint its left edge slides under the
+   * sidebar, where it would win on stacking order. Nothing outside can correct
+   * a pinned element it cannot reach, so the correction arrives here:
+   * `md:pl-(--sidebar-width)` from the route puts the centre back over the
+   * content.
+   */
+  className?: string
 }
 
 /**
@@ -55,7 +71,15 @@ export interface BulkBarProps {
  * emptied while the confirm is up takes the question away with it — which is
  * right: the sessions it named are no longer the ones in hand.
  */
-export function BulkBar({ count, anyRunning, onTag, onPin, onClose, onClear }: BulkBarProps) {
+export function BulkBar({
+  count,
+  anyRunning,
+  onTag,
+  onPin,
+  onClose,
+  onClear,
+  className,
+}: BulkBarProps) {
   if (count <= 0) return null
 
   // One noun, agreed with the count, and used everywhere the count is spoken.
@@ -71,7 +95,10 @@ export function BulkBar({ count, anyRunning, onTag, onPin, onClose, onClear }: B
       Centred with `mx-auto` between two pinned edges rather than by shifting
       it back half its own width: the text lands on whole pixels either way,
       and this leaves no stacking context behind for a later change to trip
-      over. The surface is the app-shell's: a panel over the canvas, elevated
+      over. Centred on the *window*, though — the sidebar's width is not in
+      that sum, which is what `className` is for; see the prop.
+
+      The surface is the app-shell's: a panel over the canvas, elevated
       in light, and in dark a hairline instead, since elevation says nothing
       there. The hairline is 10% rather than the shell's 5% because this
       floats over the list's own rows, where a 5% edge would go missing
@@ -80,9 +107,21 @@ export function BulkBar({ count, anyRunning, onTag, onPin, onClose, onClear }: B
     <div
       role="toolbar"
       aria-label="Bulk actions"
-      className="fixed inset-x-0 bottom-4 z-30 mx-auto flex w-fit items-center gap-x-1 rounded-xl bg-card p-1.5 shadow-lg ring-1 ring-zinc-950/10 dark:inset-ring dark:inset-ring-white/10 dark:ring-0"
+      className={cn(
+        'fixed inset-x-0 bottom-4 z-30 mx-auto flex w-fit items-center gap-x-1 rounded-xl bg-card p-1.5 shadow-lg ring-1 ring-zinc-950/10 dark:inset-ring dark:inset-ring-white/10 dark:ring-0',
+        className,
+      )}
     >
-      <span className="px-2 text-sm text-muted-foreground tabular-nums">{`${count} selected`}</span>
+      {/*
+        Announced, because the checkboxes this counts are somewhere else
+        entirely: a reader working down the rows by keyboard never brings the
+        count into focus, and a number that only changed on screen would
+        change in silence. Polite, since it is a running total and not news —
+        it must not interrupt the row being read out.
+      */}
+      <span aria-live="polite" className="px-2 text-sm text-muted-foreground tabular-nums">
+        {`${count} selected`}
+      </span>
       <Separator orientation="vertical" className="mx-1 h-5" />
 
       <Button variant="ghost" size="sm" onClick={onTag}>
