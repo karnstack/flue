@@ -415,16 +415,6 @@ export function SessionsRoute() {
     if (name === active) setActive(null)
   }
 
-  const open = useCallback(
-    (s: FleetSession) => {
-      void navigate({
-        to: TERMINAL_PATH,
-        params: { deviceId: s.machineId, sessionId: s.id },
-      })
-    },
-    [navigate],
-  )
-
   /**
    * The row's ⋯ menu. Close asks nothing first, matching the exit overlay's
    * own Close: one session the reader just named is not the bulk sweep the
@@ -620,7 +610,6 @@ export function SessionsRoute() {
           onToggleSelect={toggleSelect}
           onToggleGroup={toggleGroup}
           collapsed={folded}
-          onOpen={open}
           onAction={onAction}
           onSpawnIn={
             view.grouping === 'machine'

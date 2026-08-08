@@ -211,13 +211,17 @@ describe('SessionsRoute', () => {
     expect(screen.getByRole('button', { name: 'Exited' })).toBeTruthy()
   })
 
-  it('opens a session on the machine that owns it', async () => {
+  it('opens a session on the machine that owns it, from the row itself', async () => {
     const { sock, attic, router } = await mountSessions()
     act(() => attic.sockets[0]!.open())
     listed(attic.sockets[0]!, [info({ id: 'abc123', name: 'remote-one' })])
     listed(sock, [])
 
-    await userEvent.click(screen.getByRole('button', { name: 'Open remote-one' }))
+    // The row is a link, not a button: its href carries the machine that owns
+    // the session, which is also what a Ctrl/Cmd click hands the browser.
+    const row = screen.getByRole('link', { name: 'Open remote-one' })
+    expect(row.getAttribute('href')).toBe('/d/attic-pi/s/abc123')
+    await userEvent.click(row)
 
     await waitFor(() => expect(router.state.location.pathname).toBe('/d/attic-pi/s/abc123'))
   })
