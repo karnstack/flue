@@ -34,6 +34,9 @@ class StubRide {
   onWelcome() {
     return () => {}
   }
+  onError() {
+    return () => {}
+  }
   connect() {
     this.connects++
     for (const cb of [...this.statusCbs]) cb('open')

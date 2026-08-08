@@ -17,7 +17,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import type { FleetSession } from '@/fleet/types'
+import { keyOf, type FleetSession } from '@/fleet/types'
 import { ago } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import {
@@ -30,15 +30,6 @@ import {
 
 /** What a row's ⋯ menu can ask of a session. */
 export type RowAction = 'rename' | 'tags' | 'pin' | 'unpin' | 'close'
-
-/**
- * A row's selection key. `id` alone is not enough: two daemons mint ids with
- * no knowledge of each other, so only the machine qualifies one. The same
- * session shown under two tag headings carries the same key in both places —
- * which is exactly right for selection, and exactly why this string must
- * never become a DOM id or an htmlFor.
- */
-const keyOf = (s: FleetSession) => `${s.machineId}/${s.id}`
 
 /**
  * Where a long path is cut. CSS ellipsis can only eat the end, and the end of

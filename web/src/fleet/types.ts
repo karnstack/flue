@@ -33,6 +33,23 @@ export interface FleetSession extends SessionInfo {
   machineName: string
 }
 
+/**
+ * A row's identity for selection, and the one spelling of it.
+ *
+ * `id` alone will not do: two daemons mint ids with no knowledge of each
+ * other, so only the machine qualifies one. It lives here, beside the shape it
+ * reads, because the sessions screen and the SessionTable under it have to
+ * agree on it exactly — one stamps a checkbox with this key and the other
+ * resolves that very string back to a row, so two copies of the formula would
+ * be two things to keep in step.
+ *
+ * The same session shown under two tag headings carries this same key in both
+ * places, which is what makes a selection count the set's size rather than a
+ * walk over the groups — and exactly why this string must never become a DOM
+ * id or an htmlFor.
+ */
+export const keyOf = (s: FleetSession) => `${s.machineId}/${s.id}`
+
 /** One machine the fleet holds a client for, as the UI should describe it. */
 export interface MachineState {
   id: string

@@ -1269,6 +1269,57 @@ describe('FlueClient reconnect', () => {
     await vi.advanceTimersByTimeAsync(120_000)
     expect(sockets).toHaveLength(2)
   })
+
+  it('dials now when connect is called during the backoff wait', async () => {
+    // What a Retry button asks for. The wait runs to ten seconds, so a connect
+    // that returned because a timer was already armed would be a control that
+    // did nothing for nine of them, with no way for the reader to tell.
+    vi.useFakeTimers()
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    expect(c.status).toBe('reconnecting')
+    expect(sockets).toHaveLength(1)
+
+    c.connect()
+
+    // Dialled on the spot, with the clock untouched.
+    expect(sockets).toHaveLength(2)
+    // And the timer it took the place of is disarmed, or it would open a
+    // third socket alongside the one now live.
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(sockets).toHaveLength(2)
+  })
+
+  it('keeps the escalation it had earned when a retry is asked for early', async () => {
+    // The dial is brought forward, not forgiven: a machine that has failed
+    // four times is still a machine that has failed four times, and resetting
+    // the exponent here would let a held-down Retry hammer a Worker at the
+    // floor delay.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.close() // attempt 0 -> 1, next wait 125ms
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+    sockets[1]!.close() // attempt 1 -> 2, next wait 250ms
+
+    c.connect()
+    expect(sockets).toHaveLength(3)
+    sockets[2]!.close()
+
+    // Still climbing from the rung two failures bought — 500ms — rather than
+    // back down at the 125ms floor a reset would have put it on.
+    await vi.advanceTimersByTimeAsync(499)
+    expect(sockets).toHaveLength(3)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets).toHaveLength(4)
+  })
 })
 
 describe('FlueClient sending', () => {

@@ -24,7 +24,7 @@
  * same place: one source per reachable machine, each id appearing once.
  */
 import { daemonSocketUrl, FlueClient, type ConnStatus } from '@/client/client'
-import type { SessionInfo, Welcome } from '@/client/protocol'
+import type { ErrorMsg, SessionInfo, Welcome } from '@/client/protocol'
 import { loadOrCreateDeviceKey, loadPinnedDaemonKeyFor, type DeviceKey } from '@/crypto/keys'
 import { listMachines } from '@/relay/machines'
 import { relaySocket, type RawSocket } from '@/relay/socket'
@@ -66,6 +66,9 @@ export interface FleetSource {
 
 /** What onFleet hands its listeners, on any change to either half. */
 type FleetListener = (sessions: FleetSession[], machines: MachineState[]) => void
+
+/** What onError hands its listeners: the machine that raised it, and the error. */
+type ErrorListener = (machineId: string, err: ErrorMsg) => void
 
 /**
  * A source as the fleet holds it: the client it was given, plus everything
@@ -120,6 +123,7 @@ function machineStatus(s: ConnStatus): MachineStatus {
 export class FleetClient {
   private slots: Slot[]
   private listeners: FleetListener[] = []
+  private errorListeners: ErrorListener[] = []
   private running = false
   private poll: ReturnType<typeof setInterval> | null = null
   /** The stagger timers of the current tick, so close leaves none armed. */
@@ -202,6 +206,35 @@ export class FleetClient {
     }
   }
 
+  /**
+   * Every machine's errors, on one registration, each stamped with the machine
+   * that raised it.
+   *
+   * This belongs to the fleet rather than to the screens above it because a
+   * screen cannot enumerate the machines: a loopback tab learns its remote
+   * sources from its daemon's welcome, some way into the session, so anything
+   * that subscribed to the clients it could see at mount would be deaf on
+   * exactly the machines it gained afterwards. Wiring it beside the status and
+   * sessions listeners means a slot adopted mid-epoch is heard from the moment
+   * it is wired and unhooked with the rest on close.
+   *
+   * A passthrough, deliberately: the message is handed on whole and nothing
+   * here reads `code` or `reqId`. Which errors matter — the correlated ones
+   * belong to whoever holds the reqId, the uncorrelated ones to whichever
+   * screen last asked for something — is a judgement the consumer makes, and
+   * the fleet has no standing to make it for them.
+   */
+  onError(cb: ErrorListener): () => void {
+    this.errorListeners.push(cb)
+    let live = true
+    return () => {
+      if (!live) return
+      live = false
+      const at = this.errorListeners.indexOf(cb)
+      if (at >= 0) this.errorListeners.splice(at, 1)
+    }
+  }
+
   /** The named machine's client, for screens that need the full surface. */
   clientFor(machineId: string): FlueClient | null {
     return this.slots.find((s) => s.id === machineId)?.client ?? null
@@ -263,6 +296,7 @@ export class FleetClient {
         slot.rows = rows
         this.emit()
       }),
+      slot.client.onError((err) => this.emitError(slot.id, err)),
     ]
     // Only the loopback daemon's welcome carries facts the fleet acts on —
     // its host name, its relay slot, the relay origin. A remote source's
@@ -405,6 +439,17 @@ export class FleetClient {
         cb(sessions, machines)
       } catch (err) {
         console.error('flue: a fleet listener threw; delivery continues', err)
+      }
+    }
+  }
+
+  /** One machine's error, to every listener. Copied and caught, as `emit` is. */
+  private emitError(machineId: string, err: ErrorMsg) {
+    for (const cb of [...this.errorListeners]) {
+      try {
+        cb(machineId, err)
+      } catch (e) {
+        console.error('flue: a fleet error listener threw; delivery continues', e)
       }
     }
   }

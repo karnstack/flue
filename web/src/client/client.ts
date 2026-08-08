@@ -344,10 +344,25 @@ export class FlueClient {
     return this.attachments.get(ref)?.lastSeq
   }
 
-  /** Start connecting, and keep reconnecting until `close`. */
+  /**
+   * Start connecting, and keep reconnecting until `close`.
+   *
+   * A socket already in hand — dialling or open — makes this nothing: a second
+   * connect must never leave two sockets where the client tracks one.
+   *
+   * An armed retry is the other case, and it is not the same one. The dial is
+   * already owed, so returning here looks harmless, but the wait it is owed
+   * behind runs to ten seconds, and the one caller that asks during that wait
+   * is a human pressing Retry at a machine the screen says is unreachable. So
+   * the timer is stood down and the socket opened now. The escalation is left
+   * where it stands — `attempt` is untouched — because being asked again says
+   * nothing about whether the machine has come back, and a held-down button
+   * must not walk the backoff down to its floor.
+   */
   connect() {
     this.stopped = false
-    if (this.sock || this.retry !== null) return
+    if (this.sock) return
+    this.clearRetry()
     this.openSocket()
   }
 

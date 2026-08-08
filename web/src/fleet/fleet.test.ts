@@ -4,7 +4,7 @@ import { x25519 } from '@noble/curves/ed25519.js'
 
 import vectors from '../../../testdata/noise/ik.json'
 import type { ConnStatus, FlueClient } from '@/client/client'
-import type { SessionInfo, Welcome } from '@/client/protocol'
+import type { ErrorMsg, SessionInfo, Welcome } from '@/client/protocol'
 import { savePinnedDaemonKeyFor } from '@/crypto/keys'
 import { saveMachine } from '@/relay/machines'
 import type { RawSocket } from '@/relay/socket'
@@ -40,6 +40,7 @@ class FakeClient {
   private sessionsCbs: Array<(s: SessionInfo[]) => void> = []
   private statusCbs: Array<(s: ConnStatus) => void> = []
   private welcomeCbs: Array<(w: Welcome) => void> = []
+  private errorCbs: Array<(e: ErrorMsg) => void> = []
 
   onSessions(cb: (s: SessionInfo[]) => void) {
     return listen(this.sessionsCbs, cb)
@@ -49,6 +50,9 @@ class FakeClient {
   }
   onWelcome(cb: (w: Welcome) => void) {
     return listen(this.welcomeCbs, cb)
+  }
+  onError(cb: (e: ErrorMsg) => void) {
+    return listen(this.errorCbs, cb)
   }
 
   connect() {
@@ -79,6 +83,9 @@ class FakeClient {
   }
   emitWelcome(w: Welcome) {
     for (const cb of [...this.welcomeCbs]) cb(w)
+  }
+  emitError(e: ErrorMsg) {
+    for (const cb of [...this.errorCbs]) cb(e)
   }
   open() {
     this.emitStatus('open')
@@ -133,10 +140,14 @@ function harness(
   const fleet = new FleetClient(sources, expand)
   const calls: Array<{ sessions: FleetSession[]; machines: MachineState[] }> = []
   const off = fleet.onFleet((sessions, machines) => calls.push({ sessions, machines }))
+  const errs: Array<{ machineId: string; err: ErrorMsg }> = []
+  const offErr = fleet.onError((machineId, err) => errs.push({ machineId, err }))
   return {
     fleet,
     calls,
     off,
+    errs,
+    offErr,
     fake: (id: string) => fakes.get(id)!,
     last: () => calls[calls.length - 1]!,
   }
@@ -360,6 +371,66 @@ describe('FleetClient', () => {
     h.fleet.closeOn('nope', 's1')
     expect(h.fake('blue-mesa').closedIds).toEqual(['s1'])
     expect(h.fake('attic-pi').closedIds).toEqual([])
+  })
+
+  it('hands on every machine’s errors, saying which machine raised each', () => {
+    const h = harness([
+      ['attic-pi', 'Attic Pi'],
+      ['blue-mesa', 'Blue Mesa'],
+    ])
+    h.fleet.connect()
+
+    const gone: ErrorMsg = { type: 'error', code: 'not_found', msg: 'no such session' }
+    h.fake('blue-mesa').emitError(gone)
+    h.fake('attic-pi').emitError({ type: 'error', code: 'bad_message', msg: 'nope', reqId: 4 })
+
+    // Whole and untouched, because the fleet is a passthrough here and nothing
+    // it could add would be more than the screen already knows.
+    expect(h.errs).toEqual([
+      { machineId: 'blue-mesa', err: gone },
+      { machineId: 'attic-pi', err: { type: 'error', code: 'bad_message', msg: 'nope', reqId: 4 } },
+    ])
+    expect(h.errs[0]!.err).toBe(gone)
+    h.fleet.close()
+  })
+
+  it('hears a machine adopted after the fleet was already up', async () => {
+    // The reason this belongs to the fleet rather than to a screen: the remote
+    // sources a loopback tab holds do not exist at mount, so a route that had
+    // subscribed to the clients it could see would be deaf on every one of them.
+    const remote = new FakeClient()
+    const expand = vi.fn(() => Promise.resolve([src('attic-pi', 'Attic Pi', remote)]))
+    const h = harness([[LOCAL_MACHINE_ID, '']], expand)
+    h.fleet.connect()
+    h.fake(LOCAL_MACHINE_ID).open()
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(
+      welcome({ status: 'connected', origin: 'https://relay.example' }),
+    )
+    await flush()
+
+    remote.emitError({ type: 'error', code: 'not_found', msg: 'no such session' })
+
+    expect(h.errs).toEqual([
+      { machineId: 'attic-pi', err: { type: 'error', code: 'not_found', msg: 'no such session' } },
+    ])
+    h.fleet.close()
+  })
+
+  it('stops delivering errors after unsubscribe, and after close', () => {
+    const h = harness([['attic-pi', 'Attic Pi']])
+    h.fleet.connect()
+
+    h.offErr()
+    h.fake('attic-pi').emitError({ type: 'error', code: 'not_found', msg: '' })
+    expect(h.errs).toEqual([])
+
+    // And the source-side registration goes with the rest on close: a closed
+    // fleet is a screen on its way out, and it speaks for nobody.
+    const after: string[] = []
+    h.fleet.onError((machineId) => after.push(machineId))
+    h.fleet.close()
+    h.fake('attic-pi').emitError({ type: 'error', code: 'not_found', msg: '' })
+    expect(after).toEqual([])
   })
 
   it('routes spawnOn to the named machine and answers null for an unknown one', () => {

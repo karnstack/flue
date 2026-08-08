@@ -70,8 +70,9 @@ export function FleetProvider({ children, fleet, client }: FleetProviderProps) {
  * client goes into the same context that hook has always read, which is how
  * the terminal, Devices and Remote keep working unchanged while the fleet is
  * the one owner of that client's lifecycle. Connecting a ride that something
- * above also connects is safe by FlueClient's own promise: connect() on a
- * client already dialling is a no-op, and both closes close once.
+ * above also connects is safe by FlueClient's own promise: a client that
+ * already holds a socket keeps that one and opens no second, a client waiting
+ * out a backoff dials early rather than twice, and both closes close once.
  */
 function OwnFleetProvider({ children, fleet, client }: FleetProviderProps) {
   const legacy = useContext(FlueClientContext)

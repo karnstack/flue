@@ -21,7 +21,7 @@ import {
 import { useSidebar } from '@/components/ui/sidebar'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useFleet } from '@/fleet/provider'
-import { LOCAL_MACHINE_ID, type FleetSession, type MachineState } from '@/fleet/types'
+import { keyOf, LOCAL_MACHINE_ID, type FleetSession, type MachineState } from '@/fleet/types'
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
 import { takeCwd } from '@/lib/url'
 import { cn } from '@/lib/utils'
@@ -52,15 +52,6 @@ const TERMINAL_PATH = '/d/$deviceId/s/$sessionId' as const
  * `attachTo`, so a failed spawn produces this and nothing else, ever.
  */
 const SPAWN_FAILED = 'spawn_failed'
-
-/**
- * A row's selection key, spelled exactly as the SessionTable spells it: two
- * daemons mint ids with no knowledge of each other, so only the machine
- * qualifies one. A session shown twice under tag headings carries this same
- * key in both places, which is why the count is always the set's size and
- * never a walk over the groups.
- */
-const keyOf = (s: FleetSession) => `${s.machineId}/${s.id}`
 
 /** A fresh copy of the default arrangement — DEFAULT_VIEW is frozen, and a
  *  bare spread would share its frozen columns array with the first edit. */
@@ -295,6 +286,29 @@ export function SessionsRoute() {
           const next = new Set([...prev].filter((k) => live.has(k)))
           return next.size === prev.size ? prev : next
         })
+      }),
+      /*
+       * The refusals nobody is waiting on.
+       *
+       * An `update` and a `close` by id are answered by nothing when they
+       * work — the next list carries the truth — so the daemon's only reply
+       * to either is a bare `error{not_found}` with no reqId to hand it back
+       * by. Every correlated error already belongs to someone: a spawn's to
+       * the per-spawn listeners in `adopt`, an attach's to the client, which
+       * resolves it into `onSessionGone`. What is left would otherwise fall
+       * on the floor, and the act it refused is one the reader just performed
+       * on a row that stays exactly where it was.
+       *
+       * Which machine it came from is not said. The screen is a fleet, but
+       * the sentence is about one session the reader named a moment ago, and
+       * naming a machine they never chose would explain less than it asks.
+       * Codes other than not_found are left alone: `bad_payload` is the
+       * client talking to itself about a frame it could not read, and
+       * `lagged` is a connection fact the status line already carries.
+       */
+      fleet.onError((_machineId, e) => {
+        if (e.reqId !== undefined) return
+        if (e.code === 'not_found') setNotice('That session is gone.')
       }),
       ...(local === null
         ? []
@@ -694,9 +708,11 @@ function PlacedBulkBar(props: {
 
 /**
  * A machine the fleet cannot reach right now, said in a muted band where its
- * rows would have been. Retry redials that one machine's client; while the
- * client is between its own retries the press is a no-op, which is honest —
- * the dial is already owed.
+ * rows would have been. Retry redials that one machine's client, and does it
+ * at once: a client waiting out its backoff stands the timer down and opens
+ * the socket on the press rather than making the reader sit out the rest of a
+ * wait that runs to ten seconds. Only the wait is skipped — the escalation
+ * behind it is kept, so a machine that stays down is not hammered.
  */
 function UnreachableBand({
   machines,

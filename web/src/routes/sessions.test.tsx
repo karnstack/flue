@@ -284,6 +284,55 @@ describe('SessionsRoute', () => {
       expect(sock.ofType('close')).toEqual([{ type: 'close', id: 's1' }])
       expect(screen.getByRole('status').textContent).toContain('Closing alpha')
     })
+
+    it('announces a refusal that answers an act nobody can correlate', async () => {
+      // An update and a close-by-id carry no reqId, because success has no
+      // reply to correlate to — so their one failure mode comes back as a
+      // bare not_found. Nothing but this screen is left to say it: dropped,
+      // the row sits there unchanged and the reader is told nothing at all.
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1', name: 'alpha' })])
+
+      await user.click(screen.getByRole('button', { name: 'Actions for alpha' }))
+      await user.click(screen.getByRole('menuitem', { name: 'Close' }))
+      act(() => sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }))
+
+      expect(screen.getByRole('status').textContent).toBe('That session is gone.')
+    })
+
+    it('announces one from a remote machine too, not only the ridden one', async () => {
+      const { attic } = await mountSessions()
+      act(() => attic.sockets[0]!.open())
+
+      act(() =>
+        attic.sockets[0]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }),
+      )
+
+      expect(screen.getByRole('status').textContent).toBe('That session is gone.')
+    })
+
+    it('leaves a correlated refusal to whoever holds its request', async () => {
+      // A reqId means somebody asked and is waiting: a spawn settles in the
+      // route's own per-spawn listener, an attach inside the client. Saying
+      // it here as well would double-announce the ones that are handled and
+      // invent a sentence for the ones that are not.
+      const { sock } = await mountSessions()
+
+      act(() =>
+        sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 9 }),
+      )
+
+      expect(screen.getByRole('status').textContent).toBe('')
+    })
+
+    it('says nothing about an error that is not a missing session', async () => {
+      const { sock } = await mountSessions()
+
+      act(() => sock.emitControl({ type: 'error', code: 'lagged', msg: 'too far behind' }))
+
+      expect(screen.getByRole('status').textContent).toBe('')
+    })
   })
 
   describe('selection and the bulk bar', () => {
@@ -367,7 +416,9 @@ describe('SessionsRoute', () => {
       listed(sock, [info({ id: 's1' })])
 
       // A machine whose reconnection has stopped is the honest way to hold
-      // the unreachable state still: mid-backoff, connect() is a no-op.
+      // the unreachable state still, with no timer to advance: Retry redials
+      // a closed client and a backing-off one alike (client.test.ts pins the
+      // mid-backoff half, where the wait is stood down rather than waited out).
       act(() => fleet.clientFor('attic-pi')!.close())
 
       expect(screen.getByText(/is unreachable/)).toBeTruthy()
