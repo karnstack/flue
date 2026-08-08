@@ -15,13 +15,21 @@ const metaSuffix = ".meta.json"
 // Meta is what a human decided about a session, kept apart from everything the
 // session decided about itself.
 //
-// It is a separate file from the snapshot, and separately timed, because the
-// two answer different questions. A snapshot is written once, on a graceful
-// shutdown, and is worthless after the daemon that wrote it has been revived
-// from it. Metadata is written on every edit and has to survive the case a
-// snapshot cannot: a daemon that was killed rather than stopped. Names and tags
-// are the part of a session a user typed, and losing them to a SIGKILL would be
-// losing work, not losing a convenience.
+// It is a separate file from the snapshot, and written at a different moment,
+// which is the whole of the difference between them. A snapshot is taken once,
+// on a graceful shutdown, and carries the metadata out with it — so a clean
+// restart already has everything and needs nothing from here. This file is
+// written the instant an edit lands, which makes it the only copy of what a
+// user typed for as long as the daemon is up.
+//
+// That is a narrower claim than "it survives a crash", and the difference is
+// worth stating plainly, because the two are easy to confuse. Nothing revives
+// after a SIGKILL: no snapshot was written, so the next boot finds every record
+// here describing a session that did not come back, and sweeps it. What the
+// separation actually buys is independence from the snapshot's schedule and
+// from its contents — this is applied after revival, so a snapshot taken by a
+// daemon that predates these fields still comes back named, and an edit is
+// durable from the moment it is made rather than from the next clean stop.
 //
 // V is the file's version rather than the record's. Nothing reads it yet; it is
 // here so that a later shape can be recognised instead of guessed at.

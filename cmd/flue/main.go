@@ -177,12 +177,19 @@ func cmdServe(args []string) error {
 			fmt.Fprintf(os.Stderr, "flue: could not revive session %s: %v\n", snap.ID, err)
 		}
 	}
-	// Names and tags live in their own files beside the snapshots, and they
-	// answer the case a snapshot cannot: a daemon that was killed rather than
-	// stopped wrote no snapshot at all, but every edit was already on disk. So
-	// this runs after the revival — the sessions it hands metadata back to are
-	// the ones that just came back — and it sweeps the records of the sessions
-	// that did not, which is what stops a crash from silting the directory up.
+	// Names and tags live in their own files beside the snapshots, written as
+	// they are edited rather than at shutdown. The snapshots above already carry
+	// them, so on an ordinary restart this pass mostly agrees with what has just
+	// been restored; it earns its place on the restarts that are not ordinary —
+	// a snapshot taken by a daemon built before those fields existed, say — by
+	// being the copy that does not depend on the snapshot's contents.
+	//
+	// It runs after the revival because it can only speak about sessions that
+	// are here: it hands each record to the session it names, and deletes the
+	// ones that name nothing, which is what stops a machine that was killed
+	// rather than stopped from silting the directory up. (After a kill there are
+	// no snapshots at all, so nothing revives and the sweep is the whole of what
+	// this pass does.)
 	reg.SetMetaDir(stateDir, logger)
 	reg.AdoptMetas(stateDir)
 	// Held rather than inlined into daemon.New because the banner below mints

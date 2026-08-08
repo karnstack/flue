@@ -139,12 +139,23 @@ func newID() string {
 // login shell, inheriting the environment: flue is a terminal, and a
 // sanitised environment would defeat the purpose.
 func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
-	return r.start(opts, newID(), nil, "")
+	return r.start(opts, newID(), nil, Info{})
 }
 
 // start is Spawn with the fields a revival dictates: the session's id, bytes
-// preloaded into the ring ahead of any live output, and an initial title.
-func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string) (*Session, error) {
+// preloaded into the ring ahead of any live output, and the record the new
+// session inherits.
+//
+// restore is an Info rather than a widening list of positional arguments, since
+// everything a revival hands back is by definition a field of the thing Info
+// describes. Spawn passes the empty one, which is the honest description of a
+// session that inherits nothing.
+//
+// Only the fields below are read from it. State, size and cwd belong to the
+// process about to be started rather than to the one that ended, and a zero
+// CreatedAt is read as "this session begins now" — the Spawn case, and equally
+// a snapshot written before that field existed.
+func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info) (*Session, error) {
 	shell := loginShell()
 	argv := opts.Cmd
 	if len(argv) == 0 {
@@ -183,6 +194,15 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string
 	// would let the two disagree by however long a spawn happens to take.
 	born := r.clock()
 
+	// A revival is not a birth: the session kept its age across the restart,
+	// and only the shell inside it is new. LastActive is the opposite case and
+	// takes the reading above either way — the old one describes a process that
+	// no longer exists.
+	created := restore.CreatedAt
+	if created.IsZero() {
+		created = born
+	}
+
 	s := &Session{
 		id:        id,
 		pty:       f,
@@ -199,20 +219,26 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string
 		title:     NewTitleScanner(),
 		subs:      map[*Sub]struct{}{},
 		info: Info{
-			Cwd:   cwd,
-			Cmd:   argv,
-			State: "running",
-			Cols:  cols,
-			Rows:  rows,
-			// Empty rather than nil: see normalizeTags on why no reader
-			// should ever meet a null here.
-			Tags:       []string{},
-			CreatedAt:  born,
+			Cwd:    cwd,
+			Cmd:    argv,
+			State:  "running",
+			Cols:   cols,
+			Rows:   rows,
+			Name:   restore.Name,
+			Pinned: restore.Pinned,
+			// Through normalizeTags rather than assigned, so a hand-edited
+			// snapshot arrives in the same shape an edit would have left it in,
+			// and so the slice is this session's own rather than one the
+			// snapshot still holds a header to. It settles the no-tags case
+			// too: empty rather than nil, which is where the Spawn path lands —
+			// see normalizeTags on why no reader should ever meet a null here.
+			Tags:       normalizeTags(restore.Tags),
+			CreatedAt:  created,
 			LastActive: born,
 		},
 	}
 	s.info.ID = s.id
-	s.info.Title = title
+	s.info.Title = restore.Title
 	// Before pump starts, so everything restored precedes everything live.
 	// The `head` a fresh attach reports covers the whole preloaded region as
 	// a consequence, which is what keeps the client's probe-reply mute gate
