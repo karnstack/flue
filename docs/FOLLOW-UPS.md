@@ -87,13 +87,19 @@ terminal see a login shell under the login service too.
 
 ## 6. Smaller carried items
 
-- `TestCloseTerminatesBackgroundChildren` flaked once on CI (2026-08-07, run
-  31212710318): `waitFor("child-pid=")` found the subscriber already closed
-  with an *empty* ring at 0.00s — a state only `Close()` should produce, and
-  the test had not called it. Linux-only by the look of it (130 loaded runs on
-  Darwin stayed green), and the master-vs-leader stream semantics differ
-  exactly there (`noteMasterEnded`). One observation is not a diagnosis;
-  worth instrumenting if it fires again.
+- `TestCloseTerminatesBackgroundChildren` flaked twice on CI (2026-08-07 run
+  31212710318; 2026-08-08 run 31259207719): subscriber closed over an empty
+  ring in the test's first millisecond. **Diagnosed and fixed.** The old
+  `markExitedLocked` dropped every subscriber at reap time, and a child that
+  writes and exits in the same breath can be reaped on Linux while its last
+  bytes still sit unread in the pty buffer — the supervisor's poll beating
+  the pump to it. Linux-only because Darwin blocks a session leader's exit
+  until its pty has been drained (observed: `ps` state `E` for the whole
+  window), so the reap structurally cannot win there. Reproduced
+  deterministically in a Linux container by starving the pump; fixed with
+  the drain-then-drop rule in `markExitedLocked` (subscribers close only
+  after the master's leftover bytes are delivered), pinned by
+  `TestExitDeliversTheTailBeforeClosingSubscribers`.
 - `Subscribe(fromSeq > EndSeq)` returns `StartSeq` unclamped. The one place a
   client-supplied number enters server state unchecked.
 - `outboxDepth` and `subChanDepth` were each chosen as 256 by different tasks. The

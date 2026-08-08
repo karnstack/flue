@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // ExitedRetention is how long an exited session stays listable so its final
@@ -145,6 +146,17 @@ type Session struct {
 	info     Info
 	exitedAt time.Time
 	closed   bool
+	// pumpDone records that pump has returned: the master's stream is over
+	// and nothing will ever be read from it again.
+	pumpDone bool
+	// exitDrain is set by markExitedLocked instead of dropping subscribers:
+	// the child has exited but its final output may still sit unread in the
+	// pty buffer, and closing the stream first is how a CI run once watched
+	// a subscriber die over an empty ring in the test's first millisecond
+	// (docs/FOLLOW-UPS.md §6). While it is set, the drop belongs to whoever
+	// can prove the drain is finished — pump, after the chunk that empties
+	// the master, or the supervisor, after two quiet polls; see both.
+	exitDrain bool
 }
 
 func (s *Session) ID() string { return s.id }
@@ -333,8 +345,20 @@ func (s *Session) Close() error {
 // pump copies PTY output into the ring and fans it out to subscribers.
 func (s *Session) pump() {
 	// A read error on the master ends the output stream and nothing else. It
-	// is reported to the supervisor as a hint, never as an exit.
-	defer s.noteMasterEnded()
+	// is reported to the supervisor as a hint, never as an exit — but a
+	// stream that is over is also the end of any drain the exit was waiting
+	// on, and if the exit is already on record the subscribers close here,
+	// because no other event is coming to close them.
+	defer func() {
+		s.mu.Lock()
+		s.pumpDone = true
+		if s.exitDrain || s.info.State == "exited" {
+			s.exitDrain = false
+			s.dropSubsLocked()
+		}
+		s.mu.Unlock()
+		s.noteMasterEnded()
+	}()
 
 	buf := make([]byte, 32*1024)
 	for {
@@ -357,6 +381,14 @@ func (s *Session) pump() {
 					// reattach with its lastSeq and re-read the ring.
 					s.dropLocked(sub)
 				}
+			}
+			// The pump's own quiet verdict is authoritative: it is the only
+			// reader, so under this lock any byte it has not delivered is
+			// still visible on the master. Nothing visible and an exit
+			// waiting means the drain the exit deferred to is finished.
+			if s.exitDrain && !masterReadable(s.pty) {
+				s.exitDrain = false
+				s.dropSubsLocked()
 			}
 			s.mu.Unlock()
 		}
@@ -441,6 +473,11 @@ func (s *Session) supervise() {
 		// to publish the exit to callers, and conflating them is what let a
 		// signal go out with no probe behind it.
 		groupEmpty bool
+		// drainQuiet and drainSeq are the supervisor's view of the exit
+		// drain across turns: quiet is only believed when two consecutive
+		// polls agree and the ring has not grown between them.
+		drainQuiet bool
+		drainSeq   uint64
 	)
 	for {
 		if !reaped {
@@ -472,6 +509,30 @@ func (s *Session) supervise() {
 		// s.mu on every output chunk, so losing that TryLock is ordinary.
 		if reaped && !groupEmpty {
 			groupEmpty = s.groupGone()
+		}
+		// The drain the exit deferred (markExitedLocked): the pump settles
+		// it after its next chunk, but a pump blocked in read with nothing
+		// buffered never wakes — a background job holding the slave in
+		// silence is the ordinary shape of that. The supervisor is the
+		// actor that still runs, so it confirms quiet from outside: two
+		// polls on its own cadence with no readable byte and no ring growth
+		// between them. One poll is not enough — the pump may be mid-read,
+		// bytes already lifted off the master but not yet under the lock;
+		// they land in the ring well inside a poll interval, which is what
+		// the second look is for.
+		if recorded && s.mu.TryLock() {
+			if s.exitDrain {
+				delay = reapPollMin
+				quiet := !masterReadable(s.pty)
+				seq := s.ring.EndSeq()
+				if quiet && drainQuiet && seq == drainSeq {
+					s.exitDrain = false
+					s.dropSubsLocked()
+				}
+				drainQuiet = quiet
+				drainSeq = seq
+			}
+			s.mu.Unlock()
 		}
 		if recorded && groupEmpty {
 			// Nothing pins the pgid any more, so from here it may name a
@@ -584,20 +645,56 @@ func (s *Session) reapIfExited() (int, bool) {
 	}
 }
 
-// markExitedLocked records the child's exit and closes out its subscribers.
-// The caller must hold s.mu.
+// markExitedLocked records the child's exit. The caller must hold s.mu.
 //
 // It runs only once reapIfExited has confirmed the child is actually gone, so
 // State never reports "exited" on the strength of a read error on the master.
 // Note that it says nothing about the child's process group, which may well
 // outlive it.
+//
+// It no longer closes the subscribers itself. A child that writes and exits
+// in the same breath is reaped while its last bytes still sit unread in the
+// pty buffer, and dropping the subscribers here closed their stream ahead of
+// its own tail — observed twice on CI as a subscriber dead over an empty
+// ring (docs/FOLLOW-UPS.md §6). With the stream already over the drop is
+// safe and immediate; otherwise exitDrain hands it to the pump and the
+// supervisor, whichever proves the drain finished first.
 func (s *Session) markExitedLocked(code int) {
 	s.info.State = "exited"
 	s.info.ExitCode = code
 	s.exitedAt = s.clock()
+	if s.pumpDone {
+		s.dropSubsLocked()
+		return
+	}
+	s.exitDrain = true
+}
+
+// dropSubsLocked closes out every subscriber. The caller must hold s.mu.
+func (s *Session) dropSubsLocked() {
 	for sub := range s.subs {
 		s.dropLocked(sub)
 	}
+}
+
+// masterReadable reports whether the PTY master holds bytes its reader has
+// not consumed, without blocking and without consuming them. It is the
+// probe the drain-then-drop rule rests on: a child's write completes into
+// the pty buffer before its exit can be reaped, so at reap time the tail is
+// either already in the ring or visible here. A master that cannot be
+// polled — closed, or already past end of stream — reads as quiet.
+func masterReadable(f *os.File) bool {
+	conn, err := f.SyscallConn()
+	if err != nil {
+		return false
+	}
+	readable := false
+	_ = conn.Control(func(fd uintptr) {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, err := unix.Poll(fds, 0)
+		readable = err == nil && n > 0 && fds[0].Revents&unix.POLLIN != 0
+	})
+	return readable
 }
 
 // exitStatus reports whether the child has exited and, if so, when — the two

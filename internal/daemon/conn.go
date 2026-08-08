@@ -656,16 +656,18 @@ func (c *conn) attachTo(s *session.Session, lastSeq uint64, reqID uint64) {
 // it is not a reliable one. Session.Subscribe on a session that has already
 // exited — but has not yet been Closed, which Registry.Reap defers for
 // ExitedRetention, ten minutes — returns an open channel that nothing will
-// ever close: markExited drops the subscribers that existed when the child was
-// reaped and nothing revisits the set afterwards. A loop that waited on the
-// channel alone would park for those ten minutes with the client none the
-// wiser. So the session's exit state is read once, up front, and drives the
-// exit report from there.
+// ever close: the exit's drain-then-drop (markExitedLocked) closes the
+// subscribers present once the master's leftover output has been delivered,
+// and nothing revisits the set afterwards. A loop that waited on the channel
+// alone would park for those ten minutes with the client none the wiser. So
+// the session's exit state is read once, up front, and drives the exit
+// report from there.
 //
-// The two orderings are both covered because Subscribe and markExited are
-// serialised on the session's own lock: either this subscription was
-// registered first, in which case markExited will close its channel, or the
-// exit was recorded first, in which case Info below observes it.
+// The orderings are covered because Subscribe and the exit's bookkeeping are
+// serialised on the session's own lock: a subscription registered before the
+// post-exit drain settles is closed by the drop that ends it, and one
+// registered later finds the exit already recorded, which Info below
+// observes.
 func (c *conn) stream(a *attachment) {
 	var (
 		timer *time.Timer

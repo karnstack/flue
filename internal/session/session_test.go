@@ -975,3 +975,60 @@ func TestGroupSignalRequestIsAnsweredWhileTheSessionLockIsHeld(t *testing.T) {
 
 	waitExited(t, s, 5*time.Second)
 }
+
+// TestExitDeliversTheTailBeforeClosingSubscribers pins the ordering the CI
+// flake (docs/FOLLOW-UPS.md §6) violated: a child that writes and exits in
+// the same breath must have that write delivered to every subscriber before
+// the exit closes their channels. Before the drain-then-drop rule the
+// supervisor could reap the leader and drop every subscriber while the tail
+// still sat unread in the pty buffer — subscriber closed over an empty ring
+// in the test's first millisecond. The race needs the reaper to outrun the
+// pump, so a single spawn rarely catches it; the loop widens the net, and
+// under the fix the ordering holds by construction rather than by schedule.
+func TestExitDeliversTheTailBeforeClosingSubscribers(t *testing.T) {
+	for i := 0; i < 40; i++ {
+		r := NewRegistry(time.Now)
+		s, err := r.Spawn(SpawnOpts{
+			Cmd:  []string{"sh", "-c", "echo the-whole-tail"},
+			Cols: 80, Rows: 24,
+		})
+		if err != nil {
+			t.Fatalf("Spawn: %v", err)
+		}
+		sub := s.Subscribe(0)
+		waitFor(t, sub, "the-whole-tail", 5*time.Second)
+		s.Unsubscribe(sub)
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+}
+
+// TestMasterReadable exercises the poll the drain rule rests on: bytes a
+// child wrote before exiting are visible on the master without being
+// consumed, and a drained master reads as quiet.
+func TestMasterReadable(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+
+	if masterReadable(master) {
+		t.Fatal("a fresh master reads as readable; the poll is measuring nothing")
+	}
+	if _, err := slave.Write([]byte("tail")); err != nil {
+		t.Fatalf("slave write: %v", err)
+	}
+	if !masterReadable(master) {
+		t.Fatal("bytes written on the slave are invisible to the master's poll")
+	}
+	buf := make([]byte, 16)
+	if _, err := master.Read(buf); err != nil {
+		t.Fatalf("master read: %v", err)
+	}
+	if masterReadable(master) {
+		t.Fatal("a drained master still reads as readable")
+	}
+}
