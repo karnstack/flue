@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -197,5 +198,95 @@ func TestSnapshotThenReviveRoundTrip(t *testing.T) {
 	defer revived.Unsubscribe(sub)
 	if !bytes.Contains(sub.Backlog, []byte("daemon restarted")) {
 		t.Fatalf("revived backlog carries no restart marker: %q", sub.Backlog)
+	}
+}
+
+// TestSnapshotCarriesMetadataAcrossARestart is what makes a graceful restart
+// self-contained: the fields a human owns go out with the shutdown snapshot and
+// come back with the revival, so the restarted daemon is whole before anything
+// on disk is consulted.
+//
+// Every field is seeded with a non-zero value first, and that is the test
+// rather than a preamble to it. Against an unnamed, untagged, unpinned session
+// a Revive that simply dropped the metadata would produce exactly the same
+// Info as one that restored it faithfully.
+//
+// The two registries run on clocks an hour apart for the same reason. CreatedAt
+// is the one stamp that must survive a restart, and against a single clock
+// "carried over from the snapshot" and "stamped fresh at revival" are the same
+// value. LastActive is asserted from the other side: the shell is new, so it is
+// the revival that has to be recorded there and not the snapshot's own reading.
+func TestSnapshotCarriesMetadataAcrossARestart(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sessions")
+	epoch := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+
+	first := NewRegistry(func() time.Time { return epoch })
+	s := spawnRunning(t, first)
+	id := s.ID()
+	name, tags, pinned := "deploy", []string{"prod", "web"}, true
+	s.ApplyMeta(MetaPatch{Name: &name, Tags: &tags, Pinned: &pinned})
+	if err := SaveSnapshots(dir, first.Snapshots()); err != nil {
+		t.Fatalf("SaveSnapshots: %v", err)
+	}
+
+	later := epoch.Add(time.Hour)
+	second := NewRegistry(func() time.Time { return later })
+	snaps := LoadAndClearSnapshots(dir)
+	if len(snaps) != 1 {
+		t.Fatalf("loaded %d snapshots, want the one running session", len(snaps))
+	}
+	revived, err := second.Revive(snaps[0])
+	if err != nil {
+		t.Fatalf("Revive: %v", err)
+	}
+	t.Cleanup(func() { _ = revived.Close() })
+
+	info := revived.Info()
+	if info.ID != id {
+		t.Errorf("revived id = %q, want %q", info.ID, id)
+	}
+	if info.Name != "deploy" {
+		t.Errorf("revived name = %q, want the seeded %q", info.Name, "deploy")
+	}
+	if !slices.Equal(info.Tags, []string{"prod", "web"}) {
+		t.Errorf("revived tags = %#v, want the seeded pair", info.Tags)
+	}
+	if !info.Pinned {
+		t.Error("revived pinned = false, want the seeded true")
+	}
+	if !info.CreatedAt.Equal(epoch) {
+		t.Errorf("revived CreatedAt = %v, want the original %v: a restart is not a birth",
+			info.CreatedAt, epoch)
+	}
+	if !info.LastActive.Equal(later) {
+		t.Errorf("revived LastActive = %v, want the revival's %v", info.LastActive, later)
+	}
+}
+
+// TestReviveStampsCreatedAtWhenTheSnapshotHasNone covers the other branch, and
+// with it the Spawn path — Spawn revives nothing, so it arrives here with the
+// same empty record. A snapshot written before this field existed carries a
+// zero time, and a session claiming to have been created at the zero instant
+// would sort ahead of everything forever. Tags get the same treatment they get
+// at spawn: empty rather than nil, since nil marshals to JSON null.
+func TestReviveStampsCreatedAtWhenTheSnapshotHasNone(t *testing.T) {
+	now := time.Date(2026, 8, 8, 11, 30, 0, 0, time.UTC)
+	r := NewRegistry(func() time.Time { return now })
+	s, err := r.Revive(Snapshot{V: 1, ID: "cafebabe00000005", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Revive: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	info := s.Info()
+	if !info.CreatedAt.Equal(now) {
+		t.Errorf("CreatedAt = %v, want the clock's %v for a snapshot that carried none",
+			info.CreatedAt, now)
+	}
+	if info.Tags == nil {
+		t.Error("Tags = nil, want an empty slice: nil serialises as JSON null")
+	}
+	if len(info.Tags) != 0 || info.Name != "" || info.Pinned {
+		t.Errorf("revived metadata = %+v, want it empty when the snapshot had none", info)
 	}
 }

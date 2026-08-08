@@ -3,6 +3,8 @@ package session
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
@@ -14,12 +16,26 @@ import (
 	"github.com/creack/pty"
 )
 
+// ErrNotFound is what the registry answers for an id it does not hold. A
+// client editing a session that has just exited and been reaped is ordinary
+// rather than exceptional, so callers get a sentinel to turn into a polite
+// answer instead of a message they would have to match on.
+var ErrNotFound = errors.New("session: not found")
+
 // Registry owns every session on this daemon.
 type Registry struct {
 	clock func() time.Time
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	// metaDir is where session metadata is persisted, or "" for nowhere.
+	// Empty is the default and it disables persistence outright: a registry
+	// only writes files once somebody has said where, so tests and any daemon
+	// without a config directory stay file-free.
+	metaDir string
+	// metaLog receives the one thing that can go wrong out here — a write that
+	// failed — since nothing on the edit path is in a position to handle it.
+	metaLog *slog.Logger
 }
 
 func NewRegistry(clock func() time.Time) *Registry {
@@ -123,12 +139,23 @@ func newID() string {
 // login shell, inheriting the environment: flue is a terminal, and a
 // sanitised environment would defeat the purpose.
 func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
-	return r.start(opts, newID(), nil, "")
+	return r.start(opts, newID(), nil, Info{})
 }
 
 // start is Spawn with the fields a revival dictates: the session's id, bytes
-// preloaded into the ring ahead of any live output, and an initial title.
-func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string) (*Session, error) {
+// preloaded into the ring ahead of any live output, and the record the new
+// session inherits.
+//
+// restore is an Info rather than a widening list of positional arguments, since
+// everything a revival hands back is by definition a field of the thing Info
+// describes. Spawn passes the empty one, which is the honest description of a
+// session that inherits nothing.
+//
+// Only the fields below are read from it. State, size and cwd belong to the
+// process about to be started rather than to the one that ended, and a zero
+// CreatedAt is read as "this session begins now" — the Spawn case, and equally
+// a snapshot written before that field existed.
+func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info) (*Session, error) {
 	shell := loginShell()
 	argv := opts.Cmd
 	if len(argv) == 0 {
@@ -162,6 +189,20 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string
 		cwd, _ = os.Getwd()
 	}
 
+	// One reading for both stamps. A session that has just started has been
+	// active for exactly as long as it has existed, and taking the clock twice
+	// would let the two disagree by however long a spawn happens to take.
+	born := r.clock()
+
+	// A revival is not a birth: the session kept its age across the restart,
+	// and only the shell inside it is new. LastActive is the opposite case and
+	// takes the reading above either way — the old one describes a process that
+	// no longer exists.
+	created := restore.CreatedAt
+	if created.IsZero() {
+		created = born
+	}
+
 	s := &Session{
 		id:        id,
 		pty:       f,
@@ -170,6 +211,7 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string
 		pid:       cmd.Process.Pid,
 		kill:      killGroup,
 		setsize:   setWinsize,
+		cwdOf:     processCwd,
 		sigReq:    make(chan sigRequest),
 		masterEnd: make(chan struct{}, 1),
 		gone:      make(chan struct{}),
@@ -177,16 +219,26 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string
 		title:     NewTitleScanner(),
 		subs:      map[*Sub]struct{}{},
 		info: Info{
-			Cwd:        cwd,
-			Cmd:        argv,
-			State:      "running",
-			Cols:       cols,
-			Rows:       rows,
-			LastActive: r.clock(),
+			Cwd:    cwd,
+			Cmd:    argv,
+			State:  "running",
+			Cols:   cols,
+			Rows:   rows,
+			Name:   restore.Name,
+			Pinned: restore.Pinned,
+			// Through normalizeTags rather than assigned, so a hand-edited
+			// snapshot arrives in the same shape an edit would have left it in,
+			// and so the slice is this session's own rather than one the
+			// snapshot still holds a header to. It settles the no-tags case
+			// too: empty rather than nil, which is where the Spawn path lands —
+			// see normalizeTags on why no reader should ever meet a null here.
+			Tags:       normalizeTags(restore.Tags),
+			CreatedAt:  created,
+			LastActive: born,
 		},
 	}
 	s.info.ID = s.id
-	s.info.Title = title
+	s.info.Title = restore.Title
 	// Before pump starts, so everything restored precedes everything live.
 	// The `head` a fresh attach reports covers the whole preloaded region as
 	// a consequence, which is what keeps the client's probe-reply mute gate
@@ -208,6 +260,98 @@ func (r *Registry) Get(id string) (*Session, bool) {
 	defer r.mu.Unlock()
 	s, ok := r.sessions[id]
 	return s, ok
+}
+
+// UpdateMeta patches one session's metadata by id and returns the resulting
+// snapshot, ready to answer the request and to broadcast to everyone else
+// watching. An id the registry does not hold is ErrNotFound.
+//
+// Get releases r.mu before ApplyMeta takes s.mu, which keeps this on the right
+// side of the one ordering rule between the two locks (see Session). It costs
+// nothing worth having: the session could be reaped a moment after either
+// lock, so holding both would not make the edit any less racy against the
+// world, only more likely to stall it.
+//
+// It flushes the result to disk when a meta directory is configured, before it
+// returns: an edit a client has been told succeeded should not be able to
+// vanish in the next crash.
+func (r *Registry) UpdateMeta(id string, p MetaPatch) (Info, error) {
+	s, ok := r.Get(id)
+	if !ok {
+		return Info{}, ErrNotFound
+	}
+	info := s.ApplyMeta(p)
+	r.flushMeta(info)
+	return info, nil
+}
+
+// SetMetaDir says where session metadata is persisted, and with what logger.
+//
+// An empty dir means nowhere, which is the default and the only way to say it:
+// a registry nobody has pointed at a directory writes no files at all. A nil
+// logger takes the default one, so a caller that has no logger of its own is
+// not forced to invent a sink for a line it will probably never see.
+//
+// Called once at startup, before anything is serving, but it takes r.mu anyway
+// — the fields it writes are read on every edit, and "only at startup" is a
+// property of today's caller rather than of this method.
+func (r *Registry) SetMetaDir(dir string, log *slog.Logger) {
+	if log == nil {
+		log = slog.Default()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.metaDir, r.metaLog = dir, log
+}
+
+// metaSink reports where metadata goes and where to complain when it cannot.
+func (r *Registry) metaSink() (string, *slog.Logger) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.metaDir, r.metaLog
+}
+
+// flushMeta writes one session's metadata out, if there is anywhere to write
+// it.
+//
+// A failed write is logged and nothing more. The alternative — failing the edit
+// — would make an unwritable config directory take renaming with it, which
+// trades a durability problem for a functional one. Durability degrades; the
+// function does not.
+func (r *Registry) flushMeta(info Info) {
+	dir, log := r.metaSink()
+	if dir == "" {
+		return
+	}
+	meta := Meta{V: 1, Name: info.Name, Tags: info.Tags, Pinned: info.Pinned}
+	if err := SaveMeta(dir, info.ID, meta); err != nil {
+		log.Warn("could not persist session metadata", "session", info.ID, "err", err)
+	}
+}
+
+// AdoptMetas gives the sessions in this registry back the names and tags a
+// previous daemon persisted, and sweeps what is left over.
+//
+// It runs at boot, after revival, and the two halves are one pass because they
+// are one question: for each record on disk, is the session it describes here?
+// If it is, the metadata is applied — through ApplyMeta, so a hand-edited file's
+// tags are normalised like anybody else's, and without re-writing the file that
+// was just read. If it is not, the session did not survive the restart and its
+// record is deleted, which is what keeps a crash from leaving the directory
+// growing forever.
+func (r *Registry) AdoptMetas(dir string) {
+	if dir == "" {
+		return
+	}
+	for id, m := range LoadMetas(dir) {
+		s, ok := r.Get(id)
+		if !ok {
+			DeleteMeta(dir, id)
+			continue
+		}
+		name, tags, pinned := m.Name, m.Tags, m.Pinned
+		s.ApplyMeta(MetaPatch{Name: &name, Tags: &tags, Pinned: &pinned})
+	}
 }
 
 func (r *Registry) List() []*Session {
@@ -242,7 +386,13 @@ func (r *Registry) Reap() {
 	}
 	r.mu.Unlock()
 
+	dir, _ := r.metaSink()
 	for _, s := range victims {
 		_ = s.Close()
+		// The registry has finished with this session, so its metadata has
+		// nothing left to describe. Removing it here rather than at exit is
+		// deliberate: an exited session stays listable for ExitedRetention, and
+		// a name is exactly what makes it findable in that window.
+		DeleteMeta(dir, s.ID())
 	}
 }

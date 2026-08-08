@@ -162,16 +162,36 @@ func cmdServe(args []string) error {
 		return errors.New("refusing to start: auth token is empty")
 	}
 
+	// The sink and format launchd and systemd already capture, shared by
+	// everything in this process that has something to say.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	stateDir := snapshotsDir()
 	reg := session.NewRegistry(time.Now)
 	// Bring back what the previous daemon saved on its way out: each session
 	// returns under its old id with its scrollback and a fresh shell in its
 	// directory. Failures are reported and skipped — revival is a courtesy,
 	// and the daemon always comes up.
-	for _, snap := range session.LoadAndClearSnapshots(snapshotsDir()) {
+	for _, snap := range session.LoadAndClearSnapshots(stateDir) {
 		if _, err := reg.Revive(snap); err != nil {
 			fmt.Fprintf(os.Stderr, "flue: could not revive session %s: %v\n", snap.ID, err)
 		}
 	}
+	// Names and tags live in their own files beside the snapshots, written as
+	// they are edited rather than at shutdown. The snapshots above already carry
+	// them, so on an ordinary restart this pass mostly agrees with what has just
+	// been restored; it earns its place on the restarts that are not ordinary —
+	// a snapshot taken by a daemon built before those fields existed, say — by
+	// being the copy that does not depend on the snapshot's contents.
+	//
+	// It runs after the revival because it can only speak about sessions that
+	// are here: it hands each record to the session it names, and deletes the
+	// ones that name nothing, which is what stops a machine that was killed
+	// rather than stopped from silting the directory up. (After a kill there are
+	// no snapshots at all, so nothing revives and the sweep is the whole of what
+	// this pass does.)
+	reg.SetMetaDir(stateDir, logger)
+	reg.AdoptMetas(stateDir)
 	// Held rather than inlined into daemon.New because the banner below mints
 	// its own handoff token from it. Doing that in-process needs no
 	// authentication ceremony: this is the process that read the token file, so
@@ -233,7 +253,7 @@ func cmdServe(args []string) error {
 	rt.running = startRelay(ctx, srv, identity)
 	srv.SetRelayUI(&relayUIService{
 		runtime: rt,
-		log:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		log:     logger,
 	})
 
 	// Only now, after the bind is confirmed and the runtime record is in place,
@@ -250,7 +270,7 @@ func cmdServe(args []string) error {
 	// and the rings are intact — this is the one moment revival state can be
 	// written. Nothing runs on SIGKILL, so a killed daemon revives nothing;
 	// that is the accepted shape of a graceful-only snapshot.
-	if err := session.SaveSnapshots(snapshotsDir(), reg.Snapshots()); err != nil {
+	if err := session.SaveSnapshots(stateDir, reg.Snapshots()); err != nil {
 		fmt.Fprintf(os.Stderr, "flue: could not save sessions for revival: %v\n", err)
 	}
 	return servedErr
@@ -343,6 +363,10 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 // string when the config dir is unavailable — Load treats it as no
 // snapshots, Save fails with a path error it reports; neither stops a
 // daemon.
+//
+// Session metadata shares it, under names of its own, and reads the empty
+// string the same way: a daemon with nowhere to persist keeps names and tags in
+// memory rather than writing them somewhere arbitrary.
 func snapshotsDir() string {
 	dir, err := config.Dir()
 	if err != nil {

@@ -6,8 +6,9 @@ import {
   useRouterState,
 } from '@tanstack/react-router'
 import type { FlueClient } from '@/client/client'
-import { FlueClientProvider } from '@/client/provider'
+import { FleetProvider } from '@/fleet/provider'
 import { AppShell } from '@/components/app-shell'
+import { PageHeader } from '@/components/page-header'
 import { DevicesRoute } from '@/routes/devices'
 import { MachinesRoute } from '@/routes/machines'
 import { PairRoute } from '@/routes/pair'
@@ -33,8 +34,9 @@ export interface FlueRouterOptions {
   /**
    * The tab's client, when the entry point has already built one. It does that
    * on a relay origin, where the socket has to carry a Noise channel keyed to
-   * the daemon this browser pinned; on loopback this is absent and the provider
-   * below builds the plain /ws client for itself.
+   * the daemon this browser pinned; on loopback this is absent and the fleet
+   * provider below builds the plain /ws client for itself. Either way it is
+   * the fleet's local source — the machine this tab rides.
    */
   client?: FlueClient
   /**
@@ -47,8 +49,13 @@ export interface FlueRouterOptions {
 }
 
 /**
- * The tab's one client, the one route that must not have it, and the case where
+ * The tab's one fleet, the one route that must not have it, and the case where
  * there is no client to be had.
+ *
+ * The fleet provider superseded FlueClientProvider here: it holds one client
+ * per reachable machine — the tab's own ride first — and hands the local one
+ * into the same context useFlueClient has always read, so every screen written
+ * against the one-client world still works unchanged.
  *
  * The provider is here rather than above the router in main.tsx for a single
  * reason: /pair is served to a device that holds no session token — getting one
@@ -59,9 +66,10 @@ export interface FlueRouterOptions {
  * to the daemon with one fetch and nothing else.
  *
  * The root route is where it goes because the root match outlives every
- * navigation, so this is still exactly one client per tab and one socket for
- * sessions, the terminal and Devices alike. Only crossing in or out of /pair
- * changes which branch renders, and nothing in the app links there.
+ * navigation, so this is still exactly one fleet per tab and one socket per
+ * machine for sessions, the terminal and Devices alike. Only crossing in or
+ * out of /pair changes which branch renders, and nothing in the app links
+ * there.
  *
  * `picker` is answered here rather than per route for the same reason the
  * provider is: it is one fact about the whole tab. It sits below the /pair
@@ -79,9 +87,9 @@ const rootRoute = createRootRouteWithContext<FlueRouterOptions>()({
     if (pathname === PAIR_PATH) return <Outlet />
     if (picker === true) return <MachinesRoute />
     return (
-      <FlueClientProvider client={client}>
+      <FleetProvider client={client}>
         <Outlet />
-      </FlueClientProvider>
+      </FleetProvider>
     )
   },
 })
@@ -124,12 +132,11 @@ const sessionsRoute = createRoute({
 function Placeholder({ title, blurb }: { title: string; blurb: string }) {
   return (
     <div className="p-4 sm:p-6 lg:p-8">
-      <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
-        {title}
-      </h1>
-      <p className="mt-2 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
-        {blurb}
-      </p>
+      <PageHeader crumbs={[{ label: title }]}>
+        <p className="max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400">
+          {blurb}
+        </p>
+      </PageHeader>
     </div>
   )
 }

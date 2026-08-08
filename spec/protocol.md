@@ -30,7 +30,8 @@ Every control message is a JSON object with a `type` discriminator.
 | `detach` | `ref` | release an attachment |
 | `resize` | `ref`, `cols`, `rows`, `primary` | report this view's dimensions |
 | `signal` | `ref`, `sig` | send a signal to the session's process |
-| `close` | `ref` | end the session |
+| `close` | `ref` *or* `id` | end the session |
+| `update` | `id`, `name?`, `tags[]?`, `pinned?` | edit a session's human-owned metadata |
 | `devices` | — | list the paired devices |
 | `revoke` | `deviceId` | unpair a device and cut its connections |
 | `pairStart` | — | enter pairing mode |
@@ -41,7 +42,7 @@ Every control message is a JSON object with a `type` discriminator.
 | type | fields | meaning |
 |---|---|---|
 | `welcome` | `daemonId`, `host`, `ver`, `caps[]`, `relay?` | answers `hello` |
-| `sessions` | `sessions[]` | answers `list`, and follows any change to the set |
+| `sessions` | `sessions[]` | answers `list`, and answers `update` on the connection that sent it |
 | `attached` | `ref`, `id`, `cols`, `rows`, `title`, `seq`, `head`, `truncated`, `primary`, `reqId?` | answers `attach` or `spawn` |
 | `exit` | `ref`, `code` | the session's process ended |
 | `sizeChanged` | `ref`, `cols`, `rows`, `primary` | the PTY's dimensions changed |
@@ -86,6 +87,54 @@ up, in which case `origin` is the https origin the relay serves browsers on. A
 daemon with no relay configured omits the field entirely rather than sending
 `off`. It is not a stream: nothing pushes an update when the relay reconnects,
 so a client learns the current state from the `welcome` of its next connection.
+
+### Closing
+
+`close` ends a session, addressed one of two ways. `ref` is an attachment
+handle, for a view that is looking at the session it closes. `id` is the
+attach-free form for the sessions list, which acts on rows it never attached
+to — attaching first just to earn a ref would cost a subscribe, a backlog
+replay and a detach to deliver one verb. A message carries one address or the
+other; when both appear the non-zero `ref` wins and `id` is ignored, so the
+ref semantics are exactly what they always were.
+
+There is **no reply on success**, by either address. The session's end
+announces itself: every attached view is sent `exit`, and a list poll sees
+`state: "exited"` on its next `sessions`. A client closing from a list it is
+not attached through therefore learns the close landed the same way it learns
+everything else about the set — by asking again. Failures are answered: an
+`id` the daemon does not hold with `error{not_found}` (exactly as `update`
+answers one — a list acting on a row that has just been reaped is ordinary),
+and a `ref` the connection does not hold with `error{bad_ref}`.
+
+### Metadata
+
+`update` edits what a human owns on a session — `name`, `tags[]`, `pinned` —
+and nothing else. It is addressed by `id` rather than by `ref`, because naming a
+session is not something you have to be attached to do. `title` is not editable:
+it is scraped from the session's own output and overwritten whenever the program
+inside says something new, which is why `name` exists beside it. A UI shows
+`name` when there is one and falls back to `title`.
+
+The edit is **partial**. A field the message does not carry is a field it leaves
+alone, so `{"type":"update","id":"s1","pinned":true}` pins a session without
+touching its name or its tags, and two views editing different fields of the
+same session cannot undo each other. That makes an empty value and an absent one
+different instructions:
+
+- `"tags": []` clears every tag; no `tags` key leaves the tags as they were.
+- `"name": ""` clears the name; no `name` key leaves the name as it was.
+
+Tags are normalised by the daemon on the way in — trimmed, empties dropped,
+duplicates collapsed, sorted — so the list a later `sessions` reports is not
+always the list that was sent, and a client should render what came back rather
+than what it typed. Comparison is exact: `Prod` and `prod` are two tags.
+
+An `update` that lands is answered by a fresh `sessions` to the requesting
+connection only; other clients converge on their next `list` poll. One naming
+a session that does not exist is answered by `error{not_found}`. Editing
+metadata is not activity in the session: `lastActive` does not move, so tidying
+a list cannot reorder the list being tidied.
 
 ## Pairing
 

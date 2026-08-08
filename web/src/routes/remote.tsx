@@ -12,6 +12,7 @@ import {
   type RelayUIInfo,
 } from '@/components/cloudflare-connect'
 import { Command, Copyable } from '@/components/copyable'
+import { PageHeader } from '@/components/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -299,29 +300,31 @@ export function RemoteRoute() {
 
   return (
     <div className="flex flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
-      <div className="flex items-start justify-between gap-x-4">
-        <div className="min-w-0">
-          <h1 className="text-2xl/8 font-semibold tracking-tight text-zinc-950 sm:text-xl/7 dark:text-white">
-            Remote access
-          </h1>
-          <p className={cn(PROSE, 'mt-1 max-w-[65ch]')}>
-            The daemon listens on this computer and nowhere else. A relay gives it an address the
-            rest of the world can dial, which is what lets a phone — or a second laptop — open a
-            session on this machine.
-          </p>
-          {/*
-            Always on the page, never mounted with its text: several screen
-            readers announce only changes to a live region that was already in
-            the accessibility tree, so a region that appears alongside its first
-            message is a message nobody hears. Empty, it contributes no line box
-            at all, and `empty:mt-0` takes the margin with it.
-          */}
-          <p role="status" className={cn(PROSE, 'mt-3 max-w-[65ch] empty:mt-0')}>
-            {connectionNotice(conn)}
-          </p>
-        </div>
-        <StatusBadge status={greeted ? status : null} />
-      </div>
+      {/*
+        PageHeader rather than a hand-rolled heading row, so this screen
+        carries the same trail markup — and the same sidebar trigger on the
+        heading's line — as every other management screen.
+      */}
+      <PageHeader
+        crumbs={[{ label: 'Remote access' }]}
+        actions={<StatusBadge status={greeted ? status : null} />}
+      >
+        <p className={cn(PROSE, 'max-w-[65ch]')}>
+          The daemon listens on this computer and nowhere else. A relay gives it an address the
+          rest of the world can dial, which is what lets a phone — or a second laptop — open a
+          session on this machine.
+        </p>
+        {/*
+          Always on the page, never mounted with its text: several screen
+          readers announce only changes to a live region that was already in
+          the accessibility tree, so a region that appears alongside its first
+          message is a message nobody hears. Empty, it contributes no line box
+          at all, and `empty:mt-0` takes the margin with it.
+        */}
+        <p role="status" className={cn(PROSE, 'mt-3 max-w-[65ch] empty:mt-0')}>
+          {connectionNotice(conn)}
+        </p>
+      </PageHeader>
 
       {!greeted && <AwaitingWelcome connecting={conn === 'connecting'} />}
       {greeted && status === 'off' && <NotConfigured info={relayUI} />}

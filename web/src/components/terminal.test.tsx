@@ -464,6 +464,74 @@ describe('Terminal', () => {
     expect(document.title).toBe('flue')
   })
 
+  it('puts a typed name first in the tab, with the OSC title beside it', () => {
+    // `attached` carries no name — the sessions poll does, and it is already
+    // flowing for the cwd this component tracks anyway.
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', title: 'vim README.md' })))
+    act(() =>
+      sock.emitControl({
+        type: 'sessions',
+        sessions: [session({ name: 'api', title: 'vim README.md' })],
+      }),
+    )
+
+    expect(document.title).toBe('api — vim README.md')
+  })
+
+  it('falls back to the working directory when no program has set a title', () => {
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', title: '' })))
+    act(() => sock.emitControl({ type: 'sessions', sessions: [session()] }))
+
+    expect(document.title).toBe('/home/karn/code')
+  })
+
+  it('stands alone as the name when there is nothing to put beside it', () => {
+    // A typed name with no OSC title and no directory: "api — " would be a
+    // dash pointing at nothing.
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', title: '' })))
+    act(() =>
+      sock.emitControl({ type: 'sessions', sessions: [session({ name: 'api', cwd: '' })] }),
+    )
+
+    expect(document.title).toBe('api')
+  })
+
+  it('keeps the tab name it inherited when every source is empty', () => {
+    // Blanking the tab would say less than the name that was already there.
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', title: '' })))
+    act(() => sock.emitControl({ type: 'sessions', sessions: [session({ cwd: '' })] }))
+
+    expect(document.title).toBe('flue')
+  })
+
+  it('follows the OSC title as the sessions poll moves it, for its own row only', () => {
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', title: 'zsh' })))
+    expect(document.title).toBe('zsh')
+
+    act(() =>
+      sock.emitControl({ type: 'sessions', sessions: [session({ title: 'vim wire.go' })] }),
+    )
+    expect(document.title).toBe('vim wire.go')
+
+    // Another session's row says nothing about this tab.
+    act(() =>
+      sock.emitControl({
+        type: 'sessions',
+        sessions: [session({ id: 'other', title: 'not this tab' })],
+      }),
+    )
+    expect(document.title).toBe('vim wire.go')
+  })
+
   describe('touch scrolling', () => {
     /** Attached at 80x24 with a 17px line, ready to be dragged. */
     function mountDraggable() {
@@ -1346,12 +1414,16 @@ function session(over: Partial<SessionInfo> = {}): SessionInfo {
   return {
     id: 's1',
     title: '',
+    name: '',
+    tags: [],
+    pinned: false,
     cwd: '/home/karn/code',
     cmd: [],
     state: 'running',
     exitCode: 0,
     cols: 80,
     rows: 24,
+    createdAt: '2026-08-05T00:00:00Z',
     lastActive: '2026-08-05T00:00:00Z',
     ...over,
   }

@@ -41,9 +41,14 @@ export function AppSidebar({ currentPath, ...props }: AppSidebarProps) {
             The primitives are all divs and uls; the nav landmark and the
             explicit list role are this app's own, and router.test.tsx keys
             on the landmark to prove the terminal route has no chrome.
+
+            Named, because it is not the only navigation on the page: every
+            management screen carries its own header's Breadcrumb landmark,
+            and two nav elements a rotor lists as just "navigation" twice
+            leave the reader picking one by luck.
           */}
           <SidebarGroupContent>
-            <nav>
+            <nav aria-label="Main">
               <SidebarMenu role="list" className="gap-1">
               {NAV_ITEMS.map((item) => {
                 const active = isNavItemActive(currentPath, item.to)

@@ -1,5 +1,5 @@
 import { StrictMode } from 'react'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
   createMemoryHistory,
@@ -11,47 +11,59 @@ import {
 } from '@tanstack/react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { FlueClientProvider } from '@/client/provider'
 import type { SessionInfo } from '@/client/protocol'
+import { SidebarProvider } from '@/components/ui/sidebar'
+import { FleetClient } from '@/fleet/fleet'
+import { FleetProvider } from '@/fleet/provider'
 import { attached, fakeClient, type FakeSocket } from '@/testing/socket'
 import { SessionsRoute } from './sessions'
 
 function info(over: Partial<SessionInfo> & { id: string }): SessionInfo {
   return {
     title: 'zsh',
+    name: '',
+    tags: [],
+    pinned: false,
     cwd: '/Users/karn/code/flue',
     cmd: ['zsh', '-l'],
     state: 'running',
     exitCode: 0,
     cols: 80,
     rows: 24,
+    createdAt: '2026-07-28T09:00:00Z',
     lastActive: '2026-07-28T10:00:00Z',
     ...over,
   }
 }
 
 /**
- * Mount the screen under a router that really routes.
+ * Mount the screen under a router that really routes, over a scripted fleet.
  *
- * Deliberately not `testing/render.tsx`'s helper. That one mounts the tree as
- * the *root* route's component, so it renders whatever the location is — which
- * means navigating never unmounts anything, and every property this screen has
- * on the way out would go untested. Here the screen is the component of `/` and
- * `/sessions` only, so navigating anywhere else tears it down exactly as the
- * real router does: the terminal route is a sibling of the shell, and the nav
- * links leave for other shell routes.
+ * The fleet is the seam the provider was built with: two machines — the ridden
+ * one and a paired remote — each on its own fake socket, injected whole via
+ * `FleetProvider fleet=`, so the real FleetClient does the merging and the
+ * routing while no socket ever opens. The local machine is born nameless, as
+ * in production, and takes its name from the welcome a test emits when a
+ * heading matters.
  *
- * The socket is opened *after* the first render on purpose: a screen reached by
- * navigating mounts into a connection that is already established, but the very
- * first paint of the tab does not, and `list` has to survive both.
+ * Deliberately not `testing/render.tsx`'s helper, for the reason the previous
+ * suite spelled out: the screen must be the component of `/` and `/sessions`
+ * only, so navigating anywhere else tears it down exactly as the real router
+ * does. The SidebarProvider is here because the route reads the sidebar's
+ * expansion to place the bulk bar, and in the app that provider is the shell's.
  *
- * `strict` wraps only `SessionsRoute` itself, not the provider around it —
- * `FlueClientProvider`'s own StrictMode behaviour is provider.test.tsx's to
- * cover. This isolates the double mount to the one component whose spawn
- * timing is under test here.
+ * The socket is opened *after* the first render on purpose: a screen reached
+ * by navigating mounts into a connection that is already established, but the
+ * very first paint of the tab does not, and both have to work.
  */
 async function mountSessions({ open = true, strict = false } = {}) {
-  const { client, sockets } = fakeClient()
+  const local = fakeClient()
+  const attic = fakeClient()
+  const fleet = new FleetClient([
+    { id: 'local', name: '', client: local.client },
+    { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
+  ])
+
   const routeComponent = strict
     ? () => (
         <StrictMode>
@@ -78,17 +90,25 @@ async function mountSessions({ open = true, strict = false } = {}) {
   await router.load()
 
   const view = render(
-    <FlueClientProvider client={client}>
-      <RouterProvider router={router as never} />
-    </FlueClientProvider>,
+    <SidebarProvider>
+      <FleetProvider fleet={fleet}>
+        <RouterProvider router={router as never} />
+      </FleetProvider>
+    </SidebarProvider>,
   )
-  const sock = sockets[0]!
+  const sock = local.sockets[0]!
   if (open) act(() => sock.open())
 
   /** Navigate, and settle, so the screen has really gone by the next line. */
   const goTo = (to: string) => act(async () => void (await router.navigate({ to })))
 
-  return { ...view, router, goTo, client, sockets, sock }
+  /** The local daemon's greeting, which is what names the ridden machine. */
+  const welcomeLocal = () =>
+    act(() =>
+      sock.emitControl({ type: 'welcome', daemonId: 'd1', host: 'mesa.local', ver: '0.1.0' }),
+    )
+
+  return { ...view, router, goTo, fleet, local, attic, sock, welcomeLocal }
 }
 
 /** Whether the screen under test is still on show. */
@@ -100,348 +120,670 @@ function listed(sock: FakeSocket, sessions: SessionInfo[]) {
 
 const newSession = () => screen.getByRole('button', { name: 'New session' })
 
+/** Open one of the display-options selects and take the option reading `label`. */
+async function pick(user: ReturnType<typeof userEvent.setup>, of: string, label: string) {
+  const trigger = screen.getByRole('combobox', { name: of })
+  trigger.focus()
+  await user.keyboard('{Enter}')
+  await user.click(await screen.findByRole('option', { name: label }))
+}
+
 afterEach(() => {
   vi.useRealTimers()
+  vi.restoreAllMocks()
+  localStorage.clear()
 })
 
 describe('SessionsRoute', () => {
-  it('asks for the session list on mount, even before the socket is up', async () => {
-    // The client holds one `list` while it is down for exactly this reason: a
-    // request dropped here leaves the screen permanently empty.
-    const { sock } = await mountSessions({ open: false })
+  it('asks each machine for its sessions the moment it comes up', async () => {
+    const { sock, attic } = await mountSessions({ open: false })
     expect(sock.ofType('list')).toEqual([])
 
     act(() => sock.open())
+    expect(sock.ofType('list')).toHaveLength(1)
 
-    expect(sock.ofType('list')).toEqual([{ type: 'list' }])
+    act(() => attic.sockets[0]!.open())
+    expect(attic.sockets[0]!.ofType('list')).toHaveLength(1)
   })
 
-  it('renders what the daemon reports', async () => {
-    const { sock } = await mountSessions()
+  it('renders rows from two machines under their machine headings', async () => {
+    const { sock, attic, welcomeLocal } = await mountSessions()
+    welcomeLocal()
+    act(() => attic.sockets[0]!.open())
 
-    listed(sock, [info({ id: 's1', cwd: '/one' }), info({ id: 's2', cwd: '/two' })])
+    listed(sock, [info({ id: 's1', cwd: '/one' })])
+    listed(attic.sockets[0]!, [info({ id: 's2', cwd: '/two' })])
 
+    // The group toggles carry the machine names; the rows ride under them.
+    expect(screen.getByRole('button', { name: 'mesa.local' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Attic Pi' })).toBeTruthy()
     expect(screen.getByText('/one')).toBeTruthy()
     expect(screen.getByText('/two')).toBeTruthy()
   })
 
-  it('does not claim the daemon has no sessions before it has answered', async () => {
-    // "No sessions yet" is a statement about the daemon. Showing it while the
-    // first `list` is still in flight makes it up, and it is exactly the state
-    // every cold load passes through.
-    const { sock } = await mountSessions()
+  it('does not claim there are no sessions before the machines have answered', async () => {
+    // "No sessions yet" is a claim about the fleet. Before the first list has
+    // come back it is invented — and every cold load passes through that state.
+    const { sock, attic } = await mountSessions()
+    act(() => attic.sockets[0]!.open())
     expect(screen.queryByText(/No sessions yet/i)).toBeNull()
 
     listed(sock, [])
+    listed(attic.sockets[0]!, [])
 
     expect(screen.getByText(/No sessions yet/i)).toBeTruthy()
   })
 
-  it('keeps the list fresh while the screen is open, and stops polling on unmount', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    const { client, sock, sockets, unmount } = await mountSessions()
-    expect(sock.ofType('list')).toHaveLength(1)
+  it('folds a heading shut and open again', async () => {
+    const { sock, welcomeLocal } = await mountSessions()
+    welcomeLocal()
+    listed(sock, [info({ id: 's1', cwd: '/one' })])
 
-    await act(() => vi.advanceTimersByTimeAsync(3_000))
-    expect(sock.ofType('list')).toHaveLength(2)
+    await userEvent.click(screen.getByRole('button', { name: 'mesa.local' }))
+    expect(screen.queryByText('/one')).toBeNull()
 
-    unmount()
-    await act(() => vi.advanceTimersByTimeAsync(9_000))
-
-    // Asserting on the dead socket would prove nothing: unmounting also closes
-    // the client, so a leaked interval would send nothing either way. It is
-    // still visible from outside, because `list` is the one request the client
-    // holds while it is down — so a leaked tick leaves a request owed, and the
-    // next connection replays it.
-    act(() => client.connect())
-    act(() => sockets[1]!.open())
-    expect(sockets[1]!.ofType('list')).toEqual([])
+    await userEvent.click(screen.getByRole('button', { name: 'mesa.local' }))
+    expect(screen.getByText('/one')).toBeTruthy()
   })
 
-  it('opens a session that is already there', async () => {
-    const { sock, router } = await mountSessions()
-    listed(sock, [info({ id: 'abc123', cwd: '/one' })])
-
-    await userEvent.click(screen.getByRole('button', { name: /open/i }))
-
-    await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/abc123'))
-  })
-
-  it('starts a session only when the user asks, and never from an effect', async () => {
-    // `spawn` carries no idempotency key, so a spawn in a mount effect starts
-    // two shells under StrictMode and can only ever detach one. Creation is a
-    // click, always.
+  it('narrows the rows as the search settles', async () => {
     const { sock } = await mountSessions()
-    expect(sock.ofType('spawn')).toEqual([])
-
-    await userEvent.click(newSession())
-
-    expect(sock.ofType('spawn')).toEqual([{ type: 'spawn', cols: 80, rows: 24, reqId: 1 }])
-  })
-
-  it('hands back the attachment the daemon gave it, then opens the new session', async () => {
-    // The daemon attaches whoever spawns. This screen renders no terminal, and
-    // the terminal route attaches on its own — so keeping that ref would leave
-    // one tab holding two attachments to one session, which is the one shape
-    // FlueClient's reattach plan cannot carry.
-    const { sock, router } = await mountSessions()
-    await userEvent.click(newSession())
-
-    act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1', reqId: 1 })))
-
-    expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 4 }])
-    await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh1'))
-  })
-
-  it('ignores an attached it did not ask for', async () => {
-    // One client serves the whole tab, so this listener sees every reply —
-    // including a reattach replayed after a reconnect. Navigating on one of
-    // those would move the user somewhere they never asked to go.
-    const { sock, router } = await mountSessions()
-
-    act(() => sock.emitControl(attached({ ref: 9, id: 'someone-else' })))
-
-    expect(sock.ofType('detach')).toEqual([])
-    expect(router.state.location.pathname).toBe('/sessions')
-  })
-
-  it('takes one attached per spawn, not the next one that happens by', async () => {
-    const { sock, router } = await mountSessions()
-    await userEvent.click(newSession())
-
-    act(() => sock.emitControl(attached({ ref: 1, id: 'mine', reqId: 1 })))
-    act(() => sock.emitControl(attached({ ref: 2, id: 'not-mine' })))
-
-    expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 1 }])
-    await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/mine'))
-  })
-
-  it('starts one session per click, not one per impatient click', async () => {
-    // The second shell's `attached` would land after this screen has navigated
-    // away on the first, with no listener to hand its ref back — an attachment
-    // streaming output to nothing, held open across every reconnect.
-    const { sock } = await mountSessions()
-
-    await userEvent.click(newSession())
-    await userEvent.click(newSession())
-
-    expect(sock.ofType('spawn')).toHaveLength(1)
-  })
-
-  it('lets the user try again once a spawn has been answered', async () => {
-    const { sock } = await mountSessions()
-    await userEvent.click(newSession())
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 1 }))
-
-    await userEvent.click(newSession())
-
-    expect(sock.ofType('spawn')).toHaveLength(2)
-  })
-
-  it('hands back a spawn answered after the screen has gone', async () => {
-    // Disabling the button closes the second-click path and nothing else. A
-    // row's Open and every nav link navigate unconditionally, and this screen
-    // begins its own navigation one line before it unmounts — so a reply
-    // arriving with no listener left is the ordinary case, not the exotic one.
-    const { sock, goTo } = await mountSessions()
-    await userEvent.click(newSession())
-
-    await goTo('/settings')
-    expect(onScreen()).toBe(false)
-    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan', reqId: 1 })))
-
-    expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 7 }])
-  })
-
-  it('leaves nothing behind for the reattach plan to re-establish', async () => {
-    // The other half of the same defect, and the half that lasts: an adopted
-    // reply seeds `wanted`, so the daemon would be asked for that session on
-    // every reconnect for the life of the tab.
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    vi.spyOn(Math, 'random').mockReturnValue(0)
-    const { sock, sockets, goTo } = await mountSessions()
-    await userEvent.click(newSession())
-    await goTo('/settings')
-    act(() => sock.emitControl(attached({ ref: 7, id: 'orphan', reqId: 1 })))
-
-    act(() => sock.close())
-    await act(() => vi.advanceTimersByTimeAsync(125))
-    act(() => sockets[1]!.open())
-
-    expect(sockets[1]!.ofType('attach')).toEqual([])
-    vi.restoreAllMocks()
-  })
-
-  it('stops refusing when the spawn it was armed for failed', async () => {
-    // The third settlement, and the one that bites hardest if it is missing.
-    // A failed spawn is answered with an error and never with an `attached`,
-    // so the refusal would stay armed for the life of the connection and hand
-    // back the next attachment the tab is given — a terminal's own. That view
-    // shows itself live on a ref the client has discarded: every keystroke
-    // dropped in silence, no output, and nothing in the reattach plan for a
-    // reconnect to repair.
-    const { sock, goTo } = await mountSessions()
-    await userEvent.click(newSession())
-    await goTo('/settings')
-
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'fork: retry', reqId: 1 }))
-    act(() => sock.emitControl(attached({ ref: 1, id: 'a-terminal' })))
-
-    expect(sock.ofType('detach')).toEqual([])
-  })
-
-  it('stops refusing once the outage has answered for the reply', async () => {
-    // The hazard the refusal introduces. Left armed past the outage it would
-    // hand back the first `attached` of the next connection — a terminal's own
-    // — leaving that view holding a ref this client had already detached.
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    vi.spyOn(Math, 'random').mockReturnValue(0)
-    const { sock, sockets, goTo } = await mountSessions()
-    await userEvent.click(newSession())
-    await goTo('/settings')
-
-    act(() => sock.close())
-    await act(() => vi.advanceTimersByTimeAsync(125))
-    act(() => sockets[1]!.open())
-    act(() => sockets[1]!.emitControl(attached({ ref: 1, id: 'a-terminal' })))
-
-    expect(sockets[1]!.ofType('detach')).toEqual([])
-    vi.restoreAllMocks()
-  })
-
-  it('does not claim a reply an earlier refusal already handed back', async () => {
-    // Come back to the screen inside the first spawn's round trip and there
-    // are two claims on the wire: a refusal armed by the unmount, and a fresh
-    // debt from the new mount. Spending both on the first reply would navigate
-    // to a session that was just detached and orphan the second.
-    const { sock, router, goTo } = await mountSessions()
-    await userEvent.click(newSession())
-    await goTo('/settings')
-    await goTo('/sessions')
-    await userEvent.click(newSession())
-
-    act(() => sock.emitControl(attached({ ref: 1, id: 'first', reqId: 1 })))
-    expect(router.state.location.pathname).toBe('/sessions')
-
-    act(() => sock.emitControl(attached({ ref: 2, id: 'second', reqId: 2 })))
-
-    expect(sock.ofType('detach')).toEqual([
-      { type: 'detach', ref: 1 },
-      { type: 'detach', ref: 2 },
+    listed(sock, [
+      info({ id: 's1', cwd: '/apps/web' }),
+      info({ id: 's2', cwd: '/apps/api' }),
     ])
-    await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/second'))
+
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Search sessions' }), 'web')
+
+    await waitFor(() => expect(screen.queryByText('/apps/api')).toBeNull())
+    expect(screen.getByText('/apps/web')).toBeTruthy()
   })
 
-  it('says so when the daemon refuses to start a session', async () => {
+  it('regroups when the grouping changes', async () => {
+    const user = userEvent.setup()
     const { sock } = await mountSessions()
-    await userEvent.click(newSession())
+    listed(sock, [info({ id: 's1' }), info({ id: 's2', state: 'exited' })])
 
-    act(() =>
-      sock.emitControl({
-        type: 'error',
-        code: 'spawn_failed',
-        msg: 'chdir /nope: no such file',
-        reqId: 1,
-      }),
-    )
+    await user.click(screen.getByRole('button', { name: 'Display options' }))
+    await pick(user, 'Grouping', 'State')
 
-    expect(screen.getByRole('status').textContent).toContain('chdir /nope')
+    expect(screen.getByRole('button', { name: 'Running' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Exited' })).toBeTruthy()
   })
 
-  it('does not silently drop a spawn it could not send', async () => {
-    // `spawn` is deliberately not held while the socket is down — a shell
-    // started minutes later at a screen nobody is looking at is worse than
-    // none. That makes saying so this screen's job.
-    const { sock } = await mountSessions({ open: false })
+  it('opens a session on the machine that owns it, from the row itself', async () => {
+    const { sock, attic, router } = await mountSessions()
+    act(() => attic.sockets[0]!.open())
+    listed(attic.sockets[0]!, [info({ id: 'abc123', name: 'remote-one' })])
+    listed(sock, [])
 
-    await userEvent.click(newSession())
+    // The row is a link, not a button: its href carries the machine that owns
+    // the session, which is also what a Ctrl/Cmd click hands the browser.
+    const row = screen.getByRole('link', { name: 'Open remote-one' })
+    expect(row.getAttribute('href')).toBe('/d/attic-pi/s/abc123')
+    await userEvent.click(row)
 
-    expect(sock.ofType('spawn')).toEqual([])
-    expect(screen.getByRole('status').textContent).toMatch(/not connected/i)
+    await waitFor(() => expect(router.state.location.pathname).toBe('/d/attic-pi/s/abc123'))
   })
 
-  it('stops waiting for a reply that is never coming', async () => {
-    // A failed spawn owes an `attached` that will not arrive. If that debt
-    // stayed on the books, the next reattach to land would be mistaken for it.
-    const { sock, router } = await mountSessions()
-    await userEvent.click(newSession())
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 1 }))
+  describe('metadata actions', () => {
+    it('round-trips a rename through fleet.update, clears surviving', async () => {
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1', name: 'old-name' })])
 
-    act(() => sock.emitControl(attached({ ref: 6, id: 'unrelated' })))
+      await user.click(screen.getByRole('button', { name: 'Actions for old-name' }))
+      await user.click(screen.getByRole('menuitem', { name: 'Rename' }))
+      await user.clear(screen.getByRole('textbox', { name: 'Name' }))
+      await user.click(screen.getByRole('button', { name: 'Save' }))
 
-    expect(sock.ofType('detach')).toEqual([])
-    expect(router.state.location.pathname).toBe('/sessions')
+      // The clear travels as an explicit empty string: a truthiness copy on
+      // the way to the wire would have dropped the one field this edit is.
+      expect(sock.ofType('update')).toEqual([{ type: 'update', id: 's1', name: '' }])
+    })
+
+    it('round-trips a tag edit, and a clear of the last tag', async () => {
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1', name: 'alpha', tags: ['api'] })])
+
+      await user.click(screen.getByRole('button', { name: 'Actions for alpha' }))
+      await user.click(screen.getByRole('menuitem', { name: 'Edit tags' }))
+      await user.click(screen.getByRole('button', { name: 'Remove api' }))
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+
+      expect(sock.ofType('update')).toEqual([{ type: 'update', id: 's1', tags: [] }])
+    })
+
+    it('pins and unpins from the row menu', async () => {
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [
+        info({ id: 's1', name: 'alpha' }),
+        info({ id: 's2', name: 'beta', pinned: true }),
+      ])
+
+      await user.click(screen.getByRole('button', { name: 'Actions for alpha' }))
+      await user.click(screen.getByRole('menuitem', { name: 'Pin' }))
+      await user.click(screen.getByRole('button', { name: 'Actions for beta' }))
+      await user.click(screen.getByRole('menuitem', { name: 'Unpin' }))
+
+      expect(sock.ofType('update')).toEqual([
+        { type: 'update', id: 's1', pinned: true },
+        { type: 'update', id: 's2', pinned: false },
+      ])
+    })
+
+    it('closes a row by id, with no confirm, and says so', async () => {
+      // The ⋯ close is direct, as the exit overlay's is: one session the
+      // reader just named, not a bulk sweep. The confirm lives on the bulk
+      // bar, where the blast radius earns it.
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1', name: 'alpha' })])
+
+      await user.click(screen.getByRole('button', { name: 'Actions for alpha' }))
+      await user.click(screen.getByRole('menuitem', { name: 'Close' }))
+
+      expect(sock.ofType('close')).toEqual([{ type: 'close', id: 's1' }])
+      expect(screen.getByRole('status').textContent).toContain('Closing alpha')
+    })
+
+    it('announces a refusal that answers an act nobody can correlate', async () => {
+      // An update and a close-by-id carry no reqId, because success has no
+      // reply to correlate to — so their one failure mode comes back as a
+      // bare not_found. Nothing but this screen is left to say it: dropped,
+      // the row sits there unchanged and the reader is told nothing at all.
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1', name: 'alpha' })])
+
+      await user.click(screen.getByRole('button', { name: 'Actions for alpha' }))
+      await user.click(screen.getByRole('menuitem', { name: 'Close' }))
+      act(() => sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }))
+
+      expect(screen.getByRole('status').textContent).toBe('That session is gone.')
+    })
+
+    it('announces one from a remote machine too, not only the ridden one', async () => {
+      const { attic } = await mountSessions()
+      act(() => attic.sockets[0]!.open())
+
+      act(() =>
+        attic.sockets[0]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }),
+      )
+
+      expect(screen.getByRole('status').textContent).toBe('That session is gone.')
+    })
+
+    it('leaves a correlated refusal to whoever holds its request', async () => {
+      // A reqId means somebody asked and is waiting: a spawn settles in the
+      // route's own per-spawn listener, an attach inside the client. Saying
+      // it here as well would double-announce the ones that are handled and
+      // invent a sentence for the ones that are not.
+      const { sock } = await mountSessions()
+
+      act(() =>
+        sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 9 }),
+      )
+
+      expect(screen.getByRole('status').textContent).toBe('')
+    })
+
+    it('says nothing about an error that is not a missing session', async () => {
+      const { sock } = await mountSessions()
+
+      act(() => sock.emitControl({ type: 'error', code: 'lagged', msg: 'too far behind' }))
+
+      expect(screen.getByRole('status').textContent).toBe('')
+    })
   })
 
-  it('ignores a spawn_failed that answers someone else’s request', async () => {
-    // reqId is the whole point: an error naming another request must not
-    // write off this screen's debt or show its notice.
-    const { sock, router } = await mountSessions()
-    await userEvent.click(newSession())
+  describe('selection and the bulk bar', () => {
+    async function selectTwo() {
+      const mounted = await mountSessions()
+      const { sock, attic } = mounted
+      act(() => attic.sockets[0]!.open())
+      listed(sock, [info({ id: 's1', name: 'alpha', tags: ['api', 'prod'] })])
+      listed(attic.sockets[0]!, [info({ id: 's2', name: 'beta', tags: ['api'] })])
 
-    act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 99 }))
-    expect(screen.getByRole('status').textContent).not.toContain('nope')
+      await userEvent.click(screen.getByRole('checkbox', { name: 'Select alpha' }))
+      await userEvent.click(screen.getByRole('checkbox', { name: 'Select beta' }))
+      expect(screen.getByText('2 selected')).toBeTruthy()
+      return mounted
+    }
 
-    act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1', reqId: 1 })))
-    await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh1'))
+    it('closes the selection after a confirm, one close per machine', async () => {
+      const { sock, attic } = await selectTwo()
+
+      const bar = within(screen.getByRole('toolbar', { name: 'Bulk actions' }))
+      await userEvent.click(bar.getByRole('button', { name: 'Close' }))
+      await userEvent.click(screen.getByRole('button', { name: 'Close sessions' }))
+
+      expect(sock.ofType('close')).toEqual([{ type: 'close', id: 's1' }])
+      expect(attic.sockets[0]!.ofType('close')).toEqual([{ type: 'close', id: 's2' }])
+      // The act consumes the selection: the bar leaves with it.
+      expect(screen.queryByRole('toolbar', { name: 'Bulk actions' })).toBeNull()
+      expect(screen.getByRole('status').textContent).toContain('Closing 2 sessions')
+    })
+
+    it('pins the whole selection', async () => {
+      const { sock, attic } = await selectTwo()
+
+      await userEvent.click(screen.getByRole('button', { name: 'Pin' }))
+
+      expect(sock.ofType('update')).toEqual([{ type: 'update', id: 's1', pinned: true }])
+      expect(attic.sockets[0]!.ofType('update')).toEqual([
+        { type: 'update', id: 's2', pinned: true },
+      ])
+      expect(screen.queryByRole('toolbar', { name: 'Bulk actions' })).toBeNull()
+    })
+
+    it('tags the selection from the shared tags, replacing each list whole', async () => {
+      const user = userEvent.setup()
+      const { sock, attic } = await selectTwo()
+
+      await user.click(screen.getByRole('button', { name: 'Tag' }))
+
+      // Seeded with the intersection: api is on both rows, prod on one only.
+      expect(screen.getByRole('button', { name: 'Remove api' })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: 'Remove prod' })).toBeNull()
+
+      await user.type(screen.getByRole('textbox', { name: 'Add tag' }), 'ops{Enter}')
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+
+      // Replace semantics, honestly: each selected session's tags become the
+      // edited list — beta gains ops, alpha loses the prod the editor never
+      // showed. That is what editing a shared set means.
+      expect(sock.ofType('update')).toEqual([{ type: 'update', id: 's1', tags: ['api', 'ops'] }])
+      expect(attic.sockets[0]!.ofType('update')).toEqual([
+        { type: 'update', id: 's2', tags: ['api', 'ops'] },
+      ])
+      expect(screen.queryByRole('toolbar', { name: 'Bulk actions' })).toBeNull()
+    })
+
+    it('prunes the selection when a selected session disappears', async () => {
+      const { sock, attic } = await selectTwo()
+
+      listed(attic.sockets[0]!, [])
+      expect(screen.getByText('1 selected')).toBeTruthy()
+
+      listed(sock, [])
+      expect(screen.queryByRole('toolbar', { name: 'Bulk actions' })).toBeNull()
+    })
   })
 
-  it('reports a lost daemon rather than showing an empty screen', async () => {
-    const { sock } = await mountSessions()
-    listed(sock, [info({ id: 's1' })])
+  describe('machine health', () => {
+    it('shows an unreachable machine as a band with a retry', async () => {
+      const { fleet, attic, welcomeLocal, sock } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [info({ id: 's1' })])
 
-    act(() => sock.close())
+      // A machine whose reconnection has stopped is the honest way to hold
+      // the unreachable state still, with no timer to advance: Retry redials
+      // a closed client and a backing-off one alike (client.test.ts pins the
+      // mid-backoff half, where the wait is stood down rather than waited out).
+      act(() => fleet.clientFor('attic-pi')!.close())
 
-    expect(screen.getByRole('status').textContent).toMatch(/reconnecting/i)
+      expect(screen.getByText(/is unreachable/)).toBeTruthy()
+      expect(screen.getByText('Attic Pi')).toBeTruthy()
+
+      await userEvent.click(screen.getByRole('button', { name: 'Retry Attic Pi' }))
+      expect(attic.sockets).toHaveLength(2)
+
+      act(() => attic.sockets[1]!.open())
+      expect(screen.queryByText(/is unreachable/)).toBeNull()
+    })
+
+    it('keeps the band when the grouping is not by machine', async () => {
+      const user = userEvent.setup()
+      const { fleet, sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' })])
+      act(() => fleet.clientFor('attic-pi')!.close())
+
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await pick(user, 'Grouping', 'State')
+
+      expect(screen.getByText(/is unreachable/)).toBeTruthy()
+    })
+
+    it('reports a lost local daemon rather than showing an empty screen', async () => {
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' })])
+
+      act(() => sock.close())
+
+      expect(screen.getByRole('status').textContent).toMatch(/reconnecting/i)
+    })
+
+    it('has the live region on the page before it has anything to say', async () => {
+      // Several screen readers announce only changes to a live region that was
+      // already in the accessibility tree, so one that arrives together with
+      // its first message is a message nobody hears.
+      const { sock } = await mountSessions()
+      expect(screen.getByRole('status').textContent).toBe('')
+
+      act(() => sock.close())
+
+      expect(screen.getByRole('status').textContent).toMatch(/reconnecting/i)
+    })
   })
 
-  it('has the live region on the page before it has anything to say', async () => {
-    // Several screen readers announce only changes to a live region that was
-    // already in the accessibility tree, so one that arrives together with its
-    // first message is a message nobody hears.
-    const { sock } = await mountSessions()
-    expect(screen.getByRole('status').textContent).toBe('')
+  describe('starting sessions', () => {
+    it('spawns on the ridden machine from the primary button, only on a click', async () => {
+      const { sock } = await mountSessions()
+      expect(sock.ofType('spawn')).toEqual([])
 
-    act(() => sock.close())
+      await userEvent.click(newSession())
 
-    expect(screen.getByRole('status').textContent).toMatch(/reconnecting/i)
+      expect(sock.ofType('spawn')).toEqual([{ type: 'spawn', cols: 80, rows: 24, reqId: 1 }])
+    })
+
+    it('spawns on the first online machine when the ridden one is down', async () => {
+      const { attic } = await mountSessions({ open: false })
+      act(() => attic.sockets[0]!.open())
+
+      await userEvent.click(newSession())
+
+      expect(attic.sockets[0]!.ofType('spawn')).toHaveLength(1)
+    })
+
+    it('spawns on the machine picked from the chevron menu, then opens there', async () => {
+      const user = userEvent.setup()
+      const { sock, attic, router } = await mountSessions()
+      act(() => attic.sockets[0]!.open())
+
+      await user.click(
+        screen.getByRole('button', { name: 'Choose a machine for the new session' }),
+      )
+      await user.click(screen.getByRole('menuitem', { name: 'Attic Pi' }))
+
+      expect(attic.sockets[0]!.ofType('spawn')).toHaveLength(1)
+      expect(sock.ofType('spawn')).toEqual([])
+
+      act(() => attic.sockets[0]!.emitControl(attached({ ref: 4, id: 'fresh9', reqId: 1 })))
+
+      expect(attic.sockets[0]!.ofType('detach')).toEqual([{ type: 'detach', ref: 4 }])
+      await waitFor(() => expect(router.state.location.pathname).toBe('/d/attic-pi/s/fresh9'))
+    })
+
+    it('spawns into a machine group from its heading', async () => {
+      const { attic, sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      act(() => attic.sockets[0]!.open())
+      listed(sock, [])
+      listed(attic.sockets[0]!, [info({ id: 's2' })])
+
+      await userEvent.click(screen.getByRole('button', { name: 'New session on Attic Pi' }))
+
+      expect(attic.sockets[0]!.ofType('spawn')).toHaveLength(1)
+      expect(sock.ofType('spawn')).toEqual([])
+    })
+
+    it('hands back the attachment the daemon gave it, then opens the new session', async () => {
+      // The daemon attaches whoever spawns. This screen renders no terminal,
+      // and the terminal route attaches on its own — so keeping the ref would
+      // leave one tab holding two attachments to one session, the one shape
+      // FlueClient's reattach plan cannot carry.
+      const { sock, router } = await mountSessions()
+      await userEvent.click(newSession())
+
+      act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1', reqId: 1 })))
+
+      expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 4 }])
+      await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh1'))
+    })
+
+    it('ignores an attached it did not ask for', async () => {
+      const { sock, router } = await mountSessions()
+
+      act(() => sock.emitControl(attached({ ref: 9, id: 'someone-else' })))
+
+      expect(sock.ofType('detach')).toEqual([])
+      expect(router.state.location.pathname).toBe('/sessions')
+    })
+
+    it('starts one session per click, not one per impatient click', async () => {
+      const { sock } = await mountSessions()
+
+      await userEvent.click(newSession())
+      await userEvent.click(newSession())
+
+      expect(sock.ofType('spawn')).toHaveLength(1)
+    })
+
+    it('lets the user try again once a spawn has been answered', async () => {
+      const { sock } = await mountSessions()
+      await userEvent.click(newSession())
+      act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 1 }))
+
+      await userEvent.click(newSession())
+
+      expect(sock.ofType('spawn')).toHaveLength(2)
+    })
+
+    it('hands back a spawn answered after the screen has gone', async () => {
+      const { sock, goTo } = await mountSessions()
+      await userEvent.click(newSession())
+
+      await goTo('/settings')
+      expect(onScreen()).toBe(false)
+      act(() => sock.emitControl(attached({ ref: 7, id: 'orphan', reqId: 1 })))
+
+      expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 7 }])
+    })
+
+    it('says so when the daemon refuses to start a session', async () => {
+      const { sock } = await mountSessions()
+      await userEvent.click(newSession())
+
+      act(() =>
+        sock.emitControl({
+          type: 'error',
+          code: 'spawn_failed',
+          msg: 'chdir /nope: no such file',
+          reqId: 1,
+        }),
+      )
+
+      expect(screen.getByRole('status').textContent).toContain('chdir /nope')
+    })
+
+    it('does not silently drop a spawn when no machine is reachable', async () => {
+      const { sock } = await mountSessions({ open: false })
+
+      await userEvent.click(newSession())
+
+      expect(sock.ofType('spawn')).toEqual([])
+      expect(screen.getByRole('status').textContent).toMatch(/not connected/i)
+    })
+
+    it('keeps the teal on the new-session control alone', async () => {
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' }), info({ id: 's2', cwd: '/two' })])
+
+      const filled = screen
+        .getAllByRole('button')
+        .filter((b) => b.getAttribute('data-variant') === 'default')
+
+      // Two halves, one control: the primary verb and its machine picker.
+      expect(filled).toHaveLength(2)
+      expect(filled[0]!.textContent).toBe('New session')
+      expect(filled[1]!.getAttribute('aria-label')).toBe('Choose a machine for the new session')
+    })
   })
 
-  it('forgets a spawn the outage carried away', async () => {
-    // The reply is never coming: it was owed on a socket that is gone. Left on
-    // the books, it would claim the first `attached` of the next connection —
-    // a reattach for some other view — and navigate away from under the user.
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    vi.spyOn(Math, 'random').mockReturnValue(0)
-    const { router, sock, sockets } = await mountSessions()
-    await userEvent.click(newSession())
+  describe('saved views', () => {
+    async function saveAs(user: ReturnType<typeof userEvent.setup>, name: string) {
+      await user.click(screen.getByRole('button', { name: 'Save current view' }))
+      await user.type(screen.getByRole('textbox', { name: 'Name' }), name)
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+    }
 
-    act(() => sock.close())
-    await act(() => vi.advanceTimersByTimeAsync(125))
-    act(() => sockets[1]!.open())
-    act(() => sockets[1]!.emitControl(attached({ ref: 1, id: 'someone-else' })))
+    it('saves the arrangement, applies a view, and comes back to All', async () => {
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1', cwd: '/live' }), info({ id: 's2', cwd: '/dead', state: 'exited' })])
 
-    expect(sockets[1]!.ofType('detach')).toEqual([])
-    expect(router.state.location.pathname).toBe('/sessions')
-    vi.restoreAllMocks()
+      // Arrange: ended sessions out, then keep that under a name.
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await user.click(screen.getByRole('checkbox', { name: 'Show exited sessions' }))
+      await user.keyboard('{Escape}')
+      expect(screen.queryByText('/dead')).toBeNull()
+
+      await saveAs(user, 'Ops')
+      expect(screen.getByRole('button', { name: 'Ops' }).getAttribute('aria-pressed')).toBe('true')
+
+      // All is the built-in default: everything comes back.
+      await user.click(screen.getByRole('button', { name: 'All' }))
+      expect(screen.getByText('/dead')).toBeTruthy()
+
+      // And the tab re-applies what it kept.
+      await user.click(screen.getByRole('button', { name: 'Ops' }))
+      expect(screen.queryByText('/dead')).toBeNull()
+
+      const kept = JSON.parse(localStorage.getItem('flue.views')!) as Array<{
+        name: string
+        showExited: boolean
+      }>
+      expect(kept).toHaveLength(1)
+      expect(kept[0]).toMatchObject({ name: 'Ops', showExited: false })
+    })
+
+    it('marks dirty by value, so an edit undone is no edit at all', async () => {
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' })])
+      await saveAs(user, 'Ops')
+      expect(screen.queryByRole('button', { name: 'Update view' })).toBeNull()
+
+      const search = screen.getByRole('searchbox', { name: 'Search sessions' })
+      await user.type(search, 'web')
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'Update view' })).toBeTruthy(),
+      )
+
+      // Clearing the search restores the saved values exactly. An identity
+      // comparison would stay dirty here for good: the controls hand back a
+      // fresh ViewConfig object on every touch, equal values or not.
+      await user.clear(search)
+      await waitFor(() =>
+        expect(screen.queryByRole('button', { name: 'Update view' })).toBeNull(),
+      )
+    })
+
+    it('resets to All when the active view is deleted', async () => {
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' })])
+      await saveAs(user, 'Ops')
+
+      await user.click(screen.getByRole('button', { name: 'View options for Ops' }))
+      await user.click(screen.getByRole('menuitem', { name: 'Delete view' }))
+
+      expect(screen.queryByRole('button', { name: 'Ops' })).toBeNull()
+      expect(screen.getByRole('button', { name: 'All' }).getAttribute('aria-pressed')).toBe('true')
+    })
+
+    it('announces a save the store refused', async () => {
+      const user = userEvent.setup()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' })])
+
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('quota exceeded')
+      })
+      await saveAs(user, 'Ops')
+
+      expect(screen.getByRole('status').textContent).toContain('Could not save the view')
+      expect(screen.queryByRole('button', { name: 'Ops' })).toBeNull()
+    })
   })
 
-  it('keeps one primary button on the screen', async () => {
-    const { sock } = await mountSessions()
-    listed(sock, [info({ id: 's1' }), info({ id: 's2', cwd: '/two' })])
+  describe('the arrangement kept between visits', () => {
+    it('restores a changed grouping after a remount', async () => {
+      // The bug this closes: change the grouping, reload the page, and the
+      // list snapped back to machine. The arrangement now rides
+      // localStorage on every change and the next mount opens on it.
+      const user = userEvent.setup()
+      const first = await mountSessions()
+      listed(first.sock, [info({ id: 's1' }), info({ id: 's2', state: 'exited' })])
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await pick(user, 'Grouping', 'State')
+      await user.keyboard('{Escape}')
+      first.unmount()
 
-    const filled = screen
-      .getAllByRole('button')
-      .filter((b) => b.getAttribute('data-variant') === 'default')
+      const second = await mountSessions()
+      listed(second.sock, [info({ id: 's1' }), info({ id: 's2', state: 'exited' })])
 
-    expect(filled).toHaveLength(1)
-    expect(filled[0]!.textContent).toBe('New session')
+      expect(screen.getByRole('button', { name: 'Running' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Exited' })).toBeTruthy()
+    })
+
+    it('opens on the default when the kept arrangement is corrupt', async () => {
+      localStorage.setItem('flue.view.current', '{not json')
+      const { sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [info({ id: 's1' })])
+
+      expect(screen.getByRole('button', { name: 'mesa.local' })).toBeTruthy()
+    })
+
+    it('restores the pressed tab', async () => {
+      const user = userEvent.setup()
+      const first = await mountSessions()
+      listed(first.sock, [info({ id: 's1' })])
+      await user.click(screen.getByRole('button', { name: 'Save current view' }))
+      await user.type(screen.getByRole('textbox', { name: 'Name' }), 'Ops')
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+      expect(screen.getByRole('button', { name: 'Ops' }).getAttribute('aria-pressed')).toBe(
+        'true',
+      )
+      first.unmount()
+
+      await mountSessions()
+
+      expect(screen.getByRole('button', { name: 'Ops' }).getAttribute('aria-pressed')).toBe(
+        'true',
+      )
+    })
+
+    it('falls back to All when the restored tab is gone, keeping the arrangement', async () => {
+      // A view deleted in another browser tab can still be named by this
+      // one's record. The strip cannot press a tab that is not there, so the
+      // name falls away — but the arrangement stays: it is what the reader
+      // was looking at, whatever it used to be called.
+      localStorage.setItem(
+        'flue.view.current',
+        JSON.stringify({
+          view: {
+            grouping: 'machine',
+            ordering: 'lastActive',
+            search: '',
+            columns: ['name', 'directory'],
+            showExited: false,
+          },
+          active: 'Ops',
+        }),
+      )
+      const { sock } = await mountSessions()
+      listed(sock, [
+        info({ id: 's1', cwd: '/live' }),
+        info({ id: 's2', cwd: '/dead', state: 'exited' }),
+      ])
+
+      expect(screen.getByRole('button', { name: 'All' }).getAttribute('aria-pressed')).toBe(
+        'true',
+      )
+      expect(screen.getByText('/live')).toBeTruthy()
+      expect(screen.queryByText('/dead')).toBeNull()
+    })
   })
 
   describe('the cwd flue open hands over', () => {
     afterEach(() => history.replaceState(null, '', '/'))
 
-    it('spawns a session in that directory and navigates to it', async () => {
+    it('spawns a session in that directory on the ridden machine and navigates to it', async () => {
       history.replaceState(null, '', '/?cwd=%2FUsers%2Fkarn%2Fproj')
       const { sock, router } = await mountSessions()
 
@@ -472,9 +814,6 @@ describe('SessionsRoute', () => {
     })
 
     it('never spawns for a screen the user navigated away from before the socket opened', async () => {
-      // The cwd is held on a ref, not sent from a mount effect eagerly — so an
-      // unmount before `onStatus('open')` ever fires must leave nothing armed
-      // to send once the connection this screen no longer owns comes up.
       history.replaceState(null, '', '/?cwd=%2Ftmp')
       const { sock, unmount } = await mountSessions({ open: false })
 
@@ -486,11 +825,9 @@ describe('SessionsRoute', () => {
 
     it('spawns exactly once under a StrictMode double mount, cold', async () => {
       // The mount effect that carries the cwd spawn double-fires under
-      // StrictMode exactly like every other effect here, so this is the one
-      // place the reasoning in SessionsRoute's docstring is checked rather
-      // than assumed: the URL param is consumed on the first render only, and
-      // whichever of the two mounts survives is the one whose `onStatus`
-      // listener answers `open`.
+      // StrictMode exactly like every other effect here: the URL param is
+      // consumed on the first render only, and whichever of the two mounts
+      // survives is the one whose status listener answers the open.
       history.replaceState(null, '', '/?cwd=%2FUsers%2Fkarn%2Fproj')
       const { sock } = await mountSessions({ open: false, strict: true })
       expect(sock.ofType('spawn')).toEqual([])

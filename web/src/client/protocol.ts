@@ -73,16 +73,24 @@ export function decodeBinary(buf: ArrayBuffer): BinaryFrame {
 /** A session's lifecycle state, as `session.Info.State` reports it. */
 export type SessionState = 'running' | 'exited'
 
-/** One record of `session.Info`. All nine fields, in the daemon's spelling. */
+/** One record of `session.Info`. All thirteen fields, in the daemon's spelling. */
 export interface SessionInfo {
   id: string
+  /** What the program running inside says it is, scraped from OSC 0/2. */
   title: string
+  /** What a human called it. Empty until someone does; it outranks `title`. */
+  name: string
+  /** Trimmed, deduped and sorted by the daemon. Empty, never absent. */
+  tags: string[]
+  pinned: boolean
   cwd: string
   cmd: string[]
   state: SessionState
   exitCode: number
   cols: number
   rows: number
+  /** RFC 3339. The one timestamp output cannot move, so it sorts stably. */
+  createdAt: string
   /** RFC 3339, as Go marshals a time.Time. */
   lastActive: string
 }
@@ -164,9 +172,50 @@ export interface SignalMsg {
   sig: string
 }
 
+/**
+ * End a session, addressed one of two ways.
+ *
+ * `ref` is the original spelling: an attachment handle, for a view that is
+ * looking at the session it closes. `id` is the attach-free spelling the
+ * sessions list uses — it acts on rows it never attached to, and attaching
+ * just to earn a ref would cost a subscribe, a backlog replay and a detach to
+ * deliver one verb. A message carries one address or the other; the daemon
+ * lets a non-zero ref win when both appear, so ref semantics never move.
+ *
+ * No reply on success. The session's end announces itself: attached views get
+ * `exit`, and the list sees state `exited` on its next poll. An unknown id is
+ * answered with `error{not_found}` exactly as `update` answers one; a ref the
+ * connection does not hold with `error{bad_ref}`.
+ */
 export interface CloseMsg {
   type: 'close'
-  ref: number
+  ref?: number
+  id?: string
+}
+
+/**
+ * Edit the metadata a human owns on a session — its name, its tags, whether it
+ * is pinned. Nothing the program inside the session says can reach these
+ * fields, and nothing here touches what that program says.
+ *
+ * Partial by construction: a field this message does not carry is a field the
+ * edit leaves alone. Two views on one session is the ordinary case, so a
+ * message that had to restate everything would undo whatever the other view
+ * changed in between. Which makes the empty values load-bearing rather than
+ * skippable — `tags: []` clears the tags and `name: ''` clears the name, where
+ * omitting either says only that this edit was not about it.
+ *
+ * Mirrors `wire.Update`. Answered by a fresh `sessions` to the connection that
+ * asked, or by `error` with code `not_found`. Only that connection: nothing
+ * broadcasts the edit, so a second browser sees it on its next list rather than
+ * the instant it lands.
+ */
+export interface UpdateMsg {
+  type: 'update'
+  id: string
+  name?: string
+  tags?: string[]
+  pinned?: boolean
 }
 
 /** Ask for the paired-device list. Answered by `deviceList`. */
@@ -202,6 +251,7 @@ export type ClientMessage =
   | ResizeMsg
   | SignalMsg
   | CloseMsg
+  | UpdateMsg
   | DevicesMsg
   | RevokeMsg
   | PairStartMsg

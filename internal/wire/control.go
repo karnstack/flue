@@ -49,8 +49,54 @@ type Signal struct {
 	Sig string `json:"sig"`
 }
 
+// CloseSession ends a session, addressed one of two ways.
+//
+// Ref is the original spelling: an attachment handle, for a view that is
+// looking at the session it is closing. ID arrived with the all-machines
+// sessions list, which closes rows it never attached to — attaching first
+// just to earn a ref would cost a subscribe, a backlog replay and a detach,
+// all to deliver one verb. A message carries one address or the other; when
+// both appear, the ref wins and the id is ignored, so the ref semantics are
+// exactly what they always were.
+//
+// Both fields are omitempty because each is absent in the other's message.
+// Zero is no loss to either: refs are numbered from 1, so ref 0 never names
+// an attachment, and an empty id never names a session.
+//
+// No reply on success, by either address. The session's end announces itself:
+// attached views get exit, and the list sees state "exited" on its next poll.
+// An id the daemon does not hold is answered with error{not_found}, exactly
+// as update answers it, and a ref this connection does not hold with
+// error{bad_ref}.
 type CloseSession struct {
-	Ref uint32 `json:"ref"`
+	Ref uint32 `json:"ref,omitempty"`
+	ID  string `json:"id,omitempty"`
+}
+
+// Update edits the metadata a human owns on a session — its name, its tags,
+// whether it is pinned. Nothing the program inside the session says can reach
+// these fields, and nothing here touches what that program says.
+//
+// Partial, and partial by construction: a field this message does not carry is
+// a field the edit leaves alone. Two views on one session is the ordinary case,
+// so a message that had to restate every field would undo whatever the other
+// view changed since this one last read.
+//
+// Tags is a pointer to a slice for the one distinction a plain []string cannot
+// keep: "the user removed the last tag" arrives as `[]` and "this edit is not
+// about tags" arrives as nothing, and both decode to a nil slice. The shape
+// mirrors session.MetaPatch field for field, so the daemon can hand the patch
+// straight to the registry rather than rebuild it — a translation being exactly
+// where that distinction would go missing.
+//
+// Answered by a fresh sessions to the connection that asked, or by
+// error{not_found}. Only that connection: nothing broadcasts the edit, so a
+// second browser sees it on its next list rather than the instant it lands.
+type Update struct {
+	ID     string    `json:"id"`
+	Name   *string   `json:"name,omitempty"`
+	Tags   *[]string `json:"tags,omitempty"`
+	Pinned *bool     `json:"pinned,omitempty"`
 }
 
 // Devices asks for the paired-device list.
@@ -114,6 +160,23 @@ type RelayInfo struct {
 
 type Sessions struct {
 	Sessions []session.Info `json:"sessions"`
+}
+
+// MarshalJSON writes an empty list as [] rather than null, for the reason
+// DeviceList does below.
+//
+// "The daemon is running nothing" is reached by building the zero value — the
+// one path a nil slice takes to the wire. The field is not optional and the
+// client declares it `SessionInfo[]`, so null would throw in every consumer
+// that ranges over the list, and would do it on a fresh machine, which is the
+// first list anyone sees.
+func (s Sessions) MarshalJSON() ([]byte, error) {
+	// The alias sheds this method, so json.Marshal below does not recurse.
+	type alias Sessions
+	if s.Sessions == nil {
+		s.Sessions = []session.Info{}
+	}
+	return json.Marshal(alias(s))
 }
 
 type Attached struct {
@@ -220,6 +283,8 @@ func typeName(msg any) (string, bool) {
 		return "signal", true
 	case CloseSession:
 		return "close", true
+	case Update:
+		return "update", true
 	case Devices:
 		return "devices", true
 	case Revoke:
@@ -304,6 +369,8 @@ func DecodeControl(b []byte) (any, error) {
 			return *t, nil
 		case *CloseSession:
 			return *t, nil
+		case *Update:
+			return *t, nil
 		case *Devices:
 			return *t, nil
 		case *Revoke:
@@ -351,6 +418,8 @@ func DecodeControl(b []byte) (any, error) {
 		return deref(into(&Signal{}))
 	case "close":
 		return deref(into(&CloseSession{}))
+	case "update":
+		return deref(into(&Update{}))
 	case "devices":
 		return deref(into(&Devices{}))
 	case "revoke":

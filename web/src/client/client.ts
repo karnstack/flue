@@ -344,10 +344,25 @@ export class FlueClient {
     return this.attachments.get(ref)?.lastSeq
   }
 
-  /** Start connecting, and keep reconnecting until `close`. */
+  /**
+   * Start connecting, and keep reconnecting until `close`.
+   *
+   * A socket already in hand — dialling or open — makes this nothing: a second
+   * connect must never leave two sockets where the client tracks one.
+   *
+   * An armed retry is the other case, and it is not the same one. The dial is
+   * already owed, so returning here looks harmless, but the wait it is owed
+   * behind runs to ten seconds, and the one caller that asks during that wait
+   * is a human pressing Retry at a machine the screen says is unreachable. So
+   * the timer is stood down and the socket opened now. The escalation is left
+   * where it stands — `attempt` is untouched — because being asked again says
+   * nothing about whether the machine has come back, and a held-down button
+   * must not walk the backoff down to its floor.
+   */
   connect() {
     this.stopped = false
-    if (this.sock || this.retry !== null) return
+    if (this.sock) return
+    this.clearRetry()
     this.openSocket()
   }
 
@@ -383,6 +398,34 @@ export class FlueClient {
    */
   list() {
     if (!this.send({ type: 'list' })) this.listOwed = true
+  }
+
+  /**
+   * Edit the metadata a human owns on a session — its name, its tags, whether
+   * it is pinned. Answered by a fresh `sessions` to this connection, which
+   * reaches `onSessions` like any other, so nothing here returns anything and
+   * nothing correlates: a failure comes back as an uncorrelated
+   * `error{code:"not_found"}` and surfaces through `onError`.
+   *
+   * The patch is spread whole rather than assembled field by field, and that
+   * is the whole of the implementation on purpose. `name: ''`, `tags: []` and
+   * `pinned: false` are three edits a user makes by hand and all three are
+   * falsy, so a builder that copied each field only when it was truthy would
+   * send an update carrying nothing at all — the last tag impossible to
+   * remove, with no error to say so. Absence is the other half of the same
+   * rule: a field the caller left out is a field this edit leaves alone, which
+   * is what lets two views on one session edit it without overwriting each
+   * other.
+   *
+   * Dropped rather than held while the socket is down, unlike `list`. A rename
+   * is not the idempotent question a list is: replayed from behind a
+   * ten-second backoff it would land on whatever the metadata had become
+   * meanwhile, undoing another view's edit — the exact case partiality exists
+   * to protect. Losing it costs a retry and little else, since the sessions
+   * screen re-lists on reconnect and the row visibly snaps back.
+   */
+  update(patch: { id: string; name?: string; tags?: string[]; pinned?: boolean }) {
+    this.send({ type: 'update', ...patch })
   }
 
   /**
@@ -554,6 +597,24 @@ export class FlueClient {
   /** Ask the daemon to end the session behind `ref`. */
   closeSession(ref: number) {
     this.sendForRef(ref, { type: 'close', ref })
+  }
+
+  /**
+   * Ask the daemon to end a session by its id, with no attachment in hand —
+   * how the sessions list closes a row it never attached to.
+   *
+   * Dropped rather than held while the socket is down, for `update`'s reason
+   * with sharper teeth: a close replayed from behind a ten-second backoff
+   * would kill whatever the session had become in the meantime, and unlike a
+   * rename there is no snapping back from it. The list keeps showing the row,
+   * so the user retries with the truth in front of them.
+   *
+   * Nothing to correlate: success has no reply — the exit reaches attached
+   * views and the next list — and a failure comes back as an uncorrelated
+   * `error{not_found}` through `onError`.
+   */
+  closeById(id: string) {
+    this.send({ type: 'close', id })
   }
 
   // -------------------------------------------------------------------------

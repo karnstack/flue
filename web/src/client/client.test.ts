@@ -29,6 +29,7 @@ import {
   type SignalMsg,
   type SizeChanged,
   type SpawnMsg,
+  type UpdateMsg,
   type Welcome,
 } from './protocol'
 import { daemonSocketUrl, FlueClient, type ConnStatus, type SocketLike } from './client'
@@ -195,6 +196,11 @@ describe('control message golden file', () => {
       'resize',
       'signal',
       'close',
+      'closeById',
+      'update',
+      'updateTagsAndPinned',
+      'updateClearTags',
+      'updateClearName',
       'devices',
       'revoke',
       'pairStart',
@@ -268,6 +274,56 @@ describe('control message golden file', () => {
     expect(fixture('close')).toStrictEqual(want)
   })
 
+  it('decodes a close addressed by id, with no ref beside it', () => {
+    // The attach-free close the sessions list sends. `ref: 0` here would hand
+    // the daemon two addresses, one of which no attachment ever holds — refs
+    // are numbered from 1 — so the id travels alone.
+    const want: CloseMsg = { type: 'close', id: 'a1b2c3d4e5f60708' }
+    expect(fixture('closeById')).toStrictEqual(want)
+  })
+
+  // The four update cases exist to pin partiality in both directions. An
+  // absent field means "leave this alone", so a decoder that filled the gap
+  // with a zero value would rename a session every time somebody pinned it.
+  it('decodes an update carrying one field, the other two absent', () => {
+    const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', name: 'api server' }
+    expect(fixture('update')).toStrictEqual(want)
+  })
+
+  it('decodes an update carrying tags and pinned together', () => {
+    const want: UpdateMsg = {
+      type: 'update',
+      id: 'a1b2c3d4e5f60708',
+      tags: ['api', 'feat-x'],
+      pinned: true,
+    }
+    expect(fixture('updateTagsAndPinned')).toStrictEqual(want)
+  })
+
+  it('decodes an update clearing tags as [], not as an absent field', () => {
+    // The distinction the whole message rests on: `[]` says the user removed
+    // the last tag, absent says this edit was never about tags. A codec that
+    // let the empty array fall out on either side would make the last tag
+    // impossible to remove, silently.
+    const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', tags: [] }
+    const got = fixture('updateClearTags') as UpdateMsg
+    expect(got).toStrictEqual(want)
+    expect(got.tags).toEqual([])
+    expect('tags' in got).toBe(true)
+  })
+
+  it('decodes an update clearing a name and unpinning', () => {
+    // The same hazard as an empty `tags`, in the two shapes JSON makes easy to
+    // drop: `""` and `false`. Both are edits a user asks for by hand, so both
+    // have to survive a round trip that an omitempty on the wrong side of the
+    // Go struct would quietly eat.
+    const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', name: '', pinned: false }
+    const got = fixture('updateClearName') as UpdateMsg
+    expect(got).toStrictEqual(want)
+    expect(got.name).toBe('')
+    expect(got.pinned).toBe(false)
+  })
+
   it('decodes devices', () => {
     const want: DevicesMsg = { type: 'devices' }
     expect(fixture('devices')).toStrictEqual(want)
@@ -326,30 +382,42 @@ describe('control message golden file', () => {
     expect(fixture('welcomeRelayConnecting')).toStrictEqual(want)
   })
 
-  it('decodes sessions, including all nine fields of every record', () => {
+  // The two records are deliberately unalike in their metadata: one named,
+  // tagged and pinned, one carrying the empty values a freshly spawned
+  // session has. An empty `tags` is the case worth pinning — a daemon that
+  // let it marshal as null would put a guard in every consumer.
+  it('decodes sessions, including all thirteen fields of every record', () => {
     const want: Sessions = {
       type: 'sessions',
       sessions: [
         {
           id: 's1',
           title: 'zsh',
+          name: 'api server',
+          tags: ['api', 'prod'],
+          pinned: true,
           cwd: '/home/karn/code',
           cmd: ['zsh', '-l'],
           state: 'running',
           exitCode: 0,
           cols: 120,
           rows: 40,
+          createdAt: '2026-07-28T08:00:00Z',
           lastActive: '2026-07-28T10:30:00Z',
         },
         {
           id: 's2',
           title: 'vim',
+          name: '',
+          tags: [],
+          pinned: false,
           cwd: '/home/karn/work',
           cmd: ['vim', 'file.txt'],
           state: 'exited',
           exitCode: 1,
           cols: 80,
           rows: 24,
+          createdAt: '2026-07-28T07:15:00Z',
           lastActive: '2026-07-28T09:00:00Z',
         },
       ],
@@ -1201,6 +1269,57 @@ describe('FlueClient reconnect', () => {
     await vi.advanceTimersByTimeAsync(120_000)
     expect(sockets).toHaveLength(2)
   })
+
+  it('dials now when connect is called during the backoff wait', async () => {
+    // What a Retry button asks for. The wait runs to ten seconds, so a connect
+    // that returned because a timer was already armed would be a control that
+    // did nothing for nine of them, with no way for the reader to tell.
+    vi.useFakeTimers()
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    expect(c.status).toBe('reconnecting')
+    expect(sockets).toHaveLength(1)
+
+    c.connect()
+
+    // Dialled on the spot, with the clock untouched.
+    expect(sockets).toHaveLength(2)
+    // And the timer it took the place of is disarmed, or it would open a
+    // third socket alongside the one now live.
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(sockets).toHaveLength(2)
+  })
+
+  it('keeps the escalation it had earned when a retry is asked for early', async () => {
+    // The dial is brought forward, not forgiven: a machine that has failed
+    // four times is still a machine that has failed four times, and resetting
+    // the exponent here would let a held-down Retry hammer a Worker at the
+    // floor delay.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    sockets[0]!.open()
+    sockets[0]!.close() // attempt 0 -> 1, next wait 125ms
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+    sockets[1]!.close() // attempt 1 -> 2, next wait 250ms
+
+    c.connect()
+    expect(sockets).toHaveLength(3)
+    sockets[2]!.close()
+
+    // Still climbing from the rung two failures bought — 500ms — rather than
+    // back down at the 125ms floor a reset would have put it on.
+    await vi.advanceTimersByTimeAsync(499)
+    expect(sockets).toHaveLength(3)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets).toHaveLength(4)
+  })
 })
 
 describe('FlueClient sending', () => {
@@ -1372,6 +1491,101 @@ describe('FlueClient sending', () => {
     c.close()
     c.connect()
     sockets[1]!.open()
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+  })
+
+  it('sends a metadata update carrying only the fields the patch names', () => {
+    const { c, sock } = connected()
+    c.update({ id: 'a1b2c3d4e5f60708', name: 'api server' })
+
+    const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', name: 'api server' }
+    const sent = sock.sentControl()[1]!
+    expect(sent).toStrictEqual(want)
+    // Absent, not filled in with a default — the half of partiality that a
+    // helpful builder gets wrong. `tags: []` here would clear the tags of a
+    // session the user only renamed, and `pinned: false` would unpin it.
+    expect('tags' in sent).toBe(false)
+    expect('pinned' in sent).toBe(false)
+  })
+
+  it('keeps a metadata clear rather than dropping it for being falsy', () => {
+    // `''`, `[]` and `false` are three edits a user asks for by hand, and all
+    // three are falsy. A builder that copied each field only when it was truthy
+    // would send an update that carried nothing: the last tag could never be
+    // removed, a name never blanked, a session never unpinned, and nothing
+    // anywhere would say why.
+    const { c, sock } = connected()
+    c.update({ id: 'a1b2c3d4e5f60708', name: '', pinned: false })
+    c.update({ id: 'a1b2c3d4e5f60708', tags: [] })
+
+    const want: UpdateMsg[] = [
+      { type: 'update', id: 'a1b2c3d4e5f60708', name: '', pinned: false },
+      { type: 'update', id: 'a1b2c3d4e5f60708', tags: [] },
+    ]
+    expect(sock.sentControl().slice(1)).toStrictEqual(want)
+
+    // And on the wire, not merely in a parse of it: JSON.stringify is the last
+    // place a field can quietly go missing, and these are the frames the Go
+    // decoder has to see the empty values in.
+    const frames = sock.sent.filter((s): s is string => typeof s === 'string')
+    expect(frames[1]).toContain('"name":""')
+    expect(frames[1]).toContain('"pinned":false')
+    expect(frames[2]).toContain('"tags":[]')
+  })
+
+  it('sends a close by id carrying the id and nothing else', () => {
+    const { c, sock } = connected()
+    c.closeById('a1b2c3d4e5f60708')
+
+    const want: CloseMsg = { type: 'close', id: 'a1b2c3d4e5f60708' }
+    const sent = sock.sentControl()[1]!
+    expect(sent).toStrictEqual(want)
+    // No ref, not ref 0: zero is a value no attachment ever holds, and a
+    // frame carrying both addresses would leave the daemon to pick one.
+    expect('ref' in sent).toBe(false)
+  })
+
+  it('drops rather than holds a close by id issued while the socket is down', async () => {
+    // Like update, not like list. A close surfacing from behind a ten-second
+    // backoff would kill whatever the session had become in the meantime —
+    // possibly one restarted on purpose — and the list screen visibly keeps
+    // the row, so the user retries with the truth in front of them.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    expect(() => c.closeById('a1b2c3d4e5f60708')).not.toThrow()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    c.closeById('a1b2c3d4e5f60708')
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[0]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+  })
+
+  it('drops rather than holds a metadata update issued while the socket is down', async () => {
+    // Not idempotent the way a list is. A rename surfacing from behind a
+    // ten-second backoff lands on whatever the metadata had become in the
+    // meantime — undoing an edit made from another view, which is the case
+    // partiality exists to protect. A dropped one costs nothing but a retry:
+    // the sessions screen re-lists on reconnect, so the row snaps back rather
+    // than changing by itself minutes later.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    expect(() => c.update({ id: 'a1b2c3d4e5f60708', name: 'too early' })).not.toThrow()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    c.update({ id: 'a1b2c3d4e5f60708', name: 'too late' })
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[0]!.sentControl().map((m) => m.type)).toEqual(['hello'])
     expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
   })
 

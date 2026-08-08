@@ -1,56 +1,105 @@
-import { ArrowRightIcon } from '@heroicons/react/16/solid'
+import { Fragment } from 'react'
+import { Link } from '@tanstack/react-router'
+import {
+  ChevronDownIcon,
+  EllipsisHorizontalIcon,
+  PlusIcon,
+  StarIcon,
+} from '@heroicons/react/16/solid'
 
-import type { SessionInfo } from '@/client/protocol'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { keyOf, type FleetSession } from '@/fleet/types'
+import { ago } from '@/lib/time'
 import { cn } from '@/lib/utils'
+import { COLUMN_KEYS, displayName, type ColumnKey, type Group } from '@/sessions/view'
 
-export interface SessionTableProps {
-  sessions: SessionInfo[]
-  onOpen: (id: string) => void
-}
+/** What a row's ⋯ menu can ask of a session. */
+export type RowAction = 'rename' | 'tags' | 'pin' | 'unpin' | 'close'
 
 /**
- * By directory, ties broken by id.
- *
- * Ordering has to happen somewhere. The daemon answers `list` by ranging over
- * a Go map, and Go randomises that order on every single call, so rows given
- * straight through would reshuffle on each poll and the row under the reader's
- * pointer would not be the row they clicked. Doing it here is what stops the
- * next consumer forgetting it.
- *
- * The sort key is the part worth explaining, because the obvious one is wrong.
- * "Most recently active first" reads well and moves rows for a living: the
- * daemon stamps `lastActive` on every byte written to a pty *and* every chunk
- * read back from one, so a session tailing a log climbs to the top between one
- * poll and the next. That is the same defect as the random order, arriving by
- * a different route — deterministic per snapshot, but not stable across them.
- *
- * `cwd` is fixed when the session is spawned and never written again, so this
- * order does not move at all, and it sorts the rows by the column they lead
- * with. `id` breaks the tie, since two sessions in one directory is the
- * ordinary case rather than the exotic one.
+ * The terminal's path, written out rather than imported from src/router.tsx —
+ * importing it would close a cycle, since the router reaches this component
+ * through the sessions screen. The literal is not unchecked: `to` is typed
+ * against the registered route tree, so a path that drifts is a compile error.
  */
-function ordered(sessions: SessionInfo[]): SessionInfo[] {
-  return [...sessions].sort((a, b) => a.cwd.localeCompare(b.cwd) || a.id.localeCompare(b.id))
+const TERMINAL_PATH = '/d/$deviceId/s/$sessionId' as const
+
+/**
+ * Where a long path is cut. CSS ellipsis can only eat the end, and the end of
+ * a path is the half that tells two sessions apart — so the cut is made here,
+ * in the middle, with more kept from the tail than the head for the same
+ * reason. The full path rides in the element's title.
+ */
+const PATH_MAX = 40
+const PATH_HEAD = 15
+const PATH_TAIL = 22
+
+function midCut(path: string): string {
+  if (path.length <= PATH_MAX) return path
+  return `${path.slice(0, PATH_HEAD)}…${path.slice(-PATH_TAIL)}`
 }
 
 /**
- * The state cell: a dot and a word.
+ * A stamp as a distance: "5m ago". The daemon writes ISO strings and `ago`
+ * reads unix seconds, so the parse and the division live here, once. A stamp
+ * no Date can read renders as nothing rather than as arithmetic on NaN.
+ */
+function since(stamp: string): string {
+  const at = Date.parse(stamp)
+  return Number.isNaN(at) ? '' : ago(at / 1000)
+}
+
+/**
+ * A group's headcount, in the two words that matter: "2 running · 1 exited".
+ * A part with nobody in it is dropped rather than written as a zero, because
+ * "3 running" is a statement and "3 running · 0 exited" is a form.
+ */
+function tally(sessions: FleetSession[]): string {
+  const live = sessions.filter((s) => s.state !== 'exited').length
+  const ended = sessions.length - live
+  const parts: string[] = []
+  if (live > 0) parts.push(`${live} running`)
+  if (ended > 0) parts.push(`${ended} exited`)
+  return parts.join(' · ')
+}
+
+/**
+ * The state, said as a leading dot.
  *
  * The dot is neutral, and deliberately. Teal is this app's single accent and
  * it is spent on the one primary button per screen — a dot per row would put
- * ten of them beside it and leave the eye nowhere to land. Contrast carries the
- * distinction instead: full-strength for a live session, faded for one that has
- * ended.
+ * ten of them beside it and leave the eye nowhere to land. Contrast carries
+ * the distinction instead: full-strength for a live session, faded for one
+ * that has ended.
+ *
+ * A live session says "Running" to assistive technology alone — on screen the
+ * dot is the whole sentence. An ended one says nothing here, because its row
+ * carries a written "Exited n" among the trailing details, and one telling of
+ * a state per row is enough for anyone listening.
  *
  * `live` is written against `exited` rather than for the other value, so a
  * state the daemon adds later reads as live rather than as a process that
  * ended with an exit code nobody has.
  */
-function StateCell({ session }: { session: SessionInfo }) {
+function StateDot({ session }: { session: FleetSession }) {
   const live = session.state !== 'exited'
   return (
-    <div className="flex items-center gap-x-2">
+    <span
+      title={live ? 'Running' : `Exited ${session.exitCode}`}
+      // z-10 with every other title-holder on the row: the row link's
+      // stretched overlay is what a browser hit-tests, and a tooltip under
+      // it never shows. See SessionRow.
+      className="relative z-10 flex size-4 shrink-0 items-center justify-center"
+    >
       <span
         aria-hidden="true"
         className={cn(
@@ -58,37 +107,259 @@ function StateCell({ session }: { session: SessionInfo }) {
           live ? 'bg-zinc-950 dark:bg-white' : 'bg-zinc-950/30 dark:bg-white/30',
         )}
       />
-      <span>{live ? 'Running' : `Exited ${session.exitCode}`}</span>
-    </div>
+      {live && <span className="sr-only">Running</span>}
+    </span>
   )
 }
 
-/*
- * The shared halves of the cell classes, since three headings would otherwise
- * carry the same hundred characters each.
- *
- * Every token here has to stay hyphenated. styles.build.test.ts explains a
- * compiled utility by finding it inside a `className` or a `cn(...)` call, and
- * a name assembled in a constant is beyond its reach — so a bare single-word
- * utility put here would ship and then fail that guard as unexplained. Which
- * this comment demonstrated on its first draft, by using a word that is itself
- * a utility to describe the problem.
- */
-const HEAD_CELL =
-  'py-2 font-mono text-xs/6 font-medium tracking-wide whitespace-nowrap text-zinc-500 dark:text-zinc-400'
-const BODY_CELL = 'py-2.5 text-base/6 sm:text-sm/6'
+/** The quiet text the trailing details are set in. */
+const META_TEXT = 'text-xs/6 whitespace-nowrap text-zinc-500 dark:text-zinc-400'
 
 /**
- * The sessions, one row each.
- *
- * Rows sit on the page background with horizontal rules between them and
- * nothing else: no wrapper panel, no vertical rules, no outer edge. Sibling
- * rows in one shared context need the lightest separation that works, and a
- * panel around each would claim every session is an independent object when
- * what is on screen is a single set.
+ * How many tag badges a row shows before folding the rest into a "+n". A row
+ * is one line that must never push the pane sideways — the old layout's
+ * overflow-x wrapper died with it, so this cap is what holds the line now —
+ * and the folded remainder rides in the +n badge's tooltip.
  */
-export function SessionTable({ sessions, onOpen }: SessionTableProps) {
-  if (sessions.length === 0) {
+const TAG_CAP = 3
+
+/**
+ * One session, one row: a single line with the identity on the left, the
+ * details ranged right, and the whole of it one link.
+ *
+ * The link is a real anchor with the terminal's href, which is what buys the
+ * open-in-a-new-tab family for free — a Ctrl, Cmd or middle click never
+ * reaches the router, the browser answers it natively — and it is stretched
+ * over the row by its ::after box rather than by wrapping the row's markup,
+ * because a checkbox inside an anchor is both invalid and unreadable.
+ *
+ * That overlay is what a browser hit-tests, so two kinds of children stand
+ * above it on `z-10`: the ones that take their own pointer — the checkbox,
+ * the ⋯ trigger — and every element carrying a title, whose tooltip would
+ * otherwise never show because the hover always landed on the anchor. The
+ * title-holders are narrow, so the dead spots they cost the click surface
+ * are small and each buys a tooltip that is actually reachable; everything
+ * else lets a click fall through, and the row opens from anywhere.
+ *
+ * The checkbox keeps quiet until the row is hovered, checked, or focused —
+ * CSS alone, no state — because a column of boxes at rest would make every
+ * glance at the list feel like a bulk edit. The ⋯ menu holds the same
+ * silence. Both stay at full strength for a coarse pointer, which has no
+ * hover to reveal them with.
+ */
+function SessionRow({
+  s,
+  shown,
+  selected,
+  onToggleSelect,
+  onAction,
+}: {
+  s: FleetSession
+  shown: ColumnKey[]
+  selected: ReadonlySet<string>
+  onToggleSelect: (key: string) => void
+  onAction: (action: RowAction, s: FleetSession) => void
+}) {
+  const key = keyOf(s)
+  const name = displayName(s)
+  const ended = s.state === 'exited'
+  return (
+    <li className="group/row relative flex items-center gap-x-3 rounded-md px-2 py-2 transition-colors hover:bg-zinc-950/[0.04] dark:hover:bg-white/[0.06]">
+      <Checkbox
+        checked={selected.has(key)}
+        onCheckedChange={() => onToggleSelect(key)}
+        aria-label={`Select ${name}`}
+        className="z-10 opacity-0 transition-opacity group-hover/row:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100 data-checked:opacity-100"
+      />
+      {s.pinned && (
+        // The label rides a span because the icon marks itself aria-hidden;
+        // the star is state, not decoration, and a screen reader should
+        // hear it.
+        <span role="img" aria-label="Pinned" className="flex shrink-0">
+          <StarIcon
+            aria-hidden="true"
+            className="size-3 shrink-0 text-zinc-500 dark:text-zinc-400"
+          />
+        </span>
+      )}
+      {shown.includes('state') && <StateDot session={s} />}
+      <Link
+        to={TERMINAL_PATH}
+        params={{ deviceId: s.machineId, sessionId: s.id }}
+        aria-label={`Open ${name}`}
+        className="flex min-w-0 flex-1 items-baseline gap-x-2 outline-none after:absolute after:inset-0 after:rounded-md focus-visible:after:ring-3 focus-visible:after:ring-ring/50"
+      >
+        <span className="truncate text-base/6 font-medium text-zinc-950 sm:text-sm/6 dark:text-white">
+          {name}
+        </span>
+        <span className="truncate font-mono text-xs/6 text-zinc-500 max-sm:hidden dark:text-zinc-400">
+          {s.cmd.join(' ')}
+        </span>
+      </Link>
+      {/*
+        The details, right-ranged in the order a reader resolves a row: what
+        it is tagged, where it runs, where it sits, how it ended, when it was
+        last touched. Presence is the caller's, through `shown`; the narrower
+        the screen, the fewer survive. The machine chip survives every width
+        on purpose — the headline use of this screen is a phone reading a
+        desktop's fleet, and on that phone "which machine" outranks "which
+        directory", so the directory is what gets shed first.
+      */}
+      <div className="flex shrink-0 items-center gap-x-2.5">
+        {shown.includes('tags') && s.tags.length > 0 && (
+          <span className="flex items-center gap-x-1.5 max-sm:hidden">
+            {s.tags.slice(0, TAG_CAP).map((tag) => (
+              <Badge key={tag} variant="secondary">
+                {tag}
+              </Badge>
+            ))}
+            {s.tags.length > TAG_CAP && (
+              <Badge
+                variant="secondary"
+                title={s.tags.slice(TAG_CAP).join(', ')}
+                className="relative z-10"
+              >
+                +{s.tags.length - TAG_CAP}
+              </Badge>
+            )}
+          </span>
+        )}
+        {shown.includes('machine') && (
+          <Badge variant="outline" className="text-zinc-500 dark:text-zinc-400">
+            {s.machineName}
+          </Badge>
+        )}
+        {shown.includes('directory') && (
+          <span
+            title={s.cwd}
+            className={cn(META_TEXT, 'relative z-10 font-mono max-md:hidden')}
+          >
+            {midCut(s.cwd)}
+          </span>
+        )}
+        {shown.includes('state') && ended && (
+          <span className={META_TEXT}>Exited {s.exitCode}</span>
+        )}
+        {shown.includes('created') && (
+          <span
+            title={s.createdAt}
+            className={cn(META_TEXT, 'relative z-10 tabular-nums max-sm:hidden')}
+          >
+            {since(s.createdAt)}
+          </span>
+        )}
+        {shown.includes('lastActive') && (
+          <span title={s.lastActive} className={cn(META_TEXT, 'relative z-10 tabular-nums')}>
+            {since(s.lastActive)}
+          </span>
+        )}
+        {/*
+          The five actions a row can take, with pin and unpin standing in for
+          each other by state — offering both would make one of them a lie.
+          The trigger is named after its own row: every one of these draws
+          the same glyph, so without that a screen reader announces the same
+          control as many times as there are sessions. The menu content rides
+          a portal, so nothing chosen here lands on the row's link. `w-auto`
+          unseats the content's default trigger-width sizing, which measured
+          against this small ⋯ button would pin the menu to its `min-w-32`
+          floor regardless of the items.
+        */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Actions for ${name}`}
+              className="relative z-10 -my-1 text-zinc-500 opacity-0 transition-opacity group-hover/row:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100 data-open:opacity-100 dark:text-zinc-400"
+            >
+              <EllipsisHorizontalIcon aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-auto">
+            <DropdownMenuItem onSelect={() => onAction('rename', s)}>Rename</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onAction('tags', s)}>Edit tags</DropdownMenuItem>
+            {s.pinned ? (
+              <DropdownMenuItem onSelect={() => onAction('unpin', s)}>Unpin</DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem onSelect={() => onAction('pin', s)}>Pin</DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onSelect={() => onAction('close', s)}>
+              Close
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </li>
+  )
+}
+
+/**
+ * The rule under the last pinned row of the ungrouped list. Pinned rows are
+ * the ordered prefix — the view model put them there — so the boundary is a
+ * fact to find, not a sort to redo. It carries no words: a heading here would
+ * say "pinned", the stars already do, and the reader only needs to see where
+ * the fold in the paper is.
+ */
+function PinnedRule() {
+  return (
+    <li
+      data-divider=""
+      aria-hidden="true"
+      className="mx-2 my-1 border-b border-zinc-950/10 dark:border-white/10"
+    />
+  )
+}
+
+/**
+ * The sessions, in headed runs, one row each.
+ *
+ * No heading row of field names, anywhere. The rows are single lines whose
+ * layout already says what each piece is — a name reads as a name, a path as
+ * a path, a stamp as a stamp — and a band of labels over them would spend the
+ * top of the screen restating the obvious while making the list read like a
+ * spreadsheet. What survives of the columns preference is the choice itself:
+ * `columns` still decides which pieces a row carries; they simply sit on the
+ * row's one line now.
+ *
+ * Each group heads its run with a soft full-width band rather than a bare
+ * line, so a fold target reads as a place and not as a stray row; the rows
+ * themselves sit on the page background and answer a hover with a soft
+ * rounded tint, the same surface token the nav's items use.
+ *
+ * Everything arrives decided. `groups` come from applyView filtered, ordered
+ * and cut — the ordering rationale lives on `orderSessions`, and nothing here
+ * may re-sort a run of rows, ever. Folding, selection and the pieces to show
+ * live with the caller too: this component reports clicks and renders what it
+ * is told, which is what keeps every behaviour above it testable without a
+ * DOM. Opening is the one act that no longer passes through the caller at
+ * all — each row is a link to its own session, and the router answers it.
+ *
+ * The one decision made here is that the name ignores `columns`. Every other
+ * piece is the caller's to drop, but a list of unnamed rows identifies
+ * nothing — so the name renders whether asked for or not, and the display
+ * options can offer it as permanently on.
+ */
+export function SessionTable({
+  groups,
+  columns,
+  selected,
+  onToggleSelect,
+  onToggleGroup,
+  collapsed,
+  onAction,
+  onSpawnIn,
+}: {
+  groups: Group[]
+  columns: ColumnKey[]
+  selected: ReadonlySet<string>
+  onToggleSelect(key: string): void
+  onToggleGroup(groupKey: string): void
+  collapsed: ReadonlySet<string>
+  onAction(action: RowAction, s: FleetSession): void
+  onSpawnIn?(groupKey: string): void
+}) {
+  if (groups.length === 0) {
     /*
      * The empty state quotes the landing page's terminal figure: a dark card
      * carrying the one command that matters, ending in the emulator's own
@@ -117,85 +388,82 @@ export function SessionTable({ sessions, onOpen }: SessionTableProps) {
     )
   }
 
-  return (
-    // The negative margins let the scroll area reach the edges of the screen's
-    // padding, so a wide row scrolls rather than squeezing every other column;
-    // the inner padding puts the cells back where they were. `-my-2` with the
-    // matching `py-2` is what leaves a focus indicator somewhere to be drawn,
-    // since scrolling one axis makes the other one clip.
-    <div className="-mx-4 -my-2 overflow-x-auto whitespace-nowrap sm:-mx-6 lg:-mx-8">
-      <div className="inline-block min-w-full px-4 py-2 align-middle sm:px-6 lg:px-8">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="border-b border-zinc-950/10 dark:border-white/10">
-              <th scope="col" className={cn(HEAD_CELL, 'pr-3')}>
-                Directory
-              </th>
-              <th scope="col" className={cn(HEAD_CELL, 'px-3')}>
-                Command
-              </th>
-              <th scope="col" className={cn(HEAD_CELL, 'px-3')}>
-                State
-              </th>
-              <th scope="col" className="py-2 pl-3">
-                <span className="sr-only">Actions</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {ordered(sessions).map((s) => (
-              // The hover surface is the same token the nav's items use, so
-              // "the pointer is here" reads identically everywhere. The row
-              // itself is not a control — Open is — but on a wide screen the
-              // wash is what ties a directory to its button.
-              <tr
-                key={s.id}
-                className="group border-b border-zinc-950/5 transition-colors hover:bg-zinc-950/5 dark:border-white/5 dark:hover:bg-white/5"
-              >
-                <td className={cn(BODY_CELL, 'pr-3 font-mono text-zinc-950 dark:text-white')}>
-                  {s.cwd}
-                </td>
-                <td className={cn(BODY_CELL, 'px-3 font-mono text-zinc-600 dark:text-zinc-400')}>
-                  {s.cmd.join(' ')}
-                </td>
-                <td
-                  className={cn(BODY_CELL, 'px-3 tabular-nums text-zinc-600 dark:text-zinc-400')}
-                >
-                  <StateCell session={s} />
-                </td>
-                <td className="py-2.5 pl-3 text-right">
-                  {/*
-                    Named after its own row. Every one of these says "Open", so
-                    without this a screen reader announces the same control as
-                    many times as there are sessions, with nothing to tell them
-                    apart.
+  // Membership comes from the caller, order from COLUMN_KEYS — a preference
+  // list must not get to reorder a row's pieces by mentioning them
+  // differently.
+  const shown = COLUMN_KEYS.filter((c) => c === 'name' || columns.includes(c))
+  // The pinned rule only makes sense where there are no headings to do the
+  // separating: the single 'all' group of the ungrouped view.
+  const ungrouped = groups.length === 1 && groups[0]!.key === 'all'
 
-                    Quiet until the row is under the pointer, then at full
-                    contrast — ten boxed buttons in a column would be the
-                    loudest thing on the screen, and the affordance only needs
-                    to be certain for the row the reader is actually on.
-                    Keyboard focus keeps its own indicator at any time.
-                  */}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    aria-label={`Open ${s.cwd}`}
-                    className="text-zinc-500 group-hover:text-foreground dark:text-zinc-400"
-                    onClick={() => onOpen(s.id)}
-                  >
-                    Open
-                    <ArrowRightIcon
-                      data-icon="inline-end"
-                      aria-hidden="true"
-                      className="transition-transform group-hover/button:translate-x-0.5"
+  return (
+    <div className="flex flex-col gap-y-4">
+      {groups.map((g) => {
+        const open = !collapsed.has(g.key)
+        // Where the pinned prefix ends; 0 and -1 both mean "no rule".
+        const boundary = ungrouped ? g.sessions.findIndex((s) => !s.pinned) : 0
+        return (
+          <section key={g.key} className="flex flex-col">
+            {/*
+              One real control in the band. The toggle owns the chevron and
+              the label so its accessible name is the group's; the tally is
+              read-along text; and the spawn control — offered only when the
+              caller can honour it — stands apart so that folding a group and
+              starting a session on it can never be the same click.
+            */}
+            <div className="flex items-center gap-x-1 rounded-md bg-zinc-950/[0.03] px-2 py-1 dark:bg-white/[0.04]">
+              <button
+                type="button"
+                aria-expanded={open}
+                onClick={() => onToggleGroup(g.key)}
+                className="-ml-1 flex items-center gap-x-1 rounded-md px-1 py-0.5 text-sm/6 font-medium text-zinc-950 transition-colors outline-none hover:bg-zinc-950/5 focus-visible:ring-3 focus-visible:ring-ring/50 dark:text-white dark:hover:bg-white/5"
+              >
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className={cn(
+                    'size-4 shrink-0 text-zinc-400 transition-transform dark:text-zinc-500',
+                    !open && '-rotate-90',
+                  )}
+                />
+                {g.label}
+              </button>
+              <span className="text-sm/6 text-zinc-500 dark:text-zinc-400">
+                {tally(g.sessions)}
+              </span>
+              {onSpawnIn && (
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={`New session on ${g.label}`}
+                  className="text-zinc-500 dark:text-zinc-400"
+                  onClick={() => onSpawnIn(g.key)}
+                >
+                  <PlusIcon aria-hidden="true" />
+                </Button>
+              )}
+            </div>
+            {open && (
+              <ul className="mt-1 flex flex-col">
+                {g.sessions.map((s, at) => (
+                  // Keyed by the same composite the selection uses: unique
+                  // within a group, even when the session itself repeats
+                  // across tag groups in their own lists.
+                  <Fragment key={keyOf(s)}>
+                    {at === boundary && at > 0 && <PinnedRule />}
+                    <SessionRow
+                      s={s}
+                      shown={shown}
+                      selected={selected}
+                      onToggleSelect={onToggleSelect}
+                      onAction={onAction}
                     />
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                  </Fragment>
+                ))}
+              </ul>
+            )}
+          </section>
+        )
+      })}
     </div>
   )
 }

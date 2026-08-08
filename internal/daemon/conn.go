@@ -398,6 +398,24 @@ func (c *conn) refsFor(id string) []uint32 {
 	return refs
 }
 
+// sendSessions hands this connection the daemon's whole session list.
+//
+// It is what answers a list, and it is also what answers an edit — the two are
+// the same frame because they are the same claim, "here is the set as it stands
+// now", and a client that has one code path for it cannot end up with two
+// disagreeing models of the set.
+//
+// The empty list is built as a non-nil slice so it marshals as [] rather than
+// null; wire.Sessions insists on that anyway (see its MarshalJSON), and the two
+// agreeing is cheaper than either one alone being relied upon.
+func (c *conn) sendSessions() {
+	infos := []session.Info{}
+	for _, s := range c.srv.reg.List() {
+		infos = append(infos, s.Info())
+	}
+	_ = c.sendControl(wire.Sessions{Sessions: infos})
+}
+
 func (c *conn) handleControl(msg any) {
 	switch m := msg.(type) {
 	case wire.Hello:
@@ -405,11 +423,31 @@ func (c *conn) handleControl(msg any) {
 		// the client announce capabilities.
 
 	case wire.List:
-		infos := []session.Info{}
-		for _, s := range c.srv.reg.List() {
-			infos = append(infos, s.Info())
+		c.sendSessions()
+
+	case wire.Update:
+		// The patch is passed through field for field rather than rebuilt,
+		// because the pointers *are* the message: a nil Name means "this edit is
+		// not about the name", and anything that turned it into a string would
+		// spend that distinction on the way past. wire.Update and
+		// session.MetaPatch have the same shape for exactly this reason.
+		if _, err := c.srv.reg.UpdateMeta(m.ID, session.MetaPatch{
+			Name: m.Name, Tags: m.Tags, Pinned: m.Pinned,
+		}); err != nil {
+			// The only thing UpdateMeta refuses is an id it does not hold, and a
+			// client editing a session that has just exited and been reaped is
+			// ordinary rather than exceptional. A failed metadata *write* is not
+			// reported here at all: the registry logs it and keeps the edit, so
+			// the session is renamed either way and only its durability suffered.
+			c.sendError("not_found", "no such session")
+			return
 		}
-		_ = c.sendControl(wire.Sessions{Sessions: infos})
+		// The list, not the one session that changed: the client's model of the
+		// set is a list, so handing back the whole of it lets a rename land the
+		// same way any other change to the set does. It goes to this connection
+		// alone — nothing here broadcasts — so another browser learns of the edit
+		// on its next poll rather than the instant it happens.
+		c.sendSessions()
 
 	case wire.Spawn:
 		s, err := c.srv.reg.Spawn(session.SpawnOpts{
@@ -485,6 +523,22 @@ func (c *conn) handleControl(msg any) {
 		}
 
 	case wire.CloseSession:
+		// The id path serves the sessions list, which closes rows it never
+		// attached to. It is taken only when no ref was named at all — refs are
+		// numbered from 1, so zero is "absent", not a very low ref — and a
+		// message carrying both takes the ref path below unchanged, since the
+		// ref is what the sender believed it held. An unknown id is answered
+		// the way update answers one: a list acting on a row that has just
+		// been reaped is ordinary, and the client is owed the word.
+		if m.Ref == 0 && m.ID != "" {
+			s, ok := c.srv.reg.Get(m.ID)
+			if !ok {
+				c.sendError("not_found", "no such session")
+				return
+			}
+			_ = s.Close()
+			return
+		}
 		a := c.attachment(m.Ref)
 		if a == nil {
 			c.sendError("bad_ref", "no such attachment")

@@ -18,16 +18,31 @@ const SnapshotsDirName = "sessions"
 // children and die with it — so a restart would otherwise be destructive.
 // A snapshot brings the session back with its history and a fresh shell;
 // the running process is the one thing it cannot carry.
+//
+// It carries the human-owned metadata as well as the machine-owned identity,
+// which makes a graceful restart self-contained: the sessions come back named,
+// tagged and pinned without anything else on disk having to be consulted. The
+// metadata files beside these are written on a different schedule and read
+// after the revival, so they remain the answer for a snapshot that predates a
+// field rather than a second source for one that carries it. See Meta.
+//
+// CreatedAt travels because it is the one stamp a session must never lose. It
+// is what a stable ordering is built on, and a restart that reset it would
+// reshuffle every list in every client at once.
 type Snapshot struct {
-	V     int    `json:"v"`
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Cwd   string `json:"cwd"`
-	Cols  uint16 `json:"cols"`
-	Rows  uint16 `json:"rows"`
+	V      int      `json:"v"`
+	ID     string   `json:"id"`
+	Title  string   `json:"title"`
+	Name   string   `json:"name"`
+	Tags   []string `json:"tags"`
+	Pinned bool     `json:"pinned"`
+	Cwd    string   `json:"cwd"`
+	Cols   uint16   `json:"cols"`
+	Rows   uint16   `json:"rows"`
 	// The ring's retained bytes. encoding/json carries []byte as base64.
-	Ring    []byte    `json:"ring"`
-	SavedAt time.Time `json:"savedAt"`
+	Ring      []byte    `json:"ring"`
+	CreatedAt time.Time `json:"createdAt"`
+	SavedAt   time.Time `json:"savedAt"`
 }
 
 // reviveMarker separates the restored scrollback from the fresh shell, so
@@ -45,14 +60,20 @@ func (s *Session) Snapshot() (Snapshot, bool) {
 	}
 	ring, _ := s.ring.Since(s.ring.BaseSeq()) // a fresh copy, per Since
 	return Snapshot{
-		V:       1,
-		ID:      s.id,
-		Title:   s.info.Title,
-		Cwd:     s.info.Cwd,
-		Cols:    s.info.Cols,
-		Rows:    s.info.Rows,
-		Ring:    ring,
-		SavedAt: s.clock(),
+		V:      1,
+		ID:     s.id,
+		Title:  s.info.Title,
+		Name:   s.info.Name,
+		Tags:   s.info.Tags,
+		Pinned: s.info.Pinned,
+		Cwd:    s.info.Cwd,
+		Cols:   s.info.Cols,
+		Rows:   s.info.Rows,
+		Ring:   ring,
+		// Both timestamps, and they are not the same question: when this session
+		// began, and when this record of it was taken.
+		CreatedAt: s.info.CreatedAt,
+		SavedAt:   s.clock(),
 	}, true
 }
 
@@ -69,10 +90,15 @@ func (r *Registry) Snapshots() []Snapshot {
 }
 
 // Revive spawns a fresh login shell in a snapshot's place: the same id, so
-// routes and bookmarks keep resolving, the same title, and the old
-// scrollback preloaded ahead of a marker naming the restart. A cwd that no
-// longer exists falls back to the home directory rather than failing the
-// revival.
+// routes and bookmarks keep resolving, the same title, name, tags and pin, the
+// same age, and the old scrollback preloaded ahead of a marker naming the
+// restart. A cwd that no longer exists falls back to the home directory rather
+// than failing the revival.
+//
+// A snapshot written before a field existed carries that field's zero value,
+// and the one place that matters is CreatedAt: start reads the zero time as
+// "stamp this one now" rather than dating the session to the epoch. Everything
+// else is honestly empty when it is empty.
 func (r *Registry) Revive(snap Snapshot) (*Session, error) {
 	cwd := snap.Cwd
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
@@ -83,7 +109,14 @@ func (r *Registry) Revive(snap Snapshot) (*Session, error) {
 	preload = append(preload, reviveMarker...)
 	return r.start(
 		SpawnOpts{Cwd: cwd, Cols: snap.Cols, Rows: snap.Rows},
-		snap.ID, preload, snap.Title,
+		snap.ID, preload,
+		Info{
+			Title:     snap.Title,
+			Name:      snap.Name,
+			Tags:      snap.Tags,
+			Pinned:    snap.Pinned,
+			CreatedAt: snap.CreatedAt,
+		},
 	)
 }
 
@@ -142,6 +175,14 @@ func writeSnapshot(dir string, snap Snapshot) error {
 // must not accumulate on disk. A file that does not parse is deleted and
 // skipped — corrupt state never wedges startup. A missing directory is
 // simply no snapshots.
+//
+// Metadata files share this directory and their names end in ".json" too, so
+// the suffix alone does not identify a snapshot. They are skipped explicitly:
+// this function deletes what it reads, and metadata is the one thing here that
+// must outlive the daemon that reads it. Without the check, every name and tag
+// on the machine would be consumed by the next start — silently, since a
+// snapshot loader has no reason to complain about a file it merely failed to
+// parse.
 func LoadAndClearSnapshots(dir string) []Snapshot {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -150,6 +191,9 @@ func LoadAndClearSnapshots(dir string) []Snapshot {
 	var out []Snapshot
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), metaSuffix) {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())

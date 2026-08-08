@@ -97,6 +97,21 @@ describe('compiled stylesheet', () => {
     }
   })
 
+  it('keeps the data-state shorthands wired to the attributes Radix writes', () => {
+    // Radix primitives write `data-state="checked"` and `data-state="open"`,
+    // never a bare `data-checked` attribute. The `data-checked:`/`data-open:`
+    // shorthands the ui components lean on reach those attributes only
+    // through the custom variants `shadcn/tailwind.css` registers — imported
+    // by src/styles.css — without which Tailwind falls back to compiling
+    // them as presence selectors that nothing ever renders. Dropping that
+    // import would make the sessions list's checked checkbox vanish at rest
+    // and strip every checked box of its fill, while a suite that only reads
+    // source modules stayed green — the same shape of hazard as the dark
+    // variant above, guarded the same way: on the output.
+    expect(css).toMatch(/\.data-checked\\:opacity-100[^{}]*\[data-state=checked\]/)
+    expect(css).toMatch(/\.data-open\\:animate-in[^{}]*\[data-state=open\]/)
+  })
+
   it('leaves the pinch gesture to the browser on the terminal surface', () => {
     // touch-action: none once shipped here and made the page unzoomable on
     // phones; pinch-zoom keeps single-finger drags for the scrollback

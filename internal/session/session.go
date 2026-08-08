@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -52,16 +54,45 @@ type SpawnOpts struct {
 }
 
 // Info is a snapshot of session state safe to serialise.
+//
+// Title and Name are both labels and they are deliberately not the same field.
+// Title is what the program running in the session says it is, scraped from
+// OSC 0/2 and overwritten whenever it says something else; Name is what a
+// human decided to call this session, and nothing running inside it may touch
+// it. A UI shows the name when there is one and falls back to the title.
+//
+// CreatedAt is the one timestamp that never moves. LastActive is the useful
+// sort key right up until it isn't — a list ordered by it rearranges itself
+// under the reader's cursor as output arrives — so a stable ordering needs a
+// field that output cannot disturb.
 type Info struct {
 	ID         string    `json:"id"`
 	Title      string    `json:"title"`
+	Name       string    `json:"name"`
+	Tags       []string  `json:"tags"`
+	Pinned     bool      `json:"pinned"`
 	Cwd        string    `json:"cwd"`
 	Cmd        []string  `json:"cmd"`
 	State      string    `json:"state"` // "running" | "exited"
 	ExitCode   int       `json:"exitCode"`
 	Cols       uint16    `json:"cols"`
 	Rows       uint16    `json:"rows"`
+	CreatedAt  time.Time `json:"createdAt"`
 	LastActive time.Time `json:"lastActive"`
+}
+
+// MetaPatch is a partial update to a session's human-owned metadata: a nil
+// field means "leave this one alone".
+//
+// Partial rather than whole-record on purpose. Two tabs open on the same
+// session are the normal case, not the exotic one, and a client that had to
+// send back every field would silently undo whatever the other one changed
+// between its last read and this write. With a patch, an edit can only affect
+// what it names.
+type MetaPatch struct {
+	Name   *string
+	Tags   *[]string
+	Pinned *bool
 }
 
 // Sub is one subscriber's view of a session's output stream. Backlog plus
@@ -127,6 +158,12 @@ type Session struct {
 	// reason as kill. See setWinsize.
 	setsize func(f *os.File, ws *pty.Winsize) error
 
+	// cwdOf is processCwd, captured per session at spawn. Info reads it
+	// without holding s.mu, so the capture discipline is stricter than for
+	// kill and setsize: a test that wants a substitute must swap it before
+	// the session's Info is ever called, never while readers are live.
+	cwdOf func(pid int) (string, error)
+
 	// sigReq carries group-signal requests to the supervisor. Nothing else
 	// signals the process group; see supervise for why.
 	sigReq chan sigRequest
@@ -175,11 +212,86 @@ type Session struct {
 
 func (s *Session) ID() string { return s.id }
 
-// Info returns a snapshot of the session's state.
+// Info returns a snapshot of the session's state, and is also where the
+// child's cwd is refreshed — the kernel is the only party that knows where a
+// `cd` left the shell, so every snapshot asks it.
+//
+// The read happens before s.mu is taken. It needs nothing the lock guards —
+// only the pid, which is immutable after spawn — so keeping it outside costs
+// nothing and keeps the rule that s.mu is never held across a syscall intact
+// without having to argue about whether this one can block.
+//
+// A failed read keeps the previous value rather than blanking it: the common
+// failure is a child that has exited, and "where it last was" remains the
+// honest answer for as long as the session is listed. The store is gated on
+// State == "running" for the same reason signalling stops at groupGone —
+// after the reap the pid may be recycled, and a read that "succeeds" then
+// may be describing a stranger's directory.
 func (s *Session) Info() Info {
+	cwd, err := s.cwdOf(s.pid)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err == nil && s.info.State == "running" {
+		s.info.Cwd = cwd
+	}
 	return s.info
+}
+
+// ApplyMeta applies a partial metadata update and returns the resulting
+// snapshot — the same one a subsequent Info would report, so a caller can
+// answer a client and broadcast the change without a second read.
+//
+// Naming a session is not activity in it: LastActive is left alone, so
+// tidying up a list of sessions cannot reorder the list being tidied.
+func (s *Session) ApplyMeta(p MetaPatch) Info {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p.Name != nil {
+		s.info.Name = *p.Name
+	}
+	if p.Tags != nil {
+		// normalizeTags always allocates, which is what keeps the caller's
+		// slice out of the snapshot Info hands to readers. Sharing it would
+		// be a data race nothing in this package could see: the caller may
+		// reuse its buffer the moment this returns.
+		s.info.Tags = normalizeTags(*p.Tags)
+	}
+	if p.Pinned != nil {
+		s.info.Pinned = *p.Pinned
+	}
+	return s.info
+}
+
+// normalizeTags settles what a tag is, once, at the edge: trimmed, non-empty,
+// unique, sorted. Downstream — filtering, grouping, comparing two sessions'
+// tags — then never has to ask whether " prod" and "prod" are the same thing,
+// and a stored set has no ordering for two clients to disagree about.
+//
+// It never returns nil, even for no tags at all. A nil slice serialises as
+// JSON null, and a field that is sometimes null and sometimes a list is a
+// guard every client has to remember to write.
+//
+// The result is clipped, so it has no spare capacity for a consumer to append
+// into. Info hands the same slice header to every reader; one of them doing
+// append(info.Tags, x) on a slice with room to spare would write into the
+// array all the others are reading, which is a data race in a caller that did
+// nothing wrong.
+func normalizeTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	seen := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, dup := seen[tag]; dup {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	slices.Sort(out)
+	return slices.Clip(out)
 }
 
 // Write sends bytes to the PTY.

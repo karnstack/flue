@@ -1,149 +1,521 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
-import type { SessionInfo } from '@/client/protocol'
+import type { FleetSession } from '@/fleet/types'
+import { renderWithRouter } from '@/testing/render'
+import { COLUMN_KEYS, type Group } from '@/sessions/view'
 import { SessionTable } from './session-table'
 
-function session(over: Partial<SessionInfo> & { id: string }): SessionInfo {
+/**
+ * One session, with everything a case did not care about filled in. The
+ * defaults are inert — no name, one machine, one directory — so whatever a
+ * case overrides is the only thing that can explain its result. `title: 'zsh'`
+ * makes 'zsh' the display name unless a case says otherwise.
+ */
+function fs(over: Partial<FleetSession> & { id: string }): FleetSession {
   return {
     title: 'zsh',
+    name: '',
+    tags: [],
+    pinned: false,
     cwd: '/Users/karn/code/flue',
     cmd: ['zsh', '-l'],
     state: 'running',
     exitCode: 0,
     cols: 120,
     rows: 40,
+    createdAt: '2026-07-28T09:00:00Z',
     lastActive: '2026-07-28T10:00:00Z',
+    machineId: 'm1',
+    machineName: 'MacBook Pro',
     ...over,
   }
 }
 
-const sessions: SessionInfo[] = [
-  session({ id: 'a1b2c3d4' }),
-  session({
-    id: 'e5f6a7b8',
-    title: 'build',
-    cwd: '/Users/karn/code/reins',
-    cmd: ['pnpm', 'build'],
-    state: 'exited',
-    exitCode: 1,
-    cols: 80,
-    rows: 24,
-    lastActive: '2026-07-28T09:30:00Z',
-  }),
-]
+const group = (key: string, label: string, sessions: FleetSession[]): Group => ({
+  key,
+  label,
+  sessions,
+})
 
-/** Column `at` of every body row, top to bottom. */
-function column(at: number): string[] {
-  const body = screen.getAllByRole('rowgroup')[1]!
-  return within(body)
-    .getAllByRole('row')
-    .map((row) => within(row).getAllByRole('cell')[at]!.textContent!)
+type Props = Parameters<typeof SessionTable>[0]
+
+/**
+ * Mount with every callback spied and every prop defaulted but overridable.
+ *
+ * Under a real (memory) router now, not bare: each row is a TanStack Link to
+ * its own session, and a Link throws without a router in context. The router
+ * comes back with the render because it is also the only way to prove what a
+ * click did — jsdom never navigates, so only `router.state.location` can say
+ * whether the row opened.
+ */
+async function renderTable(over: Partial<Props> = {}) {
+  const props: Props = {
+    groups: [group('machine:m1', 'MacBook Pro', [fs({ id: 'a1' })])],
+    columns: [...COLUMN_KEYS],
+    selected: new Set<string>(),
+    onToggleSelect: vi.fn(),
+    onToggleGroup: vi.fn(),
+    collapsed: new Set<string>(),
+    onAction: vi.fn(),
+    ...over,
+  }
+  const view = await renderWithRouter(<SessionTable {...props} />)
+  return { ...view, props }
 }
 
-const directories = () => column(0)
-const commands = () => column(1)
-
 describe('SessionTable', () => {
-  it('renders a row per session', () => {
-    render(<SessionTable sessions={sessions} onOpen={() => {}} />)
-    expect(screen.getByText('/Users/karn/code/flue')).toBeTruthy()
-    expect(screen.getByText('/Users/karn/code/reins')).toBeTruthy()
+  describe('groups', () => {
+    it('heads each group with its label and a running/exited tally', async () => {
+      await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'a1' }),
+            fs({ id: 'b2', title: 'vim' }),
+            fs({ id: 'c3', title: 'build', state: 'exited', exitCode: 1 }),
+          ]),
+        ],
+      })
+
+      const toggle = screen.getByRole('button', { name: 'MacBook Pro' })
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      expect(screen.getByText('2 running · 1 exited')).toBeTruthy()
+    })
+
+    it('says only what a tally has members for', async () => {
+      await renderTable({
+        groups: [group('machine:m1', 'MacBook Pro', [fs({ id: 'a1' })])],
+      })
+      expect(screen.getByText('1 running')).toBeTruthy()
+      expect(screen.queryByText(/exited/)).toBeNull()
+    })
+
+    it('renders every group, in the order the view model decided', async () => {
+      const { container } = await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [fs({ id: 'a1' })]),
+          group('machine:m2', 'devbox', [fs({ id: 'b2', machineId: 'm2', machineName: 'devbox' })]),
+        ],
+      })
+      const text = container.textContent!
+      expect(text.indexOf('MacBook Pro')).toBeGreaterThan(-1)
+      expect(text.indexOf('MacBook Pro')).toBeLessThan(text.indexOf('devbox'))
+    })
+
+    it('folds a collapsed group down to its heading', async () => {
+      await renderTable({ collapsed: new Set(['machine:m1']) })
+
+      const toggle = screen.getByRole('button', { name: 'MacBook Pro' })
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(screen.queryByText('zsh')).toBeNull()
+    })
+
+    it('renders the rows of a group exactly as given, never re-sorted', async () => {
+      // The one ordering rule this component has is to have none: order is
+      // decided by orderSessions, 30-second buckets and all, and a helpful
+      // sort here would quietly undo it. These rows are deliberately out of
+      // order by every key such a sort might reach for — name, directory,
+      // recency, id — in either direction, so any comparison at all breaks
+      // the expectation.
+      await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'z9', title: 'zeta', cwd: '/b', lastActive: '2026-07-28T09:00:00Z' }),
+            fs({ id: 'a1', title: 'alpha', cwd: '/a', lastActive: '2026-07-28T10:00:00Z' }),
+            fs({ id: 'm5', title: 'mid', cwd: '/c', lastActive: '2026-07-28T08:00:00Z' }),
+          ]),
+        ],
+      })
+
+      const names = screen.getAllByRole('link').map((a) => a.getAttribute('aria-label'))
+      expect(names).toEqual(['Open zeta', 'Open alpha', 'Open mid'])
+    })
+
+    it('asks for a toggle rather than deciding one', async () => {
+      // Collapse state lives in the route; this component only reports the
+      // click and renders whatever `collapsed` says next time.
+      const { props } = await renderTable()
+
+      await userEvent.click(screen.getByRole('button', { name: 'MacBook Pro' }))
+
+      expect(props.onToggleGroup).toHaveBeenCalledWith('machine:m1')
+      expect(
+        screen.getByRole('button', { name: 'MacBook Pro' }).getAttribute('aria-expanded'),
+      ).toBe('true')
+    })
   })
 
-  it('shows the command that is running, not just the shell', () => {
-    render(<SessionTable sessions={sessions} onOpen={() => {}} />)
-    expect(screen.getByText('pnpm build')).toBeTruthy()
+  describe('the fields a row carries', () => {
+    it('draws no header row of field names at all', async () => {
+      // The rows are one list, not a spreadsheet: what each piece is, its
+      // rendering already says, and a band of labels over the first row
+      // would spend the top of the screen restating it.
+      const { container } = await renderTable()
+
+      expect(screen.queryAllByRole('columnheader')).toEqual([])
+      expect(container.querySelector('table, thead, th')).toBeNull()
+    })
+
+    it('drops the pieces of a column that is toggled off', async () => {
+      await renderTable({ columns: ['name', 'state'] })
+
+      expect(screen.queryByText('/Users/karn/code/flue')).toBeNull()
+      expect(screen.queryByText('MacBook Pro', { selector: '[data-slot="badge"]' })).toBeNull()
+      expect(screen.getByText('Running')).toBeTruthy()
+    })
+
+    it('keeps the name even when it is not asked for', async () => {
+      // A row with no name is a row nothing identifies. The component treats
+      // 'name' as always on, whatever the columns preference says.
+      await renderTable({ columns: ['state'] })
+
+      expect(screen.getByRole('link', { name: 'Open zsh' })).toBeTruthy()
+      expect(screen.getByText('zsh')).toBeTruthy()
+    })
+
+    it('ranges the details after the name in their fixed order', async () => {
+      // Membership is the caller's; order is COLUMN_KEYS's. A preference list
+      // that says ['lastActive', 'tags'] must not put the stamp before the
+      // badges.
+      const { container } = await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [fs({ id: 'a1', tags: ['api'] })]),
+        ],
+        columns: ['lastActive', 'directory', 'tags', 'name'],
+      })
+
+      const row = container.querySelector('li')!.textContent!
+      expect(row.indexOf('zsh')).toBeLessThan(row.indexOf('api'))
+      expect(row.indexOf('api')).toBeLessThan(row.indexOf('/Users/karn/code/flue'))
+      expect(row.indexOf('/Users/karn/code/flue')).toBeLessThan(row.indexOf('ago'))
+    })
   })
 
-  it('distinguishes running from exited', () => {
-    render(<SessionTable sessions={sessions} onOpen={() => {}} />)
-    expect(screen.getByText('Running')).toBeTruthy()
-    expect(screen.getByText('Exited 1')).toBeTruthy()
+  describe('rows', () => {
+    it('shows the display name with the command beside it', async () => {
+      await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'a1', title: 'build', cmd: ['pnpm', 'build'] }),
+          ]),
+        ],
+      })
+      expect(screen.getByText('build')).toBeTruthy()
+      expect(screen.getByText('pnpm build')).toBeTruthy()
+    })
+
+    it('distinguishes running from exited', async () => {
+      // A live session says "Running" to assistive technology through its
+      // dot; an ended one writes "Exited n" among the row's details, where
+      // the code is on screen rather than in a tooltip.
+      await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'a1' }),
+            fs({ id: 'b2', title: 'build', state: 'exited', exitCode: 1 }),
+          ]),
+        ],
+      })
+      expect(screen.getByText('Running')).toBeTruthy()
+      expect(screen.getByText('Exited 1')).toBeTruthy()
+    })
+
+    it('names the machine a row runs on', async () => {
+      await renderTable({
+        groups: [group('tag:api', 'api', [fs({ id: 'a1', tags: ['api'] })])],
+      })
+      expect(screen.getByText('MacBook Pro')).toBeTruthy()
+    })
+
+    it('shows the tags as badges', async () => {
+      await renderTable({
+        groups: [group('machine:m1', 'MacBook Pro', [fs({ id: 'a1', tags: ['api', 'prod'] })])],
+      })
+      expect(screen.getByText('api')).toBeTruthy()
+      expect(screen.getByText('prod')).toBeTruthy()
+    })
+
+    it('cuts a long directory in the middle, keeping both ends', async () => {
+      // CSS ellipsis is end-only, and the end of a path is the half that
+      // tells its sessions apart — so the cut is made in JS, in the middle.
+      const cwd = '/Users/karn/code/karnstack/flue/web/src/components'
+      await renderTable({
+        groups: [group('machine:m1', 'MacBook Pro', [fs({ id: 'a1', cwd })])],
+      })
+
+      expect(screen.getByText('/Users/karn/cod…lue/web/src/components')).toBeTruthy()
+      expect(screen.getByTitle(cwd)).toBeTruthy()
+    })
+
+    it('leaves a short directory whole', async () => {
+      await renderTable()
+      expect(screen.getByText('/Users/karn/code/flue')).toBeTruthy()
+    })
+
+    it('tells time relatively in the last active and created details', async () => {
+      const now = Date.now()
+      await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({
+              id: 'a1',
+              lastActive: new Date(now - 5 * 60_000).toISOString(),
+              createdAt: new Date(now - 2 * 24 * 60 * 60_000).toISOString(),
+            }),
+          ]),
+        ],
+      })
+      expect(screen.getByText('5m ago')).toBeTruthy()
+      expect(screen.getByText('2d ago')).toBeTruthy()
+    })
+
+    it('answers a hover with a soft rounded tint, not a card', async () => {
+      // Linear's list grammar: rows rest on the page background with nothing
+      // drawn between them, and the pointer's row answers with a rounded
+      // wash. No box per row, no rules between siblings.
+      const { container } = await renderTable()
+      const row = container.querySelector('li')!
+      expect(row.className).toMatch(/\brounded-md\b/)
+      expect(row.className).toMatch(/\bhover:bg-/)
+      expect(row.className).not.toMatch(/\bborder\b|\bborder-b\b|\bshadow/)
+    })
+
+    it('stacks every self-answering piece above the row link', async () => {
+      // The link stretches over the row by its ::after box, and a browser
+      // hit-tests that overlay first: anything that takes its own pointer —
+      // the checkbox, the ⋯ trigger — or carries its own title tooltip has
+      // to stand above it on z-10, or the anchor swallows the hover and the
+      // click. jsdom does no hit-testing, so the class is the observable
+      // contract here, exactly as the hover tint is pinned by its class.
+      const { container } = await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'a1', tags: ['a', 'b', 'c', 'd'], state: 'exited', exitCode: 1 }),
+          ]),
+        ],
+      })
+
+      expect(screen.getByRole('checkbox', { name: 'Select zsh' }).className).toMatch(/\bz-10\b/)
+      expect(screen.getByRole('button', { name: 'Actions for zsh' }).className).toMatch(
+        /\bz-10\b/,
+      )
+
+      // The state dot, the directory, both stamps, and the folded tags: each
+      // one promises a tooltip, so each one must be reachable by a hover.
+      const titled = Array.from(container.querySelectorAll('li [title]'))
+      expect(titled.length).toBeGreaterThanOrEqual(4)
+      for (const el of titled) expect(el.className).toMatch(/\bz-10\b/)
+    })
+
+    it('caps the tag badges and folds the remainder into a +n', async () => {
+      // A row is one line: the old layout could sideways-scroll a wide row,
+      // this one must never push the pane. The folded names stay reachable
+      // through the +n badge's tooltip.
+      await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'a1', tags: ['api', 'edge', 'ops', 'prod', 'staging'] }),
+          ]),
+        ],
+      })
+
+      expect(screen.getByText('api')).toBeTruthy()
+      expect(screen.getByText('edge')).toBeTruthy()
+      expect(screen.getByText('ops')).toBeTruthy()
+      expect(screen.queryByText('prod')).toBeNull()
+      expect(screen.getByText('+2').getAttribute('title')).toBe('prod, staging')
+    })
+
+    it('keeps the machine chip at every width, shedding the directory first', async () => {
+      // The headline use of this screen is a phone reading a desktop's
+      // fleet, and on that phone "which machine" outranks "which directory".
+      await renderTable()
+
+      const chip = screen.getByText('MacBook Pro', { selector: '[data-slot="badge"]' })
+      expect(chip.className).not.toMatch(/:hidden\b/)
+      expect(screen.getByTitle('/Users/karn/code/flue').className).toMatch(/\bmax-md:hidden\b/)
+    })
   })
 
-  it('calls onOpen with the session id', async () => {
-    const onOpen = vi.fn()
-    render(<SessionTable sessions={sessions} onOpen={onOpen} />)
-    await userEvent.click(screen.getAllByRole('button', { name: /open/i })[0]!)
-    expect(onOpen).toHaveBeenCalledWith('a1b2c3d4')
+  describe('selection', () => {
+    it('toggles by the composite key, and does not open the session', async () => {
+      const { props, router } = await renderTable()
+
+      await userEvent.click(screen.getByRole('checkbox', { name: 'Select zsh' }))
+
+      expect(props.onToggleSelect).toHaveBeenCalledWith('m1/a1')
+      expect(router.state.location.pathname).toBe('/sessions')
+    })
+
+    it('shows a session selected under every heading it appears in', async () => {
+      // A session tagged twice is the same object in two groups, and the
+      // selection key repeats with it — one key, two checked boxes.
+      const twice = fs({ id: 'a1', tags: ['api', 'ops'] })
+      await renderTable({
+        groups: [group('tag:api', 'api', [twice]), group('tag:ops', 'ops', [twice])],
+        selected: new Set(['m1/a1']),
+      })
+
+      const boxes = screen.getAllByRole('checkbox', { name: 'Select zsh' })
+      expect(boxes).toHaveLength(2)
+      for (const box of boxes) expect(box.getAttribute('aria-checked')).toBe('true')
+    })
   })
 
-  it('names each open control after its own row', () => {
-    // Ten buttons all called "Open" are ten identical announcements. The
-    // accessible name has to say which row it belongs to.
-    render(<SessionTable sessions={sessions} onOpen={() => {}} />)
-    expect(screen.getByRole('button', { name: /\/Users\/karn\/code\/reins/ })).toBeTruthy()
+  describe('opening', () => {
+    it('makes the whole row one link to its session', async () => {
+      const { router } = await renderTable()
+
+      const link = screen.getByRole('link', { name: 'Open zsh' })
+      // A real href on a real anchor: this is what a middle click, a copied
+      // address and a Ctrl/Cmd click all read.
+      expect(link.getAttribute('href')).toBe('/d/m1/s/a1')
+
+      await userEvent.click(link)
+      expect(router.state.location.pathname).toBe('/d/m1/s/a1')
+    })
+
+    it('leaves a modified click to the browser, which owns the new tab', async () => {
+      // Ctrl/Cmd and middle clicks mean "a new tab" and only the browser can
+      // honour that. The router must not swallow them — TanStack's Link
+      // stands aside for a modified click, so the location holds still here
+      // while a real browser would be opening the terminal beside this tab.
+      const { router } = await renderTable()
+      const link = screen.getByRole('link', { name: 'Open zsh' })
+
+      fireEvent.click(link, { ctrlKey: true })
+      expect(router.state.location.pathname).toBe('/sessions')
+
+      fireEvent.click(link, { metaKey: true })
+      expect(router.state.location.pathname).toBe('/sessions')
+
+      fireEvent.click(link, { button: 1 })
+      expect(router.state.location.pathname).toBe('/sessions')
+    })
+
+    it('offers no Open button: the row itself is the affordance', async () => {
+      await renderTable()
+      expect(screen.queryByRole('button', { name: /^Open / })).toBeNull()
+    })
   })
 
-  it('shows an empty state when there are no sessions', () => {
-    render(<SessionTable sessions={[]} onOpen={() => {}} />)
-    expect(screen.getByText(/No sessions yet/i)).toBeTruthy()
+  describe('the row menu', () => {
+    it('fires onAction for each item, and never opens the session', async () => {
+      const user = userEvent.setup()
+      const { props, router } = await renderTable()
+      const s = props.groups[0]!.sessions[0]!
+
+      const pick = async (item: string) => {
+        await user.click(screen.getByRole('button', { name: 'Actions for zsh' }))
+        await user.click(screen.getByRole('menuitem', { name: item }))
+      }
+
+      await pick('Rename')
+      expect(props.onAction).toHaveBeenLastCalledWith('rename', s)
+      await pick('Edit tags')
+      expect(props.onAction).toHaveBeenLastCalledWith('tags', s)
+      await pick('Pin')
+      expect(props.onAction).toHaveBeenLastCalledWith('pin', s)
+      await pick('Close')
+      expect(props.onAction).toHaveBeenLastCalledWith('close', s)
+
+      expect(router.state.location.pathname).toBe('/sessions')
+    })
+
+    it('offers unpin in place of pin for a pinned session', async () => {
+      const user = userEvent.setup()
+      const { props } = await renderTable({
+        groups: [group('machine:m1', 'MacBook Pro', [fs({ id: 'a1', pinned: true })])],
+      })
+
+      await user.click(screen.getByRole('button', { name: 'Actions for zsh' }))
+      expect(screen.queryByRole('menuitem', { name: 'Pin' })).toBeNull()
+      await user.click(screen.getByRole('menuitem', { name: 'Unpin' }))
+
+      expect(props.onAction).toHaveBeenLastCalledWith('unpin', props.groups[0]!.sessions[0])
+    })
   })
 
-  it('uses sentence case headings, never uppercase', () => {
-    render(<SessionTable sessions={sessions} onOpen={() => {}} />)
-    const heading = screen.getByRole('columnheader', { name: 'Directory' })
-    expect(heading.className).not.toMatch(/\buppercase\b/)
+  describe('pinned', () => {
+    it('stars a pinned session and only a pinned one', async () => {
+      await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'a1', pinned: true }),
+            fs({ id: 'b2', title: 'vim' }),
+          ]),
+        ],
+      })
+      expect(screen.getAllByRole('img', { name: 'Pinned' })).toHaveLength(1)
+    })
+
+    it('rules off the pinned rows in the ungrouped list', async () => {
+      const { container } = await renderTable({
+        groups: [
+          group('all', 'All sessions', [
+            fs({ id: 'p1', pinned: true }),
+            fs({ id: 'p2', pinned: true, title: 'vim' }),
+            fs({ id: 'u1', title: 'top' }),
+          ]),
+        ],
+      })
+
+      const items = Array.from(container.querySelectorAll('li'))
+      // Two pinned rows, the rule, then the rest.
+      expect(items).toHaveLength(4)
+      expect(items[2]!.hasAttribute('data-divider')).toBe(true)
+      expect(items[2]!.className).toMatch(/\bborder-b\b/)
+    })
+
+    it('draws no rule when the list is grouped, unpinned, or pinned throughout', async () => {
+      const grouped = await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'p1', pinned: true }),
+            fs({ id: 'u1', title: 'top' }),
+          ]),
+        ],
+      })
+      expect(grouped.container.querySelector('[data-divider]')).toBeNull()
+      grouped.unmount()
+
+      const unpinned = await renderTable({
+        groups: [group('all', 'All sessions', [fs({ id: 'u1' })])],
+      })
+      expect(unpinned.container.querySelector('[data-divider]')).toBeNull()
+      unpinned.unmount()
+
+      const allPinned = await renderTable({
+        groups: [group('all', 'All sessions', [fs({ id: 'p1', pinned: true })])],
+      })
+      expect(allPinned.container.querySelector('[data-divider]')).toBeNull()
+    })
   })
 
-  it('orders by directory, whatever order it was given', () => {
-    // Not cosmetic. The daemon builds `sessions` by ranging over a Go map, and
-    // Go randomises that order per call — so unsorted rows would reshuffle
-    // under the reader on every poll.
-    const b = session({ id: 'b', cwd: '/b' })
-    const a = session({ id: 'a', cwd: '/a' })
+  describe('spawning', () => {
+    it('offers a spawn control per group only when given somewhere to send it', async () => {
+      const bare = await renderTable()
+      expect(bare.queryByRole('button', { name: /New session on/ })).toBeNull()
+      bare.unmount()
 
-    render(<SessionTable sessions={[b, a]} onOpen={() => {}} />)
-    expect(directories()).toEqual(['/a', '/b'])
+      const onSpawnIn = vi.fn()
+      await renderTable({ onSpawnIn })
+
+      await userEvent.click(screen.getByRole('button', { name: 'New session on MacBook Pro' }))
+
+      expect(onSpawnIn).toHaveBeenCalledWith('machine:m1')
+    })
   })
 
-  it('orders sessions that share a directory by id, so the order cannot drift', () => {
-    // Two sessions in one directory is the ordinary case here, not the exotic
-    // one, so the tie-break is what makes this stable rather than just sorted.
-    const second = session({ id: 'b', cwd: '/same', cmd: ['second'] })
-    const first = session({ id: 'a', cwd: '/same', cmd: ['first'] })
+  describe('empty state', () => {
+    it('shows the terminal card when there are no groups at all', async () => {
+      const { container } = await renderTable({ groups: [] })
 
-    render(<SessionTable sessions={[second, first]} onOpen={() => {}} />)
-    expect(commands()).toEqual(['first', 'second'])
-  })
-
-  it('does not move a row because the daemon touched the session', () => {
-    // The reason the order is not "most recently active". The daemon stamps
-    // lastActive on every byte written to a pty and every chunk read back from
-    // one, so a session tailing a log would climb the table between one poll
-    // and the next. Deterministic per snapshot is not enough — it has to be
-    // the same order next time, or rows still move under the pointer.
-    const a = session({ id: 'a', cwd: '/a', lastActive: '2026-07-28T08:00:00Z' })
-    const b = session({ id: 'b', cwd: '/b', lastActive: '2026-07-28T09:00:00Z' })
-    const { rerender } = render(<SessionTable sessions={[a, b]} onOpen={() => {}} />)
-    expect(directories()).toEqual(['/a', '/b'])
-
-    // The next poll: the same two sessions, one of them busy since, and the
-    // daemon's map handing them over the other way round.
-    const busy = { ...b, lastActive: '2026-07-28T12:00:00Z' }
-    rerender(<SessionTable sessions={[busy, a]} onOpen={() => {}} />)
-
-    expect(directories()).toEqual(['/a', '/b'])
-  })
-
-  it('does not draw the rows as cards', () => {
-    // Sibling rows in a shared context take the lightest separation that
-    // works. A card per row would claim each session is an independent object
-    // when the set is one list, so: horizontal rules, no outer border, no
-    // vertical rules, and the page background showing through.
-    const { container } = render(<SessionTable sessions={sessions} onOpen={() => {}} />)
-    const table = container.querySelector('table')!
-    expect(table.className).toContain('w-full')
-
-    for (const row of Array.from(table.querySelectorAll('tr'))) {
-      expect(row.className).toMatch(/\bborder-b\b/)
-      expect(row.className).not.toMatch(/\bborder-x\b|\bborder-t\b|\brounded/)
-    }
-    for (const cell of Array.from(table.querySelectorAll('td, th'))) {
-      expect(cell.className).not.toMatch(/\bborder-/)
-      expect(cell.className).not.toMatch(/\bbg-(?!transparent)/)
-    }
+      expect(screen.getByText(/No sessions yet/)).toBeTruthy()
+      const prompt = screen.getByText('$').closest('p')!
+      expect(prompt.textContent).toContain('flue open')
+      expect(container.querySelector('[class*="animate-blink"]')).toBeTruthy()
+    })
   })
 })

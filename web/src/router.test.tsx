@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import { RouterProvider } from '@tanstack/react-router'
 import { FlueClientProvider } from './client/provider'
+import { FleetClient } from './fleet/fleet'
+import { FleetProvider } from './fleet/provider'
 import { fakeClient } from './testing/socket'
 import { createFlueRouter, TERMINAL_ROUTE_ID } from './router'
 
@@ -36,6 +38,30 @@ async function renderAt(path: string) {
     </FlueClientProvider>,
   )
   return { ...view, client, sockets }
+}
+
+/**
+ * Mount the real router at `path` under a scripted fleet: the local machine
+ * beside one paired remote, each riding its own fake socket. The router's own
+ * FleetProvider sees the fleet already in context and passes through, which is
+ * exactly the seam a test is meant to reach the tree by.
+ */
+async function renderFleet(path: string) {
+  window.history.replaceState(null, '', path)
+  const router = createFlueRouter()
+  await router.load()
+  const local = fakeClient()
+  const attic = fakeClient()
+  const fleet = new FleetClient([
+    { id: 'local', name: '', client: local.client },
+    { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
+  ])
+  const view = render(
+    <FleetProvider fleet={fleet}>
+      <RouterProvider router={router} />
+    </FleetProvider>,
+  )
+  return { ...view, local, attic }
 }
 
 /**
@@ -183,8 +209,14 @@ describe('createFlueRouter', () => {
   it('wraps a management route in the app shell when it renders', async () => {
     await renderAt('/sessions')
     // The shell's chrome, by its landmarks: the nav inside the sidebar, and
-    // the content region the sidebar primitives render as <main>.
-    expect(screen.getByRole('navigation')).toBeTruthy()
+    // the content region the sidebar primitives render as <main>. Both navs
+    // are asked for by name — Main belongs to the shell, Breadcrumb to the
+    // route's own header — and by name only: a rotor listing two anonymous
+    // "navigation" landmarks would leave the reader picking one by luck, so
+    // an unlabeled landmark appearing here is a regression, not a baseline.
+    expect(screen.getAllByRole('navigation')).toHaveLength(2)
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeTruthy()
     expect(screen.getByRole('main')).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Sessions' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Sessions' })).toBeTruthy()
@@ -293,6 +325,79 @@ describe('createFlueRouter', () => {
       // match, so a real hit is more than one.
       expect(routeIds(item.to).length).toBeGreaterThan(1)
     }
+  })
+
+  it('routes a machine-addressed terminal through that machine’s client', async () => {
+    // The deviceId segment stops being decoration here: /d/attic-pi/... must
+    // attach on the attic's own connection, and ask nothing of the local one.
+    const { container, local, attic } = await renderFleet('/d/attic-pi/s/abc123')
+
+    expect(container.querySelector('[data-flue-surface]')).not.toBeNull()
+
+    act(() => attic.sockets[0]!.open())
+
+    expect(attic.sockets[0]!.ofType('attach')).toEqual([
+      { type: 'attach', id: 'abc123', lastSeq: 0, reqId: 1 },
+    ])
+    expect(local.sockets[0]!.ofType('attach')).toEqual([])
+  })
+
+  it('mounts the terminal the moment the fleet adopts the machine', async () => {
+    // F5 on a remote machine's terminal is the bookmark case: at first render
+    // the fleet holds only the local source — remote sources are built only
+    // after the local daemon's welcome names the relay — so the route
+    // legitimately finds no client yet, and has to recover on its own the
+    // moment the slot is adopted. A one-shot resolve would leave the
+    // not-paired pill up for good, on a pane with no way out.
+    window.history.replaceState(null, '', '/d/attic-pi/s/abc123')
+    const router = createFlueRouter()
+    await router.load()
+    const local = fakeClient()
+    const attic = fakeClient()
+    const fleet = new FleetClient(
+      [{ id: 'local', name: '', client: local.client }],
+      () => Promise.resolve([{ id: 'attic-pi', name: 'Attic Pi', client: attic.client }]),
+    )
+    const { container } = render(
+      <FleetProvider fleet={fleet}>
+        <RouterProvider router={router} />
+      </FleetProvider>,
+    )
+
+    // Before the welcome, not paired is all this browser can truthfully say.
+    expect(screen.getByRole('status').textContent).toContain('Machine not paired on this browser')
+    expect(container.querySelector('[data-flue-surface]')).toBeNull()
+
+    act(() => {
+      local.sockets[0]!.open()
+      local.sockets[0]!.emitControl({
+        type: 'welcome',
+        daemonId: 'd1',
+        host: 'mesa.local',
+        ver: '0.1.0',
+        relay: { status: 'connected', origin: 'https://relay.example' },
+      })
+    })
+    // Adoption is a promise away: the fleet awaits its source builder.
+    await act(async () => {})
+
+    expect(container.querySelector('[data-flue-surface]')).not.toBeNull()
+
+    act(() => attic.sockets[0]!.open())
+    expect(attic.sockets[0]!.ofType('attach')).toEqual([
+      { type: 'attach', id: 'abc123', lastSeq: 0, reqId: 1 },
+    ])
+  })
+
+  it('tells a machine the fleet does not hold apart from a dead session', async () => {
+    // A bookmarked session URL for a machine this browser never paired with,
+    // or whose pinned key is gone. There is no client to attach with, so the
+    // route answers the way the terminal answers a session the daemon has
+    // never heard of: a still pill naming the fact.
+    const { container } = await renderFleet('/d/ghost/s/abc123')
+
+    expect(screen.getByRole('status').textContent).toContain('Machine not paired on this browser')
+    expect(container.querySelector('[data-flue-surface]')).toBeNull()
   })
 
   it('reaches remote access from the nav', async () => {

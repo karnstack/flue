@@ -440,6 +440,186 @@ func TestListReturnsSessions(t *testing.T) {
 	})
 }
 
+// ptrTo is the shortest way to spell an optional field. wire.Update carries
+// pointers so that "not mentioned" and "set to the zero value" stay different
+// instructions, which means every literal in these tests needs an address.
+func ptrTo[T any](v T) *T { return &v }
+
+// infoIn finds one session in a sessions frame. A test that means to assert
+// about a particular session has to say which, since the daemon lists every
+// session it holds and the order is a map's.
+func infoIn(msg any, id string) (session.Info, bool) {
+	l, ok := msg.(wire.Sessions)
+	if !ok {
+		return session.Info{}, false
+	}
+	for _, info := range l.Sessions {
+		if info.ID == id {
+			return info, true
+		}
+	}
+	return session.Info{}, false
+}
+
+// TestUpdateAnswersWithTheEditedSession pins the whole round trip: the edit
+// lands on the registry and the requester is handed the result rather than
+// having to ask for it.
+//
+// The session is seeded with metadata first, and with metadata that differs
+// from the edit in every field. An assertion against a freshly spawned session
+// would be satisfied by a daemon that dropped the message on the floor — it
+// would be asserting that unnamed is unnamed — so the seed is what makes the
+// three assertions below able to fail.
+func TestUpdateAnswersWithTheEditedSession(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := reg.UpdateMeta(s.ID(), session.MetaPatch{
+		Name: ptrTo("before"), Tags: ptrTo([]string{"stale"}), Pinned: ptrTo(true),
+	}); err != nil {
+		t.Fatalf("seed UpdateMeta: %v", err)
+	}
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Update{
+		ID:   s.ID(),
+		Name: ptrTo("after"),
+		// Untidy on purpose: the daemon normalises on the way in, so what comes
+		// back is trimmed, deduplicated and sorted rather than what was sent.
+		Tags:   ptrTo([]string{" prod ", "api", "prod"}),
+		Pinned: ptrTo(false),
+	})
+
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		info, ok := infoIn(msg, s.ID())
+		if !ok {
+			return false
+		}
+		if info.Name != "after" {
+			t.Fatalf("Name = %q, want %q", info.Name, "after")
+		}
+		if got := strings.Join(info.Tags, ","); got != "api,prod" {
+			t.Fatalf("Tags = %v, want [api prod]", info.Tags)
+		}
+		if info.Pinned {
+			t.Fatal("Pinned = true, want false")
+		}
+		return true
+	})
+}
+
+// TestUpdateLeavesUnmentionedFieldsAlone pins the partial semantics at the
+// daemon's edge. wire.Update's pointers are handed to session.MetaPatch as they
+// arrived; a handler that rebuilt the patch from values would flatten "not
+// mentioned" into "cleared", and the seeded tags and pin below are what would
+// disappear when it did.
+func TestUpdateLeavesUnmentionedFieldsAlone(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := reg.UpdateMeta(s.ID(), session.MetaPatch{
+		Tags: ptrTo([]string{"keep"}), Pinned: ptrTo(true),
+	}); err != nil {
+		t.Fatalf("seed UpdateMeta: %v", err)
+	}
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Update{ID: s.ID(), Name: ptrTo("renamed")})
+
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		info, ok := infoIn(msg, s.ID())
+		if !ok {
+			return false
+		}
+		if info.Name != "renamed" {
+			t.Fatalf("Name = %q, want %q", info.Name, "renamed")
+		}
+		if got := strings.Join(info.Tags, ","); got != "keep" {
+			t.Fatalf("Tags = %v, want [keep]", info.Tags)
+		}
+		if !info.Pinned {
+			t.Fatal("Pinned = false, want true: a name-only edit unpinned the session")
+		}
+		return true
+	})
+}
+
+func TestUpdateUnknownSessionReturnsError(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Update{ID: "does-not-exist", Name: ptrTo("ghost")})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "not_found"
+	})
+}
+
+// TestUpdateIsVisibleToAnotherConnection is the cross-browser path: the laptop
+// renames a session and the phone, which is not the connection that asked, sees
+// the new name on its next list.
+//
+// The phone lists twice. The first list is what makes the second one an
+// assertion rather than a coincidence — it establishes that this connection was
+// reading the old name a moment ago, so the new one can only have come from the
+// other connection's edit.
+func TestUpdateIsVisibleToAnotherConnection(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := reg.UpdateMeta(s.ID(), session.MetaPatch{Name: ptrTo("before")}); err != nil {
+		t.Fatalf("seed UpdateMeta: %v", err)
+	}
+
+	laptop := dial(t, ts)
+	writeControl(t, laptop, wire.Hello{Ver: "test"})
+	phone := dial(t, ts)
+	writeControl(t, phone, wire.Hello{Ver: "test"})
+
+	writeControl(t, phone, wire.List{})
+	readUntil(t, phone, func(msg any, _ []byte) bool {
+		info, ok := infoIn(msg, s.ID())
+		if ok && info.Name != "before" {
+			t.Fatalf("Name = %q before the edit, want %q", info.Name, "before")
+		}
+		return ok
+	})
+
+	// Read the laptop's answer before the phone asks again, so the poll below
+	// is known to follow the edit rather than to race it.
+	writeControl(t, laptop, wire.Update{ID: s.ID(), Name: ptrTo("after")})
+	readUntil(t, laptop, func(msg any, _ []byte) bool {
+		info, ok := infoIn(msg, s.ID())
+		return ok && info.Name == "after"
+	})
+
+	writeControl(t, phone, wire.List{})
+	readUntil(t, phone, func(msg any, _ []byte) bool {
+		info, ok := infoIn(msg, s.ID())
+		if !ok {
+			return false
+		}
+		if info.Name != "after" {
+			t.Fatalf("Name = %q on the second connection, want %q", info.Name, "after")
+		}
+		return true
+	})
+}
+
 func TestAttachUnknownSessionReturnsError(t *testing.T) {
 	ts, _ := newTestServer(t)
 	c := dial(t, ts)
@@ -1474,6 +1654,74 @@ func TestCloseSessionReportsExit(t *testing.T) {
 		}
 		return ok
 	})
+}
+
+// TestCloseByIDClosesTheSession is the attach-free close: the sessions list
+// acts on rows it never attached to, so a close addressed by id — ref zero,
+// which no attachment ever holds — must reach the session all the same. The
+// closer here *is* attached, but only as a witness: the id path is what is
+// being exercised, and the exit arriving on the attachment proves the close
+// landed on the session rather than on the ref.
+func TestCloseByIDClosesTheSession(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "30"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c, ref := attach(t, ts, s.ID())
+	writeControl(t, c, wire.CloseSession{ID: s.ID()})
+
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Exit)
+		if ok && e.Ref != ref {
+			t.Fatalf("Exit.Ref = %d, want %d", e.Ref, ref)
+		}
+		return ok
+	})
+}
+
+// TestCloseByIDUnknownSessionReturnsError mirrors the update handler: the one
+// thing an id-addressed close can get wrong is naming a session the daemon
+// does not hold, and a list acting on a row that has just been reaped is
+// ordinary rather than exceptional — so it is answered, not ignored.
+func TestCloseByIDUnknownSessionReturnsError(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.CloseSession{ID: "does-not-exist"})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "not_found"
+	})
+}
+
+// TestCloseWithARefIgnoresTheID pins the precedence: a non-zero ref keeps the
+// ref semantics exactly as they were, id or no id. A close carrying a stale
+// ref beside a live id must fail on the ref rather than quietly closing by
+// id — the ref is what the sender believed it held, and acting on the other
+// address would close a session behind a view that was told "no such
+// attachment".
+func TestCloseWithARefIgnoresTheID(t *testing.T) {
+	ts, reg := newTestServer(t)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "30"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.CloseSession{Ref: 999, ID: s.ID()})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		return ok && e.Code == "bad_ref"
+	})
+
+	if got := s.Info().State; got != "running" {
+		t.Fatalf("State = %q after a bad-ref close, want running", got)
+	}
 }
 
 // --- carried constraint 3: refuse to serve without an authenticator ---

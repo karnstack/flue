@@ -361,6 +361,218 @@ func TestDeviceListEncodesEmptyAsArray(t *testing.T) {
 	}
 }
 
+// TestUpdateRoundTripsPartialFields pins what a partial edit looks like on the
+// wire: the fields the message names travel, and the ones it does not are
+// absent rather than sent as zeroes. An Update that encoded its whole struct
+// would tell the daemon "the name is now empty" every time a client only meant
+// to pin a session.
+func TestUpdateRoundTripsPartialFields(t *testing.T) {
+	name := "api server"
+	tags := []string{"api", "feat-x"}
+	cleared := []string{}
+	pinned := true
+
+	cases := []struct {
+		name    string
+		msg     Update
+		present []string // keys the encoding must carry
+		absent  []string // and keys it must not
+	}{
+		{
+			name:    "nameOnly",
+			msg:     Update{ID: "a1b2c3d4e5f60708", Name: &name},
+			present: []string{"id", "name"},
+			absent:  []string{"tags", "pinned"},
+		},
+		{
+			name:    "tagsAndPinned",
+			msg:     Update{ID: "a1b2c3d4e5f60708", Tags: &tags, Pinned: &pinned},
+			present: []string{"id", "tags", "pinned"},
+			absent:  []string{"name"},
+		},
+		{
+			name:    "clearTags",
+			msg:     Update{ID: "a1b2c3d4e5f60708", Tags: &cleared},
+			present: []string{"id", "tags"},
+			absent:  []string{"name", "pinned"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b, err := EncodeControl(c.msg)
+			if err != nil {
+				t.Fatalf("EncodeControl: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(b, &fields); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if string(fields["type"]) != `"update"` {
+				t.Fatalf("type = %s, want \"update\"", fields["type"])
+			}
+			for _, k := range c.present {
+				if _, ok := fields[k]; !ok {
+					t.Errorf("encoding dropped %q: %s", k, b)
+				}
+			}
+			for _, k := range c.absent {
+				if _, ok := fields[k]; ok {
+					t.Errorf("encoding carried %q, which this edit does not name: %s", k, b)
+				}
+			}
+
+			got, err := DecodeControl(b)
+			if err != nil {
+				t.Fatalf("DecodeControl: %v", err)
+			}
+			u, ok := got.(Update)
+			if !ok {
+				t.Fatalf("msg is %T, want wire.Update", got)
+			}
+			// DeepEqual follows pointers, so this compares what each field
+			// points at — and a nil pointer against a non-nil one fails, which
+			// is the comparison that matters here.
+			if !reflect.DeepEqual(u, c.msg) {
+				t.Fatalf("round trip = %#v, want %#v", u, c.msg)
+			}
+		})
+	}
+}
+
+// TestUpdateKeepsClearedTagsDistinctFromAbsent is the reason Tags is a pointer
+// to a slice rather than a slice.
+//
+// "The user removed the last tag" and "this edit is not about tags" arrive as
+// different JSON — `[]` and nothing — and a plain []string decodes both to nil,
+// which would make clearing a session's tags a request the daemon silently
+// drops. Decoded from raw text rather than from a value this test encoded
+// first, because raw text is what a client sends.
+func TestUpdateKeepsClearedTagsDistinctFromAbsent(t *testing.T) {
+	msg, err := DecodeControl([]byte(`{"type":"update","id":"s1","tags":[]}`))
+	if err != nil {
+		t.Fatalf("DecodeControl: %v", err)
+	}
+	u, ok := msg.(Update)
+	if !ok {
+		t.Fatalf("msg is %T, want wire.Update", msg)
+	}
+	if u.Tags == nil {
+		t.Fatal("an explicit empty tag list decoded as absent")
+	}
+	if *u.Tags == nil {
+		t.Fatal("cleared tags decoded to a nil slice, want an empty non-nil one")
+	}
+	if len(*u.Tags) != 0 {
+		t.Fatalf("cleared tags have %d entries, want 0", len(*u.Tags))
+	}
+
+	msg, err = DecodeControl([]byte(`{"type":"update","id":"s1","pinned":true}`))
+	if err != nil {
+		t.Fatalf("DecodeControl: %v", err)
+	}
+	u, ok = msg.(Update)
+	if !ok {
+		t.Fatalf("msg is %T, want wire.Update", msg)
+	}
+	if u.Tags != nil {
+		t.Fatalf("an edit that never mentioned tags decoded Tags as %v", *u.Tags)
+	}
+	if u.Name != nil {
+		t.Fatalf("an edit that never mentioned a name decoded Name as %q", *u.Name)
+	}
+	if u.Pinned == nil || !*u.Pinned {
+		t.Fatalf("Pinned = %v, want a pointer to true", u.Pinned)
+	}
+}
+
+// TestCloseSessionCarriesOneAddress pins the two ways a close can name its
+// target, and that each encoding carries only the address it was given. A ref
+// is a connection-scoped attachment handle; an id is the session itself, for
+// the list screen that closes without ever attaching. An encoder that wrote
+// `ref: 0` beside an id would hand the daemon two addresses — one of them a
+// value no attachment ever holds, since refs are numbered from 1.
+func TestCloseSessionCarriesOneAddress(t *testing.T) {
+	cases := []struct {
+		name    string
+		msg     CloseSession
+		present []string
+		absent  []string
+	}{
+		{"byRef", CloseSession{Ref: 3}, []string{"ref"}, []string{"id"}},
+		{"byID", CloseSession{ID: "a1b2c3d4e5f60708"}, []string{"id"}, []string{"ref"}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			b, err := EncodeControl(c.msg)
+			if err != nil {
+				t.Fatalf("EncodeControl: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(b, &fields); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if string(fields["type"]) != `"close"` {
+				t.Fatalf("type = %s, want \"close\"", fields["type"])
+			}
+			for _, k := range c.present {
+				if _, ok := fields[k]; !ok {
+					t.Errorf("encoding dropped %q: %s", k, b)
+				}
+			}
+			for _, k := range c.absent {
+				if _, ok := fields[k]; ok {
+					t.Errorf("encoding carried %q, which this close does not name: %s", k, b)
+				}
+			}
+
+			got, err := DecodeControl(b)
+			if err != nil {
+				t.Fatalf("DecodeControl: %v", err)
+			}
+			if !reflect.DeepEqual(got, c.msg) {
+				t.Fatalf("round trip = %#v, want %#v", got, c.msg)
+			}
+		})
+	}
+}
+
+// TestSessionsEncodesEmptyAsArray holds `sessions` to the invariant deviceList
+// already keeps: a daemon with nothing running sends [], never null. The field
+// is not optional, the TypeScript side declares it `SessionInfo[]`, and the
+// zero value — which is how "no sessions" is reached — is the one path that
+// would put a null in front of every consumer that maps over the list.
+func TestSessionsEncodesEmptyAsArray(t *testing.T) {
+	b, err := EncodeControl(Sessions{})
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if string(fields["sessions"]) != "[]" {
+		t.Fatalf("sessions = %s, want []", fields["sessions"])
+	}
+
+	// And it survives the trip back, so ranging over it is safe on both sides.
+	msg, err := DecodeControl(b)
+	if err != nil {
+		t.Fatalf("DecodeControl: %v", err)
+	}
+	s, ok := msg.(Sessions)
+	if !ok {
+		t.Fatalf("msg is %T, want wire.Sessions", msg)
+	}
+	if s.Sessions == nil {
+		t.Fatal("decoded Sessions is nil, want an empty slice")
+	}
+	if len(s.Sessions) != 0 {
+		t.Fatalf("decoded Sessions has %d entries, want 0", len(s.Sessions))
+	}
+}
+
 // deepEqual recursively compares two any values for equality, handling
 // nested maps and slices. Used by TestGoldenControlMessages to verify
 // round-trip fidelity while tolerating type differences between JSON
