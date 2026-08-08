@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
 import { RouterProvider } from '@tanstack/react-router'
 import { FlueClientProvider } from './client/provider'
+import { FleetClient } from './fleet/fleet'
+import { FleetProvider } from './fleet/provider'
 import { fakeClient } from './testing/socket'
 import { createFlueRouter, TERMINAL_ROUTE_ID } from './router'
 
@@ -36,6 +38,30 @@ async function renderAt(path: string) {
     </FlueClientProvider>,
   )
   return { ...view, client, sockets }
+}
+
+/**
+ * Mount the real router at `path` under a scripted fleet: the local machine
+ * beside one paired remote, each riding its own fake socket. The router's own
+ * FleetProvider sees the fleet already in context and passes through, which is
+ * exactly the seam a test is meant to reach the tree by.
+ */
+async function renderFleet(path: string) {
+  window.history.replaceState(null, '', path)
+  const router = createFlueRouter()
+  await router.load()
+  const local = fakeClient()
+  const attic = fakeClient()
+  const fleet = new FleetClient([
+    { id: 'local', name: '', client: local.client },
+    { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
+  ])
+  const view = render(
+    <FleetProvider fleet={fleet}>
+      <RouterProvider router={router} />
+    </FleetProvider>,
+  )
+  return { ...view, local, attic }
 }
 
 /**
@@ -293,6 +319,32 @@ describe('createFlueRouter', () => {
       // match, so a real hit is more than one.
       expect(routeIds(item.to).length).toBeGreaterThan(1)
     }
+  })
+
+  it('routes a machine-addressed terminal through that machine’s client', async () => {
+    // The deviceId segment stops being decoration here: /d/attic-pi/... must
+    // attach on the attic's own connection, and ask nothing of the local one.
+    const { container, local, attic } = await renderFleet('/d/attic-pi/s/abc123')
+
+    expect(container.querySelector('[data-flue-surface]')).not.toBeNull()
+
+    act(() => attic.sockets[0]!.open())
+
+    expect(attic.sockets[0]!.ofType('attach')).toEqual([
+      { type: 'attach', id: 'abc123', lastSeq: 0, reqId: 1 },
+    ])
+    expect(local.sockets[0]!.ofType('attach')).toEqual([])
+  })
+
+  it('tells a machine the fleet does not hold apart from a dead session', async () => {
+    // A bookmarked session URL for a machine this browser never paired with,
+    // or whose pinned key is gone. There is no client to attach with, so the
+    // route answers the way the terminal answers a session the daemon has
+    // never heard of: a still pill naming the fact.
+    const { container } = await renderFleet('/d/ghost/s/abc123')
+
+    expect(screen.getByRole('status').textContent).toContain('Machine not paired on this browser')
+    expect(container.querySelector('[data-flue-surface]')).toBeNull()
   })
 
   it('reaches remote access from the nav', async () => {

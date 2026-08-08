@@ -2,7 +2,19 @@ import { createContext, useContext, useEffect, useRef, type ReactNode } from 're
 
 import { daemonSocketUrl, FlueClient } from './client'
 
-const FlueClientContext = createContext<FlueClient | null>(null)
+/**
+ * The context `useFlueClient` reads.
+ *
+ * Exported for the components that provide a client they do not own: the
+ * fleet provider naming the tab's local ride for every consumer written
+ * against the one-client world, and the terminal route pointing the pane at
+ * one machine's client. Ownership — building, connecting, closing — stays
+ * with FlueClientProvider below and with the fleet. Providing a value through
+ * this context must never come with a lifecycle attached: the owner's close
+ * still has to be the only close, or an unmounting borrower would hang up a
+ * connection the rest of the tab is riding.
+ */
+export const FlueClientContext = createContext<FlueClient | null>(null)
 
 export interface FlueClientProviderProps {
   children: ReactNode

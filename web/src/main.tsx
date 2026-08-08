@@ -45,12 +45,12 @@ const router = createFlueRouter(isRelayOrigin() ? await relayBoot(location.origi
 const root = document.getElementById('root')
 if (!root) throw new Error('missing #root')
 
-// The client provider is deliberately not here. It lives on the router's root
+// The fleet provider is deliberately not here. It lives on the router's root
 // route — see src/router.tsx — which outlives every navigation just as this
-// would, so the tab still shares one socket, but which can also see where the
-// tab actually is: /pair is served to a device with no session token, and a
-// socket opened there is a 401 the client would retry for as long as the page
-// is open.
+// would, so the tab still shares one socket per machine, but which can also
+// see where the tab actually is: /pair is served to a device with no session
+// token, and a socket opened there is a 401 the client would retry for as
+// long as the page is open.
 createRoot(root).render(
   <StrictMode>
     <RouterProvider router={router} />
