@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { DEFAULT_VIEW } from './view'
-import { deleteView, listViews, saveView, type SavedView } from './views-store'
+import {
+  deleteView,
+  listViews,
+  loadCurrent,
+  saveCurrent,
+  saveView,
+  type SavedView,
+} from './views-store'
 
 /** Written out rather than imported, so the key itself is part of the pin. */
 const VIEWS_KEY = 'flue.views'
@@ -155,5 +162,76 @@ describe('deleteView', () => {
   it('succeeds on an empty store', () => {
     expect(() => deleteView('Work')).not.toThrow()
     expect(listViews()).toEqual([])
+  })
+})
+
+describe('the current arrangement', () => {
+  /** Written out rather than imported, so the key itself is part of the pin. */
+  const CURRENT_KEY = 'flue.view.current'
+
+  it('round-trips the arrangement and the pressed tab', () => {
+    saveView(OPS)
+    saveCurrent({ ...DEFAULT_VIEW, grouping: 'state', columns: [...DEFAULT_VIEW.columns] }, 'Ops')
+
+    const kept = loadCurrent()
+    expect(kept.view.grouping).toBe('state')
+    expect(kept.active).toBe('Ops')
+  })
+
+  it('opens on the default in a browser that never arranged anything', () => {
+    expect(loadCurrent()).toEqual({ view: DEFAULT_VIEW, active: null })
+  })
+
+  it('hands out its own columns array, never the frozen default one', () => {
+    // DEFAULT_VIEW is frozen; a caller editing what this returns must get a
+    // TypeError never, and must not be editing the shared default either.
+    const kept = loadCurrent()
+    expect(() => kept.view.columns.push('created')).not.toThrow()
+    expect(DEFAULT_VIEW.columns).not.toContain('created')
+  })
+
+  it('reads a record it cannot believe as the default, whole', () => {
+    // Unlike the saved views there is no per-row salvage here: half an
+    // arrangement is nothing the screen can show.
+    const rotten = [
+      'not json',
+      '"a string"',
+      'null',
+      JSON.stringify({ active: 'Ops' }),
+      JSON.stringify({ view: { ...DEFAULT_VIEW, grouping: 'folder' }, active: null }),
+      JSON.stringify({ view: { ...DEFAULT_VIEW, columns: ['name', 'colour'] }, active: null }),
+      JSON.stringify({ view: { ...DEFAULT_VIEW, showExited: 'yes' }, active: null }),
+    ]
+    for (const raw of rotten) {
+      localStorage.setItem(CURRENT_KEY, raw)
+      expect(loadCurrent(), raw).toEqual({ view: DEFAULT_VIEW, active: null })
+    }
+  })
+
+  it('reads a storage the browser will not open as the default', () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('denied')
+    })
+    expect(loadCurrent()).toEqual({ view: DEFAULT_VIEW, active: null })
+  })
+
+  it('drops a pressed tab whose view is gone, and keeps the arrangement', () => {
+    // A view deleted in another browser tab can still be named here; the
+    // strip cannot press a tab that is not there, but what the reader was
+    // looking at is still what they were looking at.
+    saveCurrent({ ...DEFAULT_VIEW, grouping: 'tag', columns: [...DEFAULT_VIEW.columns] }, 'Ops')
+
+    const kept = loadCurrent()
+    expect(kept.active).toBeNull()
+    expect(kept.view.grouping).toBe('tag')
+  })
+
+  it('swallows a write the browser refuses', () => {
+    // Best effort: there is no promise on screen to break, so unlike
+    // saveView nothing is thrown and nobody is told.
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota exceeded')
+    })
+    expect(() => saveCurrent(DEFAULT_VIEW, null)).not.toThrow()
   })
 })

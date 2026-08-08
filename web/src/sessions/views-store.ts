@@ -24,10 +24,20 @@
  * `columns` came back mangled should cost its owner that tab, not the four
  * beside it that are perfectly readable.
  */
-import { COLUMN_KEYS, GROUPINGS, ORDERINGS, type ColumnKey, type ViewConfig } from './view'
+import {
+  COLUMN_KEYS,
+  DEFAULT_VIEW,
+  GROUPINGS,
+  ORDERINGS,
+  type ColumnKey,
+  type ViewConfig,
+} from './view'
 
 /** Where the views live. A JSON array of SavedView, and nothing else. */
 const VIEWS_KEY = 'flue.views'
+
+/** Where the arrangement on screen right now lives, pressed tab included. */
+const CURRENT_KEY = 'flue.view.current'
 
 /**
  * One kept arrangement, under the name its tab shows.
@@ -50,7 +60,15 @@ function isSavedView(value: unknown): value is SavedView {
     // Trimmed, because a tab labelled with three spaces is a tab nobody can
     // point at, tell from its neighbour, or say the name of out loud.
     v.name.trim() !== '' &&
-    isMember(GROUPINGS, v.grouping) &&
+    isViewConfig(v)
+  )
+}
+
+/** Whether a parsed value carries every field of a ViewConfig, believably. */
+function isViewConfig(value: unknown): value is ViewConfig {
+  const v = value as ViewConfig | null
+  return (
+    isMember(GROUPINGS, v?.grouping) &&
     isMember(ORDERINGS, v.ordering) &&
     typeof v.search === 'string' &&
     Array.isArray(v.columns) &&
@@ -140,4 +158,73 @@ export function saveView(view: SavedView): void {
  */
 export function deleteView(name: string): void {
   localStorage.setItem(VIEWS_KEY, JSON.stringify(listViews().filter((v) => v.name !== name)))
+}
+
+/**
+ * The arrangement the sessions screen should open with: whatever this browser
+ * was looking at last, measured, or the default when nothing readable is
+ * there. Change the grouping, reload, and watch it snap back to machine — the
+ * bug this exists to close.
+ *
+ * The whole record is believed or none of it is, unlike the per-row salvage
+ * of listViews: half an arrangement is not something the screen can show, and
+ * the default is a state every browser starts in and therefore one already
+ * known to work. What comes back is the caller's own object, columns array
+ * included — DEFAULT_VIEW is frozen, and handing it out directly would let
+ * the first edit throw.
+ *
+ * The pressed tab is measured against the saved views rather than merely
+ * against `string`: a view deleted in another browser tab can still be named
+ * here, and restoring a pressed tab the strip cannot draw would be a lie. The
+ * arrangement itself is kept either way — it is what the reader was looking
+ * at, whatever its name used to be.
+ */
+export function loadCurrent(): { view: ViewConfig; active: string | null } {
+  const fallback = () => ({
+    view: { ...DEFAULT_VIEW, columns: [...DEFAULT_VIEW.columns] },
+    active: null,
+  })
+  let raw: string | null
+  try {
+    raw = localStorage.getItem(CURRENT_KEY)
+  } catch {
+    return fallback()
+  }
+  if (raw === null) return fallback()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return fallback()
+  }
+  const record = parsed as { view?: unknown; active?: unknown } | null
+  if (record === null || !isViewConfig(record.view)) return fallback()
+  const view: ViewConfig = {
+    grouping: record.view.grouping,
+    ordering: record.view.ordering,
+    search: record.view.search,
+    columns: [...record.view.columns],
+    showExited: record.view.showExited,
+  }
+  const active =
+    typeof record.active === 'string' && listViews().some((v) => v.name === record.active)
+      ? record.active
+      : null
+  return { view, active }
+}
+
+/**
+ * Write down what the screen is showing, pressed tab and all.
+ *
+ * Best effort, and silently so — unlike saveView there is no promise on
+ * screen to break: the reader asked for an arrangement and has it, and a
+ * browser that refuses to remember it simply opens on the default next time,
+ * which is where every browser started.
+ */
+export function saveCurrent(view: ViewConfig, active: string | null): void {
+  try {
+    localStorage.setItem(CURRENT_KEY, JSON.stringify({ view, active }))
+  } catch {
+    // Nothing to do and nobody to tell: see above.
+  }
 }

@@ -700,6 +700,86 @@ describe('SessionsRoute', () => {
     })
   })
 
+  describe('the arrangement kept between visits', () => {
+    it('restores a changed grouping after a remount', async () => {
+      // The bug this closes: change the grouping, reload the page, and the
+      // list snapped back to machine. The arrangement now rides
+      // localStorage on every change and the next mount opens on it.
+      const user = userEvent.setup()
+      const first = await mountSessions()
+      listed(first.sock, [info({ id: 's1' }), info({ id: 's2', state: 'exited' })])
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await pick(user, 'Grouping', 'State')
+      await user.keyboard('{Escape}')
+      first.unmount()
+
+      const second = await mountSessions()
+      listed(second.sock, [info({ id: 's1' }), info({ id: 's2', state: 'exited' })])
+
+      expect(screen.getByRole('button', { name: 'Running' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Exited' })).toBeTruthy()
+    })
+
+    it('opens on the default when the kept arrangement is corrupt', async () => {
+      localStorage.setItem('flue.view.current', '{not json')
+      const { sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [info({ id: 's1' })])
+
+      expect(screen.getByRole('button', { name: 'mesa.local' })).toBeTruthy()
+    })
+
+    it('restores the pressed tab', async () => {
+      const user = userEvent.setup()
+      const first = await mountSessions()
+      listed(first.sock, [info({ id: 's1' })])
+      await user.click(screen.getByRole('button', { name: 'Save current view' }))
+      await user.type(screen.getByRole('textbox', { name: 'Name' }), 'Ops')
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+      expect(screen.getByRole('button', { name: 'Ops' }).getAttribute('aria-pressed')).toBe(
+        'true',
+      )
+      first.unmount()
+
+      await mountSessions()
+
+      expect(screen.getByRole('button', { name: 'Ops' }).getAttribute('aria-pressed')).toBe(
+        'true',
+      )
+    })
+
+    it('falls back to All when the restored tab is gone, keeping the arrangement', async () => {
+      // A view deleted in another browser tab can still be named by this
+      // one's record. The strip cannot press a tab that is not there, so the
+      // name falls away — but the arrangement stays: it is what the reader
+      // was looking at, whatever it used to be called.
+      localStorage.setItem(
+        'flue.view.current',
+        JSON.stringify({
+          view: {
+            grouping: 'machine',
+            ordering: 'lastActive',
+            search: '',
+            columns: ['name', 'directory'],
+            showExited: false,
+          },
+          active: 'Ops',
+        }),
+      )
+      const { sock } = await mountSessions()
+      listed(sock, [
+        info({ id: 's1', cwd: '/live' }),
+        info({ id: 's2', cwd: '/dead', state: 'exited' }),
+      ])
+
+      expect(screen.getByRole('button', { name: 'All' }).getAttribute('aria-pressed')).toBe(
+        'true',
+      )
+      expect(screen.getByText('/live')).toBeTruthy()
+      expect(screen.queryByText('/dead')).toBeNull()
+    })
+  })
+
   describe('the cwd flue open hands over', () => {
     afterEach(() => history.replaceState(null, '', '/'))
 

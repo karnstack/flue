@@ -26,7 +26,14 @@ import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
 import { takeCwd } from '@/lib/url'
 import { cn } from '@/lib/utils'
 import { applyView, DEFAULT_VIEW, displayName, type ViewConfig } from '@/sessions/view'
-import { deleteView, listViews, saveView, type SavedView } from '@/sessions/views-store'
+import {
+  deleteView,
+  listViews,
+  loadCurrent,
+  saveCurrent,
+  saveView,
+  type SavedView,
+} from '@/sessions/views-store'
 
 /**
  * The terminal's path, written out rather than imported from src/router.tsx.
@@ -159,9 +166,24 @@ export function SessionsRoute() {
   const [settled, setSettled] = useState(false)
   const lastMachines = useRef<MachineState[] | null>(null)
 
-  const [view, setView] = useState<ViewConfig>(defaultView)
+  /**
+   * The arrangement and the pressed tab open where the last visit left them —
+   * change the grouping, reload, and it used to snap back to machine. Read
+   * once, lazily, and validated by the store: a corrupt record, a storage the
+   * browser will not open, or a tab whose view was deleted elsewhere all land
+   * on the default arrangement under All.
+   */
+  const [restored] = useState(loadCurrent)
+  const [view, setView] = useState<ViewConfig>(restored.view)
   const [views, setViews] = useState<SavedView[]>(() => listViews())
-  const [active, setActive] = useState<string | null>(null)
+  const [active, setActive] = useState<string | null>(restored.active)
+
+  // Written down on every change, tab included, so a reload opens on what the
+  // reader was looking at. Persistence is orthogonal to the dirty flag below,
+  // which stays a value-compare against the active saved view.
+  useEffect(() => {
+    saveCurrent(view, active)
+  }, [view, active])
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set())
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set())
@@ -393,7 +415,7 @@ export function SessionsRoute() {
     if (found !== undefined) setView(configOf(found))
   }
 
-  const saveCurrent = (name: string) => {
+  const saveViewAs = (name: string) => {
     try {
       saveView({ name, ...view, columns: [...view.columns] })
     } catch (err) {
@@ -579,7 +601,7 @@ export function SessionsRoute() {
           active={active}
           dirty={dirty}
           onSelect={selectView}
-          onSaveCurrent={saveCurrent}
+          onSaveCurrent={saveViewAs}
           onDelete={removeView}
         />
         {/*
