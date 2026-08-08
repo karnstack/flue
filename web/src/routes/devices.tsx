@@ -10,6 +10,7 @@ import { useFlueClient } from '@/client/provider'
 import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
 import { PageHeader } from '@/components/page-header'
 import { Button } from '@/components/ui/button'
+import { ago } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { MACHINE_ID } from '@/relay/machines'
 import { isRelayOrigin } from '@/relay/mode'
@@ -18,8 +19,6 @@ import { isRelayOrigin } from '@/relay/mode'
 const TICK_MS = 1_000
 
 const MINUTE = 60
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
 
 /** What to say about a connection that is not currently carrying anything. */
 function connectionNotice(status: ConnStatus): string | null {
@@ -72,21 +71,6 @@ const UNREACHABLE =
  * screen.
  */
 const UNREACHABLE_ID = 'pair-unreachable'
-
-/**
- * How long ago, in the coarsest unit that still says something.
- *
- * `seen` is unix seconds, as `wire.DeviceInfo` reports both of its stamps —
- * multiplying rather than dividing here would put every device three thousand
- * years in the future and read "just now" forever.
- */
-function ago(seen: number, now: number = Date.now()): string {
-  const secs = Math.max(0, Math.round(now / 1000 - seen))
-  if (secs < MINUTE) return 'just now'
-  if (secs < HOUR) return `${Math.floor(secs / MINUTE)}m ago`
-  if (secs < DAY) return `${Math.floor(secs / HOUR)}h ago`
-  return `${Math.floor(secs / DAY)}d ago`
-}
 
 /** Whole seconds as m:ss, for the pairing window's deadline. */
 function remaining(secs: number): string {

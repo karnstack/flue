@@ -7,7 +7,9 @@ import type { SessionInfo } from '@/client/protocol'
 import { PageHeader } from '@/components/page-header'
 import { SessionTable } from '@/components/session-table'
 import { Button } from '@/components/ui/button'
+import { LOCAL_MACHINE_ID, type FleetSession } from '@/fleet/types'
 import { takeCwd } from '@/lib/url'
+import { applyView, type ViewConfig } from '@/sessions/view'
 
 /**
  * How often the session set is re-read while this screen is on show.
@@ -30,6 +32,35 @@ const REFRESH_MS = 3_000
  */
 const TERMINAL_PATH = '/d/$deviceId/s/$sessionId' as const
 const LOCAL_DEVICE = 'local'
+
+/**
+ * How this screen arranges its rows until the fleet rewire owns the choice.
+ *
+ * The loopback daemon is the only machine here, so nothing is grouped and the
+ * machine column would say the same word down its whole length; ordering by
+ * directory keeps the rows exactly as still as they have always been. When
+ * the sessions screen learns views, this constant and the inert props beside
+ * it below are what it replaces.
+ */
+const INTERIM_VIEW: ViewConfig = {
+  grouping: 'none',
+  ordering: 'directory',
+  search: '',
+  columns: ['name', 'directory', 'state', 'lastActive'],
+  showExited: true,
+}
+
+/** No row is selectable and no group is folded until the rewire arrives. */
+const NONE: ReadonlySet<string> = new Set()
+
+/**
+ * The daemon's rows stamped as the fleet would stamp them. This tab rides
+ * loopback, so every session is the local machine's; the name goes unshown
+ * (no machine column above) and unsearched (no search box yet).
+ */
+function stamped(list: SessionInfo[]): FleetSession[] {
+  return list.map((s) => ({ ...s, machineId: LOCAL_MACHINE_ID, machineName: 'local' }))
+}
 
 /**
  * The error a spawn is answered with when it is not answered with a session.
@@ -181,8 +212,8 @@ export function SessionsRoute() {
   }, [client, navigate, settle, spawnPendingCwd])
 
   const open = useCallback(
-    (id: string) => {
-      void navigate({ to: TERMINAL_PATH, params: { deviceId: LOCAL_DEVICE, sessionId: id } })
+    (s: FleetSession) => {
+      void navigate({ to: TERMINAL_PATH, params: { deviceId: LOCAL_DEVICE, sessionId: s.id } })
     },
     [navigate],
   )
@@ -247,7 +278,18 @@ export function SessionsRoute() {
         </p>
       </PageHeader>
 
-      {sessions !== null && <SessionTable sessions={sessions} onOpen={open} />}
+      {sessions !== null && (
+        <SessionTable
+          groups={applyView(stamped(sessions), INTERIM_VIEW)}
+          columns={INTERIM_VIEW.columns}
+          selected={NONE}
+          onToggleSelect={() => {}}
+          onToggleGroup={() => {}}
+          collapsed={NONE}
+          onOpen={open}
+          onAction={() => {}}
+        />
+      )}
     </div>
   )
 }
