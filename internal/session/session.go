@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -149,14 +150,22 @@ type Session struct {
 	// pumpDone records that pump has returned: the master's stream is over
 	// and nothing will ever be read from it again.
 	pumpDone bool
-	// exitDrain is set by markExitedLocked instead of dropping subscribers:
+	// pumpReads counts pump's returns from Read, bumped before the pump can
+	// take s.mu. It is the supervisor's evidence against a byte in flight:
+	// the master can poll quiet while the pump holds a just-read tail it has
+	// not yet delivered, and this counter moving between two spaced looks is
+	// how that state stays visible from outside. Atomic because the pump
+	// bumps it without the lock.
+	pumpReads atomic.Uint64
+
+	// drainPending is set by markExitedLocked instead of dropping subscribers:
 	// the child has exited but its final output may still sit unread in the
 	// pty buffer, and closing the stream first is how a CI run once watched
 	// a subscriber die over an empty ring in the test's first millisecond
 	// (docs/FOLLOW-UPS.md §6). While it is set, the drop belongs to whoever
 	// can prove the drain is finished — pump, after the chunk that empties
 	// the master, or the supervisor, after two quiet polls; see both.
-	exitDrain bool
+	drainPending bool
 }
 
 func (s *Session) ID() string { return s.id }
@@ -352,8 +361,8 @@ func (s *Session) pump() {
 	defer func() {
 		s.mu.Lock()
 		s.pumpDone = true
-		if s.exitDrain || s.info.State == "exited" {
-			s.exitDrain = false
+		if s.drainPending || s.info.State == "exited" {
+			s.drainPending = false
 			s.dropSubsLocked()
 		}
 		s.mu.Unlock()
@@ -363,6 +372,7 @@ func (s *Session) pump() {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := s.pty.Read(buf)
+		s.pumpReads.Add(1)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
@@ -386,8 +396,8 @@ func (s *Session) pump() {
 			// reader, so under this lock any byte it has not delivered is
 			// still visible on the master. Nothing visible and an exit
 			// waiting means the drain the exit deferred to is finished.
-			if s.exitDrain && !masterReadable(s.pty) {
-				s.exitDrain = false
+			if s.drainPending && !masterReadable(s.pty) {
+				s.drainPending = false
 				s.dropSubsLocked()
 			}
 			s.mu.Unlock()
@@ -405,12 +415,16 @@ func (s *Session) pump() {
 // be conflated. The platforms disagree about what the master's stream even
 // tracks:
 //
-//   - On Linux it tracks the slave descriptors. It ends when the last one is
-//     released, which skews in both directions: a script that does
-//     `exec >log 2>&1 </dev/null` and then works for an hour ends the stream
-//     immediately while its process group runs on and still needs killing,
-//     and conversely a background job holding the slave keeps the master
-//     readable long after the leader has gone.
+//   - On Linux it tracks the slave descriptors *and* the leader. It ends
+//     when the last slave descriptor is released — a script that does
+//     `exec >log 2>&1 </dev/null` and then works for an hour ends the
+//     stream immediately while its process group runs on and still needs
+//     killing — and it also ends when the session leader exits, whatever
+//     still holds a slave: the kernel hangs the tty up as it disassociates
+//     the leader's controlling terminal, measured here with a setsid'd
+//     grandchild whose open descriptors did not keep the stream alive.
+//     Buffered output survives the hangup — the master delivers what was
+//     written before erroring — which is what the exit drain leans on.
 //   - On Darwin it tracks the session leader. BSD ctty semantics keep the
 //     master readable while the leader lives even after every slave
 //     descriptor is released, and error it when the leader exits even though
@@ -473,11 +487,16 @@ func (s *Session) supervise() {
 		// to publish the exit to callers, and conflating them is what let a
 		// signal go out with no probe behind it.
 		groupEmpty bool
-		// drainQuiet and drainSeq are the supervisor's view of the exit
-		// drain across turns: quiet is only believed when two consecutive
-		// polls agree and the ring has not grown between them.
-		drainQuiet bool
-		drainSeq   uint64
+		// The supervisor's view of the exit drain across turns: quiet is
+		// only believed when two looks spaced at least reapPollMin apart
+		// agree, and neither the ring nor the pump's read counter has moved
+		// between them. drainSettled gates this goroutine's exit — see the
+		// note at the return below.
+		drainQuiet   bool
+		drainSeq     uint64
+		drainReads   uint64
+		drainLook    time.Time
+		drainSettled bool
 	)
 	for {
 		if !reaped {
@@ -515,28 +534,47 @@ func (s *Session) supervise() {
 		// buffered never wakes — a background job holding the slave in
 		// silence is the ordinary shape of that. The supervisor is the
 		// actor that still runs, so it confirms quiet from outside: two
-		// polls on its own cadence with no readable byte and no ring growth
-		// between them. One poll is not enough — the pump may be mid-read,
-		// bytes already lifted off the master but not yet under the lock;
-		// they land in the ring well inside a poll interval, which is what
-		// the second look is for.
+		// looks at least reapPollMin apart that agree the master polls
+		// quiet, the ring has not grown, and the pump has not returned from
+		// a read between them. One look is not enough — the pump may be
+		// mid-read, bytes already lifted off the master but not yet under
+		// the lock — and un-spaced looks are not either: the select below
+		// also wakes for signal requests and the master hint, which would
+		// compress "two consecutive polls" into microseconds. The spacing
+		// comes from the wall clock, not the loop; pumpReads is bumped
+		// before the pump can take s.mu, so a tail in flight at the first
+		// look has moved the counter by the second.
 		if recorded && s.mu.TryLock() {
-			if s.exitDrain {
+			if s.drainPending {
 				delay = reapPollMin
-				quiet := !masterReadable(s.pty)
-				seq := s.ring.EndSeq()
-				if quiet && drainQuiet && seq == drainSeq {
-					s.exitDrain = false
-					s.dropSubsLocked()
+				if now := time.Now(); now.Sub(drainLook) >= reapPollMin {
+					quiet := !masterReadable(s.pty)
+					seq := s.ring.EndSeq()
+					reads := s.pumpReads.Load()
+					if quiet && drainQuiet && seq == drainSeq && reads == drainReads {
+						s.drainPending = false
+						s.dropSubsLocked()
+						drainSettled = true
+					}
+					drainQuiet, drainSeq, drainReads, drainLook = quiet, seq, reads, now
 				}
-				drainQuiet = quiet
-				drainSeq = seq
+			} else {
+				// Nothing pending: either the exit never had a drain to
+				// wait for, or the pump has settled it. Either way the
+				// supervisor's part is done.
+				drainSettled = true
 			}
 			s.mu.Unlock()
 		}
-		if recorded && groupEmpty {
+		if recorded && groupEmpty && drainSettled {
 			// Nothing pins the pgid any more, so from here it may name a
-			// stranger. Stop signalling, permanently.
+			// stranger. Stop signalling, permanently. Gated on the drain
+			// having settled, and that gate is load-bearing: the child's
+			// own group can empty at the very reap that armed the drain —
+			// a job-control background job lives in a group of its own —
+			// and a supervisor that returned here after a single look
+			// would leave a parked pump's subscribers with no closer at
+			// all until the registry reaps the session ten minutes on.
 			close(s.gone)
 			return
 		}
@@ -667,7 +705,7 @@ func (s *Session) markExitedLocked(code int) {
 		s.dropSubsLocked()
 		return
 	}
-	s.exitDrain = true
+	s.drainPending = true
 }
 
 // dropSubsLocked closes out every subscriber. The caller must hold s.mu.

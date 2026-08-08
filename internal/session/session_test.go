@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1030,5 +1031,54 @@ func TestMasterReadable(t *testing.T) {
 	}
 	if masterReadable(master) {
 		t.Fatal("a drained master still reads as readable")
+	}
+}
+
+// TestExitWithOutOfGroupSlaveHolderClosesSubscribers pins that a leader
+// exiting with a setsid'd grandchild still holding the slave — a session and
+// process group of its own, so the leader's group empties at the very reap
+// that arms the exit drain — closes the subscribers promptly rather than
+// leaving them to the registry's ten-minute reap.
+//
+// Measured rather than assumed: Linux hangs the tty up when the session
+// leader exits, whatever still holds a slave descriptor, so the pump drains
+// and ends and is the closer here — this cannot exercise the supervisor's
+// two-look fallback or the drainSettled gate on its exit, both of which are
+// written for tty semantics this shape turned out not to have. They stay
+// because they are cheap and the semantics are the platforms' to change;
+// this test holds the observable invariant either way.
+//
+// Linux-only: macOS ships no setsid binary, and Darwin's leader-exit
+// semantics make the shape unassemblable regardless.
+func TestExitWithOutOfGroupSlaveHolderClosesSubscribers(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("needs Linux master-tracks-slaves semantics and the setsid binary")
+	}
+	r := NewRegistry(time.Now)
+	s, err := r.Spawn(SpawnOpts{
+		Cmd:  []string{"sh", "-c", "setsid sh -c 'exec sleep 30' & echo held-open"},
+		Cols: 80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+
+	sub := s.Subscribe(0)
+	waitFor(t, sub, "held-open", 5*time.Second)
+	waitExited(t, s, 5*time.Second)
+
+	// The exit is on record and nothing more is coming; the subscriber's
+	// channel must close on the supervisor's cadence, not the registry's.
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case _, ok := <-sub.C:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("subscriber never closed after the exit: the drain found no closer")
+		}
 	}
 }
