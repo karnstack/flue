@@ -41,8 +41,9 @@ export interface BulkBarProps {
    * and in the band just past the md breakpoint its left edge slides under the
    * sidebar, where it would win on stacking order. Nothing outside can correct
    * a pinned element it cannot reach, so the correction arrives here:
-   * `md:pl-(--sidebar-width)` from the route puts the centre back over the
-   * content.
+   * `md:left-(--sidebar-width)` from the route moves the bar's own left edge
+   * past the sidebar, and only while the sidebar is expanded — the route reads
+   * that from useSidebar, since no peer selector can reach in here.
    */
   className?: string
 }
