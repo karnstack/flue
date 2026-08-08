@@ -458,6 +458,29 @@ export function SessionsRoute() {
     [fleet],
   )
 
+  /**
+   * The columns the rows actually carry, which is the reader's choice minus
+   * the one that can have nothing to say.
+   *
+   * A machine chip on every row of a browser that reaches one machine is the
+   * same word repeated down the screen. It costs nothing on a desktop and it
+   * costs the *name* on a phone: at 390px the chip and the stamp take half the
+   * row, and a session called after a long path truncates to "karn@karn:…"
+   * with the useful half gone. So a fleet of one drops it.
+   *
+   * Keyed on how many machines this browser holds rather than on how many
+   * appear in the current rows, and deliberately: the row set changes with
+   * every search and every filter, and a column that came and went as the
+   * reader typed would be worse than one that is merely redundant. The
+   * preference itself is untouched — pair a second machine and the chip is
+   * back, still ticked in the display options where it never stopped being.
+   */
+  const columns = useMemo(
+    () =>
+      (machines?.length ?? 0) > 1 ? view.columns : view.columns.filter((c) => c !== 'machine'),
+    [machines, view.columns],
+  )
+
   const dirty = !sameArrangement(
     view,
     active === null ? DEFAULT_VIEW : (views.find((v) => v.name === active) ?? DEFAULT_VIEW),
@@ -686,7 +709,7 @@ export function SessionsRoute() {
       {showTable && (
         <SessionTable
           groups={groups}
-          columns={view.columns}
+          columns={columns}
           selected={selected}
           onToggleSelect={toggleSelect}
           onToggleGroup={toggleGroup}

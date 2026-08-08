@@ -56,13 +56,21 @@ function info(over: Partial<SessionInfo> & { id: string }): SessionInfo {
  * by navigating mounts into a connection that is already established, but the
  * very first paint of the tab does not, and both have to work.
  */
-async function mountSessions({ open = true, strict = false } = {}) {
+async function mountSessions({ open = true, strict = false, solo = false } = {}) {
   const local = fakeClient()
   const attic = fakeClient()
-  const fleet = new FleetClient([
-    { id: 'local', name: '', client: local.client },
-    { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
-  ])
+  // `solo` is a browser paired with one machine, which is what a fresh
+  // install is and what the machine-chip rule turns on. It is a whole fleet
+  // rather than a flag because the rule reads the fleet, and a screen told
+  // "one machine" by anything else would not be testing the rule.
+  const fleet = new FleetClient(
+    solo
+      ? [{ id: 'local', name: '', client: local.client }]
+      : [
+          { id: 'local', name: '', client: local.client },
+          { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
+        ],
+  )
 
   const routeComponent = strict
     ? () => (
@@ -159,6 +167,40 @@ describe('SessionsRoute', () => {
     expect(screen.getByRole('button', { name: 'Attic Pi' })).toBeTruthy()
     expect(screen.getByText('/one')).toBeTruthy()
     expect(screen.getByText('/two')).toBeTruthy()
+  })
+
+  it('drops the machine chip when this browser reaches only one machine', async () => {
+    // The same word down every row, and on a phone it costs the name the
+    // width it needs. The preference is untouched; only the rendering is.
+    const solo = await mountSessions({ solo: true })
+    solo.welcomeLocal()
+    listed(solo.sock, [info({ id: 's1' })])
+
+    expect(screen.queryByText('mesa.local', { selector: '[data-slot="badge"]' })).toBeNull()
+    // The row is still there and still named — only the chip went.
+    expect(screen.getByRole('link', { name: 'Open zsh' })).toBeTruthy()
+    solo.unmount()
+
+    // Two machines, and it is back: it now tells two rows apart.
+    const pair = await mountSessions()
+    pair.welcomeLocal()
+    act(() => pair.attic.sockets[0]!.open())
+    listed(pair.sock, [info({ id: 's1' })])
+    listed(pair.attic.sockets[0]!, [info({ id: 's2' })])
+
+    expect(screen.getByText('Attic Pi', { selector: '[data-slot="badge"]' })).toBeTruthy()
+  })
+
+  it('keeps the chip while a second machine is merely unreachable', async () => {
+    // Read off the fleet this browser holds, not off the machines answering
+    // right now: a column that vanished when a laptop slept and came back
+    // when it woke would be worse than one that is briefly redundant.
+    const { sock, fleet, welcomeLocal } = await mountSessions()
+    welcomeLocal()
+    act(() => fleet.clientFor('attic-pi')!.close())
+    listed(sock, [info({ id: 's1' })])
+
+    expect(screen.getByText('mesa.local', { selector: '[data-slot="badge"]' })).toBeTruthy()
   })
 
   it('does not claim there are no sessions before the machines have answered', async () => {

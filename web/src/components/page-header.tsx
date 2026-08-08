@@ -59,7 +59,18 @@ export function PageHeader({ crumbs, actions, children }: PageHeaderProps) {
       by itself.
     */
     <div data-slot="page-header" className="flex flex-col gap-y-3">
-      <div className="flex items-start justify-between gap-x-4">
+      {/*
+        Wraps, and that is what makes this header survive a phone.
+        `justify-between` on a row that cannot wrap does not push the actions
+        off the end — it overlaps them onto the heading, which is exactly what
+        the sessions toolbar did at 390px: a search field, a display menu and a
+        split button printed straight through the word "Sessions" and then ran
+        off the right edge. Wrapping puts them on their own line instead, and
+        `w-full` there is what lets that line be a toolbar — the search grows
+        into it (see SessionSearch) while the rest range right. From `sm` up
+        this row goes back to its own width and nothing moves.
+      */}
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
         <div className="flex min-w-0 items-center gap-x-1.5">
           <SidebarTrigger className="-ml-1.5 max-md:hidden" />
           <nav aria-label="Breadcrumb" className="min-w-0">
@@ -121,7 +132,11 @@ export function PageHeader({ crumbs, actions, children }: PageHeaderProps) {
             </ol>
           </nav>
         </div>
-        {actions ? <div className="flex shrink-0 items-center gap-x-2">{actions}</div> : null}
+        {actions ? (
+          <div className="flex w-full items-center justify-end gap-x-2 sm:w-auto sm:shrink-0">
+            {actions}
+          </div>
+        ) : null}
       </div>
       {children ? <div>{children}</div> : null}
     </div>

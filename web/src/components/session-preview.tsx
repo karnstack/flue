@@ -43,6 +43,35 @@ const PREVIEW_BYTES = 24 << 10
  */
 const REFRESH_MS = 1_500
 
+/**
+ * Whether this device points with something that cannot hover.
+ *
+ * A hover card on a touch screen is not merely useless, it is in the way: a
+ * finger held on a row long enough to count as a hover opens a card over the
+ * rows below, and the tap that follows either lands on the card or dismisses
+ * it — so the ordinary act of opening a session becomes a fight with a preview
+ * nobody asked for. And it would cost a round trip per row to do it.
+ *
+ * `(pointer: coarse)` rather than a width breakpoint, because the question is
+ * about the pointer and not the screen: a laptop with a narrow window still
+ * has a mouse, and a large tablet still does not.
+ *
+ * It starts false and corrects itself on mount, which is the right way round —
+ * the card cannot open before a pointer has done something anyway, and a
+ * server-rendered guess is not available here.
+ */
+function useCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(false)
+  useEffect(() => {
+    const mql = window.matchMedia('(pointer: coarse)')
+    const read = () => setCoarse(mql.matches)
+    read()
+    mql.addEventListener('change', read)
+    return () => mql.removeEventListener('change', read)
+  }, [])
+  return coarse
+}
+
 /** What the card is currently able to say. */
 export type Preview =
   | { at: 'loading' }
@@ -87,9 +116,14 @@ export function SessionPreview({
   }>
   /** The row the card hangs off. */
   children: ReactNode
-  /** Whether to skip the card entirely — a coarse pointer has no hover. */
+  /**
+   * Skip the card entirely. A coarse pointer already does this for itself —
+   * see useCoarsePointer — so this is for a caller that has some other reason
+   * to want the row bare.
+   */
   disabled?: boolean
 }) {
+  const coarse = useCoarsePointer()
   const [open, setOpen] = useState(false)
   const [preview, setPreview] = useState<Preview>({ at: 'loading' })
 
@@ -165,7 +199,7 @@ export function SessionPreview({
     // itself is deliberately not here.
   }, [open, machineId, id])
 
-  if (disabled) return <>{children}</>
+  if (disabled || coarse) return <>{children}</>
 
   return (
     <HoverCard
