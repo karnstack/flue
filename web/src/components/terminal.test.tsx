@@ -586,6 +586,32 @@ describe('Terminal', () => {
       expect(em.live().scrolled).toBeLessThan(90)
     })
 
+    it('reads the speed of the flick, not of the pause before it', () => {
+      // The commonest gesture there is: touch to stop the last glide, hesitate,
+      // then flick. The reaction gap belongs to the gesture but to no part of
+      // its speed, and a window measured from touchdown divides the answer by
+      // however long the thumb took to make up its mind.
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+      const surface = surfaceEl()
+
+      act(() => {
+        surface.dispatchEvent(touch('touchstart', [300], 0))
+        surface.dispatchEvent(touch('touchmove', [283], 200))
+        surface.dispatchEvent(touch('touchmove', [249], 216))
+        surface.dispatchEvent(touch('touchmove', [215], 232))
+        surface.dispatchEvent(touch('touchend', [], 240))
+      })
+      expect(em.live().scrolled).toBe(5)
+
+      frames.run(2000)
+
+      // 68px over the last 32ms is 125 lines/s, worth about 63 lines. Measured
+      // from touchdown it would read 21 lines/s instead and stop inside 15.
+      expect(em.live().scrolled).toBeGreaterThan(40)
+      expect(em.live().scrolled).toBeLessThan(90)
+    })
+
     it('does not glide when the finger came to rest before it lifted', () => {
       // The samples still describe a fast drag; the release does not. A thumb
       // that parks the content and lets go expects it to stay parked, and the

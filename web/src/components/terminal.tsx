@@ -382,7 +382,8 @@ export function Terminal({
       touchCarry = 0
       // The anchor counts as a sample. A flick is often three moves long at a
       // 60Hz touch rate, and reading its speed from the moves alone would
-      // throw away a third of the evidence and most of the window.
+      // throw away a third of the evidence and most of the window. The lift
+      // trims it back off again if the finger rested here before setting off.
       flick.push({ t: e.timeStamp, y: touchY })
     }
     const touchMove = (e: TouchEvent) => {
@@ -411,11 +412,17 @@ export function Terminal({
       const wasDragging = touchY !== null
       touchY = null
       touchCarry = 0
-      // Velocity over the sample window. Two samples and thirty milliseconds
-      // are the floor, so a tap reads as no flick at all. The lift's own clock
-      // is the other half: moves stop arriving the instant the finger stops,
-      // so a thumb that parks the content and lets go a moment later leaves
-      // fast samples behind it, and only their age gives it away.
+      // Velocity is the recent motion, not the whole gesture: a hesitation
+      // after touchdown, or a drag that turned around mid-way, is no part of
+      // the speed at the lift and averaging across it would divide the answer
+      // by the length of the pause. Two samples are always kept, so a flick
+      // short enough to be three samples still reads.
+      while (flick.length > 2 && flick[flick.length - 1]!.t - flick[0]!.t > 100) flick.shift()
+      // Two samples and thirty milliseconds are the floor, so a tap reads as
+      // no flick at all. The lift's own clock is the other half: moves stop
+      // arriving the instant the finger stops, so a thumb that parks the
+      // content and lets go a moment later leaves fast samples behind it, and
+      // only their age gives it away.
       const a = flick[0]
       const b = flick[flick.length - 1]
       flick = []
