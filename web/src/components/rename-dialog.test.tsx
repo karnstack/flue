@@ -61,6 +61,18 @@ describe('RenameDialog', () => {
     expect(props.onSubmit).toHaveBeenCalledWith('db migrations')
   })
 
+  it('submits before it asks to close', async () => {
+    // Task 19 wires both to the same "stop renaming this row" state, so the
+    // update must be sent while the dialog still holds what to send.
+    const user = userEvent.setup()
+    const calls: string[] = []
+    renderDialog({ onSubmit: () => calls.push('submit'), onClose: () => calls.push('close') })
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(calls).toEqual(['submit', 'close'])
+  })
+
   it('lets an empty field through, because empty is how a name is cleared', async () => {
     // The daemon reads '' as "no name", which puts the session back on the
     // title its program announces. A dialog that refused to submit nothing

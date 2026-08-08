@@ -87,6 +87,25 @@ export function TagEditor({ open, current, known, onSubmit, onClose }: TagEditor
 }
 
 /**
+ * The set with one more tag in it: trimmed, and unchanged if the tag is blank
+ * or already there.
+ *
+ * Three routes reach this rule and it cannot hold for two of them — a typed
+ * Enter, a clicked suggestion, and Save over a field the reader never pressed
+ * Enter on. That third one is the reason this is a function rather than four
+ * lines inside the first handler that needed them.
+ *
+ * The comparison is exact rather than case-folded: `API` and `api` are two
+ * strings until the daemon says otherwise, and folding them here would drop a
+ * tag the reader had just watched themselves type.
+ */
+function withTag(held: string[], tag: string): string[] {
+  const clean = tag.trim()
+  if (clean === '' || held.includes(clean)) return held
+  return [...held, clean]
+}
+
+/**
  * The chips, the field, the suggestions, and the two buttons.
  *
  * Deliberately not a form element, unlike the rename dialog's body. Enter here
@@ -118,18 +137,10 @@ function TagForm({
   const [tags, setTags] = useState<string[]>(() => [...current])
   const [draft, setDraft] = useState('')
 
-  /**
-   * Both routes in — a typed Enter and a clicked suggestion — end here, so
-   * the trim and the duplicate check cannot apply to one and not the other.
-   * The comparison is exact rather than case-folded: `API` and `api` are two
-   * strings until the daemon says otherwise, and guessing here would silently
-   * drop a tag the reader watched themselves type.
-   */
+  /** A typed Enter and a clicked suggestion, both of which empty the field. */
   const add = (tag: string) => {
-    const clean = tag.trim()
     setDraft('')
-    if (clean === '') return
-    setTags((held) => (held.includes(clean) ? held : [...held, clean]))
+    setTags((held) => withTag(held, tag))
   }
 
   // What the fleet knows, minus what this session already carries, narrowed by
@@ -220,7 +231,14 @@ function TagForm({
         <Button type="button" variant="outline" onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="button" onClick={() => onSubmit(tags)}>
+        {/*
+          The field is part of the answer. Someone who typed a tag and reached
+          straight for Save is done, and a dialog that threw those keystrokes
+          away on the way out would be disagreeing with them in silence — the
+          worst way to disagree, since the chips are gone before anyone can
+          read what was sent.
+        */}
+        <Button type="button" onClick={() => onSubmit(withTag(tags, draft))}>
           Save
         </Button>
       </DialogFooter>

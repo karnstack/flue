@@ -39,6 +39,14 @@ describe('TagEditor', () => {
     expect(screen.getByRole('button', { name: 'Remove api' })).toBeTruthy()
   })
 
+  it('opens with the field focused, not the first chip', () => {
+    // The first thing Radix can reach in here is a chip, and a chip removes
+    // the tag it names. Opening with "delete api" under the space bar is not
+    // a greeting, so the field is focused by hand.
+    renderEditor()
+    expect(document.activeElement).toBe(screen.getByLabelText('Add tag'))
+  })
+
   it('adds a trimmed tag on Enter and empties the field', async () => {
     const user = userEvent.setup()
     renderEditor()
@@ -101,6 +109,41 @@ describe('TagEditor', () => {
 
     expect(props.onSubmit).toHaveBeenCalledWith(['api', 'db'])
     expect(props.onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a typed tag that was never Entered', async () => {
+    // Save is the button that means "I am done", and a reader who typed a
+    // tag and reached for it is done. Dropping the field's contents on the
+    // way out would be the dialog disagreeing with them in silence.
+    const user = userEvent.setup()
+    const { props } = renderEditor()
+
+    await user.type(screen.getByLabelText('Add tag'), '  prod  ')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(props.onSubmit).toHaveBeenCalledWith(['api', 'prod'])
+  })
+
+  it('does not double a typed tag the session already carries', async () => {
+    const user = userEvent.setup()
+    const { props } = renderEditor()
+
+    await user.type(screen.getByLabelText('Add tag'), 'api')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(props.onSubmit).toHaveBeenCalledWith(['api'])
+  })
+
+  it('submits before it asks to close', async () => {
+    // Task 19 wires both to the same "stop editing this row" state, so the
+    // update must be sent while the dialog still holds what to send.
+    const user = userEvent.setup()
+    const calls: string[] = []
+    renderEditor({ onSubmit: () => calls.push('submit'), onClose: () => calls.push('close') })
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(calls).toEqual(['submit', 'close'])
   })
 
   it('submits an empty list, because empty is how tags are cleared', async () => {
