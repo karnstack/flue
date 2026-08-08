@@ -160,6 +160,8 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       answers = on
     },
 
+    applicationCursorKeys: () => term.modes.applicationCursorKeysMode,
+
     contentSize(): PixelSize | null {
       if (disposed) return null
       const screen = term.element?.querySelector(SCREEN_SELECTOR)

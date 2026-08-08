@@ -3,6 +3,7 @@ import { LayoutGridIcon, PlusIcon } from 'lucide-react'
 
 import { useFlueClient } from '@/client/provider'
 import { ExitOverlay } from '@/components/exit-overlay'
+import { KeyBar } from '@/components/key-bar'
 import { ThemeMenu } from '@/components/theme-menu'
 import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
 import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
@@ -18,6 +19,7 @@ import {
   type Dimensions,
 } from '@/lib/geometry'
 import { createKeyboardModes, type KeyboardMode } from '@/lib/keyboard'
+import { barKeyBytes, ctrlTransform, type BarKey } from '@/lib/keys'
 import { cn } from '@/lib/utils'
 import { trackVisualViewport, zoomedIn } from '@/lib/viewport'
 
@@ -131,6 +133,15 @@ export function Terminal({
     client.status === 'reconnecting' ? 'reconnecting' : 'connecting',
   )
   const [mode, setMode] = useState<KeyboardMode>('tab')
+  // Coarse pointer once per mount: whether this device's primary pointer is a
+  // finger decides the key bar's existence, and a pointer does not change
+  // class mid-session in any way worth re-rendering for.
+  const [coarse] = useState(() => globalThis.matchMedia?.('(pointer: coarse)')?.matches ?? false)
+  // The latched Ctrl: state for the chip's pressed look, a ref for the input
+  // path, which lives inside the effect and must read it without re-running.
+  const [ctrlArmed, setCtrlArmed] = useState(false)
+  const ctrlArmedRef = useRef(ctrlArmed)
+  ctrlArmedRef.current = ctrlArmed
   const [exitCode, setExitCode] = useState<number | null>(null)
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
@@ -156,6 +167,7 @@ export function Terminal({
   const actionsRef = useRef<{
     restart: (dir: string | null) => void
     applyTheme: (id: string) => void
+    sendKey: (key: BarKey) => void
   } | null>(null)
   // The latest onRestarted, readable from inside the effect without putting
   // a prop identity in its dependency array.
@@ -323,7 +335,14 @@ export function Terminal({
     emulator.onData((bytes) => {
       // No ref, no destination — and no input while the backlog replays.
       if (ref === null || consumed < muteUntil) return
-      client.sendInput(ref, bytes)
+      let out = bytes
+      if (ctrlArmedRef.current) {
+        // The bar's latched Ctrl folds this keystroke, and is spent on it
+        // whether or not it could fold — like a real latched modifier.
+        out = ctrlTransform(bytes) ?? bytes
+        setCtrlArmed(false)
+      }
+      client.sendInput(ref, out)
     })
 
     // Touch scrolling, by hand: xterm's viewport scrolls on wheel events and
@@ -563,6 +582,15 @@ export function Terminal({
         emulator.setTheme(next)
         pane.style.backgroundColor = next.background ?? ''
       },
+      sendKey: (key) => {
+        if (ref === null || consumed < muteUntil) return
+        const bytes = barKeyBytes(key, {
+          appCursor: emulator.applicationCursorKeys(),
+          ctrl: ctrlArmedRef.current,
+        })
+        if (ctrlArmedRef.current) setCtrlArmed(false)
+        client.sendInput(ref, bytes)
+      },
     }
 
     // Another tab choosing a theme lands here: the preference is global, and
@@ -651,6 +679,7 @@ export function Terminal({
         data-flue-inset=""
         className={cn(
           'absolute inset-3 transition-opacity',
+          coarse && 'bottom-16',
           phase === 'exited' && 'opacity-60',
         )}
       >
@@ -660,6 +689,13 @@ export function Terminal({
           className="flue-term-surface absolute top-0 left-0 origin-top-left"
         />
       </div>
+      {coarse && (
+        <KeyBar
+          ctrl={ctrlArmed}
+          onCtrl={() => setCtrlArmed((v) => !v)}
+          onKey={(k) => actionsRef.current?.sendKey(k)}
+        />
+      )}
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar
           eats their clicks. */}

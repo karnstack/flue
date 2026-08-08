@@ -59,7 +59,7 @@ export interface TerminalTheme {
  * xterm.js implements this today. Keeping it small and free of xterm-specific
  * concepts is what keeps the protocol client and the terminal route testable
  * without a DOM, and is the whole reason this file exists: every part of flue
- * that talks to a terminal talks to these ten methods.
+ * that talks to a terminal talks to this interface.
  *
  * The last three arrived with the terminal view, and each is here rather than
  * in the view because the alternative was the view reaching past the seam into
@@ -144,6 +144,16 @@ export interface Emulator {
    * primary role. Off by default until the daemon says who is primary.
    */
   answerQueries(on: boolean): void
+  /**
+   * Whether the program has asked for application cursor keys (DECCKM).
+   *
+   * The on-screen key bar synthesises arrow presses, and an arrow's encoding
+   * is the program's choice, not the bar's: CSI moves history at a shell,
+   * SS3 is what vim and friends expect once they have set the mode. Reading
+   * it here keeps the bar as mode-honest as a hardware keyboard through
+   * xterm would be.
+   */
+  applicationCursorKeys(): boolean
   /** Test-only: simulate user input. */
   injectForTest(data: string): void
 }

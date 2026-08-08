@@ -1004,6 +1004,88 @@ describe('Terminal', () => {
       expect(sock.input()).toEqual([{ ref: 2, text: 'live' }])
     })
   })
+
+  describe('the key bar', () => {
+    /** jsdom has no matchMedia; a coarse pointer is claimed explicitly. */
+    function coarsePointer() {
+      vi.stubGlobal('matchMedia', (query: string) => ({
+        matches: query.includes('coarse'),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    }
+    const bar = () => document.querySelector<HTMLElement>('[data-flue-keybar]')
+    const key = (label: string) =>
+      Array.from(document.querySelectorAll<HTMLButtonElement>('[data-flue-keybar] button')).find(
+        (b) => b.textContent?.startsWith(label),
+      )!
+
+    it('exists only for touch', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+      expect(bar()).toBeNull()
+    })
+
+    it('sends CSI arrows for a shell and SS3 once the program asks', () => {
+      coarsePointer()
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('↑'))
+      expect(sock.input()).toEqual([{ ref: 1, text: '\x1b[A' }])
+
+      em.live().appCursor = true
+      fireEvent.pointerDown(key('↓'))
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '\x1b[A' },
+        { ref: 1, text: '\x1bOB' },
+      ])
+    })
+
+    it('arms Ctrl for exactly one following keystroke', () => {
+      coarsePointer()
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('ctrl'))
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('true')
+      act(() => em.live().send('c'))
+      act(() => em.live().send('c'))
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '\x03' },
+        { ref: 1, text: 'c' },
+      ])
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+    })
+
+    it('chords Ctrl with an arrow', () => {
+      coarsePointer()
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('ctrl'))
+      fireEvent.pointerDown(key('→'))
+      expect(sock.input()).toEqual([{ ref: 1, text: '\x1b[1;5C' }])
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+    })
+
+    it('drops bar keys pressed before the attach comes back', () => {
+      coarsePointer()
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      fireEvent.pointerDown(key('esc'))
+      expect(sock.input()).toEqual([])
+    })
+
+    it('reserves bottom room in the inset so the bar covers no rows', () => {
+      coarsePointer()
+      mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      expect(inset().className).toContain('bottom-16')
+    })
+  })
 })
 
 /** A complete SessionInfo, so a caller only names what it cares about. */
