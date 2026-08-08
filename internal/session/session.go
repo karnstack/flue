@@ -156,6 +156,12 @@ type Session struct {
 	// reason as kill. See setWinsize.
 	setsize func(f *os.File, ws *pty.Winsize) error
 
+	// cwdOf is processCwd, captured per session at spawn. Info reads it
+	// without holding s.mu, so the capture discipline is stricter than for
+	// kill and setsize: a test that wants a substitute must swap it before
+	// the session's Info is ever called, never while readers are live.
+	cwdOf func(pid int) (string, error)
+
 	// sigReq carries group-signal requests to the supervisor. Nothing else
 	// signals the process group; see supervise for why.
 	sigReq chan sigRequest
@@ -180,10 +186,28 @@ type Session struct {
 
 func (s *Session) ID() string { return s.id }
 
-// Info returns a snapshot of the session's state.
+// Info returns a snapshot of the session's state, and is also where the
+// child's cwd is refreshed — the kernel is the only party that knows where a
+// `cd` left the shell, so every snapshot asks it.
+//
+// The read happens before s.mu is taken. It needs nothing the lock guards —
+// only the pid, which is immutable after spawn — so keeping it outside costs
+// nothing and keeps the rule that s.mu is never held across a syscall intact
+// without having to argue about whether this one can block.
+//
+// A failed read keeps the previous value rather than blanking it: the common
+// failure is a child that has exited, and "where it last was" remains the
+// honest answer for as long as the session is listed. The store is gated on
+// State == "running" for the same reason signalling stops at groupGone —
+// after the reap the pid may be recycled, and a read that "succeeds" then
+// may be describing a stranger's directory.
 func (s *Session) Info() Info {
+	cwd, err := s.cwdOf(s.pid)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err == nil && s.info.State == "running" {
+		s.info.Cwd = cwd
+	}
 	return s.info
 }
 

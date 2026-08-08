@@ -182,6 +182,7 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, title string
 		pid:       cmd.Process.Pid,
 		kill:      killGroup,
 		setsize:   setWinsize,
+		cwdOf:     processCwd,
 		sigReq:    make(chan sigRequest),
 		masterEnd: make(chan struct{}, 1),
 		gone:      make(chan struct{}),
