@@ -20,7 +20,13 @@ import {
 import type { FleetSession } from '@/fleet/types'
 import { ago } from '@/lib/time'
 import { cn } from '@/lib/utils'
-import { COLUMN_KEYS, displayName, type ColumnKey, type Group } from '@/sessions/view'
+import {
+  COLUMN_KEYS,
+  COLUMN_LABELS,
+  displayName,
+  type ColumnKey,
+  type Group,
+} from '@/sessions/view'
 
 /** What a row's ⋯ menu can ask of a session. */
 export type RowAction = 'rename' | 'tags' | 'pin' | 'unpin' | 'close'
@@ -33,17 +39,6 @@ export type RowAction = 'rename' | 'tags' | 'pin' | 'unpin' | 'close'
  * never become a DOM id or an htmlFor.
  */
 const keyOf = (s: FleetSession) => `${s.machineId}/${s.id}`
-
-/** What each column is called in the heading row. Sentence case, always. */
-const COLUMN_LABELS: Record<ColumnKey, string> = {
-  name: 'Name',
-  directory: 'Directory',
-  machine: 'Machine',
-  tags: 'Tags',
-  state: 'State',
-  lastActive: 'Last active',
-  created: 'Created',
-}
 
 /**
  * Where a long path is cut. CSS ellipsis can only eat the end, and the end of

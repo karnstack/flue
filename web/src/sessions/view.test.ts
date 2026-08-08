@@ -4,11 +4,14 @@ import type { FleetSession } from '@/fleet/types'
 import {
   applyView,
   COLUMN_KEYS,
+  COLUMN_LABELS,
   DEFAULT_VIEW,
   displayName,
   filterSessions,
+  GROUPING_LABELS,
   GROUPINGS,
   groupSessions,
+  ORDERING_LABELS,
   ORDERINGS,
   orderSessions,
 } from './view'
@@ -116,6 +119,28 @@ describe('filterSessions', () => {
       expect(ids(filterSessions(rows, search))).toEqual(want)
     })
   }
+
+  it('matches the command printed under the name', () => {
+    // The row prints `cmd` as its subtitle, so it is text on screen, and text
+    // on screen a search cannot reach is a search that is lying by omission.
+    const pair = [
+      s({ id: 'go', cmd: ['go', 'test', './...'] }),
+      s({ id: 'shell', cmd: ['zsh', '-l'] }),
+    ]
+    expect(ids(filterSessions(pair, 'go test'))).toEqual(['go'])
+  })
+
+  it('matches a title a typed name is standing in front of', () => {
+    // `displayName` prefers the name, so this title is nowhere on the row —
+    // and is searched anyway. A session called `api` is still the one running
+    // vim over internal/wire, and whoever is hunting for the vim session
+    // should not have to first remember what they renamed it to.
+    const pair = [
+      s({ id: 'named', name: 'api', title: 'vim internal/wire' }),
+      s({ id: 'plain', name: 'web' }),
+    ]
+    expect(ids(filterSessions(pair, 'wire'))).toEqual(['named'])
+  })
 
   it('leaves the order it was handed alone', () => {
     const reversed = [rows[1]!, rows[0]!]
@@ -375,6 +400,43 @@ describe('DEFAULT_VIEW', () => {
   it('shows every column but the creation time', () => {
     expect(DEFAULT_VIEW.columns).toEqual(COLUMN_KEYS.filter((c) => c !== 'created'))
     expect(DEFAULT_VIEW.columns).not.toContain('created')
+  })
+
+  it('refuses to be edited, loudly', () => {
+    // One object, handed to every screen that has never saved an arrangement.
+    // A `view.columns.push(...)` somewhere above would edit what the next
+    // reader is handed, and "reset to defaults" would then restore whatever
+    // the bug left behind — a corruption that survives a reload and points at
+    // nothing. Frozen, so the attempt throws at the line that wrote it.
+    expect(Object.isFrozen(DEFAULT_VIEW)).toBe(true)
+    expect(Object.isFrozen(DEFAULT_VIEW.columns)).toBe(true)
+    expect(() => DEFAULT_VIEW.columns.push('created')).toThrow(TypeError)
+    expect(() => {
+      DEFAULT_VIEW.grouping = 'none'
+    }).toThrow(TypeError)
+    expect(DEFAULT_VIEW.columns).not.toContain('created')
+    expect(DEFAULT_VIEW.grouping).toBe('machine')
+  })
+})
+
+describe('the words for the keys', () => {
+  it('has a sentence-case label for every grouping, ordering and column', () => {
+    // The maps are Records over the three unions, so a key without a label is
+    // a type error rather than a test failure. What this pins is the shape a
+    // reader sees: sentence case, and never the identifier itself.
+    for (const [key, label] of [
+      ...GROUPINGS.map((g) => [g, GROUPING_LABELS[g]] as const),
+      ...ORDERINGS.map((o) => [o, ORDERING_LABELS[o]] as const),
+      ...COLUMN_KEYS.map((c) => [c, COLUMN_LABELS[c]] as const),
+    ]) {
+      expect(label, key).toMatch(/^[A-Z][^A-Z]*$/)
+    }
+  })
+
+  it('calls the absence of grouping something other than "None"', () => {
+    // It sits in a list beside Machine and Tag, where a bare "None" reads as
+    // a fourth thing to group by rather than as the way out of grouping.
+    expect(GROUPING_LABELS.none).toBe('No grouping')
   })
 })
 

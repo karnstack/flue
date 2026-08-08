@@ -51,6 +51,47 @@ export const COLUMN_KEYS = [
 ] as const
 export type ColumnKey = (typeof COLUMN_KEYS)[number]
 
+/*
+ * What each of those words is called in English.
+ *
+ * Here rather than beside the markup that prints them, because two surfaces
+ * print the same words and they must never disagree: the sessions list writes
+ * `COLUMN_LABELS` across its heading row, and the display options offer the
+ * same seven as chips. A second copy in the second file is a copy that drifts
+ * the first time a column is renamed, and the reader is left with a chip whose
+ * heading calls itself something else.
+ *
+ * Sentence case throughout, as every other label on this screen is.
+ */
+export const GROUPING_LABELS: Record<Grouping, string> = {
+  machine: 'Machine',
+  state: 'State',
+  tag: 'Tag',
+  directory: 'Directory',
+  // Not "None": in a list beside Machine and Tag, a bare "None" reads as a
+  // fourth thing to group by rather than as the way out of grouping.
+  none: 'No grouping',
+}
+
+/** @see GROUPING_LABELS */
+export const ORDERING_LABELS: Record<Ordering, string> = {
+  lastActive: 'Last active',
+  created: 'Created',
+  name: 'Name',
+  directory: 'Directory',
+}
+
+/** @see GROUPING_LABELS */
+export const COLUMN_LABELS: Record<ColumnKey, string> = {
+  name: 'Name',
+  directory: 'Directory',
+  machine: 'Machine',
+  tags: 'Tags',
+  state: 'State',
+  lastActive: 'Last active',
+  created: 'Created',
+}
+
 /** One arrangement of the sessions list: what is shown, and how it reads. */
 export interface ViewConfig {
   grouping: Grouping
@@ -70,13 +111,35 @@ export interface ViewConfig {
  * someone comes here to find; hiding it by default would make the screen
  * quietly lie about what happened. Every column but the creation time, which
  * is the one people ask for rarely and can turn on.
+ *
+ * Frozen, and its column list with it, because this is one object shared by
+ * every browser tab that has never saved an arrangement. `ViewConfig` is a
+ * mutable type — the display options hand back whole new objects, and callers
+ * are free to edit their own — so a single `view.columns.push(…)` written
+ * against what happens to be the default would rewrite the default itself,
+ * for every screen, until reload. Freezing turns that into a TypeError at the
+ * line that wrote it instead of a wrong screen three files away.
  */
-export const DEFAULT_VIEW: ViewConfig = {
+export const DEFAULT_VIEW: ViewConfig = Object.freeze<ViewConfig>({
   grouping: 'machine',
   ordering: 'lastActive',
   search: '',
-  columns: ['name', 'directory', 'machine', 'tags', 'state', 'lastActive'],
+  columns: frozen(['name', 'directory', 'machine', 'tags', 'state', 'lastActive']),
   showExited: true,
+})
+
+/**
+ * `Object.freeze` for an array, keeping the type it came in with.
+ *
+ * `Object.freeze` answers with a `readonly` type, and `ViewConfig.columns` is
+ * not readonly — deliberately, since every other holder of one builds and
+ * edits their own: the store, the tabs, the display options. Declaring the
+ * field readonly to describe this single shared literal would push that
+ * ceremony onto all of them. So the type is waved through here, at one line
+ * that says it is doing that, and the freeze itself is entirely real.
+ */
+function frozen<T>(list: T[]): T[] {
+  return Object.freeze(list) as T[]
 }
 
 /**
@@ -134,10 +197,19 @@ function basename(path: string): string {
  * slash. An empty search — including one that is nothing but the spaces left
  * behind by a half-deleted word — admits everything.
  *
- * What is searched is what the row shows: the name it displays, its directory,
- * its tags, and its machine. A title that lost to a name the user typed is not
- * reachable, deliberately — a search that matched text no row on screen
- * contains produces a result the reader cannot explain.
+ * What is searched is what the row shows, plus one thing it does not. The row
+ * shows the name it displays, the command printed under that name, its
+ * directory, its tags and its machine, and all five are reachable — text on
+ * screen that a search cannot find is a search lying by omission.
+ *
+ * The exception is the title, which is searched even when a typed name is
+ * standing in front of it. It is the one field a match can come from without
+ * being anywhere on the row, and it earns that: a session someone renamed
+ * `api` is still the one running vim over internal/wire, and whoever is
+ * hunting for the vim session should not have to first remember what they
+ * called it. The row already carries the rest of the explanation — a name, a
+ * command, a directory — so the result reads as "this is that session" rather
+ * than as a match out of nowhere.
  */
 export function filterSessions(list: FleetSession[], search: string): FleetSession[] {
   const needle = search.trim().toLowerCase()
@@ -147,7 +219,7 @@ export function filterSessions(list: FleetSession[], search: string): FleetSessi
 
 /** Every string a search is allowed to see, for one session. */
 function haystack(s: FleetSession): string[] {
-  return [displayName(s), s.cwd, s.machineName, ...s.tags]
+  return [displayName(s), s.title, s.cmd.join(' '), s.cwd, s.machineName, ...s.tags]
 }
 
 /**
