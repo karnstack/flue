@@ -111,9 +111,10 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   document.title = 'flue'
-  // The terminal paints the document canvas inline; a leak here would fail
-  // in whichever test runs next rather than the one that leaked.
+  // The terminal paints the document canvas and the body inline; a leak here
+  // would fail in whichever test runs next rather than the one that leaked.
   document.documentElement.style.backgroundColor = ''
+  document.body.style.backgroundColor = ''
   localStorage.clear()
 })
 
@@ -1510,6 +1511,44 @@ describe('the terminal theme', () => {
     document.documentElement.style.backgroundColor = 'rgb(1, 2, 3)'
     view.unmount()
     expect(document.documentElement.style.backgroundColor).toBe('rgb(1, 2, 3)')
+  })
+
+  it('paints the body with it, because the body covers the canvas', () => {
+    localStorage.setItem('flue:theme', 'dracula')
+    const { view } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    // The canvas alone was not enough, and this is the band that proved it:
+    // the body is full-height of the *layout* viewport, which a phone
+    // keyboard does not shorten, so the body's own stylesheet colour paints
+    // over the canvas across exactly the strip the keyboard uncovers below
+    // the viewport-pinned pane. On iOS 26 that strip is what shows around
+    // the keyboard slab and behind the form accessory bar — zinc-950 under a
+    // dracula terminal read as a black bar sitting under the session.
+    expect(document.body.style.backgroundColor).toBe('rgb(40, 42, 54)')
+
+    // A theme change repaints the body along with the canvas and the pane.
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: 'flue:theme', newValue: 'nord' }),
+      )
+    })
+    expect(document.body.style.backgroundColor).toBe('rgb(46, 52, 64)')
+
+    // And leaving hands it back, so the sessions screen wears app colours.
+    view.unmount()
+    expect(document.body.style.backgroundColor).toBe('')
+  })
+
+  it('does not claw back a body someone newer has painted', () => {
+    localStorage.setItem('flue:theme', 'dracula')
+    const { view } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    expect(document.body.style.backgroundColor).toBe('rgb(40, 42, 54)')
+
+    // Same restraint the canvas gets, for the same teardown order: a
+    // replacement owner paints before this view's cleanup runs.
+    document.body.style.backgroundColor = 'rgb(1, 2, 3)'
+    view.unmount()
+    expect(document.body.style.backgroundColor).toBe('rgb(1, 2, 3)')
   })
 })
 
