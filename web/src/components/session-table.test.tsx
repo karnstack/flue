@@ -280,6 +280,62 @@ describe('SessionTable', () => {
       expect(row.className).toMatch(/\bhover:bg-/)
       expect(row.className).not.toMatch(/\bborder\b|\bborder-b\b|\bshadow/)
     })
+
+    it('stacks every self-answering piece above the row link', async () => {
+      // The link stretches over the row by its ::after box, and a browser
+      // hit-tests that overlay first: anything that takes its own pointer —
+      // the checkbox, the ⋯ trigger — or carries its own title tooltip has
+      // to stand above it on z-10, or the anchor swallows the hover and the
+      // click. jsdom does no hit-testing, so the class is the observable
+      // contract here, exactly as the hover tint is pinned by its class.
+      const { container } = await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'a1', tags: ['a', 'b', 'c', 'd'], state: 'exited', exitCode: 1 }),
+          ]),
+        ],
+      })
+
+      expect(screen.getByRole('checkbox', { name: 'Select zsh' }).className).toMatch(/\bz-10\b/)
+      expect(screen.getByRole('button', { name: 'Actions for zsh' }).className).toMatch(
+        /\bz-10\b/,
+      )
+
+      // The state dot, the directory, both stamps, and the folded tags: each
+      // one promises a tooltip, so each one must be reachable by a hover.
+      const titled = Array.from(container.querySelectorAll('li [title]'))
+      expect(titled.length).toBeGreaterThanOrEqual(4)
+      for (const el of titled) expect(el.className).toMatch(/\bz-10\b/)
+    })
+
+    it('caps the tag badges and folds the remainder into a +n', async () => {
+      // A row is one line: the old layout could sideways-scroll a wide row,
+      // this one must never push the pane. The folded names stay reachable
+      // through the +n badge's tooltip.
+      await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [
+            fs({ id: 'a1', tags: ['api', 'edge', 'ops', 'prod', 'staging'] }),
+          ]),
+        ],
+      })
+
+      expect(screen.getByText('api')).toBeTruthy()
+      expect(screen.getByText('edge')).toBeTruthy()
+      expect(screen.getByText('ops')).toBeTruthy()
+      expect(screen.queryByText('prod')).toBeNull()
+      expect(screen.getByText('+2').getAttribute('title')).toBe('prod, staging')
+    })
+
+    it('keeps the machine chip at every width, shedding the directory first', async () => {
+      // The headline use of this screen is a phone reading a desktop's
+      // fleet, and on that phone "which machine" outranks "which directory".
+      await renderTable()
+
+      const chip = screen.getByText('MacBook Pro', { selector: '[data-slot="badge"]' })
+      expect(chip.className).not.toMatch(/:hidden\b/)
+      expect(screen.getByTitle('/Users/karn/code/flue').className).toMatch(/\bmax-md:hidden\b/)
+    })
   })
 
   describe('selection', () => {

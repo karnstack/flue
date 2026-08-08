@@ -54,12 +54,13 @@ export type ColumnKey = (typeof COLUMN_KEYS)[number]
 /*
  * What each of those words is called in English.
  *
- * Here rather than beside the markup that prints them, because two surfaces
- * print the same words and they must never disagree: the sessions list writes
- * `COLUMN_LABELS` across its heading row, and the display options offer the
- * same seven as chips. A second copy in the second file is a copy that drifts
- * the first time a column is renamed, and the reader is left with a chip whose
- * heading calls itself something else.
+ * Here rather than beside the markup that prints them, because the labels
+ * belong to the unions above: a word renamed here is renamed everywhere in
+ * one edit. The sessions list itself no longer prints `COLUMN_LABELS` at all
+ * — its rows carry the fields with no heading row over them — which leaves
+ * the display options' chips as the one surface today; keeping the
+ * vocabulary beside the words it names is what stops a second copy from
+ * growing back when another surface arrives.
  *
  * Sentence case throughout, as every other label on this screen is.
  */

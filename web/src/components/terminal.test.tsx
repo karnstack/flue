@@ -486,6 +486,29 @@ describe('Terminal', () => {
     expect(document.title).toBe('/home/karn/code')
   })
 
+  it('stands alone as the name when there is nothing to put beside it', () => {
+    // A typed name with no OSC title and no directory: "api — " would be a
+    // dash pointing at nothing.
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', title: '' })))
+    act(() =>
+      sock.emitControl({ type: 'sessions', sessions: [session({ name: 'api', cwd: '' })] }),
+    )
+
+    expect(document.title).toBe('api')
+  })
+
+  it('keeps the tab name it inherited when every source is empty', () => {
+    // Blanking the tab would say less than the name that was already there.
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', title: '' })))
+    act(() => sock.emitControl({ type: 'sessions', sessions: [session({ cwd: '' })] }))
+
+    expect(document.title).toBe('flue')
+  })
+
   it('follows the OSC title as the sessions poll moves it, for its own row only', () => {
     const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
     act(() => sock.emitControl(attached({ ref: 1, id: 's1', title: 'zsh' })))

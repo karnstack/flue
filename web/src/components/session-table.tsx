@@ -95,7 +95,10 @@ function StateDot({ session }: { session: FleetSession }) {
   return (
     <span
       title={live ? 'Running' : `Exited ${session.exitCode}`}
-      className="flex size-4 shrink-0 items-center justify-center"
+      // z-10 with every other title-holder on the row: the row link's
+      // stretched overlay is what a browser hit-tests, and a tooltip under
+      // it never shows. See SessionRow.
+      className="relative z-10 flex size-4 shrink-0 items-center justify-center"
     >
       <span
         aria-hidden="true"
@@ -113,6 +116,14 @@ function StateDot({ session }: { session: FleetSession }) {
 const META_TEXT = 'text-xs/6 whitespace-nowrap text-zinc-500 dark:text-zinc-400'
 
 /**
+ * How many tag badges a row shows before folding the rest into a "+n". A row
+ * is one line that must never push the pane sideways — the old layout's
+ * overflow-x wrapper died with it, so this cap is what holds the line now —
+ * and the folded remainder rides in the +n badge's tooltip.
+ */
+const TAG_CAP = 3
+
+/**
  * One session, one row: a single line with the identity on the left, the
  * details ranged right, and the whole of it one link.
  *
@@ -120,9 +131,15 @@ const META_TEXT = 'text-xs/6 whitespace-nowrap text-zinc-500 dark:text-zinc-400'
  * open-in-a-new-tab family for free — a Ctrl, Cmd or middle click never
  * reaches the router, the browser answers it natively — and it is stretched
  * over the row by its ::after box rather than by wrapping the row's markup,
- * because a checkbox inside an anchor is both invalid and unreadable. The
- * interactive children stack above that overlay on `z-10`; everything else
- * lets a click fall through to the link, so the row opens from anywhere.
+ * because a checkbox inside an anchor is both invalid and unreadable.
+ *
+ * That overlay is what a browser hit-tests, so two kinds of children stand
+ * above it on `z-10`: the ones that take their own pointer — the checkbox,
+ * the ⋯ trigger — and every element carrying a title, whose tooltip would
+ * otherwise never show because the hover always landed on the anchor. The
+ * title-holders are narrow, so the dead spots they cost the click surface
+ * are small and each buys a tooltip that is actually reachable; everything
+ * else lets a click fall through, and the row opens from anywhere.
  *
  * The checkbox keeps quiet until the row is hovered, checked, or focused —
  * CSS alone, no state — because a column of boxes at rest would make every
@@ -183,28 +200,40 @@ function SessionRow({
         The details, right-ranged in the order a reader resolves a row: what
         it is tagged, where it runs, where it sits, how it ended, when it was
         last touched. Presence is the caller's, through `shown`; the narrower
-        the screen, the fewer survive, name and recency last of all.
+        the screen, the fewer survive. The machine chip survives every width
+        on purpose — the headline use of this screen is a phone reading a
+        desktop's fleet, and on that phone "which machine" outranks "which
+        directory", so the directory is what gets shed first.
       */}
       <div className="flex shrink-0 items-center gap-x-2.5">
         {shown.includes('tags') && s.tags.length > 0 && (
           <span className="flex items-center gap-x-1.5 max-sm:hidden">
-            {s.tags.map((tag) => (
+            {s.tags.slice(0, TAG_CAP).map((tag) => (
               <Badge key={tag} variant="secondary">
                 {tag}
               </Badge>
             ))}
+            {s.tags.length > TAG_CAP && (
+              <Badge
+                variant="secondary"
+                title={s.tags.slice(TAG_CAP).join(', ')}
+                className="relative z-10"
+              >
+                +{s.tags.length - TAG_CAP}
+              </Badge>
+            )}
           </span>
         )}
         {shown.includes('machine') && (
-          <Badge
-            variant="outline"
-            className="text-zinc-500 max-md:hidden dark:text-zinc-400"
-          >
+          <Badge variant="outline" className="text-zinc-500 dark:text-zinc-400">
             {s.machineName}
           </Badge>
         )}
         {shown.includes('directory') && (
-          <span title={s.cwd} className={cn(META_TEXT, 'font-mono max-lg:hidden')}>
+          <span
+            title={s.cwd}
+            className={cn(META_TEXT, 'relative z-10 font-mono max-md:hidden')}
+          >
             {midCut(s.cwd)}
           </span>
         )}
@@ -212,12 +241,15 @@ function SessionRow({
           <span className={META_TEXT}>Exited {s.exitCode}</span>
         )}
         {shown.includes('created') && (
-          <span title={s.createdAt} className={cn(META_TEXT, 'tabular-nums max-sm:hidden')}>
+          <span
+            title={s.createdAt}
+            className={cn(META_TEXT, 'relative z-10 tabular-nums max-sm:hidden')}
+          >
             {since(s.createdAt)}
           </span>
         )}
         {shown.includes('lastActive') && (
-          <span title={s.lastActive} className={cn(META_TEXT, 'tabular-nums')}>
+          <span title={s.lastActive} className={cn(META_TEXT, 'relative z-10 tabular-nums')}>
             {since(s.lastActive)}
           </span>
         )}
