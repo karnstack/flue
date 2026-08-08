@@ -8,10 +8,17 @@ import {
   RouterProvider,
 } from '@tanstack/react-router'
 
+import { SidebarProvider } from '@/components/ui/sidebar'
+
 /**
  * Render `ui` inside a minimal router. TanStack's Link throws without a
  * router in context, and the real routes pull in the whole app, so this
  * mirrors only the paths the app links to.
+ *
+ * A SidebarProvider wraps the lot for the same reason the router does: in the
+ * app every management screen renders inside the shell, which provides both,
+ * and PageHeader reads the sidebar context for its inline trigger. A screen
+ * that never touches it pays nothing for the wrapper.
  *
  * The router is returned alongside the render result because it is the only
  * way to prove a click was handled client-side: jsdom does not navigate, so
@@ -45,5 +52,12 @@ export async function renderWithRouter(ui: ReactNode, initialPath = '/sessions')
   // empty tree and every query in the test misses. Loading first is what
   // makes the render synchronous, which is why this helper is async.
   await router.load()
-  return { router, ...render(<RouterProvider router={router as never} />) }
+  return {
+    router,
+    ...render(
+      <SidebarProvider>
+        <RouterProvider router={router as never} />
+      </SidebarProvider>,
+    ),
+  }
 }

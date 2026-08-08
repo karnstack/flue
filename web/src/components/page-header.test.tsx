@@ -11,6 +11,20 @@ const trail = () => screen.getByRole('navigation', { name: 'Breadcrumb' })
 const block = () => document.querySelector('[data-slot="page-header"]')!
 
 describe('PageHeader', () => {
+  it('carries the sidebar trigger beside the crumbs, for md and up', async () => {
+    // The shell used to spend a whole bar on this one button; now it sits on
+    // the heading's own line. Below md it stands down — the shell's mobile
+    // band still carries a trigger of its own there, beside the wordmark.
+    await renderWithRouter(<PageHeader crumbs={[{ label: 'Sessions' }]} />)
+
+    const trigger = screen.getByRole('button', { name: 'Toggle Sidebar' })
+    expect(block().contains(trigger)).toBe(true)
+    expect(trigger.className).toMatch(/\bmax-md:hidden\b/)
+    // Outside the trail's landmark: the trigger is shell furniture, not a
+    // step on the way here.
+    expect(trail().contains(trigger)).toBe(false)
+  })
+
   it('renders a lone crumb as the page heading, with nothing before it', async () => {
     // The single-crumb case is every screen in the app today, and the crumb
     // *is* the title: rendering the same word twice — once as a trail item,
@@ -100,11 +114,11 @@ describe('PageHeader', () => {
     // an actions div with no actions would push the page down by itself.
     await renderWithRouter(<PageHeader crumbs={[{ label: 'Sessions' }]} />)
 
-    // One row, and inside it the trail on its own: no actions wrapper waiting
-    // to be filled, and no second row under it.
+    // One row, and inside it only the leading cluster — the trigger and the
+    // trail: no actions wrapper waiting to be filled, no second row under it.
     expect(block().children).toHaveLength(1)
     const row = block().firstElementChild!
     expect(row.children).toHaveLength(1)
-    expect(row.firstElementChild).toBe(trail())
+    expect(row.firstElementChild!.contains(trail())).toBe(true)
   })
 })

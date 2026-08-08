@@ -135,6 +135,21 @@ describe('AppShell', () => {
     }
   })
 
+  it('keeps its own top band for mobile only', async () => {
+    // Below md the band is the sheet's opener and the wordmark's home. From
+    // md up it used to hold one small button over a screenful of nothing —
+    // the trigger rides each screen's PageHeader there instead, so the band
+    // stands down and the routes' own headers meet the top of the screen.
+    const { container } = await renderWithRouter(
+      <AppShell currentPath="/sessions">
+        <p>route content</p>
+      </AppShell>,
+    )
+    const band = container.querySelector('header')!
+    expect(band).not.toBeNull()
+    expect(band.className).toMatch(/\bmd:hidden\b/)
+  })
+
   it('collapses and reopens the desktop sidebar from the header trigger', async () => {
     await renderWithRouter(
       <AppShell currentPath="/sessions">

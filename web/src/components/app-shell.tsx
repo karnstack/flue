@@ -32,9 +32,16 @@ export function AppShell({ currentPath, children }: AppShellProps) {
         gutter, a hairline does not.
       */}
       <SidebarInset className="min-w-0 md:bg-card dark:md:inset-ring dark:md:inset-ring-white/5 dark:md:shadow-none">
-        <header className="flex h-14 shrink-0 items-center gap-x-1.5 px-3">
+        {/*
+          Mobile only. Below md the sheet needs an opener and the wordmark
+          needs a home, and there is no header row of the route's own to fold
+          them into. From md up this band held one small button over a
+          screenful of nothing, so the trigger rides the PageHeader instead —
+          see page-header.tsx — and the band is gone.
+        */}
+        <header className="flex h-14 shrink-0 items-center gap-x-1.5 px-3 md:hidden">
           <SidebarTrigger className="-ml-1.5" />
-          <Wordmark className="md:hidden" />
+          <Wordmark />
         </header>
         {/*
           min-w-0 on the inset and min-h-0 here are required, not decorative:
