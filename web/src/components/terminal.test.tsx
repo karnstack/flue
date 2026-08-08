@@ -77,14 +77,18 @@ const surfaceEl = () => document.querySelector<HTMLElement>('[data-flue-surface]
  * A touch event jsdom will really dispatch.
  *
  * jsdom ships no `Touch` constructor, so a genuine TouchEvent cannot be built
- * with any points in it. The handlers under test read exactly three things —
- * how many touches there are, the first one's clientY, and preventDefault —
- * so this carries those. `cancelable` is the load-bearing part: whether the
- * event comes back prevented is what decides if the browser may pan.
+ * with any points in it. The handlers under test read exactly four things —
+ * how many touches there are, the first one's clientY, the clock, and
+ * preventDefault — so this carries those. `cancelable` is the load-bearing
+ * part: whether the event comes back prevented is what decides if the browser
+ * may pan. `at` overrides the stamp jsdom writes at construction time, which
+ * is the only way consecutive events can be told apart within one tick; the
+ * drag tests that never lift a finger pass none and read a real clock.
  */
-function touch(type: 'touchstart' | 'touchmove' | 'touchend', ys: number[]) {
+function touch(type: 'touchstart' | 'touchmove' | 'touchend', ys: number[], at?: number) {
   const e = new Event(type, { bubbles: true, cancelable: true })
   Object.defineProperty(e, 'touches', { value: ys.map((clientY) => ({ clientY })) })
+  if (at !== undefined) Object.defineProperty(e, 'timeStamp', { value: at })
   return e
 }
 
@@ -464,6 +468,51 @@ describe('Terminal', () => {
       return mounted
     }
 
+    /**
+     * An animation frame queue that honours cancellation.
+     *
+     * A no-op cancelAnimationFrame would let a glide nobody wants keep running
+     * with no test able to tell, which is the one thing these are here to
+     * catch. Ids start high on purpose: the component cancels its own relayout
+     * frame on unmount, and that id was handed out by the real clock before
+     * these stubs existed, so a low counter here would collide with it and a
+     * glide would look cancelled by the wrong hand.
+     */
+    function frameQueue() {
+      const queued = new Map<number, (t: number) => void>()
+      let nextId = 1000
+      let now = 48
+      vi.stubGlobal('requestAnimationFrame', (cb: (t: number) => void) => {
+        const id = nextId++
+        queued.set(id, cb)
+        return id
+      })
+      vi.stubGlobal('cancelAnimationFrame', (id: number) => void queued.delete(id))
+      return {
+        pending: () => queued.size,
+        /** Runs up to `n` frames on a 16ms clock, each free to queue the next. */
+        run(n: number) {
+          act(() => {
+            for (let i = 0; i < n && queued.size; i++) {
+              const [id, cb] = [...queued][0]!
+              queued.delete(id)
+              cb((now += 16))
+            }
+          })
+        },
+      }
+    }
+
+    /** A fast upward drag, lifted while still moving: 34px (2 lines) per 16ms. */
+    function flick(surface: HTMLElement, liftAt = 48) {
+      act(() => {
+        surface.dispatchEvent(touch('touchstart', [300], 0))
+        surface.dispatchEvent(touch('touchmove', [266], 16))
+        surface.dispatchEvent(touch('touchmove', [232], 32))
+        surface.dispatchEvent(touch('touchend', [], liftAt))
+      })
+    }
+
     it('scrolls the scrollback, and takes the gesture from the browser to do it', () => {
       const { em } = mountDraggable()
 
@@ -492,6 +541,78 @@ describe('Terminal', () => {
       expect(move.defaultPrevented).toBe(false)
       // Both halves of the same promise, asserted together.
       expect(surfaceEl().style.touchAction).toBe('auto')
+    })
+
+    it('glides on after a flick, and a new touch stops the glide', () => {
+      // Mounted before the stubs: the relayout frame the mount schedules would
+      // otherwise land in this queue and be drained as if it were the glide.
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+      const surface = surfaceEl()
+
+      flick(surface)
+      // 68px of finger over a 17px line, all of it while the finger is down.
+      const dragged = em.live().scrolled
+      expect(dragged).toBe(4)
+
+      // The glide keeps scrolling with no finger on the glass at all.
+      frames.run(4)
+      const glided = em.live().scrolled
+      expect(glided).toBeGreaterThan(dragged)
+      // Still asking for frames, which is what makes the next part a test.
+      expect(frames.pending()).toBe(1)
+
+      // A finger back on the glass pins the content: no glide survives it.
+      act(() => void surface.dispatchEvent(touch('touchstart', [200], 400)))
+      expect(frames.pending()).toBe(0)
+      frames.run(4)
+      expect(em.live().scrolled).toBe(glided)
+    })
+
+    it('comes to rest on its own', () => {
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+
+      flick(surfaceEl())
+      // Far more frames than a glide this size can use; it stops when the
+      // velocity dies, not when the caller runs out of patience.
+      frames.run(2000)
+
+      expect(frames.pending()).toBe(0)
+      // 4 lines in 32ms is 125 lines/s, and 0.998^ms friction spends that over
+      // about 63 further lines — bounded rather than pinned, because the exact
+      // total is an artifact of the frame clock a test happens to crank.
+      expect(em.live().scrolled).toBeGreaterThan(40)
+      expect(em.live().scrolled).toBeLessThan(90)
+    })
+
+    it('does not glide when the finger came to rest before it lifted', () => {
+      // The samples still describe a fast drag; the release does not. A thumb
+      // that parks the content and lets go expects it to stay parked, and the
+      // moves stop arriving the moment the finger stops, so only the lift's
+      // own clock can tell this apart from a flick.
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+
+      flick(surfaceEl(), 400)
+
+      expect(em.live().scrolled).toBe(4)
+      expect(frames.pending()).toBe(0)
+    })
+
+    it('drops the glide when the terminal goes away', () => {
+      // A glide outliving its effect would go on calling scrollLines into an
+      // emulator that has already been disposed.
+      const { view } = mountDraggable()
+      const frames = frameQueue()
+
+      flick(surfaceEl())
+      frames.run(2)
+      expect(frames.pending()).toBe(1)
+
+      act(() => view.unmount())
+
+      expect(frames.pending()).toBe(0)
     })
 
     it('drops a drag already under way when the zoom arrives mid-gesture', () => {

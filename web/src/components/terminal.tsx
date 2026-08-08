@@ -18,6 +18,7 @@ import {
   type Box,
   type Dimensions,
 } from '@/lib/geometry'
+import { startGlide } from '@/lib/glide'
 import { createKeyboardModes, type KeyboardMode } from '@/lib/keyboard'
 import { barKeyBytes, ctrlTransform, type BarKey } from '@/lib/keys'
 import { cn } from '@/lib/utils'
@@ -351,14 +352,24 @@ export function Terminal({
     // remainder carried between moves so slow drags still add up. The
     // surface's own CSS sets touch-action: pinch-zoom (styles.css), which is
     // what keeps the browser from spending the gesture on panning the page
-    // while still leaving two fingers to the zoom.
+    // while still leaving two fingers to the zoom. A finger that lifts while
+    // still moving hands its speed to a glide (lib/glide.ts), which is what
+    // every other scrolling surface on a phone does.
     let touchY: number | null = null
     let touchCarry = 0
+    // The flick record: the last few moves' clocks and positions, enough to
+    // read a release velocity from. Cleared whenever a gesture starts.
+    let flick: Array<{ t: number; y: number }> = []
+    let glide: (() => void) | null = null
     const lineHeightPx = () => {
       const content = emulator.contentSize()
       return content && dims.rows > 0 ? content.height / dims.rows : 17
     }
     const touchStart = (e: TouchEvent) => {
+      // A finger on the glass pins the content — any glide in flight ends.
+      glide?.()
+      glide = null
+      flick = []
       // A magnified page belongs to the browser, and releasing touch-action
       // is not enough to give it back: touch-action only says the browser
       // *may* pan, while the preventDefault() below cancels that pan whatever
@@ -369,6 +380,10 @@ export function Terminal({
       }
       touchY = e.touches[0]!.clientY
       touchCarry = 0
+      // The anchor counts as a sample. A flick is often three moves long at a
+      // 60Hz touch rate, and reading its speed from the moves alone would
+      // throw away a third of the evidence and most of the window.
+      flick.push({ t: e.timeStamp, y: touchY })
     }
     const touchMove = (e: TouchEvent) => {
       if (touchY === null || e.touches.length !== 1) return
@@ -388,11 +403,27 @@ export function Terminal({
       const lines = Math.trunc(delta)
       touchCarry = delta - lines
       touchY = y
+      flick.push({ t: e.timeStamp, y })
+      if (flick.length > 6) flick.shift()
       if (lines !== 0) emulator.scrollLines(lines)
     }
-    const touchEnd = () => {
+    const touchEnd = (e: TouchEvent) => {
+      const wasDragging = touchY !== null
       touchY = null
       touchCarry = 0
+      // Velocity over the sample window. Two samples and thirty milliseconds
+      // are the floor, so a tap reads as no flick at all. The lift's own clock
+      // is the other half: moves stop arriving the instant the finger stops,
+      // so a thumb that parks the content and lets go a moment later leaves
+      // fast samples behind it, and only their age gives it away.
+      const a = flick[0]
+      const b = flick[flick.length - 1]
+      flick = []
+      if (!wasDragging || !a || !b || b.t - a.t < 30) return
+      if (e.timeStamp - b.t > 100) return
+      const dt = (b.t - a.t) / 1000
+      const lps = (a.y - b.y) / lineHeightPx() / dt
+      glide = startGlide({ velocity: lps, onLines: (n) => emulator.scrollLines(n) })
     }
     surface.addEventListener('touchstart', touchStart, { passive: true })
     surface.addEventListener('touchmove', touchMove, { passive: false })
@@ -617,6 +648,7 @@ export function Terminal({
       surface.removeEventListener('touchmove', touchMove)
       surface.removeEventListener('touchend', touchEnd)
       surface.removeEventListener('touchcancel', touchEnd)
+      glide?.()
       untrackViewport()
       window.removeEventListener('storage', onStorage)
       window.removeEventListener('keydown', onKey, true)
