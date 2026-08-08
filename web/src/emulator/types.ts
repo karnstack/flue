@@ -61,11 +61,15 @@ export interface TerminalTheme {
  * without a DOM, and is the whole reason this file exists: every part of flue
  * that talks to a terminal talks to this interface.
  *
- * The last three arrived with the terminal view, and each is here rather than
- * in the view because the alternative was the view reaching past the seam into
- * xterm's own DOM and options — which is the one thing this file exists to
- * prevent. All three are emulator-agnostic: every terminal emulator has a
- * palette, a focus state, and a rendered size.
+ * `setTheme`, `focus` and `contentSize` arrived with the terminal view, and
+ * each is here rather than in the view because the alternative was the view
+ * reaching past the seam into xterm's own DOM and options — which is the one
+ * thing this file exists to prevent. All three are emulator-agnostic: every
+ * terminal emulator has a palette, a focus state, and a rendered size. The two
+ * that came after them, `answerQueries` and `applicationCursorKeys`, are the
+ * same bargain struck over terminal modes rather than over what is drawn:
+ * which client may answer a program's questions, and how a program wants its
+ * arrow keys encoded.
  */
 export interface Emulator {
   /**

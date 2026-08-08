@@ -85,7 +85,11 @@ const surfaceEl = () => document.querySelector<HTMLElement>('[data-flue-surface]
  * is the only way consecutive events can be told apart within one tick; the
  * drag tests that never lift a finger pass none and read a real clock.
  */
-function touch(type: 'touchstart' | 'touchmove' | 'touchend', ys: number[], at?: number) {
+function touch(
+  type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel',
+  ys: number[],
+  at?: number,
+) {
   const e = new Event(type, { bubbles: true, cancelable: true })
   Object.defineProperty(e, 'touches', { value: ys.map((clientY) => ({ clientY })) })
   if (at !== undefined) Object.defineProperty(e, 'timeStamp', { value: at })
@@ -622,6 +626,28 @@ describe('Terminal', () => {
 
       flick(surfaceEl(), 400)
 
+      expect(em.live().scrolled).toBe(4)
+      expect(frames.pending()).toBe(0)
+    })
+
+    it('takes no glide from a gesture the system cancelled', () => {
+      // The notification shade, an alert, an incoming call: the browser fires
+      // touchcancel, promptly and with the drag's fast samples still on the
+      // record, so every test a lift is judged by passes. But no finger left
+      // the glass — nothing was thrown — and a scrollback that coasted here
+      // would be moving after the interruption put it down.
+      const { em } = mountDraggable()
+      const frames = frameQueue()
+      const surface = surfaceEl()
+
+      act(() => {
+        surface.dispatchEvent(touch('touchstart', [300], 0))
+        surface.dispatchEvent(touch('touchmove', [266], 16))
+        surface.dispatchEvent(touch('touchmove', [232], 32))
+        surface.dispatchEvent(touch('touchcancel', [], 48))
+      })
+
+      // The 68px the finger did travel stand; nothing is added to them.
       expect(em.live().scrolled).toBe(4)
       expect(frames.pending()).toBe(0)
     })
@@ -1202,6 +1228,30 @@ describe('Terminal', () => {
       expect(key('ctrl').getAttribute('aria-pressed')).toBe('true')
       act(() => em.live().send('c'))
       act(() => em.live().send('c'))
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '\x03' },
+        { ref: 1, text: 'c' },
+      ])
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+    })
+
+    it('spends the arming on the first of two keystrokes in one task', () => {
+      // The spend cannot wait on a render. Both deliveries here land before
+      // React flushes the state change, so the input path reads the ref it was
+      // given — and a ref left true until the flush folds the second keystroke
+      // too, on one press of ctrl.
+      coarsePointer()
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('ctrl'))
+      act(() => {
+        em.live().send('c')
+        em.live().send('c')
+      })
+
       expect(sock.input()).toEqual([
         { ref: 1, text: '\x03' },
         { ref: 1, text: 'c' },

@@ -341,6 +341,10 @@ export function Terminal({
         // The bar's latched Ctrl folds this keystroke, and is spent on it
         // whether or not it could fold — like a real latched modifier.
         out = ctrlTransform(bytes) ?? bytes
+        // The ref by hand, beside the state and not through it: the render
+        // that would re-sync it is a flush away, and two keystrokes delivered
+        // inside one task would both read the arming and both fold.
+        ctrlArmedRef.current = false
         setCtrlArmed(false)
       }
       client.sendInput(ref, out)
@@ -432,10 +436,25 @@ export function Terminal({
       const lps = (a.y - b.y) / lineHeightPx() / dt
       glide = startGlide({ velocity: lps, onLines: (n) => emulator.scrollLines(n) })
     }
+    /**
+     * The gesture taken away rather than finished: a notification shade pulled
+     * down over it, an alert, a call. No finger ever lifted, so there is no
+     * release to read a speed from — the drag simply stops where it was.
+     *
+     * Its own handler rather than touchEnd's, because the samples a
+     * system-stolen drag leaves behind are indistinguishable from a flick's:
+     * fast, recent, and promptly followed by an event. Sharing the lift path
+     * would send the scrollback coasting with nothing on the glass.
+     */
+    const touchCancel = () => {
+      touchY = null
+      touchCarry = 0
+      flick = []
+    }
     surface.addEventListener('touchstart', touchStart, { passive: true })
     surface.addEventListener('touchmove', touchMove, { passive: false })
     surface.addEventListener('touchend', touchEnd, { passive: true })
-    surface.addEventListener('touchcancel', touchEnd, { passive: true })
+    surface.addEventListener('touchcancel', touchCancel, { passive: true })
 
     // The pane hugs the visual viewport: a phone keyboard shrinks it and the
     // ResizeObserver below refits the terminal above the keyboard. While
@@ -626,7 +645,11 @@ export function Terminal({
           appCursor: emulator.applicationCursorKeys(),
           ctrl: ctrlArmedRef.current,
         })
-        if (ctrlArmedRef.current) setCtrlArmed(false)
+        if (ctrlArmedRef.current) {
+          // Spent here too, ref first: see the onData path above.
+          ctrlArmedRef.current = false
+          setCtrlArmed(false)
+        }
         client.sendInput(ref, bytes)
       },
     }
@@ -654,7 +677,7 @@ export function Terminal({
       surface.removeEventListener('touchstart', touchStart)
       surface.removeEventListener('touchmove', touchMove)
       surface.removeEventListener('touchend', touchEnd)
-      surface.removeEventListener('touchcancel', touchEnd)
+      surface.removeEventListener('touchcancel', touchCancel)
       glide?.()
       untrackViewport()
       window.removeEventListener('storage', onStorage)
