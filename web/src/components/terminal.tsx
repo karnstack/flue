@@ -232,6 +232,26 @@ export function Terminal({
     // frame; the pty hears about it once, when the layout has settled.
     let settleTimer = 0
     const priorTitle = document.title
+    /*
+     * What the browser tab is called while this session is on it: the name a
+     * human typed leads, then whatever the program inside announced through
+     * OSC 0/2, then the session's working directory when the program has
+     * said nothing — the same pecking order displayName reads names by,
+     * minus the command floor, which would caption every tab "zsh".
+     *
+     * Two sources feed it, both already flowing: `attached` carries the OSC
+     * title's first word, and the sessions poll carries every later one,
+     * name and directory included. When all three strings are empty the tab
+     * keeps whatever it was called before, rather than being blanked.
+     */
+    let tabName = ''
+    let tabOsc = ''
+    let tabCwd = ''
+    const retitle = () => {
+      const at = tabOsc || tabCwd
+      const text = tabName && at ? `${tabName} — ${at}` : tabName || at
+      if (text) document.title = text
+    }
 
     const paneBox = (): Box => {
       // The inner box, not the pane: the pane carries the padding that gives
@@ -529,7 +549,8 @@ export function Terminal({
         muteUntil = a.head
         if (a.truncated) emulator.write(RESET)
         emulator.resize(a.cols, a.rows)
-        if (a.title) document.title = a.title
+        tabOsc = a.title
+        retitle()
         // An exited session still reattaches and still replays its scrollback;
         // it is just not going to produce any more of it.
         if (!over) setPhase('live')
@@ -575,7 +596,12 @@ export function Terminal({
     offs.push(
       client.onSessions((list) => {
         const own = list.find((s) => s.id === sessionId)
-        if (own) setCwd(own.cwd)
+        if (!own) return
+        setCwd(own.cwd)
+        tabName = own.name
+        tabOsc = own.title
+        tabCwd = own.cwd
+        retitle()
       }),
     )
 
