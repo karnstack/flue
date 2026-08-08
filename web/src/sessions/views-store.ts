@@ -47,7 +47,9 @@ function isSavedView(value: unknown): value is SavedView {
   const v = value as SavedView | null
   return (
     typeof v?.name === 'string' &&
-    v.name !== '' &&
+    // Trimmed, because a tab labelled with three spaces is a tab nobody can
+    // point at, tell from its neighbour, or say the name of out loud.
+    v.name.trim() !== '' &&
     isMember(GROUPINGS, v.grouping) &&
     isMember(ORDERINGS, v.ordering) &&
     typeof v.search === 'string' &&
@@ -113,8 +115,16 @@ export function listViews(): SavedView[] {
  * Throws if storage refuses the write. The caller is the half that can say
  * "that did not save"; swallowing it would leave a tab on screen that is not
  * there after a reload.
+ *
+ * Throws on a name that is nothing but blanks for exactly that reason rather
+ * than a different one. listViews will not hand such a row back, so writing it
+ * would produce a tab that is there until the page reloads and then is not —
+ * the precise failure the paragraph above refuses to allow, arriving by a
+ * quieter route. Whitespace *inside* a name is the reader's business; this
+ * only asks that something be there.
  */
 export function saveView(view: SavedView): void {
+  if (view.name.trim() === '') throw new TypeError('flue: a saved view needs a name')
   const kept = listViews()
   const at = kept.findIndex((v) => v.name === view.name)
   if (at < 0) kept.push(view)

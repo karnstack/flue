@@ -66,6 +66,20 @@ describe('listViews and saveView', () => {
     expect(listViews().map((v) => v.name)).toEqual(['Work', 'work'])
   })
 
+  it('refuses a name that is nothing but blanks', () => {
+    // listViews drops such a row, so accepting the write would put a tab on
+    // screen that is gone at the next load — the same outcome a swallowed
+    // quota error gives, and refused here for the same reason.
+    expect(() => saveView({ ...WORK, name: '   ' })).toThrow()
+    expect(listViews()).toEqual([])
+  })
+
+  it('leaves the views it already kept alone when it refuses one', () => {
+    saveView(WORK)
+    expect(() => saveView({ ...OPS, name: ' ' })).toThrow()
+    expect(listViews()).toEqual([WORK])
+  })
+
   it('lets a write failure reach the caller', () => {
     // Storage full, or a browser that refuses it: the caller is the one that
     // can say "that did not save", and a swallowed error would leave a tab on
@@ -100,6 +114,7 @@ describe('listViews on a store it cannot believe', () => {
     { what: 'a nameless row', row: { ...DEFAULT_VIEW } },
     { what: 'a row named with a number', row: { ...DEFAULT_VIEW, name: 7 } },
     { what: 'a row with an empty name', row: { ...DEFAULT_VIEW, name: '' } },
+    { what: 'a row named with nothing but blanks', row: { ...DEFAULT_VIEW, name: '   ' } },
     { what: 'a grouping nothing groups by', row: { ...WORK, grouping: 'folder' } },
     { what: 'an ordering nothing orders by', row: { ...WORK, ordering: 'size' } },
     { what: 'a search that is not text', row: { ...WORK, search: 3 } },
