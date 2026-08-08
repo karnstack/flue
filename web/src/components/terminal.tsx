@@ -181,24 +181,40 @@ export function Terminal({
     const surface = surfaceRef.current
     if (!pane || !inner || !surface) return
 
-    // The document's canvas, painted along with the pane wherever the theme
-    // lands. The pane stops at the visual viewport while a phone keyboard is
-    // up, and rubber-band overscroll runs past the page: both bands show the
-    // canvas, which otherwise wears the app scheme's colour — a dark OS under
-    // a light terminal theme put a black flash behind every keyboard open.
+    // The two grounds behind the pane, painted along with it wherever the
+    // theme lands. The pane stops at the visual viewport while a phone
+    // keyboard is up, and rubber-band overscroll runs past the page: both
+    // bands show what is under the pane, which otherwise wears the app
+    // scheme's colour — a dark OS under a light terminal theme put a black
+    // flash behind every keyboard open.
+    //
+    // Both, because the canvas alone leaves the keyboard band wrong in the
+    // other direction. The body's box is the full height of the *layout*
+    // viewport, and a phone keyboard shortens only the visual one, so the
+    // body paints its own stylesheet colour over the canvas across exactly
+    // the strip the keyboard uncovers — zinc-950, a black bar under a dark
+    // terminal theme, which is what iOS 26 shows around its keyboard slab
+    // and behind the form accessory bar. Only overscroll past the body's box
+    // ever reaches the canvas itself.
+    //
     // Restored on unmount so the rest of the app keeps its stylesheet colour.
     const canvas = document.documentElement
+    const body = document.body
     const priorCanvas = canvas.style.backgroundColor
+    const priorBody = body.style.backgroundColor
     // What this effect last painted, read back so the value carries the
     // style engine's own serialisation. The cleanup compares before it
     // restores, for the reason the viewport tracker's disposer does: a
     // replacement owner can paint before this one tears down, and a stale
     // cleanup must surrender only what it still owns.
     let paintedCanvas = ''
+    let paintedBody = ''
     const paintGround = (bg: string | undefined) => {
       pane.style.backgroundColor = bg ?? ''
       canvas.style.backgroundColor = bg ?? ''
+      body.style.backgroundColor = bg ?? ''
       paintedCanvas = canvas.style.backgroundColor
+      paintedBody = body.style.backgroundColor
     }
 
     const palette = resolveTheme(themeIdRef.current, prefersDark())
@@ -717,6 +733,9 @@ export function Terminal({
       document.title = priorTitle
       if (canvas.style.backgroundColor === paintedCanvas) {
         canvas.style.backgroundColor = priorCanvas
+      }
+      if (body.style.backgroundColor === paintedBody) {
+        body.style.backgroundColor = priorBody
       }
       emulator.dispose()
     }
