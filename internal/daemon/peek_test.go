@@ -100,13 +100,39 @@ func TestPeekMintsNoRefAndLeavesNoSubscriber(t *testing.T) {
 	})
 }
 
+// quiet waits until a session's LastActive stops moving, and answers with it.
+//
+// Without this the case below measures the wrong thing. The stamp moves on
+// every chunk read back from the pty, and a pty round trip is the kernel's
+// business: peekTarget returns as soon as the echo is *findable* in the ring,
+// which can be one chunk of several. A baseline taken there and compared a
+// millisecond later catches the pump finishing its delivery and blames the
+// peek for it — which is exactly how this failed in CI and never once
+// locally.
+func quiet(t *testing.T, s *session.Session) time.Time {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	last := s.Info().LastActive
+	for {
+		time.Sleep(20 * time.Millisecond)
+		now := s.Info().LastActive
+		if now.Equal(last) {
+			return now
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the session never stopped producing output")
+		}
+		last = now
+	}
+}
+
 func TestPeekDoesNotCountAsActivityInTheSession(t *testing.T) {
 	// The sessions list orders by LastActive by default, so a preview that
 	// touched the stamp would sort the row under the pointer to the top of the
 	// list the pointer is resting on.
 	ts, reg := newTestServer(t)
 	s := peekTarget(t, reg, "quiet")
-	before := s.Info().LastActive
+	before := quiet(t, s)
 
 	c := dial(t, ts)
 	writeControl(t, c, wire.Hello{Ver: "test"})
