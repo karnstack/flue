@@ -1062,6 +1062,59 @@ describe('Terminal', () => {
       expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
     })
 
+    it('spends the arming on a keystroke it cannot fold', () => {
+      // A digit has no control code, and neither does a paste or a multi-byte
+      // character: ctrlTransform returns null and the bytes go out untouched.
+      // The arming is spent all the same, as a latched modifier on a real
+      // keyboard would be — otherwise Ctrl stays armed for good and the next
+      // letter typed is silently folded into a control code nobody asked for.
+      coarsePointer()
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('ctrl'))
+      act(() => em.live().send('7'))
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+
+      act(() => em.live().send('c'))
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '7' },
+        { ref: 1, text: 'c' },
+      ])
+    })
+
+    it('answers a screen reader’s activation without double-sending a real tap', () => {
+      // VoiceOver's and TalkBack's double-tap, and Enter or Space on a hybrid
+      // device's keyboard, all synthesise a click and dispatch no pointer
+      // event at all. A bar wired to pointerdown alone advertises itself to
+      // assistive technology — aria-pressed, an accessible name each — and
+      // then does nothing when that technology activates it, on exactly the
+      // devices the bar exists for. `detail` is 0 for a synthesised click and
+      // counts the presses behind a real one, which is what keeps a finger's
+      // own follow-up click from sending the key twice.
+      coarsePointer()
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.click(key('esc'), { detail: 0 })
+      expect(sock.input()).toEqual([{ ref: 1, text: '\x1b' }])
+      fireEvent.click(key('ctrl'), { detail: 0 })
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('true')
+      fireEvent.click(key('ctrl'), { detail: 0 })
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+
+      // A finger: pointerdown, and then a click of its own that must not
+      // send a second tab.
+      fireEvent.pointerDown(key('tab'))
+      fireEvent.click(key('tab'), { detail: 1 })
+      expect(sock.input()).toEqual([
+        { ref: 1, text: '\x1b' },
+        { ref: 1, text: '\x09' },
+      ])
+    })
+
     it('chords Ctrl with an arrow', () => {
       coarsePointer()
       const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)

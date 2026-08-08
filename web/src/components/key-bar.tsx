@@ -18,6 +18,15 @@ const KEYS: ReadonlyArray<{ key: BarKey; label: string; name: string }> = [
  * very keyboard the bar exists to work beside. Ctrl is latched: one press
  * arms it for the next key, bar or typed, and the Terminal owns that state
  * because the fold happens on the input path, not here.
+ *
+ * The onClick beside each is not a duplicate. VoiceOver's and TalkBack's
+ * double-tap synthesise a click and dispatch no pointer event at all, as does
+ * Enter or Space on a keyboard — so a bar wired to pointerdown alone offers
+ * assistive technology a named, pressable control that answers nothing, on
+ * exactly the devices this exists for. `detail` counts the presses behind a
+ * real click and is 0 for a synthesised one, which is what keeps a finger's
+ * own follow-up click from sending the key a second time: cancelling
+ * pointerdown suppresses the compatibility mouse events, never the click.
  */
 export function KeyBar(props: {
   ctrl: boolean
@@ -41,6 +50,9 @@ export function KeyBar(props: {
           e.preventDefault()
           props.onCtrl()
         }}
+        onClick={(e) => {
+          if (e.detail === 0) props.onCtrl()
+        }}
         className={cn(
           chip,
           props.ctrl
@@ -58,6 +70,9 @@ export function KeyBar(props: {
           onPointerDown={(e) => {
             e.preventDefault()
             props.onKey(k.key)
+          }}
+          onClick={(e) => {
+            if (e.detail === 0) props.onKey(k.key)
           }}
           className={cn(chip, 'text-(--chip-dim) hover:text-(--chip-fg) active:bg-(--chip-wash)')}
         >
