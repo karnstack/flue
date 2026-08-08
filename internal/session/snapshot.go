@@ -142,6 +142,14 @@ func writeSnapshot(dir string, snap Snapshot) error {
 // must not accumulate on disk. A file that does not parse is deleted and
 // skipped — corrupt state never wedges startup. A missing directory is
 // simply no snapshots.
+//
+// Metadata files share this directory and their names end in ".json" too, so
+// the suffix alone does not identify a snapshot. They are skipped explicitly:
+// this function deletes what it reads, and metadata is the one thing here that
+// must outlive the daemon that reads it. Without the check, every name and tag
+// on the machine would be consumed by the next start — silently, since a
+// snapshot loader has no reason to complain about a file it merely failed to
+// parse.
 func LoadAndClearSnapshots(dir string) []Snapshot {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -150,6 +158,9 @@ func LoadAndClearSnapshots(dir string) []Snapshot {
 	var out []Snapshot
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), metaSuffix) {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())

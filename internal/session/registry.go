@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
@@ -27,6 +28,14 @@ type Registry struct {
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	// metaDir is where session metadata is persisted, or "" for nowhere.
+	// Empty is the default and it disables persistence outright: a registry
+	// only writes files once somebody has said where, so tests and any daemon
+	// without a config directory stay file-free.
+	metaDir string
+	// metaLog receives the one thing that can go wrong out here — a write that
+	// failed — since nothing on the edit path is in a position to handle it.
+	metaLog *slog.Logger
 }
 
 func NewRegistry(clock func() time.Time) *Registry {
@@ -236,12 +245,87 @@ func (r *Registry) Get(id string) (*Session, bool) {
 // nothing worth having: the session could be reaped a moment after either
 // lock, so holding both would not make the edit any less racy against the
 // world, only more likely to stall it.
+//
+// It flushes the result to disk when a meta directory is configured, before it
+// returns: an edit a client has been told succeeded should not be able to
+// vanish in the next crash.
 func (r *Registry) UpdateMeta(id string, p MetaPatch) (Info, error) {
 	s, ok := r.Get(id)
 	if !ok {
 		return Info{}, ErrNotFound
 	}
-	return s.ApplyMeta(p), nil
+	info := s.ApplyMeta(p)
+	r.flushMeta(info)
+	return info, nil
+}
+
+// SetMetaDir says where session metadata is persisted, and with what logger.
+//
+// An empty dir means nowhere, which is the default and the only way to say it:
+// a registry nobody has pointed at a directory writes no files at all. A nil
+// logger takes the default one, so a caller that has no logger of its own is
+// not forced to invent a sink for a line it will probably never see.
+//
+// Called once at startup, before anything is serving, but it takes r.mu anyway
+// — the fields it writes are read on every edit, and "only at startup" is a
+// property of today's caller rather than of this method.
+func (r *Registry) SetMetaDir(dir string, log *slog.Logger) {
+	if log == nil {
+		log = slog.Default()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.metaDir, r.metaLog = dir, log
+}
+
+// metaSink reports where metadata goes and where to complain when it cannot.
+func (r *Registry) metaSink() (string, *slog.Logger) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.metaDir, r.metaLog
+}
+
+// flushMeta writes one session's metadata out, if there is anywhere to write
+// it.
+//
+// A failed write is logged and nothing more. The alternative — failing the edit
+// — would make an unwritable config directory take renaming with it, which
+// trades a durability problem for a functional one. Durability degrades; the
+// function does not.
+func (r *Registry) flushMeta(info Info) {
+	dir, log := r.metaSink()
+	if dir == "" {
+		return
+	}
+	meta := Meta{V: 1, Name: info.Name, Tags: info.Tags, Pinned: info.Pinned}
+	if err := SaveMeta(dir, info.ID, meta); err != nil {
+		log.Warn("could not persist session metadata", "session", info.ID, "err", err)
+	}
+}
+
+// AdoptMetas gives the sessions in this registry back the names and tags a
+// previous daemon persisted, and sweeps what is left over.
+//
+// It runs at boot, after revival, and the two halves are one pass because they
+// are one question: for each record on disk, is the session it describes here?
+// If it is, the metadata is applied — through ApplyMeta, so a hand-edited file's
+// tags are normalised like anybody else's, and without re-writing the file that
+// was just read. If it is not, the session did not survive the restart and its
+// record is deleted, which is what keeps a crash from leaving the directory
+// growing forever.
+func (r *Registry) AdoptMetas(dir string) {
+	if dir == "" {
+		return
+	}
+	for id, m := range LoadMetas(dir) {
+		s, ok := r.Get(id)
+		if !ok {
+			DeleteMeta(dir, id)
+			continue
+		}
+		name, tags, pinned := m.Name, m.Tags, m.Pinned
+		s.ApplyMeta(MetaPatch{Name: &name, Tags: &tags, Pinned: &pinned})
+	}
 }
 
 func (r *Registry) List() []*Session {
@@ -276,7 +360,13 @@ func (r *Registry) Reap() {
 	}
 	r.mu.Unlock()
 
+	dir, _ := r.metaSink()
 	for _, s := range victims {
 		_ = s.Close()
+		// The registry has finished with this session, so its metadata has
+		// nothing left to describe. Removing it here rather than at exit is
+		// deliberate: an exited session stays listable for ExitedRetention, and
+		// a name is exactly what makes it findable in that window.
+		DeleteMeta(dir, s.ID())
 	}
 }
