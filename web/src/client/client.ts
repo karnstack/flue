@@ -386,6 +386,34 @@ export class FlueClient {
   }
 
   /**
+   * Edit the metadata a human owns on a session — its name, its tags, whether
+   * it is pinned. Answered by a fresh `sessions` to this connection, which
+   * reaches `onSessions` like any other, so nothing here returns anything and
+   * nothing correlates: a failure comes back as an uncorrelated
+   * `error{code:"not_found"}` and surfaces through `onError`.
+   *
+   * The patch is spread whole rather than assembled field by field, and that
+   * is the whole of the implementation on purpose. `name: ''`, `tags: []` and
+   * `pinned: false` are three edits a user makes by hand and all three are
+   * falsy, so a builder that copied each field only when it was truthy would
+   * send an update carrying nothing at all — the last tag impossible to
+   * remove, with no error to say so. Absence is the other half of the same
+   * rule: a field the caller left out is a field this edit leaves alone, which
+   * is what lets two views on one session edit it without overwriting each
+   * other.
+   *
+   * Dropped rather than held while the socket is down, unlike `list`. A rename
+   * is not the idempotent question a list is: replayed from behind a
+   * ten-second backoff it would land on whatever the metadata had become
+   * meanwhile, undoing another view's edit — the exact case partiality exists
+   * to protect. Losing it costs a retry and little else, since the sessions
+   * screen re-lists on reconnect and the row visibly snaps back.
+   */
+  update(patch: { id: string; name?: string; tags?: string[]; pinned?: boolean }) {
+    this.send({ type: 'update', ...patch })
+  }
+
+  /**
    * Ask for the paired-device list, and keep asking on every connection after
    * this one.
    *

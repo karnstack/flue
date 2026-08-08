@@ -1434,6 +1434,68 @@ describe('FlueClient sending', () => {
     expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
   })
 
+  it('sends a metadata update carrying only the fields the patch names', () => {
+    const { c, sock } = connected()
+    c.update({ id: 'a1b2c3d4e5f60708', name: 'api server' })
+
+    const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', name: 'api server' }
+    const sent = sock.sentControl()[1]!
+    expect(sent).toStrictEqual(want)
+    // Absent, not filled in with a default — the half of partiality that a
+    // helpful builder gets wrong. `tags: []` here would clear the tags of a
+    // session the user only renamed, and `pinned: false` would unpin it.
+    expect('tags' in sent).toBe(false)
+    expect('pinned' in sent).toBe(false)
+  })
+
+  it('keeps a metadata clear rather than dropping it for being falsy', () => {
+    // `''`, `[]` and `false` are three edits a user asks for by hand, and all
+    // three are falsy. A builder that copied each field only when it was truthy
+    // would send an update that carried nothing: the last tag could never be
+    // removed, a name never blanked, a session never unpinned, and nothing
+    // anywhere would say why.
+    const { c, sock } = connected()
+    c.update({ id: 'a1b2c3d4e5f60708', name: '', pinned: false })
+    c.update({ id: 'a1b2c3d4e5f60708', tags: [] })
+
+    const want: UpdateMsg[] = [
+      { type: 'update', id: 'a1b2c3d4e5f60708', name: '', pinned: false },
+      { type: 'update', id: 'a1b2c3d4e5f60708', tags: [] },
+    ]
+    expect(sock.sentControl().slice(1)).toStrictEqual(want)
+
+    // And on the wire, not merely in a parse of it: JSON.stringify is the last
+    // place a field can quietly go missing, and these are the frames the Go
+    // decoder has to see the empty values in.
+    const frames = sock.sent.filter((s): s is string => typeof s === 'string')
+    expect(frames[1]).toContain('"name":""')
+    expect(frames[1]).toContain('"pinned":false')
+    expect(frames[2]).toContain('"tags":[]')
+  })
+
+  it('drops rather than holds a metadata update issued while the socket is down', async () => {
+    // Not idempotent the way a list is. A rename surfacing from behind a
+    // ten-second backoff lands on whatever the metadata had become in the
+    // meantime — undoing an edit made from another view, which is the case
+    // partiality exists to protect. A dropped one costs nothing but a retry:
+    // the sessions screen re-lists on reconnect, so the row snaps back rather
+    // than changing by itself minutes later.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sockets } = harness()
+
+    c.connect()
+    expect(() => c.update({ id: 'a1b2c3d4e5f60708', name: 'too early' })).not.toThrow()
+    sockets[0]!.open()
+    sockets[0]!.close()
+    c.update({ id: 'a1b2c3d4e5f60708', name: 'too late' })
+    await vi.advanceTimersByTimeAsync(125)
+    sockets[1]!.open()
+
+    expect(sockets[0]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+    expect(sockets[1]!.sentControl().map((m) => m.type)).toEqual(['hello'])
+  })
+
   it('sends the device and pairing requests the protocol defines', () => {
     const { c, sock } = connected()
     c.listDevices()
