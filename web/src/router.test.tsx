@@ -336,6 +336,53 @@ describe('createFlueRouter', () => {
     expect(local.sockets[0]!.ofType('attach')).toEqual([])
   })
 
+  it('mounts the terminal the moment the fleet adopts the machine', async () => {
+    // F5 on a remote machine's terminal is the bookmark case: at first render
+    // the fleet holds only the local source — remote sources are built only
+    // after the local daemon's welcome names the relay — so the route
+    // legitimately finds no client yet, and has to recover on its own the
+    // moment the slot is adopted. A one-shot resolve would leave the
+    // not-paired pill up for good, on a pane with no way out.
+    window.history.replaceState(null, '', '/d/attic-pi/s/abc123')
+    const router = createFlueRouter()
+    await router.load()
+    const local = fakeClient()
+    const attic = fakeClient()
+    const fleet = new FleetClient(
+      [{ id: 'local', name: '', client: local.client }],
+      () => Promise.resolve([{ id: 'attic-pi', name: 'Attic Pi', client: attic.client }]),
+    )
+    const { container } = render(
+      <FleetProvider fleet={fleet}>
+        <RouterProvider router={router} />
+      </FleetProvider>,
+    )
+
+    // Before the welcome, not paired is all this browser can truthfully say.
+    expect(screen.getByRole('status').textContent).toContain('Machine not paired on this browser')
+    expect(container.querySelector('[data-flue-surface]')).toBeNull()
+
+    act(() => {
+      local.sockets[0]!.open()
+      local.sockets[0]!.emitControl({
+        type: 'welcome',
+        daemonId: 'd1',
+        host: 'mesa.local',
+        ver: '0.1.0',
+        relay: { status: 'connected', origin: 'https://relay.example' },
+      })
+    })
+    // Adoption is a promise away: the fleet awaits its source builder.
+    await act(async () => {})
+
+    expect(container.querySelector('[data-flue-surface]')).not.toBeNull()
+
+    act(() => attic.sockets[0]!.open())
+    expect(attic.sockets[0]!.ofType('attach')).toEqual([
+      { type: 'attach', id: 'abc123', lastSeq: 0, reqId: 1 },
+    ])
+  })
+
   it('tells a machine the fleet does not hold apart from a dead session', async () => {
     // A bookmarked session URL for a machine this browser never paired with,
     // or whose pinned key is gone. There is no client to attach with, so the

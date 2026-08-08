@@ -1,3 +1,4 @@
+import { useCallback, useSyncExternalStore } from 'react'
 import { useNavigate, useParams } from '@tanstack/react-router'
 
 import { FlueClientContext } from '@/client/provider'
@@ -31,11 +32,25 @@ import { useFleet } from '@/fleet/provider'
 export function TerminalRoute() {
   const { deviceId, sessionId } = useParams({ from: '/d/$deviceId/s/$sessionId' })
   const navigate = useNavigate()
-  const client = useFleet().clientFor(deviceId)
+  const fleet = useFleet()
+  // Resolved through a subscription, not read once, because the answer moves:
+  // a direct load of a remote machine's session renders before the fleet has
+  // adopted its remote sources — those are built only after the local
+  // daemon's welcome names the relay — so the first look legitimately finds
+  // nothing, and the moment of adoption has to reach this route as a
+  // re-render, or a reload of a remote terminal would sit on the not-paired
+  // pill for ever. onFleet fires on any reshaping of the fleet, and the
+  // snapshot is the slot's own client, whose identity only changes when the
+  // answer genuinely has.
+  const client = useSyncExternalStore(
+    useCallback((onChange: () => void) => fleet.onFleet(onChange), [fleet]),
+    () => fleet.clientFor(deviceId),
+  )
   // A machine the fleet does not hold: never paired on this browser, or its
-  // pinned key gone. There is no connection to attach with and no amount of
-  // waiting will produce one, so this reads like the terminal's own answer to
-  // a session the daemon has never heard of — final, and said in a pill.
+  // pinned key gone. Said in a pill, the way the terminal answers a session
+  // the daemon has never heard of — though unlike that answer this one is
+  // provisional for a breath at boot, which is what the subscription above
+  // exists to notice.
   if (client === null) return <MachineNotPaired />
   // Keyed by machine and session, so navigating between two sessions builds a
   // new terminal rather than feeding one emulator two sessions' scrollback.
