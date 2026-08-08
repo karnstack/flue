@@ -30,6 +30,22 @@ if (!globalThis.matchMedia) {
   })) as unknown as typeof matchMedia
 }
 
+// Nor this one, and it is not optional for anything built on Radix's Select:
+// on open it walks its items and calls `scrollIntoView` on the one to focus,
+// unguarded, so a bare `render(<Select defaultOpen>)` dies with
+// "candidate?.scrollIntoView is not a function" before a single assertion
+// runs. A no-op is the honest stub — the real method scrolls, and nothing in
+// jsdom scrolls.
+//
+// `globalThis.Element` first, and for the same reason the two above test
+// globalThis rather than the bare name: this file is the setup for *every*
+// suite, and the three `@vitest-environment node` build tests have no DOM at
+// all. A bare `Element.prototype` there is a ReferenceError that fails them
+// before they compile anything.
+if (globalThis.Element && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function scrollIntoView() {}
+}
+
 /*
  * Fail a test that logged one of flue's own swallowed errors.
  *
