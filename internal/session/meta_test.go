@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -20,11 +21,7 @@ import (
 func TestSpawnStampsCreatedAtAndEmptyTags(t *testing.T) {
 	now := time.Now()
 	r := NewRegistry(func() time.Time { return now })
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	defer s.Close()
+	s := spawnRunning(t, r)
 
 	info := s.Info()
 	if !info.CreatedAt.Equal(now) {
@@ -48,54 +45,87 @@ func TestSpawnStampsCreatedAtAndEmptyTags(t *testing.T) {
 // means "leave this alone", so two clients editing different fields of the
 // same session cannot clobber each other by round-tripping stale values.
 //
-// The clock is fixed so that "nothing else moved" can be asserted about
-// LastActive too — naming a session is not activity in it.
+// Every field is seeded with a non-zero value before the first single-field
+// patch, and that ordering is the test rather than a preamble to it. Patch a
+// session whose tags are empty and whose pin is false and "left alone" and
+// "cleared" produce the same snapshot, so the assertion holds just as well
+// against an ApplyMeta that zeroes every field it was not given.
+//
+// The clock advances on every reading for the same reason. LastActive must
+// not move — naming a session is not activity in it — but against a clock
+// frozen at one value, an ApplyMeta that stamped LastActive would stamp it
+// with exactly the value the assertion compares against and pass.
 func TestApplyMetaPartialUpdate(t *testing.T) {
-	now := time.Now()
-	r := NewRegistry(func() time.Time { return now })
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	defer s.Close()
+	epoch := time.Now()
+	var ticks atomic.Int64
+	r := NewRegistry(func() time.Time {
+		return epoch.Add(time.Duration(ticks.Add(1)) * time.Second)
+	})
+	s := spawnRunning(t, r)
 
+	seedName, seedTags, seedPinned := "seed", []string{"prod", "web"}, true
+	s.ApplyMeta(MetaPatch{Name: &seedName, Tags: &seedTags, Pinned: &seedPinned})
 	before := s.Info()
 
+	// Name only: tags and pin must survive, and each patch moves its field to
+	// a value the seed did not have, so applying it is observable too.
 	name := "deploy"
 	got := s.ApplyMeta(MetaPatch{Name: &name})
 	if got.Name != "deploy" {
 		t.Errorf("Name = %q, want %q", got.Name, "deploy")
 	}
-	if got.Pinned {
-		t.Error("Pinned = true after a name-only patch")
+	if !slices.Equal(got.Tags, []string{"prod", "web"}) {
+		t.Errorf("Tags = %#v after a name-only patch, want the seeded pair", got.Tags)
 	}
-	if len(got.Tags) != 0 {
-		t.Errorf("Tags = %v after a name-only patch, want them untouched", got.Tags)
+	if !got.Pinned {
+		t.Error("Pinned = false after a name-only patch, want the seeded true")
 	}
 	if !got.CreatedAt.Equal(before.CreatedAt) {
 		t.Errorf("CreatedAt = %v, want the unchanged %v", got.CreatedAt, before.CreatedAt)
 	}
 	if !got.LastActive.Equal(before.LastActive) {
-		t.Errorf("LastActive = %v, want the unchanged %v", got.LastActive, before.LastActive)
+		t.Errorf("LastActive = %v, want the unchanged %v: a rename is not activity",
+			got.LastActive, before.LastActive)
 	}
 	if got.ID != before.ID || got.Cwd != before.Cwd || got.State != before.State {
 		t.Errorf("patch disturbed identity or state: %+v, was %+v", got, before)
 	}
 
-	pinned := true
+	// Pin only, and unpinning rather than pinning — against a seed of false
+	// the write and the accidental zeroing would again be the same outcome.
+	pinned := false
 	got = s.ApplyMeta(MetaPatch{Pinned: &pinned})
-	if !got.Pinned {
-		t.Error("Pinned = false after a pin-only patch")
+	if got.Pinned {
+		t.Error("Pinned = true after a patch setting it false")
 	}
 	if got.Name != "deploy" {
 		t.Errorf("Name = %q after a pin-only patch, want the earlier %q", got.Name, "deploy")
+	}
+	if !slices.Equal(got.Tags, []string{"prod", "web"}) {
+		t.Errorf("Tags = %#v after a pin-only patch, want the seeded pair", got.Tags)
+	}
+
+	// Tags only.
+	tags := []string{"api"}
+	got = s.ApplyMeta(MetaPatch{Tags: &tags})
+	if !slices.Equal(got.Tags, []string{"api"}) {
+		t.Errorf("Tags = %#v, want [api]", got.Tags)
+	}
+	if got.Name != "deploy" {
+		t.Errorf("Name = %q after a tags-only patch, want the earlier %q", got.Name, "deploy")
+	}
+	if got.Pinned {
+		t.Error("Pinned = true after a tags-only patch, want the earlier false")
+	}
+	if !got.LastActive.Equal(before.LastActive) {
+		t.Errorf("LastActive = %v, want the unchanged %v", got.LastActive, before.LastActive)
 	}
 
 	// The returned snapshot is not a courtesy copy of the patch: it is what
 	// the next reader sees, which is what lets a caller answer a client
 	// without a second round trip through Info.
 	live := s.Info()
-	if live.Name != got.Name || live.Pinned != got.Pinned {
+	if live.Name != got.Name || live.Pinned != got.Pinned || !slices.Equal(live.Tags, got.Tags) {
 		t.Errorf("Info() = %+v, want it to agree with ApplyMeta's %+v", live, got)
 	}
 }
@@ -107,11 +137,7 @@ func TestApplyMetaPartialUpdate(t *testing.T) {
 // later case clearing what an earlier one wrote is part of what is asserted.
 func TestApplyMetaNormalizesTags(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	defer s.Close()
+	s := spawnRunning(t, r)
 
 	cases := []struct {
 		name string
@@ -132,6 +158,13 @@ func TestApplyMetaNormalizesTags(t *testing.T) {
 			}
 			if !slices.Equal(got, c.want) {
 				t.Fatalf("Tags = %#v, want %#v", got, c.want)
+			}
+			// No spare capacity, so a consumer that appends to the snapshot
+			// gets a new array instead of writing into the one the session is
+			// still handing to every other reader.
+			if cap(got) != len(got) {
+				t.Fatalf("cap(Tags) = %d, len = %d: the snapshot shares room to append into",
+					cap(got), len(got))
 			}
 		})
 	}
@@ -157,11 +190,7 @@ func TestUpdateMetaUnknownID(t *testing.T) {
 // take: look the session up, patch it, hand back the snapshot to broadcast.
 func TestUpdateMetaAppliesToTheSession(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	defer s.Close()
+	s := spawnRunning(t, r)
 
 	name, tags, pinned := "api", []string{"web", "prod"}, true
 	got, err := r.UpdateMeta(s.ID(), MetaPatch{Name: &name, Tags: &tags, Pinned: &pinned})
@@ -193,11 +222,7 @@ func TestUpdateMetaAppliesToTheSession(t *testing.T) {
 // scribble over their input the instant ApplyMeta returns.
 func TestCreatedAtSurvivesConcurrentInfo(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	defer s.Close()
+	s := spawnRunning(t, r)
 
 	created := s.Info().CreatedAt
 	if created.IsZero() {
@@ -209,15 +234,13 @@ func TestCreatedAtSurvivesConcurrentInfo(t *testing.T) {
 	// has to agree with it, and a patch observed half-applied would show up as
 	// the two disagreeing.
 	const rounds = 300
-	writer := func(prefix string) func() {
-		return func() {
-			for i := 0; i < rounds; i++ {
-				name := prefix + strconv.Itoa(i)
-				tags := []string{" " + name + " ", "shared", "shared"}
-				pinned := i%2 == 0
-				s.ApplyMeta(MetaPatch{Name: &name, Tags: &tags, Pinned: &pinned})
-				tags[0] = "clobbered"
-			}
+	writer := func(prefix string) {
+		for i := 0; i < rounds; i++ {
+			name := prefix + strconv.Itoa(i)
+			tags := []string{" " + name + " ", "shared", "shared"}
+			pinned := i%2 == 0
+			s.ApplyMeta(MetaPatch{Name: &name, Tags: &tags, Pinned: &pinned})
+			tags[0] = "clobbered"
 		}
 	}
 	check := func(info Info) bool {
@@ -248,8 +271,8 @@ func TestCreatedAtSurvivesConcurrentInfo(t *testing.T) {
 
 	var writers sync.WaitGroup
 	writers.Add(2)
-	go func() { defer writers.Done(); writer("a")() }()
-	go func() { defer writers.Done(); writer("b")() }()
+	go func() { defer writers.Done(); writer("a") }()
+	go func() { defer writers.Done(); writer("b") }()
 	written := make(chan struct{})
 	go func() { writers.Wait(); close(written) }()
 
@@ -271,6 +294,15 @@ func TestCreatedAtSurvivesConcurrentInfo(t *testing.T) {
 			}
 			select {
 			case <-written:
+				// One last reading before the guard, because the goroutine
+				// can be descheduled anywhere in this loop — on a single
+				// processor, reliably between the count above and this
+				// select. Without it, "saw nothing" means "lost a scheduling
+				// race" as often as it means "the writers never ran", and the
+				// test flakes on a session that was patched six hundred times.
+				if s.Info().Name != "" {
+					saw++
+				}
 				if saw == 0 {
 					t.Error("the reader never caught a patched session, so this proved nothing")
 				}

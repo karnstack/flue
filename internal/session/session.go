@@ -220,6 +220,12 @@ func (s *Session) ApplyMeta(p MetaPatch) Info {
 // It never returns nil, even for no tags at all. A nil slice serialises as
 // JSON null, and a field that is sometimes null and sometimes a list is a
 // guard every client has to remember to write.
+//
+// The result is clipped, so it has no spare capacity for a consumer to append
+// into. Info hands the same slice header to every reader; one of them doing
+// append(info.Tags, x) on a slice with room to spare would write into the
+// array all the others are reading, which is a data race in a caller that did
+// nothing wrong.
 func normalizeTags(tags []string) []string {
 	out := make([]string, 0, len(tags))
 	seen := make(map[string]struct{}, len(tags))
@@ -235,7 +241,7 @@ func normalizeTags(tags []string) []string {
 		out = append(out, tag)
 	}
 	slices.Sort(out)
-	return out
+	return slices.Clip(out)
 }
 
 // Write sends bytes to the PTY.
