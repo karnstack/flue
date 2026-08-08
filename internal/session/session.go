@@ -150,13 +150,18 @@ type Session struct {
 	// pumpDone records that pump has returned: the master's stream is over
 	// and nothing will ever be read from it again.
 	pumpDone bool
-	// pumpReads counts pump's returns from Read, bumped before the pump can
-	// take s.mu. It is the supervisor's evidence against a byte in flight:
-	// the master can poll quiet while the pump holds a just-read tail it has
-	// not yet delivered, and this counter moving between two spaced looks is
-	// how that state stays visible from outside. Atomic because the pump
-	// bumps it without the lock.
-	pumpReads atomic.Uint64
+	// pumpParked and pumpReads are the supervisor's evidence against a byte
+	// in flight: the master can poll quiet while the pump holds a just-read
+	// tail it has not yet delivered. parked is true only while the pump is
+	// inside Read — holding nothing — and reads counts Read's returns, so a
+	// wake-deliver-park cycle between two looks moves the counter even
+	// though both looks saw the pump parked. A look believes quiet only
+	// with the pump parked and the counter still; the one unobservable
+	// instant left is the pump entering Read with nothing in hand, which is
+	// exactly the state quiet claims. Atomics because the pump maintains
+	// both without the lock.
+	pumpParked atomic.Bool
+	pumpReads  atomic.Uint64
 
 	// drainPending is set by markExitedLocked instead of dropping subscribers:
 	// the child has exited but its final output may still sit unread in the
@@ -164,7 +169,7 @@ type Session struct {
 	// a subscriber die over an empty ring in the test's first millisecond
 	// (docs/FOLLOW-UPS.md §6). While it is set, the drop belongs to whoever
 	// can prove the drain is finished — pump, after the chunk that empties
-	// the master, or the supervisor, after two quiet polls; see both.
+	// the master, or the supervisor, after two spaced looks agree; see both.
 	drainPending bool
 }
 
@@ -371,7 +376,9 @@ func (s *Session) pump() {
 
 	buf := make([]byte, 32*1024)
 	for {
+		s.pumpParked.Store(true)
 		n, err := s.pty.Read(buf)
+		s.pumpParked.Store(false)
 		s.pumpReads.Add(1)
 		if n > 0 {
 			chunk := make([]byte, n)
@@ -431,9 +438,9 @@ func (s *Session) pump() {
 //     a background job still holds one. So the early-EOF case above cannot be
 //     reproduced on Darwin at all.
 //
-// No platform makes the two events coincide reliably, so the supervisor uses
-// this only to shorten its poll interval — never to decide the session's
-// state.
+// On no platform does the master ending imply the child is reapable or its
+// group empty, so the supervisor uses this only to shorten its poll interval
+// — never to decide the session's state.
 //
 // The hint is delivered at most once per call and dropped if one is already
 // pending, so it is safe to call more than once and from more than one place.
@@ -535,20 +542,20 @@ func (s *Session) supervise() {
 		// silence is the ordinary shape of that. The supervisor is the
 		// actor that still runs, so it confirms quiet from outside: two
 		// looks at least reapPollMin apart that agree the master polls
-		// quiet, the ring has not grown, and the pump has not returned from
-		// a read between them. One look is not enough — the pump may be
-		// mid-read, bytes already lifted off the master but not yet under
-		// the lock — and un-spaced looks are not either: the select below
-		// also wakes for signal requests and the master hint, which would
-		// compress "two consecutive polls" into microseconds. The spacing
-		// comes from the wall clock, not the loop; pumpReads is bumped
-		// before the pump can take s.mu, so a tail in flight at the first
-		// look has moved the counter by the second.
+		// quiet, the pump sits parked inside a read, the ring has not
+		// grown, and the read counter has not moved between them. Un-spaced
+		// looks would not do: the select below also wakes for signal
+		// requests and the master hint, which would compress "two
+		// consecutive polls" into microseconds — the spacing comes from the
+		// wall clock, not the loop. The parked flag is what rules out a
+		// tail lifted off the master but not yet under the lock, and the
+		// counter rules out a whole wake-deliver-park cycle hiding between
+		// the looks.
 		if recorded && s.mu.TryLock() {
 			if s.drainPending {
 				delay = reapPollMin
 				if now := time.Now(); now.Sub(drainLook) >= reapPollMin {
-					quiet := !masterReadable(s.pty)
+					quiet := !masterReadable(s.pty) && s.pumpParked.Load()
 					seq := s.ring.EndSeq()
 					reads := s.pumpReads.Load()
 					if quiet && drainQuiet && seq == drainSeq && reads == drainReads {
@@ -695,7 +702,7 @@ func (s *Session) reapIfExited() (int, bool) {
 // pty buffer, and dropping the subscribers here closed their stream ahead of
 // its own tail — observed twice on CI as a subscriber dead over an empty
 // ring (docs/FOLLOW-UPS.md §6). With the stream already over the drop is
-// safe and immediate; otherwise exitDrain hands it to the pump and the
+// safe and immediate; otherwise drainPending hands it to the pump and the
 // supervisor, whichever proves the drain finished first.
 func (s *Session) markExitedLocked(code int) {
 	s.info.State = "exited"

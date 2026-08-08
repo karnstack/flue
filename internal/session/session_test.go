@@ -1052,11 +1052,18 @@ func TestMasterReadable(t *testing.T) {
 // semantics make the shape unassemblable regardless.
 func TestExitWithOutOfGroupSlaveHolderClosesSubscribers(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("needs Linux master-tracks-slaves semantics and the setsid binary")
+		t.Skip("needs the leader-exit tty hangup shape and the setsid binary, both Linux")
 	}
 	r := NewRegistry(time.Now)
+	// The leader lingers a beat after echoing so Subscribe below provably
+	// registers before the exit's drop visits the set — a subscriber that
+	// arrives after the drop sits on an open channel by design (see
+	// conn.stream's contract) and would fail this test's closure wait for
+	// the wrong reason. The holder sleeps just long enough to outlive the
+	// test: it is outside the group, so Close's kill cannot reach it and a
+	// long sleep would linger after the run.
 	s, err := r.Spawn(SpawnOpts{
-		Cmd:  []string{"sh", "-c", "setsid sh -c 'exec sleep 30' & echo held-open"},
+		Cmd:  []string{"sh", "-c", "setsid sh -c 'exec sleep 3' & echo held-open; sleep 0.2"},
 		Cols: 80, Rows: 24,
 	})
 	if err != nil {
