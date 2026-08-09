@@ -153,6 +153,26 @@ describe('PairRoute', () => {
     expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
   })
 
+  it('scrubs the token and the key from the address bar, and pairs from memory', async () => {
+    // The live bearer token must not outlive its reading in the URL — the
+    // address bar is a history entry, and history syncs. The page captures
+    // both parameters before the rewrite, so the rewrite must not cost the
+    // ceremony anything: TanStack notices the replaceState and re-renders
+    // the route with an empty search, and the POST below is the proof the
+    // page kept what the bar no longer shows.
+    fetchMock.mockResolvedValue(paired())
+    await renderPair(LINK)
+
+    await waitFor(() => expect(window.location.search).toBe(''))
+    expect(window.location.pathname).toBe('/pair')
+
+    await userEvent.click(await armedPairButton())
+    const { body } = posted(fetchMock)
+    expect(body.token).toBe(TOKEN)
+    expect(await screen.findByRole('heading', { name: 'Paired' })).toBeTruthy()
+    expect(await loadPinnedDaemonKey()).toEqual(DAEMON_PUB_BYTES)
+  })
+
   it('pins the key the QR carried, once the daemon answers as that key', async () => {
     fetchMock.mockResolvedValue(paired())
     await renderPair(LINK)
@@ -474,6 +494,24 @@ describe('PairRoute on a relay origin', () => {
     expect(machines).toHaveLength(1)
     expect(machines[0]).toMatchObject({ id: 'blue-mesa', name: 'Blue Mesa' })
     expect(machines[0]!.pairedAt).toBeGreaterThan(0)
+  })
+
+  it('scrubs the secrets but keeps the machine the link names', async () => {
+    // `location` is this suite's stub and stays frozen; `document.location`
+    // is the real bar the scrub rewrites, so it is where the rewrite shows.
+    // The id and the name are not secrets and the ceremony still needs them
+    // on a reload's explanation page, so only `t` and `k` go.
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&d=blue-mesa&n=Blue%20Mesa`)
+
+    await waitFor(() => expect(document.location.search).toBe('?d=blue-mesa&n=Blue+Mesa'))
+
+    // And pairing still runs on the captured values: posted at the machine
+    // the link named, pinned under it.
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+    expect(posted(fetchMock).url).toBe('/api/pair/blue-mesa')
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
   })
 
   it('walks straight into the machine it just paired', async () => {

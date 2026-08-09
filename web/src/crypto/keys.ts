@@ -25,6 +25,9 @@ const DB_NAME = 'flue'
 const STORE = 'keys'
 const DEVICE_RECORD = 'device-static'
 
+/** An X25519 key, in bytes. Anything else is not one. */
+const KEY_BYTES = 32
+
 /**
  * Where the daemon's static public key is pinned, once pairing has handed one
  * over.
@@ -86,7 +89,7 @@ export async function loadOrCreateDeviceKey(factory: IDBFactory = indexedDB): Pr
       const privateKey = new Uint8Array(existing.privateKey)
       return { privateKey, publicKey: x25519.getPublicKey(privateKey) }
     }
-    const privateKey = crypto.getRandomValues(new Uint8Array(32))
+    const privateKey = crypto.getRandomValues(new Uint8Array(KEY_BYTES))
     await tx(db, 'readwrite', (s) => s.put({ privateKey }, DEVICE_RECORD))
     return { privateKey, publicKey: x25519.getPublicKey(privateKey) }
   } finally {
@@ -140,9 +143,11 @@ export async function loadPinnedDaemonKey(
  * ordinary way this browser learns that a machine's key changed — a daemon
  * reinstalled, its identity reminted — and refusing to overwrite would strand
  * the browser on the stale pin forever, with forgetting the machine by hand
- * as the only way back. What the record buys is a reload: the fragment
- * carrying the key is scrubbed the moment it is read, so without this a
- * refreshed tab would have no key to hand the handshake.
+ * as the only way back. What the record buys is a reload: the key travels in
+ * the link's `?k=` query parameter, and the pairing page scrubs `t` and `k`
+ * from the address bar once it has read them (routes/pair.tsx, via
+ * lib/url.ts's scrubPairingParams) — so without this a refreshed tab would
+ * have no key to hand the handshake.
  *
  * Which puts the whole weight on the caller: *only* a key the ceremony proved
  * is the machine's — taken from the QR, and matched against the daemon's own
@@ -199,10 +204,18 @@ async function read(record: string, factory: IDBFactory): Promise<Uint8Array | n
     const existing = await tx<{ publicKey: Uint8Array } | undefined>(db, 'readonly', (s) =>
       s.get(record),
     )
+    if (!existing) return null
     // Copied out rather than handed back as it was read: the value structured
     // clone returns is this caller's own, and the next reader deserves the
     // stored bytes rather than whatever the last one did to theirs.
-    return existing ? new Uint8Array(existing.publicKey) : null
+    const key = new Uint8Array(existing.publicKey)
+    // A pin that is not 32 bytes is not an X25519 static key, and handing it
+    // to the handshake anyway throws inside messageA — a shutdown FlueClient
+    // answers by reconnecting into the identical throw, silently and forever.
+    // Absent is the honest reading of a record this module could never have
+    // written: the boot fails closed into the picker, where pairing again is
+    // on offer, instead of open into a loop nothing on screen explains.
+    return key.length === KEY_BYTES ? key : null
   } finally {
     db.close()
   }

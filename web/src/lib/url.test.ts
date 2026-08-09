@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import { stripHandoff, takeCwd } from './url'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { scrubPairingParams, stripHandoff, takeCwd } from './url'
 
 describe('stripHandoff', () => {
   it('removes the handoff token', () => {
@@ -37,6 +37,73 @@ describe('stripHandoff', () => {
   it('is idempotent', () => {
     const once = stripHandoff('http://127.0.0.1:7717/?h=secret&cwd=%2Ftmp')
     expect(stripHandoff(once)).toBe(once)
+  })
+})
+
+describe('scrubPairingParams', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    history.replaceState(null, '', '/')
+  })
+
+  it('removes the token and the key from the address bar', () => {
+    history.replaceState(null, '', '/pair?t=secret&k=daemonkey')
+    scrubPairingParams()
+    expect(location.pathname).toBe('/pair')
+    expect(location.search).toBe('')
+  })
+
+  it('preserves the machine id and name beside them', () => {
+    history.replaceState(null, '', '/pair?t=secret&k=daemonkey&d=blue-mesa&n=Blue%20Mesa')
+    scrubPairingParams()
+    expect(location.search).toBe('?d=blue-mesa&n=Blue+Mesa')
+  })
+
+  it('scrubs a key travelling without a token, and the reverse', () => {
+    // A link that lost one of the pair in transit still carries the other,
+    // and half the secrets in the history is not half the problem.
+    history.replaceState(null, '', '/pair?k=daemonkey')
+    scrubPairingParams()
+    expect(location.search).toBe('')
+
+    history.replaceState(null, '', '/pair?t=secret')
+    scrubPairingParams()
+    expect(location.search).toBe('')
+  })
+
+  it('removes every repetition of the parameters', () => {
+    // URLSearchParams.delete removes all entries with the name, but a helper
+    // that reached for get()/set() would leave the second copy behind.
+    history.replaceState(null, '', '/pair?t=one&t=two&k=a&k=b')
+    scrubPairingParams()
+    expect(location.search).toBe('')
+  })
+
+  it('keeps the path and the fragment', () => {
+    history.replaceState(null, '', '/pair?t=secret#top')
+    scrubPairingParams()
+    expect(location.pathname).toBe('/pair')
+    expect(location.hash).toBe('#top')
+    expect(location.search).toBe('')
+  })
+
+  it('leaves a URL without either parameter untouched', () => {
+    // Not merely unchanged — untouched: TanStack's history patches
+    // replaceState and re-parses the location on every call, so a rewrite
+    // that rewrote nothing would still cost a router pass.
+    history.replaceState(null, '', '/pair?d=blue-mesa')
+    const replace = vi.spyOn(history, 'replaceState')
+    scrubPairingParams()
+    expect(replace).not.toHaveBeenCalled()
+    expect(location.search).toBe('?d=blue-mesa')
+  })
+
+  it('is idempotent', () => {
+    history.replaceState(null, '', '/pair?t=secret&k=daemonkey&d=blue-mesa')
+    scrubPairingParams()
+    const once = location.href
+    scrubPairingParams()
+    expect(location.href).toBe(once)
   })
 })
 
