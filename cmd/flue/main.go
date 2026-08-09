@@ -84,6 +84,8 @@ func main() {
 		err = cmdStatus()
 	case "relay":
 		err = cmdRelay(os.Args[2:])
+	case "update":
+		err = cmdUpdate()
 	case "version", "--version", "-v":
 		err = cmdVersion()
 	case "-h", "--help", "help":
@@ -110,6 +112,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue relay address URL  repoint this machine at a custom domain on the same relay
   flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N] [--open]   run the daemon in the foreground
+  flue update             download the newest release, swap this binary, restart the daemon
   flue version            print the version (also --version, -v)
 `
 
