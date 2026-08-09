@@ -341,7 +341,11 @@ func joinCommand(host, secret string) string {
 // SetAddress is `flue relay address` behind the card: the user routed a
 // custom domain to the Worker in the Cloudflare dashboard, and this repoints
 // relay.json at it. URL and origin only; worker, secret and machine id stay,
-// because the Worker behind the name is the same one.
+// because the Worker behind the name is the same one. What does not stay is
+// any existing pairing — the daemon serves exactly the origin it dials, so
+// every browser paired on the old one must pair again on the new address
+// (see runRelayAddress), and the second step line carries that truth to the
+// card.
 func (s *relayUIService) SetAddress(ctx context.Context, address string) (daemon.RelayUIDeployResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -364,7 +368,10 @@ func (s *relayUIService) SetAddress(ctx context.Context, address string) (daemon
 	}
 	s.logf().Info("relay address changed from the UI", "host", host)
 	return daemon.RelayUIDeployResult{
-		Steps:  []string{"relay address is now wss://" + host},
+		Steps: []string{
+			"relay address is now wss://" + host,
+			"every browser paired on the old origin must pair again on the new address",
+		},
 		Origin: "https://" + host,
 		// The transport dialling right now read the old file at startup.
 		RestartNeeded: true,

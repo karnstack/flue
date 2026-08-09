@@ -546,7 +546,12 @@ export function RelayUpdateDialog({
  * The custom-domain hand-off: the user routes a domain to the Worker in the
  * Cloudflare dashboard, then tells flue the new name here. A local config
  * rewrite (POST /api/relay/address), nothing minted, and the daemon dials
- * the new name on its next start — which the result says out loud.
+ * the new name on its next start — which the result says out loud, along
+ * with the move's one cost: pairings are pinned to the origin they were
+ * made on (the daemon refuses channels announced on any origin it did not
+ * dial), so every paired browser pairs again on the new address. The label
+ * and the result both carry that, because a promise of continuity here
+ * strands people — see docs/RELAY.md, "A custom domain".
  */
 function AddressChange({ origin }: { origin?: string }) {
   const [editing, setEditing] = useState(false)
@@ -567,7 +572,7 @@ function AddressChange({ origin }: { origin?: string }) {
       if (!res.ok) throw new Error((await res.text()).trim() || `the daemon answered ${res.status}`)
       const body = (await res.json()) as { origin?: string; restart_needed?: boolean }
       setSaid(
-        `The relay address is now ${body.origin ?? address}. Restart the daemon (flue disable && flue enable, or restart flue serve) to dial it.`,
+        `The relay address is now ${body.origin ?? address}. Restart the daemon (flue disable && flue enable, or restart flue serve) to dial it, then pair every browser again on the new address — pairings are pinned to the origin they were made on, so tabs paired on the old one will only ever reconnect.`,
       )
       setEditing(false)
     } catch (err) {
@@ -598,7 +603,7 @@ function AddressChange({ origin }: { origin?: string }) {
   return (
     <form onSubmit={save} className="flex flex-col gap-y-2">
       <label htmlFor="cf-address" className={NOTE}>
-        The relay's new address — the Worker behind it stays the same, so nothing re-pairs
+        The relay's new address — the Worker behind it stays the same, but every paired browser must pair again on it
       </label>
       <Input
         id="cf-address"

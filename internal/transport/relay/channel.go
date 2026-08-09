@@ -239,8 +239,14 @@ func (t *Transport) openChannel(s *socket, m *relaywire.Open) {
 		// The origin is announced rather than assumed precisely so it can be
 		// checked: a relay naming an origin this daemon did not dial is
 		// misconfigured or lying, and either way no browser on it is one this
-		// daemon agreed to serve.
-		t.log.Warn("relay announced a channel on an origin this daemon did not dial",
+		// daemon agreed to serve. There is one benign way here — `flue relay
+		// address` moved this daemon to a new origin and a browser paired on
+		// the old one reconnected into this refusal — and it gets the same
+		// answer on purpose: the pin cannot tell yesterday's origin from a
+		// hostile one, and must not try. docs/RELAY.md's custom-domain section
+		// and the relay address commands now say so; the log line names the
+		// way out.
+		t.log.Warn("relay announced a channel on an origin this daemon did not dial; a browser paired on a former relay address must pair again on the current one",
 			"channel", m.Channel, "origin", clip(m.Origin), "dialled", t.cfg.Origin)
 		t.tell(s, relaywire.Close{Channel: m.Channel})
 		return

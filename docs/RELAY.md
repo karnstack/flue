@@ -169,10 +169,22 @@ flue relay address wss://relay.example.com
 or use "Change the relay address" on the Remote screen's card. Either way it
 is a local rewrite of relay.json's URL and origin, the worker, the secret
 and this machine's id are untouched, because the Worker behind the name is
-the same one. Restart the daemon to dial the new name. Browsers paired
-against the workers.dev origin keep working while that origin still routes;
-a browser opening the custom domain pairs afresh, because its keys and
-records live per origin in the browser itself.
+the same one. Restart the daemon to dial the new name.
+
+What the move does cost: **every paired browser pairs again, on the new
+origin.** A pairing is pinned to the origin the browser performed it on. The
+hub announces, on every channel, the origin the browser actually connected
+through, and the daemon refuses any channel or pairing request announced on
+an origin it did not dial (`internal/transport/relay/channel.go`) — that
+refusal is what stops a relay lying about where a browser came from, and
+what keeps a live pairing token from being spent on an origin the user never
+opened, so it does not soften for the origin *you* used to dial. The old
+workers.dev origin still routes to the Worker, but a tab paired there now
+reconnects into that refusal forever, and a pairing attempt from it is
+refused the same way (which the pair page can only report as a spent
+window). The fix is the front door: open the new address, scan a fresh QR,
+and the browser mints its keys and records under the origin the daemon now
+serves — they live per origin in the browser anyway.
 
 ### One account, several relays
 
