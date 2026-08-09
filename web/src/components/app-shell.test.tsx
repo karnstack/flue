@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { FlueClientContext } from '@/client/provider'
 import { renderWithRouter } from '@/testing/render'
+import { fakeClient } from '@/testing/socket'
 import { AppShell } from './app-shell'
 import { NAV_ITEMS } from './nav'
 
@@ -163,6 +165,42 @@ describe('AppShell', () => {
     // And not in the main nav, which is a list of screens this app has.
     const main = screen.getByRole('navigation', { name: 'Main' })
     expect(within(main).queryByRole('link', { name: 'GitHub' })).toBeNull()
+  })
+
+  it('names the flue on the other end of the socket, once it has been told', async () => {
+    // Through a real client and a real welcome frame, so this covers the
+    // whole path rather than a stub of the middle of it.
+    const { client, last } = fakeClient()
+    const shell = (
+      <FlueClientContext.Provider value={client}>
+        <AppShell currentPath="/sessions">
+          <p>route content</p>
+        </AppShell>
+      </FlueClientContext.Provider>
+    )
+    client.connect()
+    await renderWithRouter(shell, OFF_NAV)
+
+    // Nothing before the greeting. A tab that has not been welcomed does not
+    // know which flue it is talking to, and a placeholder would be a loading
+    // state for a line nobody is waiting on.
+    expect(screen.queryByText(/^flue /)).toBeNull()
+
+    last().open()
+    last().emitControl({ type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.4.1' })
+
+    const line = await screen.findByText('flue 0.4.1')
+    // The daemon's releases, not a tag assembled from the string above — a
+    // guess at this project's tag spelling is a 404 on a link that promised
+    // release notes.
+    expect(line.closest('a')!.getAttribute('href')).toBe(
+      'https://github.com/karnstack/flue/releases',
+    )
+
+    // And it follows a reconnect, since a welcome is a claim about the daemon
+    // and the daemon may have been restarted into a new build under the tab.
+    last().emitControl({ type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.5.0' })
+    expect(await screen.findByText('flue 0.5.0')).toBeTruthy()
   })
 
   it('signs the corner without taking a click away from the screen underneath', async () => {

@@ -19,5 +19,15 @@ export const REPO_URL = 'https://github.com/karnstack/flue'
  */
 export const ISSUES_URL = `${REPO_URL}/issues`
 
+/**
+ * What every release changed, for the version printed in the sidebar.
+ *
+ * The list rather than a tag. A tag URL would have to be assembled from the
+ * version string the daemon reports, which is a guess about how this project
+ * spells its tags — and a wrong guess is a 404 on a link that promised
+ * release notes.
+ */
+export const RELEASES_URL = `${REPO_URL}/releases`
+
 /** Whoever is on the other end of the credit line. */
 export const AUTHOR_URL = 'https://x.com/gyankarn'

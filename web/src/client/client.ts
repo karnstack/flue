@@ -367,6 +367,23 @@ export class FlueClient {
     return this.lastWelcome?.relay ?? { status: 'off' }
   }
 
+  /**
+   * Which flue is on the other end of this socket, or null before the first
+   * welcome has arrived.
+   *
+   * A claim about the daemon, so it survives a reconnect exactly as `relay`
+   * does — and it is the only version a remote tab can learn. GET
+   * /api/relay/info carries one too, but that endpoint is the daemon's own
+   * loopback surface and does not exist on a relay origin; this rides the
+   * wire, so a phone reading a laptop's fleet gets the laptop's answer.
+   *
+   * Null rather than a guess: a tab that has not been greeted knows nothing,
+   * and "dev" is a real answer a from-source build gives.
+   */
+  get version(): string | null {
+    return this.lastWelcome?.ver ?? null
+  }
+
   /** The offset of the next byte expected on `ref`, if it is still attached. */
   lastSeqFor(ref: number): number | undefined {
     return this.attachments.get(ref)?.lastSeq
