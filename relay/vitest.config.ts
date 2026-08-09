@@ -43,5 +43,10 @@ export default defineConfig({
       },
     }),
   ],
-  test: { include: ['test/**/*.test.ts'] },
+  test: {
+    include: ['test/**/*.test.ts'],
+    // Drops the hub's per-channel Workers Logs line from test output — the
+    // line itself is deliberate production logging. See test/setup.ts.
+    setupFiles: ['test/setup.ts'],
+  },
 })

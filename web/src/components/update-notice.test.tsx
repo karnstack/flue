@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -63,8 +63,12 @@ function mount() {
       <UpdateNotice />
     </FlueClientContext.Provider>,
   )
-  last().open()
-  last().emitControl({ type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.4.1' })
+  // FakeSocket delivers synchronously, so the welcome's setState lands right
+  // here — inside act, or as an act warning from every test in the file.
+  act(() => {
+    last().open()
+    last().emitControl({ type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.4.1' })
+  })
   return view
 }
 

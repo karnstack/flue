@@ -32,11 +32,18 @@ async function renderAt(path: string) {
   const router = createFlueRouter()
   await router.load()
   const { client, sockets } = fakeClient()
-  const view = render(
-    <FlueClientProvider client={client}>
-      <RouterProvider router={router} />
-    </FlueClientProvider>,
-  )
+  // Async act, not a bare render: mounting RouterProvider re-runs
+  // router.load() from Transitioner's mount effect, and its continuations
+  // update the router stores a microtask after RTL's synchronous act exits —
+  // an act warning per mounted Match on a runner slow enough to print them.
+  let view!: ReturnType<typeof render>
+  await act(async () => {
+    view = render(
+      <FlueClientProvider client={client}>
+        <RouterProvider router={router} />
+      </FlueClientProvider>,
+    )
+  })
   return { ...view, client, sockets }
 }
 
@@ -56,11 +63,15 @@ async function renderFleet(path: string) {
     { id: 'local', name: '', client: local.client },
     { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
   ])
-  const view = render(
-    <FleetProvider fleet={fleet}>
-      <RouterProvider router={router} />
-    </FleetProvider>,
-  )
+  // The same async act as renderAt, for the same post-mount load.
+  let view!: ReturnType<typeof render>
+  await act(async () => {
+    view = render(
+      <FleetProvider fleet={fleet}>
+        <RouterProvider router={router} />
+      </FleetProvider>,
+    )
+  })
   return { ...view, local, attic }
 }
 
@@ -74,7 +85,12 @@ async function renderPicker(path: string) {
   window.history.replaceState(null, '', path)
   const router = createFlueRouter({ picker: true })
   await router.load()
-  return render(<RouterProvider router={router} />)
+  // The same async act as renderAt, for the same post-mount load.
+  let view!: ReturnType<typeof render>
+  await act(async () => {
+    view = render(<RouterProvider router={router} />)
+  })
+  return view
 }
 
 /**
@@ -104,7 +120,10 @@ async function renderBare(path: string, picker = false): Promise<string[]> {
   window.history.replaceState(null, '', path)
   const router = createFlueRouter({ picker })
   await router.load()
-  render(<RouterProvider router={router} />)
+  // The same async act as renderAt, for the same post-mount load.
+  await act(async () => {
+    render(<RouterProvider router={router} />)
+  })
   return urls
 }
 
@@ -360,11 +379,16 @@ describe('createFlueRouter', () => {
       [{ id: 'local', name: '', client: local.client }],
       () => Promise.resolve([{ id: 'attic-pi', name: 'Attic Pi', client: attic.client }]),
     )
-    const { container } = render(
-      <FleetProvider fleet={fleet}>
-        <RouterProvider router={router} />
-      </FleetProvider>,
-    )
+    // The same async act as renderAt, for the same post-mount load. The fleet
+    // has not been welcomed yet, so nothing here settles the adoption early.
+    let container!: HTMLElement
+    await act(async () => {
+      container = render(
+        <FleetProvider fleet={fleet}>
+          <RouterProvider router={router} />
+        </FleetProvider>,
+      ).container
+    })
 
     // Before the welcome, not paired is all this browser can truthfully say.
     expect(screen.getByRole('status').textContent).toContain('Machine not paired on this browser')

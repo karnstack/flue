@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { RouterProvider } from '@tanstack/react-router'
 import { IDBFactory } from 'fake-indexeddb'
@@ -79,7 +79,15 @@ async function renderPair(search = '') {
   window.history.replaceState(null, '', `/pair${search}`)
   const router = createFlueRouter()
   await router.load()
-  return render(<RouterProvider router={router} />)
+  // Async act, because mounting RouterProvider re-runs router.load() from
+  // Transitioner's mount effect, and its continuations update the router
+  // stores a microtask after RTL's synchronous act exits — an act warning per
+  // mounted Match on a runner slow enough to print them.
+  let view!: ReturnType<typeof render>
+  await act(async () => {
+    view = render(<RouterProvider router={router} />)
+  })
+  return view
 }
 
 const pairButton = () => screen.getByRole('button', { name: 'Pair' })
@@ -468,7 +476,12 @@ async function renderRelayPair(search = '') {
   })
   const router = createFlueRouter()
   await router.load()
-  return render(<RouterProvider router={router} />)
+  // The same async act as renderPair, for the same post-mount load.
+  let view!: ReturnType<typeof render>
+  await act(async () => {
+    view = render(<RouterProvider router={router} />)
+  })
+  return view
 }
 
 describe('PairRoute on a relay origin', () => {
