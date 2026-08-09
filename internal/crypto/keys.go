@@ -67,7 +67,7 @@ func LoadOrCreateStaticKey(configDir string) (noise.DHKey, error) {
 		return noise.DHKey{}, err
 	}
 	// CreateTemp+rename in the same directory, so a crash never leaves a
-	// half-written key. Same shape as config.writeTokenAtomically; a third
+	// half-written key. Same shape as config.writeSecretAtomically; a third
 	// copy of the pattern — FOLLOW-UPS item 6 already tracks the dedupe.
 	tmp, err := os.CreateTemp(dir, "static.key.*")
 	if err != nil {
@@ -79,6 +79,24 @@ func LoadOrCreateStaticKey(configDir string) (noise.DHKey, error) {
 		return noise.DHKey{}, err
 	}
 	if _, err := tmp.Write(blob); err != nil {
+		tmp.Close()
+		return noise.DHKey{}, err
+	}
+	// Flushed to the disk before the rename publishes it. A rename is atomic
+	// with respect to other processes, but not with respect to power loss: the
+	// directory entry can reach the disk before the data blocks it points at,
+	// which leaves a zero-length file where a complete one used to be.
+	//
+	// For this file that is the worst state there is: a zero-length static.key
+	// is unparseable, unparseable is a refusal to start (never a regenerate —
+	// see above), and the daemon stays down until someone deletes the file by
+	// hand, after which every paired device must re-pair.
+	//
+	// The directory entry itself is deliberately not fsynced, matching
+	// config.writeSecretAtomically. Losing the rename is the acceptable
+	// failure — the next start finds no file and generates a fresh key on its
+	// own, so the daemon comes up without help.
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return noise.DHKey{}, err
 	}
