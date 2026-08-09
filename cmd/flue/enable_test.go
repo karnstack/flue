@@ -16,6 +16,7 @@ import (
 type fakeManager struct {
 	st           service.Status
 	enableErr    error
+	warns        []string // what Warnings reports after Enable
 	enableCalls  int
 	disableCalls int
 	statusCalls  int
@@ -38,6 +39,7 @@ func (f *fakeManager) Status() (service.Status, error) {
 	f.statusCalls++
 	return f.st, nil
 }
+func (f *fakeManager) Warnings() []string { return f.warns }
 
 func swapManager(t *testing.T, m service.Manager) {
 	t.Helper()
@@ -118,6 +120,38 @@ func TestRunEnableConvergesWhenAlreadyEnabled(t *testing.T) {
 	}
 	if m.enableCalls != 1 {
 		t.Fatalf("Enable called %d times, want 1 (Enable itself converges)", m.enableCalls)
+	}
+}
+
+// TestRunEnableRelaysEnableWarnings: a manager that succeeded with a caveat
+// (systemd with enable-linger refused) gets its warning onto the transcript,
+// under the installed checkmark, without failing the run.
+func TestRunEnableRelaysEnableWarnings(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	token, err := config.LoadOrCreateToken()
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	port := newTestDaemon(t, token)
+	if err := daemon.WriteRuntime(port); err != nil {
+		t.Fatalf("WriteRuntime: %v", err)
+	}
+
+	const warn = `loginctl enable-linger failed — run "loginctl enable-linger" yourself`
+	m := &fakeManager{warns: []string{warn}}
+	swapManager(t, m)
+	restore := swapBrowser(t, func(string) error { return nil })
+	defer restore()
+
+	var out bytes.Buffer
+	if err := runEnable(&out, 2*time.Second); err != nil {
+		t.Fatalf("runEnable with a warning must still succeed: %v", err)
+	}
+	if !strings.Contains(out.String(), "✓ login service installed") {
+		t.Fatalf("transcript missing the installed checkmark:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "! "+warn) {
+		t.Fatalf("transcript missing the warning line:\n%s", out.String())
 	}
 }
 

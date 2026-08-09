@@ -48,6 +48,9 @@ flue enable
 ```
 
 `flue enable` installs a login service, starts the daemon, and opens the UI.
+On Linux it also runs `loginctl enable-linger`, so the daemon — and your
+sessions — survive your last logout; if lingering can't be enabled (some
+containers refuse it), `flue enable` warns and names the command to run.
 Everything after that happens in the browser.
 
 ## The CLI

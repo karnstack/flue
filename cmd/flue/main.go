@@ -1159,6 +1159,14 @@ func runEnable(w io.Writer, wait time.Duration) error {
 		return err
 	}
 	fmt.Fprintf(w, "\n  ✓ login service installed\n")
+	// A Manager may have succeeded with a caveat (systemd: enable-linger
+	// refused, so sessions die at last logout). Say so, right here where the
+	// checkmarks are, without failing the enable.
+	if wn, ok := mgr.(service.Warner); ok {
+		for _, warn := range wn.Warnings() {
+			fmt.Fprintf(w, "  ! %s\n", warn)
+		}
+	}
 
 	port, err := awaitDaemon(wait)
 	if err != nil {
