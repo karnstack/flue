@@ -10,14 +10,19 @@ import (
 // fakeRunner records every command and answers from a script keyed by the
 // command's verb — launchctl's first argument. CI never talks to launchd.
 type fakeRunner struct {
-	calls [][]string
-	fail  map[string]error  // verb -> error
-	out   map[string]string // verb -> combined output
+	calls    [][]string
+	fail     map[string]error  // verb -> error, every call
+	failOnce map[string]error  // verb -> error, consumed by the first call
+	out      map[string]string // verb -> combined output
 }
 
 func (f *fakeRunner) Run(name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string{name}, args...))
 	v := verbOf(name, args)
+	if err, ok := f.failOnce[v]; ok {
+		delete(f.failOnce, v)
+		return []byte(f.out[v]), err
+	}
 	return []byte(f.out[v]), f.fail[v]
 }
 
@@ -73,20 +78,58 @@ func TestLaunchdEnableWritesTheUnitAndBootstraps(t *testing.T) {
 }
 
 func TestLaunchdEnableConvergesWhenAlreadyLoaded(t *testing.T) {
-	// Re-running enable when already enabled is not an error: bootstrap
-	// refuses a loaded label, so enable falls through to print (is it
-	// loaded?) and kickstart (start it if it is dead) — and never bootout,
-	// which would kill a healthy daemon and its sessions.
-	r := &fakeRunner{
-		fail: map[string]error{"bootstrap": errFake("Bootstrap failed: 5: Input/output error")},
-	}
+	// Re-running enable when already enabled with an unchanged binary is not
+	// an error and never restarts a healthy daemon: bootstrap refuses a
+	// loaded label, the plist on disk is byte-identical to what Enable just
+	// rewrote, so enable falls through to print (is it loaded?) and
+	// kickstart (start it if it is dead) — not bootout, which would kill a
+	// healthy daemon and its sessions for nothing. Contrast
+	// TestLaunchdEnableConvergesAChangedExe, where bootout is the point.
+	r := &fakeRunner{}
 	l, _ := newLaunchdUnderTest(t, r)
+	if err := l.Enable(); err != nil {
+		t.Fatalf("first Enable: %v", err)
+	}
 
+	r.calls = nil
+	r.fail = map[string]error{"bootstrap": errFake("Bootstrap failed: 5: Input/output error")}
 	if err := l.Enable(); err != nil {
 		t.Fatalf("Enable on an already-enabled service: %v", err)
 	}
 	if vs := r.verbs(); strings.Join(vs, ",") != "bootstrap,print,kickstart" {
 		t.Fatalf("verbs = %v, want [bootstrap print kickstart]", vs)
+	}
+}
+
+func TestLaunchdEnableConvergesAChangedExe(t *testing.T) {
+	// The brew-upgrade shape: the loaded job and the plist on disk point at
+	// an old binary path. Rewriting the file alone changes nothing — launchd
+	// reads a plist only at bootstrap — so Enable must bootout the stale job
+	// and bootstrap the fresh plist. The restart is deliberate: the old job
+	// would exec a deleted Caskroom path at the next login.
+	r := &fakeRunner{}
+	home := t.TempDir()
+	if err := NewLaunchd("/opt/homebrew/Caskroom/flue/0.0.9/flue", home, 501, r).Enable(); err != nil {
+		t.Fatalf("Enable with the old exe: %v", err)
+	}
+
+	r.calls = nil
+	// The label is loaded, so the first bootstrap refuses; after bootout the
+	// domain is clear and the second bootstrap succeeds — failOnce, exactly
+	// like the real launchctl.
+	r.failOnce = map[string]error{"bootstrap": errFake("Bootstrap failed: 5: Input/output error")}
+	if err := NewLaunchd("/opt/homebrew/bin/flue", home, 501, r).Enable(); err != nil {
+		t.Fatalf("Enable with the new exe: %v", err)
+	}
+	if vs := r.verbs(); strings.Join(vs, ",") != "bootstrap,print,bootout,bootstrap" {
+		t.Fatalf("verbs = %v, want [bootstrap print bootout bootstrap]", vs)
+	}
+	got, err := os.ReadFile(filepath.Join(home, "Library", "LaunchAgents", "sh.flue.daemon.plist"))
+	if err != nil {
+		t.Fatalf("read plist: %v", err)
+	}
+	if string(got) != string(LaunchdPlist("/opt/homebrew/bin/flue")) {
+		t.Fatalf("plist on disk still carries the old exe:\n%s", got)
 	}
 }
 

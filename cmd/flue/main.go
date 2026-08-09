@@ -1128,11 +1128,14 @@ func defaultServiceManager() (service.Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Resolved, per the spec: the unit records the binary itself, so a
-	// brew-installed symlink and a hand-built flue both point at themselves.
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
+	// Deliberately NOT resolved through EvalSymlinks: the unit must record
+	// the name the user invokes, not the file it points at today. A Homebrew
+	// cask install is a symlink (/opt/homebrew/bin/flue) into a
+	// version-pinned Caskroom directory that `brew upgrade` deletes —
+	// resolving it bakes a doomed path into the plist and the login service
+	// fails to exec at the next login. The symlink is the stable name, and
+	// launchd/systemd exec through it fine. Script installs are real files,
+	// for which os.Executable is already the answer.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
