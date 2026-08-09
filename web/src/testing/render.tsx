@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { render } from '@testing-library/react'
+import { act, render } from '@testing-library/react'
 import {
   createMemoryHistory,
   createRootRoute,
@@ -52,12 +52,19 @@ export async function renderWithRouter(ui: ReactNode, initialPath = '/sessions')
   // empty tree and every query in the test misses. Loading first is what
   // makes the render synchronous, which is why this helper is async.
   await router.load()
-  return {
-    router,
-    ...render(
+  // The async act matters even though the router is already loaded: mounting
+  // RouterProvider runs Transitioner's mount effect, which calls router.load()
+  // again, and that call's continuations update the router stores a microtask
+  // after RTL's own synchronous act has exited. Flushing them inside act here
+  // is what keeps every consumer of this helper from tripping "not wrapped in
+  // act(...)" warnings — one per mounted Match — on the first update.
+  let view!: ReturnType<typeof render>
+  await act(async () => {
+    view = render(
       <SidebarProvider>
         <RouterProvider router={router as never} />
       </SidebarProvider>,
-    ),
-  }
+    )
+  })
+  return { router, ...view }
 }

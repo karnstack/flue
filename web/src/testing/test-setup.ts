@@ -46,6 +46,26 @@ if (globalThis.Element && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = function scrollIntoView() {}
 }
 
+// window.scrollTo exists in jsdom, but as a stub that logs "Not implemented:
+// Window's scrollTo() method" to stderr every time focus mode or a Radix
+// primitive calls it — sixty-odd lines per full run, none of them news. The
+// no-op is the same honest stub as scrollIntoView above: nothing in jsdom
+// scrolls. Overwritten unconditionally, because unlike the globals above the
+// jsdom version is present — presence is the problem.
+if (globalThis.window) {
+  window.scrollTo = () => {}
+}
+
+// getContext is the same story: jsdom ships the method, and without the
+// `canvas` package it logs "Not implemented" and returns null. Returning the
+// null directly keeps the behaviour every caller already handles — the QR
+// code on Devices falls back to a link when the context is missing, and a
+// test pins exactly that — while dropping the log line.
+if (globalThis.HTMLCanvasElement) {
+  HTMLCanvasElement.prototype.getContext = (() =>
+    null) as typeof HTMLCanvasElement.prototype.getContext
+}
+
 /*
  * Fail a test that logged one of flue's own swallowed errors.
  *

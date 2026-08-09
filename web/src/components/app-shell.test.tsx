@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FlueClientContext } from '@/client/provider'
 import { renderWithRouter } from '@/testing/render'
@@ -186,8 +186,12 @@ describe('AppShell', () => {
     // state for a line nobody is waiting on.
     expect(screen.queryByText(/^flue /)).toBeNull()
 
-    last().open()
-    last().emitControl({ type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.4.1' })
+    // FakeSocket delivers synchronously, so the welcome's setState lands right
+    // here — inside act, or as an act warning for every listening component.
+    act(() => {
+      last().open()
+      last().emitControl({ type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.4.1' })
+    })
 
     const line = await screen.findByText('flue 0.4.1')
     // The daemon's releases, not a tag assembled from the string above — a
@@ -199,7 +203,9 @@ describe('AppShell', () => {
 
     // And it follows a reconnect, since a welcome is a claim about the daemon
     // and the daemon may have been restarted into a new build under the tab.
-    last().emitControl({ type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.5.0' })
+    act(() => {
+      last().emitControl({ type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.5.0' })
+    })
     expect(await screen.findByText('flue 0.5.0')).toBeTruthy()
   })
 

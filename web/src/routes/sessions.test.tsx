@@ -97,13 +97,21 @@ async function mountSessions({ open = true, strict = false, solo = false } = {})
   // tree and every query misses.
   await router.load()
 
-  const view = render(
-    <SidebarProvider>
-      <FleetProvider fleet={fleet}>
-        <RouterProvider router={router as never} />
-      </FleetProvider>
-    </SidebarProvider>,
-  )
+  // Async act, because mounting RouterProvider re-runs router.load() from
+  // Transitioner's mount effect, and its continuations update the router
+  // stores a microtask after RTL's synchronous act exits — an act warning per
+  // mounted Match on a runner slow enough to print them. No socket is open
+  // yet, so nothing else can settle early in here.
+  let view!: ReturnType<typeof render>
+  await act(async () => {
+    view = render(
+      <SidebarProvider>
+        <FleetProvider fleet={fleet}>
+          <RouterProvider router={router as never} />
+        </FleetProvider>
+      </SidebarProvider>,
+    )
+  })
   const sock = local.sockets[0]!
   if (open) act(() => sock.open())
 
@@ -629,7 +637,11 @@ describe('SessionsRoute', () => {
       // `spawn` carries no metadata, so the tag can only be applied once the
       // session exists — which is the `attached` that answers it.
       expect(sock.ofType('update')).toEqual([])
-      act(() => sock.emitControl(attached({ ref: 3, id: 'fresh1', reqId: 1 })))
+      // Async, unlike the emits above: this `attached` answers a spawn, so it
+      // also starts the navigation to the new session, and the router's
+      // continuations land a microtask after a synchronous act exits. The
+      // update frame itself is sent synchronously, before the screen changes.
+      await act(async () => sock.emitControl(attached({ ref: 3, id: 'fresh1', reqId: 1 })))
 
       expect(sock.ofType('update')).toEqual([{ type: 'update', id: 'fresh1', tags: ['api'] }])
     })
