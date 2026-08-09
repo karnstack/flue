@@ -604,9 +604,13 @@ export function DevicesRoute() {
             while no device could reach the address the QR would carry — see
             `reachable` — since a pairing that succeeds against 127.0.0.1 is
             worse than one refused: it mints a device that can never connect.
+
+            The default size rather than `sm`, like the Sessions header's own
+            action: a page header's one filled control is the same height on
+            every screen, and on Sessions it shares a line with an Input and an
+            icon button that are both 32px.
           */
           <Button
-            size="sm"
             disabled={!connected || !reachable}
             // Only when that is the reason it is shut. A button held shut by a
             // socket that is down is already explained by the live region
