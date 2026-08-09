@@ -162,8 +162,22 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info
 		argv = []string{shell, "-l"}
 	}
 
+	// An empty Cwd is a caller with no preference, and it must not fall
+	// through to the daemon's own directory: a service-started daemon runs at
+	// / — neither unit in internal/service sets a working directory — and a
+	// hand-started one runs wherever it happened to be launched from, so
+	// every default session would open somewhere nobody chose. Home is what
+	// a terminal emulator or sshd would have picked, and it is where Revive
+	// already lands a session whose directory has vanished. When even home is
+	// unknowable the empty string stands and the shell inherits — the old
+	// behaviour, kept as the floor rather than the default.
+	cwd := opts.Cwd
+	if cwd == "" {
+		cwd, _ = os.UserHomeDir()
+	}
+
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = opts.Cwd
+	cmd.Dir = cwd
 	cmd.Env = sessionEnv(os.Environ(), shell)
 
 	cols, rows := opts.Cols, opts.Rows
@@ -184,7 +198,10 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info
 		size = DefaultRingSize
 	}
 
-	cwd := opts.Cwd
+	// The recorded cwd is the value resolved above, so what Info reports is
+	// where the shell actually started rather than a second opinion. It is
+	// only still empty when home was unresolvable, and then the child
+	// inherited the daemon's directory — so that is what gets recorded.
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
