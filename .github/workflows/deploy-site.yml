@@ -1,8 +1,10 @@
 # Deploys flue.sh when the site or the installer changes on main.
 #
 # Requires the CLOUDFLARE_API_TOKEN repo secret (Workers Scripts: Edit).
-# The secret is optional: without it the job skips rather than fails —
-# `make site-deploy` from locally-authed wrangler is the baseline path.
+# The secret is optional: without it the job skips rather than fails, but
+# loudly — a warning annotation, not a silent green run, because until a
+# deploy lands, flue.sh and the README's install one-liner 404. `make
+# site-deploy` from locally-authed wrangler is the baseline path.
 name: deploy-site
 
 on:
@@ -32,8 +34,10 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "CLOUDFLARE_API_TOKEN is not set; skipping the deploy." \
-                 "Local 'make site-deploy' is the baseline."
+            # A warning annotation, so the skip shows up on the run summary
+            # instead of hiding inside a green checkmark.
+            echo "::warning::CLOUDFLARE_API_TOKEN is not set; skipping the deploy." \
+                 "flue.sh stays unpublished until a deploy runs — 'make site-deploy' from locally-authed wrangler is the baseline."
           fi
 
       - name: Install the toolchain from mise.toml

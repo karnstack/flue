@@ -14,7 +14,12 @@ on:
       bump:
         description: "Which part of the version to bump"
         type: choice
-        default: patch
+        # No default, on purpose: with zero tags the base is v0.0.0, so a
+        # patch default would have minted v0.0.1 as the first-ever release.
+        # The dispatcher has to say what kind of release this is. (The tag
+        # step below refuses v0.0.x regardless, in case the UI ever
+        # preselects an option anyway.)
+        required: true
         options: [patch, minor, major]
 
 permissions:
@@ -29,6 +34,63 @@ jobs:
           # Required for the changelog: goreleaser walks the history
           # between tags.
           fetch-depth: 0
+
+      # Fail here, not mid-goreleaser: the cask publish to karnstack/tap is
+      # the last thing goreleaser does, so a missing or powerless
+      # TAP_GITHUB_TOKEN would only surface after the GitHub release and
+      # artifacts are already live — a stranded half-release where the
+      # release page looks fine and `brew install karnstack/tap/flue` is
+      # broken. Prove the token exists and can see the tap before anything
+      # is tagged or published.
+      - name: Preflight the tap token
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::TAP_GITHUB_TOKEN is not set. Add the repo secret (a token that can push to karnstack/tap) before releasing."
+            exit 1
+          fi
+          if ! gh api repos/karnstack/tap --silent; then
+            echo "::error::karnstack/tap is not reachable with TAP_GITHUB_TOKEN. Check that the repo exists and the token grants access to it."
+            exit 1
+          fi
+
+      # go, node, and pnpm from mise.toml — goreleaser's before hook runs
+      # `make web`, which needs all three, and so does the test gate below.
+      - name: Install the toolchain from mise.toml
+        uses: jdx/mise-action@v4
+
+      # mise-action caches the tools it installs, but not the pnpm store;
+      # cache it separately, keyed on the lockfile.
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml', 'relay/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
+      # The same test surface ci.yml runs, and it runs before the tag step
+      # on purpose: a tag is forever, so a broken main head has to fail the
+      # run while it is still untagged and unpublished — after tagging is
+      # too late.
+      - name: Lint and test
+        run: make lint test
+
+      # ubuntu-latest images ship shellcheck; apt keeps it deterministic
+      # either way.
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Shellcheck the install script
+        run: shellcheck scripts/install.sh scripts/install_test.sh
+
+      - name: Install-script tests
+        run: bash scripts/install_test.sh
 
       - name: Tag the next ${{ inputs.bump }} version
         if: github.event_name == 'workflow_dispatch'
@@ -47,15 +109,19 @@ jobs:
             patch) version="v${major}.${minor}.$((patch + 1))" ;;
           esac
           echo "releasing ${version} (latest was ${latest})" | tee -a "$GITHUB_STEP_SUMMARY"
+          # A v0.0.x result can only mean a patch bump off the tagless
+          # repo — nothing has shipped yet, so the first release must be at
+          # least v0.1.0. Refuse to mint it rather than publish it.
+          case "$version" in
+            v0.0.*)
+              echo "::error::refusing to tag ${version}: no release exists yet, so the first one must be at least v0.1.0. Re-run with bump=minor (or major)."
+              exit 1
+              ;;
+          esac
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$version" -m "$version"
           git push origin "$version"
-
-      # go, node, and pnpm from mise.toml — goreleaser's before hook runs
-      # `make web`, which needs all three.
-      - name: Install the toolchain from mise.toml
-        uses: jdx/mise-action@v4
 
       - name: Release
         uses: goreleaser/goreleaser-action@v7
@@ -66,6 +132,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # User-provided repo secret — the one manual setup step. It
-          # authorizes the formula push to karnstack/tap; the default
-          # GITHUB_TOKEN cannot write to another repository.
+          # authorizes the cask push to karnstack/tap; the default
+          # GITHUB_TOKEN cannot write to another repository. The preflight
+          # step has already proven it non-empty and able to see the tap.
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
