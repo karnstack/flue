@@ -10,6 +10,7 @@ import {
   type DeviceInfo,
   type ErrorMsg,
   type Pairing,
+  type Preview,
   type RelayInfo,
   type ServerMessage,
   type SessionInfo,
@@ -44,6 +45,16 @@ interface Attachment {
 
 const BACKOFF_BASE_MS = 250
 const BACKOFF_MAX_MS = 10_000
+
+/**
+ * How long a `peek` waits before giving up on the daemon.
+ *
+ * Generous against a busy daemon on a slow relay leg, and short enough that a
+ * hover card resolves to "no preview right now" while the pointer is plausibly
+ * still on the row. See `peek` for why this one request needs a deadline when
+ * none of the others do.
+ */
+const PEEK_TIMEOUT_MS = 5_000
 
 /**
  * How long a connection has to last before the backoff forgets it ever failed.
@@ -196,6 +207,23 @@ export class FlueClient {
    * — a view let go before the answer arrived. See `abandon` and `forget`.
    */
   private abandoned = new Set<number>()
+
+  /**
+   * The peeks on the wire, reqId -> whoever is waiting for the answer.
+   *
+   * A promise per request rather than an emitter, because a peek is the one
+   * question this client asks that has exactly one asker and exactly one
+   * answer: a hover wants *this* session's tail, and an emitter would hand
+   * every preview to every listener and make each of them filter by id. Kept
+   * apart from `pending` because the two are settled by different messages and
+   * `pending`'s values are session ids used for the not-found sweep.
+   *
+   * Every entry is settled, one way or another. `teardown` rejects what is
+   * left, for the reason it clears `pending`: a reply the outage carried away
+   * is never coming, and a hover card waiting forever on it would sit at a
+   * spinner until the pointer moved.
+   */
+  private peeks = new Map<number, { resolve: (p: Preview) => void; reject: (e: Error) => void }>()
 
   /** A `list` asked for while the socket was down. See `list`. */
   private listOwed = false
@@ -426,6 +454,58 @@ export class FlueClient {
    */
   update(patch: { id: string; name?: string; tags?: string[]; pinned?: boolean }) {
     this.send({ type: 'update', ...patch })
+  }
+
+  /**
+   * Ask for the tail of a session's scrollback, without attaching to it.
+   *
+   * The one request on this client that answers with a promise, because it is
+   * the one whose reply has exactly one asker: a hover card wants *this*
+   * session's bytes and nothing else, and threading that through an emitter
+   * would make every consumer filter by id and invent its own timeout.
+   *
+   * Dropped rather than held while the socket is down — the rejection is the
+   * point. A preview is a thing somebody is looking at right now; one that
+   * surfaced from behind a ten-second backoff would draw output that is ten
+   * seconds stale into a card over a row the pointer left long ago. Callers
+   * are expected to catch and show nothing.
+   */
+  peek(id: string, bytes?: number): Promise<Preview> {
+    if (!this.ready || !this.sock) {
+      return Promise.reject(new Error('flue: not connected'))
+    }
+    const reqId = this.nextReqId++
+    return new Promise<Preview>((resolve, reject) => {
+      /*
+       * The one request on this client with a deadline of its own, and it
+       * earns it: `peek` is newer than the protocol's other verbs, so a daemon
+       * older than this page answers it with an *uncorrelated*
+       * `error{bad_message}` — a refusal that names no reqId and therefore
+       * reaches no asker. Without this the card would sit at "Reading…" for as
+       * long as the pointer stayed on the row, on every row, forever. The same
+       * timer covers a daemon that simply dropped the request.
+       *
+       * Nothing else here needs one: every other reply either arrives or dies
+       * with its socket, and `teardown` settles that case.
+       */
+      const deadline = setTimeout(() => {
+        if (!this.peeks.delete(reqId)) return
+        reject(new Error('flue: the daemon did not answer'))
+      }, PEEK_TIMEOUT_MS)
+      const settle = <T,>(cb: (v: T) => void) => (v: T) => {
+        clearTimeout(deadline)
+        cb(v)
+      }
+      this.peeks.set(reqId, { resolve: settle(resolve), reject: settle(reject) })
+      // After the entry exists, so a send that throws synchronously — a socket
+      // that closed between the readiness check and here — cannot leave a
+      // promise nothing will ever settle.
+      if (!this.send({ type: 'peek', id, bytes, reqId })) {
+        clearTimeout(deadline)
+        this.peeks.delete(reqId)
+        reject(new Error('flue: not connected'))
+      }
+    })
   }
 
   /**
@@ -765,8 +845,29 @@ export class FlueClient {
         this.sizeListeners.emit(msg)
         break
 
+      case 'preview': {
+        if (msg.reqId === undefined) break
+        const waiting = this.peeks.get(msg.reqId)
+        if (waiting === undefined) break
+        this.peeks.delete(msg.reqId)
+        waiting.resolve(msg)
+        break
+      }
+
       case 'error': {
         if (msg.reqId !== undefined) {
+          // A peek's own refusal, before the attach bookkeeping below looks at
+          // it: `not_found` answers both, and only the peek's asker should
+          // hear about a session the sessions list has already reaped. It is
+          // deliberately not folded into `pending` — that map's not-found
+          // sweep retires a reattach plan, which a peek never made.
+          const waiting = this.peeks.get(msg.reqId)
+          if (waiting !== undefined) {
+            this.peeks.delete(msg.reqId)
+            waiting.reject(new Error(msg.msg || msg.code))
+            this.errorListeners.emit(msg)
+            break
+          }
           this.abandoned.delete(msg.reqId)
           const sid = this.pending.get(msg.reqId)
           this.pending.delete(msg.reqId)
@@ -849,9 +950,14 @@ export class FlueClient {
     // refOwner is deliberately left alone: it is what lets a view that unmounts
     // during the outage still name the session its ref stood for.
     this.attachments.clear()
-    // Both name replies that were on the wire, and this socket was the wire.
+    // All three name replies that were on the wire, and this socket was the
+    // wire. The peeks are rejected rather than merely dropped: a promise
+    // nothing settles is a hover card spinning until the pointer moves.
     this.pending.clear()
     this.abandoned.clear()
+    const orphaned = [...this.peeks.values()]
+    this.peeks.clear()
+    for (const p of orphaned) p.reject(new Error('flue: connection lost'))
     sock?.close()
   }
 

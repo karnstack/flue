@@ -80,3 +80,53 @@ func TestRingWrapPreservesOrder(t *testing.T) {
 		t.Fatalf("Since(base) = %q, %v; want %q, true", data, ok, "cdefgh")
 	}
 }
+
+func TestTailAnswersTheLastNBytes(t *testing.T) {
+	r := NewRing(16)
+	r.Write([]byte("abcdefghij"))
+
+	if got := string(r.Tail(4)); got != "ghij" {
+		t.Fatalf("Tail(4) = %q, want %q", got, "ghij")
+	}
+}
+
+func TestTailAnswersEverythingWhenAskedForMoreThanIsHeld(t *testing.T) {
+	// A preview asks for a fixed size and a young session has less than that,
+	// which is ordinary rather than exceptional.
+	r := NewRing(16)
+	r.Write([]byte("abc"))
+
+	if got := string(r.Tail(4096)); got != "abc" {
+		t.Fatalf("Tail(4096) = %q, want %q", got, "abc")
+	}
+}
+
+func TestTailIsBoundedByWhatEvictionLeft(t *testing.T) {
+	r := NewRing(4)
+	r.Write([]byte("abcdefgh"))
+
+	if got := string(r.Tail(8)); got != "efgh" {
+		t.Fatalf("Tail(8) = %q, want %q", got, "efgh")
+	}
+}
+
+func TestTailOfNothingIsEmptyRatherThanAnError(t *testing.T) {
+	r := NewRing(16)
+	for _, n := range []int{0, -1, 4} {
+		if got := r.Tail(n); len(got) != 0 {
+			t.Fatalf("Tail(%d) on an empty ring = %q, want empty", n, got)
+		}
+	}
+}
+
+func TestTailReadsAcrossTheWrapPoint(t *testing.T) {
+	// The one case the index arithmetic can get wrong: the bytes wanted
+	// straddle the end of the backing array.
+	r := NewRing(8)
+	r.Write([]byte("12345"))
+	r.Write([]byte("6789"))
+
+	if got := string(r.Tail(6)); got != "456789" {
+		t.Fatalf("Tail(6) = %q, want %q", got, "456789")
+	}
+}

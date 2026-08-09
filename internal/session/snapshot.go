@@ -43,12 +43,46 @@ type Snapshot struct {
 	Ring      []byte    `json:"ring"`
 	CreatedAt time.Time `json:"createdAt"`
 	SavedAt   time.Time `json:"savedAt"`
+	// ClaudeSession is the Claude Code conversation this session was most
+	// plausibly working in, when there was one — see claude.go for how that
+	// is judged and how weak the judgement is. Empty is the ordinary case:
+	// most sessions are not running Claude Code, and nothing is printed for
+	// them. It is an id, never a command; the command is assembled at revival,
+	// so the wording lives in one place.
+	ClaudeSession string `json:"claudeSession,omitempty"`
 }
 
 // reviveMarker separates the restored scrollback from the fresh shell, so
 // the seam is visible instead of two shells' output reading as one.
 var reviveMarker = []byte(
 	"\r\n\x1b[2m── daemon restarted · previous shell ended here ──\x1b[0m\r\n\r\n")
+
+// reviveNote writes the seam, plus — when the snapshot knew of one — the
+// command that picks the interrupted conversation back up.
+//
+// Printed rather than run. The daemon revives into a login shell and typing
+// into somebody's terminal on their behalf is a different kind of act from
+// restoring what they were looking at: the shell may have been in the middle
+// of something, the id is a guess (claude.go says how much of one), and a
+// command that ran itself would be one the user never chose and cannot
+// un-choose. A line they can read and copy costs a keystroke and takes
+// nothing away.
+//
+// The id is written between the command and the end of the line with no
+// quoting, because it cannot need any: Claude Code names its transcripts with
+// hex and hyphens, and latestClaudeSession only ever returns a filename it
+// found on disk under that shape. Anything else would have failed the suffix
+// test that let it out of the directory scan.
+func reviveNote(claudeSession string) []byte {
+	if claudeSession == "" {
+		return reviveMarker
+	}
+	note := "\x1b[2mpick the Claude session back up with\x1b[0m \x1b[1mclaude --resume " +
+		claudeSession + "\x1b[0m\r\n\r\n"
+	out := make([]byte, 0, len(reviveMarker)+len(note))
+	out = append(out, reviveMarker...)
+	return append(out, note...)
+}
 
 // Snapshot captures what a revival needs. ok is false for an exited or
 // closed session: those end with the daemon rather than coming back.
@@ -79,12 +113,21 @@ func (s *Session) Snapshot() (Snapshot, bool) {
 
 // Snapshots returns one Snapshot per running session — the set a shutdown
 // should carry over.
+//
+// The Claude Code lookup happens here rather than inside Session.Snapshot for
+// one reason: it reads a directory, and s.mu is never held across a syscall.
+// Snapshot returns with the lock released and the cwd already in hand, so the
+// scan costs one readdir per running session on a shutdown path that is
+// already writing a file per session.
 func (r *Registry) Snapshots() []Snapshot {
 	var out []Snapshot
 	for _, s := range r.List() {
-		if snap, ok := s.Snapshot(); ok {
-			out = append(out, snap)
+		snap, ok := s.Snapshot()
+		if !ok {
+			continue
 		}
+		snap.ClaudeSession = claudeSessionFor(snap.Cwd, snap.CreatedAt)
+		out = append(out, snap)
 	}
 	return out
 }
@@ -104,9 +147,10 @@ func (r *Registry) Revive(snap Snapshot) (*Session, error) {
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
 		cwd, _ = os.UserHomeDir()
 	}
-	preload := make([]byte, 0, len(snap.Ring)+len(reviveMarker))
+	note := reviveNote(snap.ClaudeSession)
+	preload := make([]byte, 0, len(snap.Ring)+len(note))
 	preload = append(preload, snap.Ring...)
-	preload = append(preload, reviveMarker...)
+	preload = append(preload, note...)
 	return r.start(
 		SpawnOpts{Cwd: cwd, Cols: snap.Cols, Rows: snap.Rows},
 		snap.ID, preload,

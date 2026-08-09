@@ -116,15 +116,15 @@ function ordered(devices: DeviceInfo[]): DeviceInfo[] {
 }
 
 /*
- * The shared halves of the cell classes, spelled out rather than assembled.
+ * The shared halves of the row classes, spelled out rather than assembled.
  *
  * Every token here has to stay hyphenated: styles.build.test.ts explains a
  * compiled utility by finding it inside a `className` or a `cn(...)` call, and
  * a name pasted together in a constant is beyond its reach.
  */
-const HEAD_CELL =
-  'py-2 font-mono text-xs/6 font-medium tracking-wide whitespace-nowrap text-zinc-500 dark:text-zinc-400'
-const BODY_CELL = 'py-2.5 text-base/6 sm:text-sm/6'
+
+/** The quiet text a row's trailing details are set in — the sessions list's. */
+const META_TEXT = 'text-xs/6 whitespace-nowrap tabular-nums text-zinc-500 dark:text-zinc-400'
 
 /** The quiet per-row control, at rest and while it is armed. */
 const ROW_BUTTON = 'text-zinc-500 dark:text-zinc-400'
@@ -169,7 +169,7 @@ function DeviceRows({
   if (devices.length === 0) {
     return (
       <div className="flex flex-col items-center py-12 text-center sm:py-16">
-        <div className="flex size-12 items-center justify-center rounded-xl bg-zinc-950/5 dark:bg-white/5">
+        <div className="flex size-11 items-center justify-center rounded-lg bg-zinc-950/5 dark:bg-white/5">
           <QrCodeIcon
             aria-hidden="true"
             className="size-4 shrink-0 text-zinc-500 dark:text-zinc-400"
@@ -185,116 +185,118 @@ function DeviceRows({
     )
   }
 
+  /*
+   * One row per device, in the sessions list's own row language rather than in
+   * a grid of cells.
+   *
+   * What this replaced had four columns, three of which were one short
+   * string each, and a header row spending the top of the screen naming them.
+   * On a phone — which is the device most likely to be *reading* this screen —
+   * it did not fit, so it scrolled sideways, which is how a list of four
+   * phones came to have a horizontal scrollbar. A row that puts the identity
+   * on the left and the details ranged right needs no header to be read, drops
+   * its least useful detail at narrow widths instead of hiding all of them
+   * behind a scroll, and — the part that matters most — makes this screen and
+   * the sessions screen visibly the same app.
+   */
   return (
-    // The negative margins let the scroll area reach the edges of the screen's
-    // padding, so a narrow phone scrolls one row sideways rather than squeezing
-    // every column on the page; the inner padding puts the cells back where
-    // they were. `-my-2` with the matching `py-2` leaves the focus indicator
-    // somewhere to be drawn, since scrolling one axis clips the other.
-    <div className="-mx-4 -my-2 overflow-x-auto whitespace-nowrap sm:-mx-6 lg:-mx-8">
-      <div className="inline-block min-w-full px-4 py-2 align-middle sm:px-6 lg:px-8">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="border-b border-zinc-950/10 dark:border-white/10">
-              <th scope="col" className={cn(HEAD_CELL, 'pr-3')}>
-                Device
-              </th>
-              <th scope="col" className={cn(HEAD_CELL, 'px-3')}>
-                Paired
-              </th>
-              <th scope="col" className={cn(HEAD_CELL, 'px-3')}>
-                Last seen
-              </th>
-              <th scope="col" className="py-2 pl-3">
-                <span className="sr-only">Actions</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {ordered(devices).map((d) => (
-              <tr
-                key={d.id}
-                className="group border-b border-zinc-950/5 transition-colors hover:bg-zinc-950/5 dark:border-white/5 dark:hover:bg-white/5"
-              >
-                <td className={cn(BODY_CELL, 'pr-3 text-zinc-950 dark:text-white')}>{d.label}</td>
-                <td className={cn(BODY_CELL, 'px-3 tabular-nums text-zinc-600 dark:text-zinc-400')}>
-                  {ago(d.pairedAt)}
-                </td>
-                <td className={cn(BODY_CELL, 'px-3 tabular-nums text-zinc-600 dark:text-zinc-400')}>
-                  {ago(d.lastSeen)}
-                </td>
-                <td className="py-2.5 pl-3 text-right">
-                  {armed === d.id ? (
-                    <span className="flex items-center justify-end gap-x-1">
-                      {/*
-                        Named after its own row, as every control in this column
-                        is: without that a screen reader announces "Confirm" as
-                        many times as there are devices, with nothing to tell
-                        them apart. Red at full strength here and only here —
-                        this is the click that actually cuts the device off.
-                      */}
-                      <Button
-                        ref={confirm}
-                        variant="ghost"
-                        size="sm"
-                        disabled={!connected}
-                        aria-label={`Confirm revoking ${d.label}`}
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => onRevoke(d.id)}
-                      >
-                        Confirm
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`Cancel revoking ${d.label}`}
-                        className={ROW_BUTTON}
-                        onClick={() => onArm(null)}
-                      >
-                        Cancel
-                      </Button>
-                    </span>
-                  ) : (
-                    /*
-                      Quiet until the row is under the pointer, then red: a
-                      column of destructive-red buttons would be the loudest
-                      thing on a screen whose ordinary use is reading it, and
-                      the warning only has to be certain for the row the reader
-                      is actually on. Keyboard focus keeps its own indicator.
-
-                      Both hover states are named, and the plain one is not
-                      redundant: the ghost variant carries `hover:text-foreground`,
-                      which twMerge keeps against a `group-hover:` utility because
-                      the modifiers differ and which the sheet emits later at
-                      equal specificity. Without the pair, the pointer landing on
-                      this button would take the red *off* it — the opposite of
-                      what the row is saying.
-
-                      Held shut while the socket is down, because `revoke` is
-                      dropped rather than held there — a click that quietly did
-                      nothing would leave the reader believing a device had been
-                      cut off when it is still connected.
-                    */
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={!connected}
-                      aria-label={`Revoke ${d.label}`}
-                      className={cn(
-                        ROW_BUTTON,
-                        'group-hover:text-destructive hover:text-destructive',
-                      )}
-                      onClick={() => onArm(d.id)}
-                    >
-                      Revoke
-                    </Button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="flex flex-col">
+      <div className="flex items-center gap-x-1.5 rounded-md px-2 py-1">
+        <span className="text-control font-medium text-zinc-950 dark:text-white">
+          Paired devices
+        </span>
+        <span className="text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
+          {devices.length}
+        </span>
       </div>
+      <ul className="mt-1 flex flex-col">
+        {ordered(devices).map((d) => (
+          <li
+            key={d.id}
+            className="group/row flex items-center gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-row-hover"
+          >
+            <span className="min-w-0 flex-1 truncate text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
+              {d.label}
+            </span>
+            {/*
+              Paired first, last seen second, reading right — and the first of
+              the two is what goes at narrow widths. Which was seen when is the
+              live fact, the one somebody checks before revoking; when it was
+              paired is history, and history is what a phone can do without.
+            */}
+            <span className={cn(META_TEXT, 'max-sm:hidden')}>paired {ago(d.pairedAt)}</span>
+            <span className={META_TEXT}>{ago(d.lastSeen)}</span>
+            {armed === d.id ? (
+              <span className="flex shrink-0 items-center gap-x-1">
+                {/*
+                  Named after its own row, as every repeated control in a list
+                  is: without that a screen reader announces "Confirm" as many
+                  times as there are devices, with nothing to tell them apart.
+                  Red at full strength here and only here — this is the click
+                  that actually cuts the device off.
+                */}
+                <Button
+                  ref={confirm}
+                  variant="ghost"
+                  size="sm"
+                  disabled={!connected}
+                  aria-label={`Confirm revoking ${d.label}`}
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => onRevoke(d.id)}
+                >
+                  Confirm
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label={`Cancel revoking ${d.label}`}
+                  className={ROW_BUTTON}
+                  onClick={() => onArm(null)}
+                >
+                  Cancel
+                </Button>
+              </span>
+            ) : (
+              /*
+                Quiet until the row is under the pointer, then red: a column of
+                destructive-red buttons would be the loudest thing on a screen
+                whose ordinary use is reading it, and the warning only has to be
+                certain for the row the reader is actually on. It also *hides*
+                until then, the way the sessions list hides its ⋯ — the row is
+                information first and a control second. Keyboard focus reveals
+                it and keeps its own indicator; a coarse pointer, which has no
+                hover to reveal anything with, gets it at full strength.
+
+                Both hover states are named, and the plain one is not redundant:
+                the ghost variant carries `hover:text-foreground`, which twMerge
+                keeps against a `group-hover:` utility because the modifiers
+                differ and which the sheet emits later at equal specificity.
+                Without the pair, the pointer landing on this button would take
+                the red *off* it — the opposite of what the row is saying.
+
+                Held shut while the socket is down, because `revoke` is dropped
+                rather than held there — a click that quietly did nothing would
+                leave the reader believing a device had been cut off when it is
+                still connected.
+              */
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!connected}
+                aria-label={`Revoke ${d.label}`}
+                className={cn(
+                  ROW_BUTTON,
+                  'shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100',
+                  'group-hover/row:text-destructive hover:text-destructive',
+                )}
+                onClick={() => onArm(d.id)}
+              >
+                Revoke
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -340,7 +342,7 @@ function PairingWindow({
   }, [url])
 
   return (
-    <div className="flex flex-col items-start gap-4 rounded-xl border border-zinc-950/10 p-4 sm:flex-row sm:gap-6 sm:p-6 dark:border-white/10">
+    <div className="flex flex-col items-start gap-4 rounded-lg bg-card p-4 shadow-low ring-1 ring-hairline sm:flex-row sm:gap-6 sm:p-6">
       {/*
         White in both themes, as a QR code has to be: the quiet zone lean-qr
         draws around the code is part of what a camera looks for. `pixelated`
@@ -349,7 +351,7 @@ function PairingWindow({
       <canvas
         ref={code}
         aria-hidden="true"
-        className="size-36 shrink-0 rounded-md bg-white [image-rendering:pixelated] sm:size-40"
+        className="size-36 shrink-0 rounded-sm bg-white [image-rendering:pixelated] sm:size-40"
       />
       <div className="flex min-w-0 flex-col items-start gap-y-3">
         <p className="text-base/6 font-medium text-zinc-950 sm:text-sm/6 dark:text-white">

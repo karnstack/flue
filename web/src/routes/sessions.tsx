@@ -25,7 +25,14 @@ import { keyOf, LOCAL_MACHINE_ID, type FleetSession, type MachineState } from '@
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
 import { takeCwd } from '@/lib/url'
 import { cn } from '@/lib/utils'
-import { applyView, DEFAULT_VIEW, displayName, type ViewConfig } from '@/sessions/view'
+import {
+  applyView,
+  DEFAULT_VIEW,
+  displayName,
+  spawnFromGroup,
+  type Group,
+  type ViewConfig,
+} from '@/sessions/view'
 import {
   deleteView,
   listViews,
@@ -218,7 +225,7 @@ export function SessionsRoute() {
    * over time and a single mount-time subscription could not name them all.
    */
   const adopt = useCallback(
-    (client: FlueClient, machineId: string, reqId: number) => {
+    (client: FlueClient, machineId: string, reqId: number, tag?: string) => {
       const entry: PendingSpawn = { reqId, client, offs: [] }
       const settle = () => {
         if (!pending.current.delete(entry)) return
@@ -229,6 +236,12 @@ export function SessionsRoute() {
         client.onAttached((a) => {
           if (a.reqId !== reqId) return
           settle()
+          // A session started from a tag's heading belongs under that heading,
+          // and `spawn` carries no metadata — so the tag is applied the moment
+          // the session exists and not before. It has to be here rather than
+          // beside the spawn for the obvious reason: until `attached` lands
+          // there is no id to address the edit to.
+          if (tag !== undefined) client.update({ id: a.id, tags: [tag] })
           // Hand the ref straight back: this screen renders no terminal, and
           // the route it navigates to attaches on its own.
           client.detach(a.ref)
@@ -256,17 +269,17 @@ export function SessionsRoute() {
   )
 
   const spawnOn = useCallback(
-    (machineId: string | undefined) => {
+    (machineId: string | undefined, opts: { cwd?: string; tag?: string } = {}) => {
       setNotice(null)
       const client = machineId === undefined ? null : fleet.clientFor(machineId)
       // 80x24 is a starting point, not a decision; the terminal corrects it
       // the moment it can measure a pane.
-      const reqId = client?.spawn({ cols: 80, rows: 24 }) ?? null
+      const reqId = client?.spawn({ cwd: opts.cwd, cols: 80, rows: 24 }) ?? null
       if (client === null || reqId === null || machineId === undefined) {
         setNotice('Not connected to the flue daemon, so nothing was started.')
         return
       }
-      adopt(client, machineId, reqId)
+      adopt(client, machineId, reqId, opts.tag)
     },
     [adopt, fleet],
   )
@@ -398,6 +411,75 @@ export function SessionsRoute() {
   const primaryTarget = online.some((m) => m.id === LOCAL_MACHINE_ID)
     ? LOCAL_MACHINE_ID
     : online[0]?.id
+
+  /**
+   * The `+` on a group's heading: make one of *these*.
+   *
+   * What "these" means is `spawnFromGroup`'s to decide and it is a pure
+   * function of the grouping and the key, so the rule is arguable in a unit
+   * test rather than by clicking headings. Only the machine is resolved here,
+   * because only this screen knows which machine a heading that names none
+   * should fall back to — the same `primaryTarget` the toolbar's own button
+   * spawns on.
+   */
+  const spawnInGroup = (group: Group) => {
+    const want = spawnFromGroup(view.grouping, group.key)
+    if (want === null) return
+    spawnOn(want.machineId ?? primaryTarget, { cwd: want.cwd, tag: want.tag })
+  }
+
+  /**
+   * What that control is called, in the words of the thing it inherits.
+   *
+   * Undefined is how a heading says it has no `+` at all, and it is read
+   * straight off the same rule the click uses, so the control cannot be
+   * offered for a group the click would refuse.
+   */
+  const spawnLabel = (group: Group): string | undefined => {
+    const want = spawnFromGroup(view.grouping, group.key)
+    if (want === null) return undefined
+    if (want.tag !== undefined) return `New session tagged ${want.tag}`
+    if (want.cwd !== undefined) return `New session in ${want.cwd}`
+    if (want.machineId !== undefined) return `New session on ${group.label}`
+    return 'New session'
+  }
+
+  /**
+   * How a row asks what it is doing, for the hover preview.
+   *
+   * Routed through the fleet by the row's own machine, so a preview of a
+   * session on a second laptop asks that laptop rather than this one. A
+   * machine the fleet no longer holds rejects, which the card renders as "no
+   * preview right now" — the honest answer, and the same one it gives for a
+   * daemon mid-reconnect.
+   */
+  const peek = useCallback(
+    (s: FleetSession, bytes: number) => fleet.peekOn(s.machineId, s.id, bytes),
+    [fleet],
+  )
+
+  /**
+   * The columns the rows actually carry, which is the reader's choice minus
+   * the one that can have nothing to say.
+   *
+   * A machine chip on every row of a browser that reaches one machine is the
+   * same word repeated down the screen. It costs nothing on a desktop and it
+   * costs the *name* on a phone: at 390px the chip and the stamp take half the
+   * row, and a session called after a long path truncates to "karn@karn:…"
+   * with the useful half gone. So a fleet of one drops it.
+   *
+   * Keyed on how many machines this browser holds rather than on how many
+   * appear in the current rows, and deliberately: the row set changes with
+   * every search and every filter, and a column that came and went as the
+   * reader typed would be worse than one that is merely redundant. The
+   * preference itself is untouched — pair a second machine and the chip is
+   * back, still ticked in the display options where it never stopped being.
+   */
+  const columns = useMemo(
+    () =>
+      (machines?.length ?? 0) > 1 ? view.columns : view.columns.filter((c) => c !== 'machine'),
+    [machines, view.columns],
+  )
 
   const dirty = !sameArrangement(
     view,
@@ -627,17 +709,15 @@ export function SessionsRoute() {
       {showTable && (
         <SessionTable
           groups={groups}
-          columns={view.columns}
+          columns={columns}
           selected={selected}
           onToggleSelect={toggleSelect}
           onToggleGroup={toggleGroup}
           collapsed={folded}
           onAction={onAction}
-          onSpawnIn={
-            view.grouping === 'machine'
-              ? (groupKey) => spawnOn(groupKey.replace(/^machine:/, ''))
-              : undefined
-          }
+          onSpawnIn={spawnInGroup}
+          spawnLabel={spawnLabel}
+          peek={peek}
         />
       )}
 
@@ -733,7 +813,7 @@ function UnreachableBand({
   onRetry(machineId: string): void
 }) {
   return (
-    <div className="flex flex-col gap-y-1 rounded-lg bg-zinc-950/[0.03] px-3 py-2 dark:bg-white/[0.04]">
+    <div className="flex flex-col gap-y-1 rounded-md bg-row-hover px-3 py-2">
       {machines.map((m) => {
         const name = m.name || m.id
         return (

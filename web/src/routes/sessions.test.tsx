@@ -56,13 +56,21 @@ function info(over: Partial<SessionInfo> & { id: string }): SessionInfo {
  * by navigating mounts into a connection that is already established, but the
  * very first paint of the tab does not, and both have to work.
  */
-async function mountSessions({ open = true, strict = false } = {}) {
+async function mountSessions({ open = true, strict = false, solo = false } = {}) {
   const local = fakeClient()
   const attic = fakeClient()
-  const fleet = new FleetClient([
-    { id: 'local', name: '', client: local.client },
-    { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
-  ])
+  // `solo` is a browser paired with one machine, which is what a fresh
+  // install is and what the machine-chip rule turns on. It is a whole fleet
+  // rather than a flag because the rule reads the fleet, and a screen told
+  // "one machine" by anything else would not be testing the rule.
+  const fleet = new FleetClient(
+    solo
+      ? [{ id: 'local', name: '', client: local.client }]
+      : [
+          { id: 'local', name: '', client: local.client },
+          { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
+        ],
+  )
 
   const routeComponent = strict
     ? () => (
@@ -159,6 +167,40 @@ describe('SessionsRoute', () => {
     expect(screen.getByRole('button', { name: 'Attic Pi' })).toBeTruthy()
     expect(screen.getByText('/one')).toBeTruthy()
     expect(screen.getByText('/two')).toBeTruthy()
+  })
+
+  it('drops the machine chip when this browser reaches only one machine', async () => {
+    // The same word down every row, and on a phone it costs the name the
+    // width it needs. The preference is untouched; only the rendering is.
+    const solo = await mountSessions({ solo: true })
+    solo.welcomeLocal()
+    listed(solo.sock, [info({ id: 's1' })])
+
+    expect(screen.queryByText('mesa.local', { selector: '[data-slot="badge"]' })).toBeNull()
+    // The row is still there and still named — only the chip went.
+    expect(screen.getByRole('link', { name: 'Open zsh' })).toBeTruthy()
+    solo.unmount()
+
+    // Two machines, and it is back: it now tells two rows apart.
+    const pair = await mountSessions()
+    pair.welcomeLocal()
+    act(() => pair.attic.sockets[0]!.open())
+    listed(pair.sock, [info({ id: 's1' })])
+    listed(pair.attic.sockets[0]!, [info({ id: 's2' })])
+
+    expect(screen.getByText('Attic Pi', { selector: '[data-slot="badge"]' })).toBeTruthy()
+  })
+
+  it('keeps the chip while a second machine is merely unreachable', async () => {
+    // Read off the fleet this browser holds, not off the machines answering
+    // right now: a column that vanished when a laptop slept and came back
+    // when it woke would be worse than one that is briefly redundant.
+    const { sock, fleet, welcomeLocal } = await mountSessions()
+    welcomeLocal()
+    act(() => fleet.clientFor('attic-pi')!.close())
+    listed(sock, [info({ id: 's1' })])
+
+    expect(screen.getByText('mesa.local', { selector: '[data-slot="badge"]' })).toBeTruthy()
   })
 
   it('does not claim there are no sessions before the machines have answered', async () => {
@@ -518,6 +560,68 @@ describe('SessionsRoute', () => {
 
       expect(attic.sockets[0]!.ofType('spawn')).toHaveLength(1)
       expect(sock.ofType('spawn')).toEqual([])
+    })
+
+    it('spawns into a tag group tagged with that group\'s tag', async () => {
+      // The heading names a property its rows share, so the `+` on it makes
+      // one of *these* — which for a tag means a session that will land under
+      // the same heading rather than under "No tag" beside it.
+      const user = userEvent.setup()
+      const { sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [info({ id: 's1', tags: ['api'] })])
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await pick(user, 'Grouping', 'Tag')
+      await user.keyboard('{Escape}')
+
+      await user.click(screen.getByRole('button', { name: 'New session tagged api' }))
+
+      expect(sock.ofType('spawn')).toHaveLength(1)
+      // `spawn` carries no metadata, so the tag can only be applied once the
+      // session exists — which is the `attached` that answers it.
+      expect(sock.ofType('update')).toEqual([])
+      act(() => sock.emitControl(attached({ ref: 3, id: 'fresh1', reqId: 1 })))
+
+      expect(sock.ofType('update')).toEqual([{ type: 'update', id: 'fresh1', tags: ['api'] }])
+    })
+
+    it('spawns into a directory group in that group\'s directory', async () => {
+      const user = userEvent.setup()
+      const { sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [info({ id: 's1', cwd: '/Users/karn/code/flue' })])
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await pick(user, 'Grouping', 'Directory')
+      await user.keyboard('{Escape}')
+
+      await user.click(
+        screen.getByRole('button', { name: 'New session in /Users/karn/code/flue' }),
+      )
+
+      expect(sock.ofType('spawn')).toEqual([
+        { type: 'spawn', cwd: '/Users/karn/code/flue', cols: 80, rows: 24, reqId: 1 },
+      ])
+    })
+
+    it('offers no spawn control on the Exited heading', async () => {
+      // The one heading whose members cannot be made: a session is exited
+      // because its process ended, so anything started here would leave the
+      // heading it was started from on its first frame.
+      const user = userEvent.setup()
+      const { sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [
+        info({ id: 's1' }),
+        info({ id: 's2', state: 'exited', exitCode: 1 }),
+      ])
+      await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await pick(user, 'Grouping', 'State')
+      await user.keyboard('{Escape}')
+
+      // Two, not three: the toolbar's own button and the Running heading's.
+      // Grouped by state there are two headings on screen and only one of them
+      // may offer to make something.
+      expect(screen.getAllByRole('button', { name: 'New session' })).toHaveLength(2)
     })
 
     it('hands back the attachment the daemon gave it, then opens the new session', async () => {

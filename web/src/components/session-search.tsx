@@ -77,7 +77,12 @@ export function SessionSearch({ value, onChange }: SessionSearchProps) {
   }, [value])
 
   return (
-    <div className="relative">
+    // Grows into whatever the header's action row has spare, then stops at a
+    // fixed width from `sm` up. On a phone that row is a line of its own and
+    // the field is the only thing on it worth widening; on a desktop it sits
+    // beside a heading and a fixed measure keeps the toolbar from jumping
+    // about as the heading's length changes between screens.
+    <div className="relative min-w-0 flex-1 sm:flex-none">
       {/*
         Decoration, and marked as such: the field is named by its own label,
         and a reader who hears "search" twice learns nothing the second time.
@@ -94,7 +99,7 @@ export function SessionSearch({ value, onChange }: SessionSearchProps) {
         spellCheck={false}
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
-        className="w-44 pl-8 sm:w-56"
+        className="w-full pl-8 sm:w-56"
       />
     </div>
   )

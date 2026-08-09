@@ -109,7 +109,7 @@ export function BulkBar({
       role="toolbar"
       aria-label="Bulk actions"
       className={cn(
-        'fixed inset-x-0 bottom-4 z-30 mx-auto flex w-fit items-center gap-x-1 rounded-xl bg-card p-1.5 shadow-lg ring-1 ring-zinc-950/10 dark:inset-ring dark:inset-ring-white/10 dark:ring-0',
+        'fixed inset-x-0 bottom-4 z-30 mx-auto flex w-fit items-center gap-x-1 rounded-lg bg-card p-1.5 shadow-high ring-1 ring-hairline',
         className,
       )}
     >

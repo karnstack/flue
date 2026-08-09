@@ -99,6 +99,70 @@ type Update struct {
 	Pinned *bool     `json:"pinned,omitempty"`
 }
 
+// Peek asks for the tail of a session's scrollback without attaching to it.
+//
+// It exists for the sessions list, which wants to show what a row is doing
+// without becoming a subscriber to it. An attach would work and is the wrong
+// shape: it costs a ref, a backlog replay, a delivery channel and a detach per
+// row, and a list hovering over twenty sessions would leave twenty
+// subscriptions behind it. This is a read and nothing else — no ref is minted,
+// no stream starts, and the session's LastActive is not touched, because
+// looking at a preview is not activity inside the session.
+//
+// Bytes caps how much of the tail is returned. Zero means the daemon's own
+// default; anything above PeekMaxBytes is clamped to it rather than refused,
+// since a client asking for too much wants as much as it can have.
+//
+// Answered by preview, or by error{not_found} for an id the daemon does not
+// hold. ReqID correlates the two, because a list peeks at many rows at once
+// and the answers arrive in whatever order the daemon reaches them.
+type Peek struct {
+	ID    string `json:"id"`
+	Bytes int    `json:"bytes,omitempty"`
+	// ReqID correlates this request with the preview or error answering it.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// Preview answers peek with raw terminal output — escape sequences and all,
+// exactly as the ring holds them.
+//
+// Raw rather than rendered, because rendering is the client's job and it
+// already owns a terminal emulator. A daemon that flattened this to text would
+// have to make every decision an emulator makes — wrapping at which width,
+// what a cursor move means, which of two overwrites won — and would make them
+// differently from the emulator the same client uses to draw the session for
+// real.
+//
+// Data is base64 on the wire, as encoding/json carries every []byte. It is the
+// *tail*, so it will usually begin mid-escape-sequence; a consumer must expect
+// to discard a partial sequence at the front rather than treat it as content.
+type Preview struct {
+	ID string `json:"id"`
+	// Data is the raw tail of the session's scrollback.
+	Data []byte `json:"data"`
+	// Cols and Rows are the dimensions the bytes were drawn at, so a consumer
+	// that replays them into an emulator can size it the way the session is.
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
+	// ReqID echoes the reqId of the peek this answers.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// MarshalJSON writes an empty tail as "" rather than null.
+//
+// encoding/json carries a nil []byte as null, and a session that has produced
+// no output at all is reached by the ordinary path rather than an exotic one.
+// The client declares the field a string it base64-decodes, so null would
+// throw on exactly the sessions that have least to show.
+func (p Preview) MarshalJSON() ([]byte, error) {
+	// The alias sheds this method, so json.Marshal below does not recurse.
+	type alias Preview
+	if p.Data == nil {
+		p.Data = []byte{}
+	}
+	return json.Marshal(alias(p))
+}
+
 // Devices asks for the paired-device list.
 type Devices struct{}
 
@@ -285,6 +349,10 @@ func typeName(msg any) (string, bool) {
 		return "close", true
 	case Update:
 		return "update", true
+	case Peek:
+		return "peek", true
+	case Preview:
+		return "preview", true
 	case Devices:
 		return "devices", true
 	case Revoke:
@@ -371,6 +439,10 @@ func DecodeControl(b []byte) (any, error) {
 			return *t, nil
 		case *Update:
 			return *t, nil
+		case *Peek:
+			return *t, nil
+		case *Preview:
+			return *t, nil
 		case *Devices:
 			return *t, nil
 		case *Revoke:
@@ -420,6 +492,10 @@ func DecodeControl(b []byte) (any, error) {
 		return deref(into(&CloseSession{}))
 	case "update":
 		return deref(into(&Update{}))
+	case "peek":
+		return deref(into(&Peek{}))
+	case "preview":
+		return deref(into(&Preview{}))
 	case "devices":
 		return deref(into(&Devices{}))
 	case "revoke":

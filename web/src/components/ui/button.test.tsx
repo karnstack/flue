@@ -23,7 +23,9 @@ describe('Button', () => {
     render(<Button className="rounded-none">Run</Button>)
     const el = screen.getByRole('button', { name: 'Run' })
     expect(el.className).toContain('rounded-none')
-    expect(el.className).not.toContain('rounded-lg')
+    // The base radius, named exactly: an assertion against a class the button
+    // stopped carrying would pass forever without proving anything.
+    expect(el.className).not.toContain('rounded-md')
   })
 
   it('renders as the child element when asChild is set', () => {

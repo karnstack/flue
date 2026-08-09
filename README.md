@@ -1,6 +1,6 @@
 <h1 align="center">flue</h1>
 
-<p align="center"><strong>Your terminal, as a browser tab. Reachable from any device you own.</strong></p>
+<p align="center"><strong>A session manager for every machine you own — in a browser tab.</strong></p>
 
 <p align="center">
   <a href="https://github.com/karnstack/flue/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/karnstack/flue/ci.yml?branch=main&label=ci" alt="CI status"></a>
@@ -10,87 +10,47 @@
 
 <p align="center">
   <a href="https://flue.sh">flue.sh</a> ·
+  <a href="docs/DEVELOPMENT.md">developing</a> ·
   <a href="docs/RELAY.md">relay runbook</a> ·
   <a href="docs/faq.md">faq</a>
 </p>
 
-> Status: the local terminal works, and `flue enable` installs the login
-> service. The end-to-end crypto pairing pins is in place, and the devices
-> UI lists and revokes what is paired; pairing a new device needs the relay
-> connected, because the daemon binds loopback only and the UI refuses to
-> offer a QR that says 127.0.0.1, an address every other device resolves to
-> itself. The Cloudflare relay is built: `flue relay setup` deploys it to
-> your own account, `flue relay join` points your other machines at the same
-> Worker, and each daemon dials its own slot on it. It has not yet been
-> through its manual end-to-end gate against a real account
-> ([docs/RELAY.md](docs/RELAY.md)), so treat it as ready to try rather than
-> ready to rely on. No release is tagged yet: the pipeline is live, and the
-> first tag ships binaries, a brew formula, and the installer.
->
-> flue is open source and always free. There is no hosted service and none is
-> planned: remote access runs through a Worker you deploy into your own
-> Cloudflare account, and flue.sh is a landing page with instructions.
+flue runs a small daemon that owns your shells. It keeps them alive when you
+close the tab, lists every one of them across every machine you have paired,
+and hands them back — on your laptop, your phone, a second machine — exactly
+where you left off.
+
+- **Sessions outlive the tab.** Close it and the build keeps running.
+  Reattaching replays what you missed.
+- **One list, every machine.** Name, tag, pin, group and search the whole
+  fleet from one tab. Hover a session to see what it is actually doing.
+- **Reachable from anything you own.** Pair a phone with a QR code. Two
+  devices on one session mirror live, and the phone's 40 columns don't shrink
+  the laptop.
+- **No hosted service.** Remote access runs through a relay you deploy into
+  your own Cloudflare account, end-to-end encrypted with the daemon's key
+  pinned at pairing. flue.sh is a landing page, never part of the data path.
+
+One static Go binary. macOS, Linux, WSL. No Node, no Python, no toolchain.
 
 ## Install
 
 ```sh
-brew install karnstack/tap/flue
-```
-
-or, without Homebrew:
-
-```sh
-curl -fsSL https://flue.sh/install.sh | sh
-```
-
-then:
-
-```sh
+brew install karnstack/tap/flue    # or: curl -fsSL https://flue.sh/install.sh | sh
 flue enable
 ```
 
 `flue enable` installs a login service, starts the daemon, and opens the UI.
-Everything after that happens in the browser. macOS · Linux · WSL. One
-static binary — no Node, no Python, no toolchain, ever.
+Everything after that happens in the browser.
 
-## Why
-
-Two apps get used all day: a terminal and a browser. Browsers have tab
-groups, tab search, splits, session restore, and URL addressing. Terminals
-have none of it and cannot join in.
-
-flue makes a terminal session a browser tab, so it inherits all of that for
-free — and makes the same live session reachable from a phone, an iPad, or
-another laptop.
-
-## Shape
-
-A small Go daemon owns the PTYs and their scrollback. A web app renders
-them. Closing the tab detaches; the build keeps running, and reattaching
-replays what you missed. Two devices on one session mirror live — typing on
-the phone shows up on the laptop, and the phone's 40 columns don't shrink
-the laptop.
-
-The sessions list holds every machine at once: one tab lists what is running
-on every machine you have paired, not just the one serving the page. Rows
-carry the directory each shell is in now rather than the one it started in,
-and a session can be renamed, tagged, or pinned there without attaching to
-it. Group by machine, state, tag, or directory, search the whole set, and
-keep an arrangement you come back to as a saved view.
-
-<p align="center">
-  <img src="docs/architecture.png" width="830"
-    alt="Architecture of flue: on your machine, a browser tab talks to the flue daemon over a loopback websocket. The daemon and your other devices each dial outbound into a flue-relay Worker in your own Cloudflare account, which forwards ciphertext it holds no key for. A Noise IK channel runs end to end from the daemon to the remote browser, the daemon's key pinned at pairing. No hosted service; flue.sh is never part of the data path.">
-</p>
-
-The CLI stays small on purpose:
+## The CLI
 
 ```
 flue enable        # install the login service, start the daemon, open the UI
 flue disable       # remove it
 flue status        # daemon, login service, and session diagnostics
 flue open [path]   # spawn a session here — handy from a shell prompt
-flue relay setup   # deploy a relay to your own Cloudflare account (see below)
+flue relay setup   # deploy a relay to your own Cloudflare account
 flue relay join    # point this machine at a relay another machine deployed
 flue relay status  # show the configured relay
 flue relay update  # redeploy this release's relay; secret and pairings kept
@@ -100,130 +60,50 @@ flue serve         # run the daemon in the foreground, no login service
 
 ## Remote access
 
-Remote access is opt-in. One remote path exists today: a relay Worker you
-deploy into your own Cloudflare account. The Remote screen in the UI shows
-`flue relay setup` until a relay is configured, then the state of the one
-you have.
-
-| provider | what it needs | intermediary | state |
-|---|---|---|---|
-| local | nothing, always on | none | works |
-| Cloudflare | a Cloudflare account, free tier is enough | your own Worker, ciphertext only | works — `flue relay setup` |
-| Cloudflare + your domain | a domain on Cloudflare | your own Worker | designed |
-
-One relay fronts every machine you own, and only the first machine ever
-touches the Cloudflare API:
+The daemon binds loopback and nothing else, so reaching it from elsewhere is
+opt-in and takes one command:
 
 ```sh
-flue relay setup     # machine 1: paste a Cloudflare API token, watch it deploy, done
+flue relay setup                                   # machine 1: paste a Cloudflare token
+flue relay join wss://<your-relay> --secret <...>  # every other machine
 ```
 
-The same deploy is a card on the UI's Remote screen: paste the token there,
-see exactly what will be created in your account, click Deploy. Both doors
-run the same code, and the UI one exists only on the daemon's own loopback
-origin — a token typed into a remote tab would cross the relay, so no remote
-tab is ever offered the form.
+That deploys a Worker **and** this web app into your own Cloudflare account,
+on the free tier. The same deploy is a card on the UI's Remote screen. One
+relay fronts every machine you own; pairing is per machine, once per browser,
+from the QR each machine shows.
 
-That deploys the relay Worker **and** the web app into your own Cloudflare
-account, sets a fresh daemon secret, joins this machine under a machine id of
-its own, and ends by printing one line. Run that line on every other machine:
+What it deploys, what it costs, what one shared secret does and does not
+separate: [docs/RELAY.md](docs/RELAY.md). What a hostile relay origin could
+do despite the end-to-end encryption — the honest version, because the browser
+loads its JavaScript from that origin — is in the [FAQ](docs/faq.md).
 
-```sh
-flue relay join wss://<your-relay> --secret <...>     # printed by setup, verbatim
-```
+<p align="center">
+  <img src="docs/architecture.png" width="830"
+    alt="Architecture of flue: on your machine, a browser tab talks to the flue daemon over a loopback websocket. The daemon and your other devices each dial outbound into a flue-relay Worker in your own Cloudflare account, which forwards ciphertext it holds no key for. A Noise IK channel runs end to end from the daemon to the remote browser, the daemon's key pinned at pairing. No hosted service; flue.sh is never part of the data path.">
+</p>
 
-`join` needs no token and deploys nothing — the Worker already exists and the
-secret is the whole credential. It mints the machine an id of its own and
-points its daemon at its own slot on the same Worker. Opening the relay's one
-URL opens the machine this browser has paired — or a picker, once it has
-paired several; pairing is per machine, once per browser, from the QR each
-machine shows. The token is
-never stored. What it deploys, what it costs, what bounds abuse, what one
-shared secret does and does not separate, and the counters it leaves behind
-are in [docs/RELAY.md](docs/RELAY.md).
+## Status
 
-Anything through an intermediary is end-to-end encrypted (Noise IK, the
-daemon's key pinned at pairing), so the relay forwards ciphertext it holds no
-key for and cannot read your shell **out of what crosses it**. That qualifier is
-load-bearing, not throat-clearing — the browser loads its JavaScript from the
-relay's origin, and no amount of end-to-end encryption fixes that. What a
-hostile origin could actually do with it is spelled out plainly in the
-[FAQ](docs/faq.md), along with the bundle digest you can recompute from this
-source and exactly what it does and does not prove today.
+Pre-1.0, and honest about it. The local terminal, the login service, the
+fleet-wide sessions list and the end-to-end pairing all work. The Cloudflare
+relay is built and deployable but has not been through its manual end-to-end
+gate against a real account ([docs/RELAY.md](docs/RELAY.md)) — ready to try
+rather than ready to rely on. Known rough edges live in
+[docs/FOLLOW-UPS.md](docs/FOLLOW-UPS.md).
 
-## Building from source
+flue is open source and always free.
+
+## Building and developing
 
 ```sh
 mise install   # go, node, pnpm — pinned in mise.toml
-make build     # builds the web UI and the relay Worker, embeds both, produces bin/flue
+make build     # web UI + relay Worker, embedded, into bin/flue
 make test
 ```
 
-`cd web && pnpm hash` prints a SHA-256 over every file in `web/dist`, so you can
-check for yourself that this source builds to that bundle — same source, same
-lockfile, same pinned toolchain, same digest, *on the same platform*. No release
-publishes a digest to compare a served bundle against yet; the
-[FAQ](docs/faq.md) has both halves of that, along with why the cross-platform
-caveat is real.
-
-## Developing
-
-The full guide — the dev/prod split, working on the relay, deploying a dev
-relay of your own — is [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The
-short version:
-
-Development never builds the web app — hot reload owns it:
-
-```sh
-make run       # terminal 1: the dev daemon on 127.0.0.1:7719, no web build
-make web-dev   # terminal 2: Vite with hot reload on 127.0.0.1:5173
-```
-
-The dev daemon runs on 7719 with its own config directory
-(`~/.config/flue-dev`), so it coexists with an installed flue on 7717: they
-never fight over `runtime.json`, the dev `relay.json` cannot clobber the
-installed one, and the session cookie's name carries the port so logging
-into one UI does not log you out of the other. `FLUE_DEV_PORT` and
-`FLUE_DEV_CONFIG` in the Makefile move both knobs.
-
-`make run` compiles with the `dev` build tag, which swaps the embedded UI
-for a redirect to Vite (`web/dev.go`) and the embedded relay Worker for
-nothing at all (`relay/dev.go`) — neither `web/dist` nor `relay/dist` need
-exist and Node never runs. (`flue relay setup` refuses to deploy from a dev
-build, since it has no Worker to deploy.) It passes `--open`, so the browser
-opens itself: the one-time
-link plants the auth cookie and lands you on the Vite server, no clicking
-race. Vite proxies `/api` and `/ws` back to the daemon and rewrites the
-Origin so its checks pass; the cookie rides along because cookies ignore
-the port. Stick to `127.0.0.1`, not `localhost`: the cookie is set for that
-host exactly. Restarting a lot and tired of tabs?
-`XDG_CONFIG_HOME=~/.config/flue-dev go run -tags dev ./cmd/flue serve --port 7719`
-skips the auto-open; the cookie from the first open keeps working. Any other
-flue command aimed at the dev daemon needs that same `XDG_CONFIG_HOME`, or
-it will talk to the installed one.
-
-A production-like run — the embedded UI, exactly what a user gets — is:
-
-```sh
-make build && bin/flue serve
-```
-
-`make test` runs all three suites (Go, the web app, the relay Worker);
-`make lint` is `go vet` (with and without the dev tag) plus a TypeScript
-typecheck of each package. Use pnpm, never npm —
-the web workspace pins it, and `mise.toml` pins the exact go/node/pnpm
-versions CI uses. One ordering rule remains for untagged Go commands:
-nothing compiles until `web/dist` and `relay/dist` both exist (`//go:embed`
-in `web/embed.go` and `relay/embed.go`), so a bare `go build ./cmd/flue`
-wants `cd web && pnpm build` and `cd relay && pnpm build` first — or just
-use `make build`, which sequences all of it for you.
-
-Layout, briefly: `cmd/flue` is the CLI, `internal/daemon` the HTTP/WebSocket
-server, `internal/session` the PTYs and scrollback, `internal/service` the
-launchd/systemd integration, `web/` the React app, `site/` the flue.sh page,
-`relay/` the Cloudflare Worker, `docs/RELAY.md` the relay runbook,
-`docs/faq.md` the honest answers, and `docs/FOLLOW-UPS.md` the known rough
-edges — worth reading before touching the code.
+The dev loop, the dev/prod split, and working on the relay are in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## License
 

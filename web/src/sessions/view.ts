@@ -344,6 +344,69 @@ const BUCKETS: Record<Grouping, (s: FleetSession) => Bucket[]> = {
   none: () => [{ key: 'all', label: 'All sessions', rank: 0 }],
 }
 
+/**
+ * What a new session started from a group's heading should inherit from it.
+ *
+ * Every heading in this list names a property its rows share, so a `+` on the
+ * heading has an obvious meaning: make one of these. Grouped by machine it
+ * means "on that machine", by tag "carrying that tag", by directory "in that
+ * directory" — the group's own defining fact, handed to the spawn.
+ *
+ * Two headings are named and get nothing, which is the point of returning a
+ * type rather than a bare guess:
+ *
+ *   `Exited` cannot be made. A session is exited because its process ended,
+ *   and a `+` there would offer to create something that would immediately not
+ *   belong under the heading it was created from.
+ *
+ *   `No tag` and `Running` and `All sessions` *can* be made, and are made by
+ *   asking for nothing in particular — which is exactly a plain new session.
+ *   They answer with an empty request rather than null, so the caller offers
+ *   the control and the click does the obvious thing.
+ *
+ * Null therefore means "do not offer this", and is checked by the component
+ * that draws the heading. The key is parsed rather than the label read,
+ * because the label is what a person sees and a machine called `exited` would
+ * otherwise decide what its own `+` does.
+ */
+export interface SpawnRequest {
+  /** Which machine, when the heading names one. Else the caller's default. */
+  machineId?: string
+  /** Which directory, when the heading names one. */
+  cwd?: string
+  /** Which tag the new session should carry, when the heading names one. */
+  tag?: string
+}
+
+export function spawnFromGroup(grouping: Grouping, groupKey: string): SpawnRequest | null {
+  switch (grouping) {
+    case 'machine':
+      return { machineId: after(groupKey, 'machine:') }
+    case 'directory':
+      return { cwd: after(groupKey, 'dir:') }
+    case 'tag':
+      return groupKey === UNTAGGED_KEY ? {} : { tag: after(groupKey, 'tag:') }
+    case 'state':
+      // The one heading nothing can be created under.
+      return groupKey === 'state:exited' ? null : {}
+    case 'none':
+      return {}
+  }
+}
+
+/**
+ * The part of a group key after its kind prefix.
+ *
+ * A directory key is `dir:` plus a path, and a path may contain a colon, so
+ * this cuts at the known prefix rather than at the first separator it finds.
+ * A key that does not carry the prefix at all is returned whole — the caller
+ * built both the key and this lookup, so a mismatch is a bug rather than
+ * input, and handing back something wrong-but-legible beats a silent empty.
+ */
+function after(key: string, prefix: string): string {
+  return key.startsWith(prefix) ? key.slice(prefix.length) : key
+}
+
 /** Gather the rows into their buckets, then put the buckets in reading order. */
 function collect(list: FleetSession[], bucketsOf: (s: FleetSession) => Bucket[]): Group[] {
   const found = new Map<string, Bucket & { sessions: FleetSession[] }>()

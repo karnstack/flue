@@ -50,6 +50,25 @@ func (r *Ring) BaseSeq() uint64 { return r.end - uint64(r.n) }
 // EndSeq is the seq just past the newest byte written.
 func (r *Ring) EndSeq() uint64 { return r.end }
 
+// Tail returns the last n retained bytes, or everything retained when there
+// are fewer than n. A non-positive n is an empty answer rather than an error:
+// callers size it from a request, and "show me nothing" is a coherent ask.
+//
+// It is Since expressed as a distance from the end rather than an absolute
+// offset, which is what a reader who holds no seq at all needs — a preview
+// wants "the last few kilobytes", and computing the offset for that at every
+// call site means every call site has to know about BaseSeq eviction.
+func (r *Ring) Tail(n int) []byte {
+	if n <= 0 {
+		return []byte{}
+	}
+	if n > r.n {
+		n = r.n
+	}
+	out, _ := r.Since(r.end - uint64(n))
+	return out
+}
+
 // Since returns every retained byte at or after seq. ok is false when seq
 // has already been evicted, which means the caller must send a full
 // snapshot instead of a delta. A seq beyond EndSeq yields an empty slice

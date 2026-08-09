@@ -339,7 +339,7 @@ export function CloudflareConnectCard({
   setupCommand: string
 }) {
   return (
-    <Card className="sm:max-w-lg">
+    <Card className="max-w-3xl">
       <CardHeader>
         <div className="flex items-center justify-between gap-x-3">
           <CloudflareMark />
