@@ -375,6 +375,7 @@ func TestRelayUIJoinCommandRebuildsTheHandOffLine(t *testing.T) {
 		Origin:    "https://flue-relay-dev.karn.workers.dev",
 		MachineID: "m-1",
 		Worker:    "flue-relay-dev",
+		FleetSeed: testFleetSeed,
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
 	}
@@ -382,8 +383,30 @@ func TestRelayUIJoinCommandRebuildsTheHandOffLine(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("JoinCommand: ok %v err %v", ok, err)
 	}
-	if cmd != "flue relay join wss://flue-relay-dev.karn.workers.dev --secret fleet-s3cret" {
+	if cmd != "flue relay join wss://flue-relay-dev.karn.workers.dev --secret fleet-s3cret --fleet "+testFleetSeed {
 		t.Fatalf("join command = %q", cmd)
+	}
+}
+
+// TestRelayUIJoinCommandStaysQuietWithoutAFleetKey: a relay.json from before
+// the fleet key exists cannot produce a faithful line — join refuses one
+// without --fleet — so the card offers nothing rather than a command that
+// would be refused on the machine it was pasted into.
+func TestRelayUIJoinCommandStaysQuietWithoutAFleetKey(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	svc := &relayUIService{runtime: &relayRuntime{}}
+
+	if err := config.SaveRelay(config.Relay{
+		URL:       "wss://flue-relay-dev.karn.workers.dev",
+		Secret:    "fleet-s3cret",
+		Origin:    "https://flue-relay-dev.karn.workers.dev",
+		MachineID: "m-1",
+		Worker:    "flue-relay-dev",
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+	if cmd, ok, err := svc.JoinCommand(context.Background()); ok || err != nil {
+		t.Fatalf("JoinCommand without a fleet key = %q ok %v err %v; want quiet false", cmd, ok, err)
 	}
 }
 

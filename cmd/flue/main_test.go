@@ -21,6 +21,7 @@ import (
 
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 )
@@ -1261,6 +1262,7 @@ func TestStatusReportsAConfiguredRelayWithoutItsSecret(t *testing.T) {
 		Origin:      "https://flue-relay.example",
 		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
 		MachineName: "Karn's MacBook Pro",
+		FleetSeed:   testFleetSeed,
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
 	}
@@ -1275,6 +1277,12 @@ func TestStatusReportsAConfiguredRelayWithoutItsSecret(t *testing.T) {
 	}
 	if strings.Contains(out, secret) {
 		t.Fatalf("status printed the daemon secret:\n%s", out)
+	}
+	// The fleet key is the other credential relay.json holds, and the newer
+	// one: it signs every cert the fleet trusts, so a status output pasted
+	// into a bug report must not carry it either.
+	if strings.Contains(out, testFleetSeed) {
+		t.Fatalf("status printed the fleet key:\n%s", out)
 	}
 }
 
@@ -1306,17 +1314,27 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 		Origin:      "https://r.example",
 		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
 		MachineName: "Karn's MacBook Pro",
+		FleetSeed:   testFleetSeed,
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
 	}
 
+	// The identity serve would have built: the same file's seed, parsed. The
+	// relay leg refuses to start without a fleet key, so a zero Identity here
+	// would test nothing but that refusal.
+	fk, err := fleet.Parse(testFleetSeed)
+	if err != nil {
+		t.Fatalf("fleet.Parse: %v", err)
+	}
+	id := daemon.Identity{Fleet: fk}
+
 	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth("0123456789abcdef", 0),
-		uiHandler(), version, daemon.Identity{})
+		uiHandler(), version, id)
 	t.Cleanup(srv.Shutdown)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startRelay(ctx, srv, daemon.Identity{})
+	startRelay(ctx, srv, id)
 
 	deadline := time.Now().Add(3 * time.Second)
 	for attempts.Load() == 0 {

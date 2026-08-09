@@ -32,6 +32,11 @@ import (
 // coincidence.
 const setupToken = "cf-token-must-never-be-printed-or-stored"
 
+// testFleetSeed is a fleet key spelled the way the join line spells one: 32
+// bytes, unpadded base64url. Fixed rather than minted, so a test that asserts
+// on a rebuilt join line can name the string it expects.
+const testFleetSeed = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+
 // --- the fake Cloudflare API -------------------------------------------------
 
 // manifestLine is one entry of the asset upload session's manifest.
@@ -898,7 +903,7 @@ func TestRunRelayJoinWritesTheRelayConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	var out bytes.Buffer
-	if err := runRelayJoin(&out, []string{"wss://flue-relay.karn.workers.dev", "--secret", "s3cr3t-from-setup"}); err != nil {
+	if err := runRelayJoin(&out, []string{"wss://flue-relay.karn.workers.dev", "--secret", "s3cr3t-from-setup", "--fleet", testFleetSeed}); err != nil {
 		t.Fatalf("runRelayJoin: %v", err)
 	}
 
@@ -957,7 +962,7 @@ func TestRunRelayJoinNormalizesTheAddress(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 			var out bytes.Buffer
-			if err := runRelayJoin(&out, []string{tc.arg, "--secret", "s"}); err != nil {
+			if err := runRelayJoin(&out, []string{tc.arg, "--secret", "s", "--fleet", testFleetSeed}); err != nil {
 				t.Fatalf("runRelayJoin(%q): %v", tc.arg, err)
 			}
 			saved := loadSavedRelay(t)
@@ -978,7 +983,7 @@ func TestRunRelayJoinTakesADisplayName(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	var out bytes.Buffer
-	if err := runRelayJoin(&out, []string{"wss://r.example", "--secret", "s", "--name", "Study Mac Mini"}); err != nil {
+	if err := runRelayJoin(&out, []string{"wss://r.example", "--secret", "s", "--fleet", testFleetSeed, "--name", "Study Mac Mini"}); err != nil {
 		t.Fatalf("runRelayJoin: %v", err)
 	}
 	if saved := loadSavedRelay(t); saved.MachineName != "Study Mac Mini" {
@@ -1000,10 +1005,12 @@ func TestRunRelayJoinRefusesBadArguments(t *testing.T) {
 		{"no url", []string{"--secret", "s"}, "url"},
 		{"no secret", []string{"wss://r.example"}, "--secret"},
 		{"empty secret", []string{"wss://r.example", "--secret", ""}, "--secret"},
-		{"a scheme that is neither", []string{"http://r.example", "--secret", "s"}, "wss://"},
+		{"a scheme that is neither", []string{"http://r.example", "--secret", "s", "--fleet", testFleetSeed}, "wss://"},
 		{"no host", []string{"wss://", "--secret", "s"}, "url"},
-		{"a path on the url", []string{"wss://r.example/daemon", "--secret", "s"}, "path"},
-		{"a name past 64 runes", []string{"wss://r.example", "--secret", "s", "--name", strings.Repeat("é", 65)}, "--name"},
+		{"a path on the url", []string{"wss://r.example/daemon", "--secret", "s", "--fleet", testFleetSeed}, "path"},
+		{"a name past 64 runes", []string{"wss://r.example", "--secret", "s", "--fleet", testFleetSeed, "--name", strings.Repeat("é", 65)}, "--name"},
+		{"no fleet key", []string{"wss://r.example", "--secret", "s"}, "--fleet"},
+		{"a mangled fleet key", []string{"wss://r.example", "--secret", "s", "--fleet", "not-base64url!!"}, "fleet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
