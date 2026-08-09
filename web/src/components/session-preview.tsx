@@ -23,6 +23,40 @@ const CLOSE_DELAY_MS = 120
 const PREVIEW_LINES = 14
 
 /**
+ * How far to the left of the pointer the card's leading edge is put.
+ *
+ * The card is anchored to where the pointer actually is rather than to the
+ * start of the row, and the row is the full width of the screen: aligned to
+ * its leading edge, a card opened while reading a session's machine or its
+ * timestamp appeared a thousand pixels away from the thing being read, which
+ * is far enough that it registers as something else opening rather than as an
+ * answer to the row under the pointer.
+ *
+ * A small lead rather than none, so the pointer sits just inside the card's
+ * corner instead of exactly on it — a card whose edge is under the cursor
+ * reads as though the cursor is about to be swallowed by it.
+ */
+const CURSOR_LEAD_PX = 24
+
+/**
+ * Where along the row the card should hang from, in pixels from the row's own
+ * leading edge — which is the number Radix takes as `alignOffset`.
+ *
+ * Its own function because it is the whole of the positioning decision and
+ * because nothing in a test environment can answer it from the rendered
+ * result: jsdom lays nothing out, so every rectangle it reports is zero and
+ * the placement the browser would compute cannot be observed there.
+ *
+ * A missing pointer means the keyboard opened the card and there is nothing
+ * to aim at, so it falls back to the row's leading edge — which is where the
+ * focus ring the reader is following already is.
+ */
+export function cursorAlignOffset(rowLeft: number | undefined, pointerX: number | null): number {
+  if (rowLeft === undefined || pointerX === null) return 0
+  return Math.round(pointerX - rowLeft - CURSOR_LEAD_PX)
+}
+
+/**
  * How much scrollback to ask for.
  *
  * More than the lines shown need, and deliberately: the bytes are a tail, so
@@ -128,6 +162,35 @@ export function SessionPreview({
   const [preview, setPreview] = useState<Preview>({ at: 'loading' })
 
   /**
+   * Where the card hangs from, measured across the row rather than from its
+   * start — see CURSOR_LEAD_PX.
+   *
+   * Two refs and one piece of state, and the split is the point. The pointer's
+   * position is written on every move and read exactly once, when the card
+   * opens; keeping it in state would re-render the whole row a hundred times
+   * a second for a number nothing is drawing yet. The offset that comes out
+   * of it *is* state, because Radix positions from it — and it is frozen at
+   * the moment of opening rather than tracked, so a card that is already up
+   * stays where the reader found it instead of sliding along under a pointer
+   * on its way to the card itself.
+   */
+  // Typed as the anchor the primitive's own Trigger props declare, not as the
+  // bare element it happens to be: the row is a link today and the ref only
+  // ever has getBoundingClientRect asked of it.
+  const trigger = useRef<HTMLAnchorElement | null>(null)
+  const pointerX = useRef<number | null>(null)
+  const [alignOffset, setAlignOffset] = useState(0)
+
+  const onOpenChange = (next: boolean) => {
+    if (next) {
+      setAlignOffset(
+        cursorAlignOffset(trigger.current?.getBoundingClientRect().left, pointerX.current),
+      )
+    }
+    setOpen(next)
+  }
+
+  /**
    * Which fetch the card is currently interested in.
    *
    * A card closed and reopened over a different row must not be filled in by
@@ -204,7 +267,7 @@ export function SessionPreview({
   return (
     <HoverCard
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={onOpenChange}
       openDelay={OPEN_DELAY_MS}
       closeDelay={CLOSE_DELAY_MS}
     >
@@ -212,17 +275,50 @@ export function SessionPreview({
         `asChild` onto whatever the row is, so no wrapper element lands between
         the list item and what it holds — the row's layout is a flex line and an
         extra div in it would break the alignment of every cell.
+
+        Which also means these handlers and this ref end up on the row's own
+        anchor, merged with the ones Radix puts there: the primitive composes
+        rather than replaces, so the hover behaviour it owns is untouched.
+        Clearing on the way out and on focus keeps a stale position from a
+        pointer that has since left the row out of a card the keyboard opened.
       */}
-      <HoverCardTrigger asChild>{children}</HoverCardTrigger>
+      <HoverCardTrigger
+        asChild
+        ref={trigger}
+        onPointerMove={(e) => {
+          pointerX.current = e.clientX
+        }}
+        onPointerLeave={() => {
+          pointerX.current = null
+        }}
+        onFocus={() => {
+          pointerX.current = null
+        }}
+      >
+        {children}
+      </HoverCardTrigger>
       {/*
-        Below the row and aligned to its left edge, never beside it. The row's
-        own trailing details — its tags, its machine, when it was last touched
-        — sit to the right of the name, so a card placed on that side covers
-        the very row the pointer is resting on. Dropping it underneath covers
-        the rows *below*, which is what a hover card is for and what the reader
-        expects when something opens under their pointer.
+        Below the row, never beside it. The row's own trailing details — its
+        tags, its machine, when it was last touched — sit to the right of the
+        name, so a card placed on that side covers the very row the pointer is
+        resting on. Dropping it underneath covers the rows *below*, which is
+        what a hover card is for and what the reader expects when something
+        opens under their pointer.
+
+        Across the row it follows the pointer instead of the row's leading
+        edge; `alignOffset` is how, and CURSOR_LEAD_PX is why. Radix keeps its
+        own collision handling on top of the offset, so a card asked for near
+        the right edge of the window is pulled back inside it rather than
+        drawn off screen — which is also why the padding is named here: with
+        the default of zero the rescued card ends up flush against the glass.
       */}
-      <HoverCardContent side="bottom" align="start" className="w-[30rem] max-w-[90vw] p-0">
+      <HoverCardContent
+        side="bottom"
+        align="start"
+        alignOffset={alignOffset}
+        collisionPadding={12}
+        className="w-[30rem] max-w-[90vw] p-0"
+      >
         <PreviewCard session={session} preview={preview} />
       </HoverCardContent>
     </HoverCard>

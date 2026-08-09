@@ -242,8 +242,17 @@ function Reachable({ origin }: { origin: string }) {
           The one filled control on the screen, taking its teal from --primary
           rather than naming a colour. A router Link, never a plain anchor: a
           page reload would tear down the tab's one socket.
+
+          The label stays at the control type size — 13px, the token every
+          menu item and button in the app shares, and not a number this one
+          call site gets to disagree with. What changes is the box around it.
+          At the `sm` height this used to have, a 28px control holds a 20px
+          line box, which leaves four pixels of air and makes the words look
+          oversized for the thing they sit in; the label was never the problem.
+          A step taller on a phone as well, where 28px is also under any
+          reasonable target for a finger.
         */}
-        <Button size="sm" asChild>
+        <Button asChild className="h-9 px-3 sm:h-8 sm:px-2.5">
           <Link to="/devices">
             <QrCodeIcon data-icon="inline-start" aria-hidden="true" />
             Pair a device

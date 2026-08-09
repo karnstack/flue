@@ -8,7 +8,6 @@ import {
 } from '@heroicons/react/16/solid'
 
 import { PageHeader } from '@/components/page-header'
-import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
 /*
@@ -84,7 +83,14 @@ const PLANNED = [
  */
 export function SettingsRoute() {
   return (
-    <div className="flex flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
+    /*
+      Capped, and at the same 3xl the Remote screen's panels use. Everything
+      on this page is a line of text, so without a cap the rows keep their
+      hover band all the way to the right edge of a wide display — a highlight
+      three times the width of the words in it, moving under a pointer that is
+      nowhere near them.
+    */
+    <div className="flex max-w-3xl flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
       <PageHeader crumbs={[{ label: 'Settings' }]}>
         <p className={cn(PROSE, 'max-w-[65ch]')}>
           flue keeps almost nothing configurable on purpose — the defaults are the product. These
@@ -102,20 +108,18 @@ export function SettingsRoute() {
               <Icon aria-hidden="true" className="size-3.5 text-zinc-500 dark:text-zinc-400" />
             </span>
             <div className="flex min-w-0 flex-col gap-y-0.5">
-              <span className="flex flex-wrap items-center gap-x-2">
-                <span className="text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
-                  {title}
-                </span>
-                {/*
-                  On every row rather than once at the top, because a reader
-                  scrolling this list should not have to remember a heading to
-                  know what they are looking at. `outline` keeps it quiet: this
-                  is a label, and the screen's teal is spent on nothing here
-                  because there is nothing to press.
-                */}
-                <Badge variant="outline" className="text-zinc-500 dark:text-zinc-400">
-                  Coming soon
-                </Badge>
+              {/*
+                No "Coming soon" badge, and there was one on every row here.
+                A badge earns its place by telling rows apart, which needs at
+                least two kinds of row; when every entry carries it the badge
+                distinguishes nothing and six of them is just six more things
+                to read past. The sentence above the list already says none of
+                these has shipped. Put the badge back the day one of them
+                does, when the list becomes mixed and the label starts
+                answering a question.
+              */}
+              <span className="text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
+                {title}
               </span>
               {/*
                 A step down from the page's own paragraph, and below the title

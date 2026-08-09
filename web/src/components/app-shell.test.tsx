@@ -135,6 +135,52 @@ describe('AppShell', () => {
     }
   })
 
+  it('offers the project and its issue tracker without leaving them in the nav', async () => {
+    await renderWithRouter(
+      <AppShell currentPath="/sessions">
+        <p>route content</p>
+      </AppShell>,
+      OFF_NAV,
+    )
+    // Its own landmark, named: two anonymous "navigation" landmarks in one
+    // sidebar leave a rotor user picking between them by luck.
+    const project = screen.getByRole('navigation', { name: 'Project' })
+
+    const feedback = within(project).getByRole('link', { name: 'Feedback' })
+    expect(feedback.getAttribute('href')).toBe('https://github.com/karnstack/flue/issues')
+    const source = within(project).getByRole('link', { name: 'GitHub' })
+    expect(source.getAttribute('href')).toBe('https://github.com/karnstack/flue')
+
+    for (const out of [feedback, source]) {
+      expect(out.getAttribute('target')).toBe('_blank')
+      // noreferrer as well as noopener: this app is served from a loopback
+      // address as often as from a relay, and neither belongs in a Referer
+      // header sent to GitHub.
+      expect(out.getAttribute('rel')).toContain('noopener')
+      expect(out.getAttribute('rel')).toContain('noreferrer')
+    }
+
+    // And not in the main nav, which is a list of screens this app has.
+    const main = screen.getByRole('navigation', { name: 'Main' })
+    expect(within(main).queryByRole('link', { name: 'GitHub' })).toBeNull()
+  })
+
+  it('signs the corner without taking a click away from the screen underneath', async () => {
+    await renderWithRouter(
+      <AppShell currentPath="/sessions">
+        <p>route content</p>
+      </AppShell>,
+      OFF_NAV,
+    )
+    const credit = screen.getByRole('link', { name: 'karn' })
+    expect(credit.getAttribute('href')).toBe('https://x.com/gyankarn')
+    // The line sits over a scrolling list, so everything but the link itself
+    // has to let pointer events through to whatever is beneath it.
+    const line = credit.closest('p')!
+    expect(line.className).toContain('pointer-events-none')
+    expect(credit.className).toContain('pointer-events-auto')
+  })
+
   it('keeps its own top band for mobile only', async () => {
     // Below md the band is the sheet's opener and the wordmark's home. From
     // md up it used to hold one small button over a screenful of nothing —

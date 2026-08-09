@@ -1,6 +1,9 @@
 import type { ReactNode } from 'react'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
+import { Toaster } from '@/components/ui/sonner'
 import { AppSidebar } from './app-sidebar'
+import { Credit } from './credit'
+import { RelayUpdateNotice } from './relay-update'
 import { Wordmark } from './wordmark'
 
 export interface AppShellProps {
@@ -50,7 +53,22 @@ export function AppShell({ currentPath, children }: AppShellProps) {
           off screen instead of scrolling.
         */}
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+        {/*
+          Last, and a sibling of the scroll area rather than a child of it, so
+          it stays in the panel's corner while the content moves under it. The
+          inset is already positioned, so this needs nothing of its own.
+        */}
+        <Credit />
       </SidebarInset>
+      {/*
+        Outside the panel, because both of these belong to the window rather
+        than to the screen inside it: the notice is raised by the daemon's
+        state and not by whatever route happens to be mounted, and the window
+        it opens portals to the body anyway. Mounted once, here, so a route
+        change cannot re-raise a notice the reader has already sent away.
+      */}
+      <Toaster />
+      <RelayUpdateNotice currentPath={currentPath} />
     </SidebarProvider>
   )
 }

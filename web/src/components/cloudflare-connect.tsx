@@ -2,9 +2,17 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { CheckIcon, CloudIcon } from '@heroicons/react/16/solid'
 
 import { Copyable, Command } from '@/components/copyable'
+import { TextButton, TextLink } from '@/components/text-link'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import { isRelayOrigin } from '@/relay/mode'
@@ -57,6 +65,31 @@ interface DeployResult {
 }
 
 /**
+ * Everything currently reading the daemon's relay answer.
+ *
+ * A module-level set rather than a context, because the thing being kept in
+ * step is not a subtree: the Remote screen's card and the shell's standing
+ * notice (relay-update.tsx) each call the hook, they are on opposite sides of
+ * the tree, and an update started from either has to land on both. A deploy
+ * that finished while the card still said "Update available" was the whole
+ * complaint — the answer had changed and the page was showing a cached copy
+ * of the question.
+ */
+const readers = new Set<() => void>()
+
+/**
+ * Tell them all to ask again.
+ *
+ * Called on every successful deploy or update rather than by whoever started
+ * it. The daemon's answer is one fact about one machine, so the moment it
+ * changes every reader of it is stale, including the ones on other screens
+ * that had nothing to do with the change.
+ */
+export function relayUIChanged() {
+  for (const ask of readers) ask()
+}
+
+/**
  * What the daemon can say about its relay deployability, or null while the
  * answer is on its way (or was refused — a daemon old enough to lack the
  * endpoint answers 404, and the card's fallback is the CLI it always named).
@@ -86,8 +119,10 @@ export function useRelayUIInfo(): RelayUIInfo | null {
     }
     window.addEventListener('focus', run)
     document.addEventListener('visibilitychange', run)
+    readers.add(ask)
     return () => {
       cancelled = true
+      readers.delete(ask)
       window.removeEventListener('focus', run)
       document.removeEventListener('visibilitychange', run)
     }
@@ -147,6 +182,7 @@ function DeployFlow({
   defaultWorker,
   storedToken,
   accountName,
+  onDone,
 }: {
   endpoint: string
   /** The verb on the button: "Deploy" or "Update relay". */
@@ -157,6 +193,8 @@ function DeployFlow({
   /** A token is stored daemon-side: the field is optional and starts hidden. */
   storedToken?: boolean
   accountName?: string
+  /** Called once the deploy has landed, for a caller with something to close. */
+  onDone?: () => void
 }) {
   const [phase, setPhase] = useState<Phase>('form')
   const [token, setToken] = useState('')
@@ -187,6 +225,10 @@ function DeployFlow({
       setResult(res)
       setToken('')
       setPhase('done')
+      // The daemon's answer about this relay is now out of date everywhere it
+      // is being read, including on screens this form is not on.
+      relayUIChanged()
+      onDone?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setPhase(accounts.length > 0 ? 'accounts' : 'form')
@@ -271,14 +313,9 @@ function DeployFlow({
             <div className="flex flex-col gap-y-1.5">
               <label htmlFor="cf-token" className={NOTE}>
                 API token — created at{' '}
-                <a
-                  href={TOKEN_PAGE}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline underline-offset-2"
-                >
+                <TextLink href={TOKEN_PAGE} target="_blank">
                   dash.cloudflare.com
-                </a>{' '}
+                </TextLink>{' '}
                 with the “{TOKEN_TEMPLATE}” template
               </label>
               <Input
@@ -294,13 +331,9 @@ function DeployFlow({
           ) : (
             <p className={NOTE}>
               Using the stored token{accountName ? ` for ${accountName}` : ''}.{' '}
-              <button
-                type="button"
-                onClick={() => setWantsFreshToken(true)}
-                className="underline underline-offset-2"
-              >
+              <TextButton onClick={() => setWantsFreshToken(true)}>
                 Use a different token
-              </button>
+              </TextButton>
             </p>
           )}
         </>
@@ -388,6 +421,16 @@ export function CloudflareConnectCard({
  */
 export function CloudflareConfiguredCard({ info }: { info: RelayUIInfo }) {
   const stale = updateAvailable(info)
+  /*
+    Owned by the card and not by the button, because the button is the first
+    thing to go: a successful update re-asks the daemon, the answer comes back
+    naming this release, `stale` turns false, and everything gated on it
+    disappears — correctly, since there is nothing left to update. A window
+    gated on it would take the list of steps the deploy just produced with it,
+    which is the one account the reader has of what was done to their
+    Cloudflare account.
+  */
+  const [updating, setUpdating] = useState(false)
   return (
     <Card className="max-w-3xl">
       <CardHeader>
@@ -418,19 +461,86 @@ export function CloudflareConfiguredCard({ info }: { info: RelayUIInfo }) {
       </CardHeader>
       <CardContent className="flex flex-col gap-y-5">
         {stale && (
-          <DeployFlow
-            endpoint={UPDATE_ENDPOINT}
-            action="Update relay"
-            storedToken={info.has_token}
-            accountName={info.account_name}
-          />
+          <div>
+            {/*
+              The trailing ellipsis is the old menu convention and it is doing
+              real work: this control opens something and asks, while the one
+              at the foot of the window it opens is the one that acts. Two
+              controls a click apart both reading exactly "Update relay" is
+              the kind of thing a reader forgives and a screen reader does
+              not.
+            */}
+            <Button size="sm" onClick={() => setUpdating(true)}>
+              Update relay…
+            </Button>
+          </div>
         )}
+        <RelayUpdateDialog info={info} open={updating} onOpenChange={setUpdating} />
         <JoinReveal />
         <AddressChange origin={info.origin} />
       </CardContent>
     </Card>
   )
 }
+
+/**
+ * The update, in a window over whatever the reader was looking at.
+ *
+ * It used to be a form sitting open on the Remote card, which was fine while
+ * the Remote card was the only place an update could start. It is not: the
+ * shell raises a notice about a stale relay on every screen (relay-update.tsx),
+ * and a notice whose only answer is "go to a different page, find the card,
+ * scroll to the form" is a notice that costs the reader their place. One
+ * surface for the update, opened from either door, and closing it puts them
+ * back exactly where they were.
+ *
+ * Nothing here is dismissed on success. A deploy answers with the steps it
+ * took, and those steps are the only account of what just happened to the
+ * reader's Cloudflare account — a window that closed itself on the way to
+ * them would be a window that hid its own receipt.
+ */
+export function RelayUpdateDialog({
+  info,
+  open,
+  onOpenChange,
+  onDone,
+}: {
+  info: RelayUIInfo
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onDone?: () => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Update the relay</DialogTitle>
+          <DialogDescription className={NOTE}>
+            {/*
+              Only while the two still differ. The window outlives the answer
+              that opened it — a successful update re-asks the daemon and the
+              versions come back equal — and "deployed by flue 0.3.0; this
+              daemon is 0.3.0" is a sentence that reads as a fault.
+            */}
+            {updateAvailable(info)
+              ? `It was deployed by flue ${info.deployed_version}; this daemon is ${info.version}. `
+              : ''}
+            Updating redeploys the Worker and the web app it serves — the secret, the machine ids
+            and every pairing stay, and everything reconnects on its own.
+          </DialogDescription>
+        </DialogHeader>
+        <DeployFlow
+          endpoint={UPDATE_ENDPOINT}
+          action="Update relay"
+          storedToken={info.has_token}
+          accountName={info.account_name}
+          onDone={onDone}
+        />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 
 /**
  * The custom-domain hand-off: the user routes a domain to the Worker in the
@@ -470,16 +580,14 @@ function AddressChange({ origin }: { origin?: string }) {
       <div className="flex flex-col gap-y-1.5">
         <p className={NOTE}>
           Routed a custom domain to the Worker in the Cloudflare dashboard?{' '}
-          <button
-            type="button"
+          <TextButton
             onClick={() => {
               setEditing(true)
               setSaid('')
             }}
-            className="underline underline-offset-2"
           >
             Change the relay address
-          </button>
+          </TextButton>
         </p>
         <p role="status" className={cn(NOTE, 'empty:hidden')}>
           {said}

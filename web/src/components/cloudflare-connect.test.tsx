@@ -6,6 +6,7 @@ import {
   CloudflareConfiguredCard,
   CloudflareConnectCard,
   updateAvailable,
+  useRelayUIInfo,
   type RelayUIInfo,
 } from './cloudflare-connect'
 
@@ -143,7 +144,11 @@ describe('CloudflareConfiguredCard', () => {
 
     expect(screen.getByText(/deployed by flue 0\.1\.0/)).toBeTruthy()
     const user = userEvent.setup()
-    await user.type(screen.getByLabelText(/API token/), 't')
+    // The card offers the update; the form itself lives in the window that
+    // opens, so that a notice raised on any other screen can open the same
+    // one without taking the reader off the page they were on.
+    await user.click(screen.getByRole('button', { name: 'Update relay…' }))
+    await user.type(await screen.findByLabelText(/API token/), 't')
     await user.click(screen.getByRole('button', { name: 'Update relay' }))
 
     expect(calls[0]!.url).toBe('/api/relay/update')
@@ -163,11 +168,13 @@ describe('CloudflareConfiguredCard', () => {
     }
     render(<CloudflareConfiguredCard info={info} />)
 
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Update relay…' }))
+
     // No token field: the stored credential answers, named by account.
     expect(screen.queryByLabelText(/API token/)).toBeNull()
-    expect(screen.getByText(/Using the stored token for personal/)).toBeTruthy()
+    expect(await screen.findByText(/Using the stored token for personal/)).toBeTruthy()
 
-    const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Update relay' }))
 
     expect(calls[0]!.url).toBe('/api/relay/update')
@@ -190,7 +197,61 @@ describe('CloudflareConfiguredCard', () => {
     )
     expect(screen.getByText(/Deployed into personal/)).toBeTruthy()
     expect(screen.getByText(/nothing to update/)).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Update relay' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Update relay…' })).toBeNull()
+  })
+})
+
+/**
+ * The card as the Remote screen actually mounts it: reading the daemon rather
+ * than being handed an answer. Everything about staying in step with a deploy
+ * happens between the hook and the card, so a case that passes `info` in as a
+ * prop cannot see any of it.
+ */
+function LiveConfiguredCard() {
+  const info = useRelayUIInfo()
+  return info ? <CloudflareConfiguredCard info={info} /> : <p>asking the daemon…</p>
+}
+
+describe('the card after an update lands', () => {
+  it('re-reads the daemon rather than leaving the old answer on screen', async () => {
+    // GET info (behind), POST update, GET info (current) — the third being
+    // the one that only happens if a finished deploy tells its readers.
+    stubFetch([
+      {
+        configured: true,
+        can_deploy: true,
+        version: '0.3.0',
+        deployed_version: '0.2.0',
+        worker: 'flue-relay',
+        has_token: true,
+      },
+      { steps: ['worker deployed: flue-relay'] },
+      {
+        configured: true,
+        can_deploy: true,
+        version: '0.3.0',
+        deployed_version: '0.3.0',
+        worker: 'flue-relay',
+        has_token: true,
+      },
+    ])
+    render(<LiveConfiguredCard />)
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Update relay…' }))
+    await user.click(screen.getByRole('button', { name: 'Update relay' }))
+
+    // The card behind the window has caught up on its own: no offer to update
+    // something that no longer needs it, and it says so.
+    expect(await screen.findByText(/nothing to update/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Update relay…' })).toBeNull()
+
+    // And the window is still standing, holding the only account the reader
+    // has of what was just done to their Cloudflare account. It used to be
+    // rendered only while an update was outstanding, which took the steps off
+    // screen at the instant they arrived.
+    expect(screen.getByText('worker deployed: flue-relay')).toBeTruthy()
+    expect(screen.getByRole('dialog')).toBeTruthy()
   })
 })
 

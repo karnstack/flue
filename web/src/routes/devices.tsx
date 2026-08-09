@@ -9,6 +9,7 @@ import { useRelayTransport } from '@/hooks/use-relay-transport'
 import { useFlueClient } from '@/client/provider'
 import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
 import { PageHeader } from '@/components/page-header'
+import { TEXT_LINK } from '@/components/text-link'
 import { Button } from '@/components/ui/button'
 import { ago } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -645,10 +646,7 @@ export function DevicesRoute() {
               page load would tear down the tab's one socket, and this daemon
               is what that socket is to.
             */}
-            <Link
-              to="/remote"
-              className="font-medium text-zinc-950 underline underline-offset-4 dark:text-white"
-            >
+            <Link to="/remote" className={TEXT_LINK}>
               Set up remote access
             </Link>
           </p>
