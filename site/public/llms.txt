@@ -1,0 +1,57 @@
+# flue
+
+> flue keeps your terminal sessions alive on the machine that owns them and hands them back on any device you have. A small Go daemon owns the shells and their scrollback; a web app renders them. Closing the tab detaches rather than kills, so a build, an agent run or an SSH session keeps going, and reattaching replays what was missed.
+
+flue is open source (MIT), pre-1.0, and free. It installs as one static Go
+binary on macOS, Linux and WSL, with no Node, Python or other toolchain.
+
+There is no hosted service. The daemon binds loopback and nothing else.
+Remote access is opt-in and runs on infrastructure you own: `flue relay setup`
+deploys a relay Worker and the web app into your own Cloudflare account, on the
+free tier. Traffic crossing that relay is end-to-end encrypted with Noise IK,
+the daemon's static key pinned when a browser pairs, so the Worker forwards
+ciphertext it holds no key for. flue.sh serves docs and downloads and is never
+part of the data path.
+
+Status: the local terminal, the login service, the fleet-wide sessions list and
+the end-to-end pairing all work. The Cloudflare relay is built and deployable
+but has not been through its manual end-to-end gate against a real account.
+It is ready to try rather than ready to rely on.
+
+## Install
+
+```sh
+brew install karnstack/tap/flue    # or: curl -fsSL https://flue.sh/install.sh | sh
+flue enable
+```
+
+`flue enable` installs a login service, starts the daemon and opens the UI.
+Everything after that happens in the browser.
+
+## CLI
+
+- `flue enable`: install the login service, start the daemon, open the UI
+- `flue disable`: remove it
+- `flue status`: daemon, login service and session diagnostics
+- `flue open [path]`: spawn a session in a directory
+- `flue serve`: run the daemon in the foreground, no login service
+- `flue relay setup`: deploy a relay to your own Cloudflare account
+- `flue relay join`: point this machine at a relay another machine deployed
+- `flue relay status`: show the configured relay
+- `flue relay update`: redeploy this release's relay; secret and pairings kept
+- `flue relay address`: repoint this machine at a custom domain on the same relay
+
+## Docs
+
+- [How flue works](https://flue.sh/docs/how-it-works): the daemon that owns the shells, why closing a tab detaches rather than kills, how two devices mirror one session, and the CLI.
+- [Remote access](https://flue.sh/docs/relay): how a machine becomes reachable from anywhere on infrastructure you own, the relay protocol, what it costs, and what a relay operator can and cannot see.
+- [FAQ](https://flue.sh/docs/faq): short answers, including the one where the honest answer is not the flattering one. The web app's JavaScript is served by the relay origin, so a hostile origin is a real threat that encryption does not remove.
+
+## Optional
+
+- [Source](https://github.com/karnstack/flue): the repository. Everything is MIT licensed and there is no closed component.
+- [The relay runbook](https://github.com/karnstack/flue/blob/main/docs/RELAY.md): operator-grade detail, the caps, and the counters.
+- [The long FAQ](https://github.com/karnstack/flue/blob/main/docs/faq.md): the full version of the trust argument, including the exact move a hostile origin would make.
+- [Developing flue](https://github.com/karnstack/flue/blob/main/docs/DEVELOPMENT.md): the dev loop and the dev/prod split.
+- [Relay protocol spec](https://github.com/karnstack/flue/blob/main/spec/relay-protocol.md): the normative protocol.
+- [Known rough edges](https://github.com/karnstack/flue/blob/main/docs/FOLLOW-UPS.md): what is not finished.

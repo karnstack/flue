@@ -1,6 +1,6 @@
 <h1 align="center">flue</h1>
 
-<p align="center"><strong>A session manager for every machine you own — in a browser tab.</strong></p>
+<p align="center"><strong>Your work shouldn't stop when you close the laptop.</strong></p>
 
 <p align="center">
   <a href="https://github.com/karnstack/flue/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/karnstack/flue/ci.yml?branch=main&label=ci" alt="CI status"></a>
@@ -10,20 +10,27 @@
 
 <p align="center">
   <a href="https://flue.sh">flue.sh</a> ·
-  <a href="docs/DEVELOPMENT.md">developing</a> ·
-  <a href="docs/RELAY.md">relay runbook</a> ·
-  <a href="docs/faq.md">faq</a>
+  <a href="https://flue.sh/docs/how-it-works">how it works</a> ·
+  <a href="https://flue.sh/docs/relay">remote access</a> ·
+  <a href="https://flue.sh/docs/faq">faq</a>
 </p>
 
-flue runs a small daemon that owns your shells. It keeps them alive when you
-close the tab, lists every one of them across every machine you have paired,
-and hands them back — on your laptop, your phone, a second machine — exactly
-where you left off.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/hero-dark.png">
+    <img src="docs/hero-light.png" width="900"
+      alt="flue's sessions screen in a browser tab on 127.0.0.1:7717, listing six sessions grouped across four machines: macbook, studio, pi-4 and vps. Beside it a phone, on the relay's own address, has the same highlighted session open, showing an agent transcript and a row of terminal keys.">
+  </picture>
+</p>
+
+Builds, agents and SSH sessions keep running on the machine that owns them,
+and you pick any of them back up on any device you have. A small Go daemon
+holds the shells and their scrollback; a web app renders them. Closing the tab
+detaches rather than kills, and reattaching replays what you missed.
 
 - **Sessions outlive the tab.** Close it and the build keeps running.
-  Reattaching replays what you missed.
 - **One list, every machine.** Name, tag, pin, group and search the whole
-  fleet from one tab. Hover a session to see what it is actually doing.
+  fleet from one place. Hover a session to see what it is actually doing.
 - **Reachable from anything you own.** Pair a phone with a QR code. Two
   devices on one session mirror live, and the phone's 40 columns don't shrink
   the laptop.
@@ -49,7 +56,7 @@ Everything after that happens in the browser.
 flue enable        # install the login service, start the daemon, open the UI
 flue disable       # remove it
 flue status        # daemon, login service, and session diagnostics
-flue open [path]   # spawn a session here — handy from a shell prompt
+flue open [path]   # spawn a session here, handy from a shell prompt
 flue relay setup   # deploy a relay to your own Cloudflare account
 flue relay join    # point this machine at a relay another machine deployed
 flue relay status  # show the configured relay
@@ -73,10 +80,12 @@ on the free tier. The same deploy is a card on the UI's Remote screen. One
 relay fronts every machine you own; pairing is per machine, once per browser,
 from the QR each machine shows.
 
-What it deploys, what it costs, what one shared secret does and does not
-separate: [docs/RELAY.md](docs/RELAY.md). What a hostile relay origin could
-do despite the end-to-end encryption — the honest version, because the browser
-loads its JavaScript from that origin — is in the [FAQ](docs/faq.md).
+What it deploys and what it costs is at
+[flue.sh/docs/relay](https://flue.sh/docs/relay), with the operator-grade
+version in [docs/RELAY.md](docs/RELAY.md). What a hostile relay origin could do
+despite the end-to-end encryption, which is the honest version because the
+browser loads its JavaScript from that origin, is in the
+[FAQ](https://flue.sh/docs/faq) and at length in [docs/faq.md](docs/faq.md).
 
 <p align="center">
   <img src="docs/architecture.png" width="830"
@@ -88,8 +97,8 @@ loads its JavaScript from that origin — is in the [FAQ](docs/faq.md).
 Pre-1.0, and honest about it. The local terminal, the login service, the
 fleet-wide sessions list and the end-to-end pairing all work. The Cloudflare
 relay is built and deployable but has not been through its manual end-to-end
-gate against a real account ([docs/RELAY.md](docs/RELAY.md)) — ready to try
-rather than ready to rely on. Known rough edges live in
+gate against a real account ([docs/RELAY.md](docs/RELAY.md)), so treat it as
+ready to try rather than ready to rely on. Known rough edges live in
 [docs/FOLLOW-UPS.md](docs/FOLLOW-UPS.md).
 
 flue is open source and always free.
@@ -97,13 +106,14 @@ flue is open source and always free.
 ## Building and developing
 
 ```sh
-mise install   # go, node, pnpm — pinned in mise.toml
+mise install   # go, node, pnpm, pinned in mise.toml
 make build     # web UI + relay Worker, embedded, into bin/flue
 make test
 ```
 
 The dev loop, the dev/prod split, and working on the relay are in
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The landing site is its own package
+under [site/](site/), and `make site-dev` runs it.
 
 ## License
 
