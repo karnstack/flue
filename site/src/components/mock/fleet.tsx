@@ -264,16 +264,18 @@ export function PhoneFrame({ className }: { className?: string }) {
         {/* Status bar, with the island floating over it. The island is the
             one part that is black in both themes — it is a cutout, not a
             surface. */}
-        <div className="relative flex shrink-0 items-center justify-between px-4 pt-3.5 pb-2.5 text-foreground">
-          <span className="font-mono text-[0.6875rem] font-medium tabular-nums">9:41</span>
+        <div className="relative flex shrink-0 items-center justify-between px-4 pt-3.5 pb-2.5 text-zinc-400 dark:text-white">
+          <span className="font-mono text-[0.6875rem] font-medium tabular-nums text-zinc-500 dark:text-white">
+            9:41
+          </span>
           {/* The island is a cutout, so it is black in both themes — and it is
               sized to leave real air on both sides of it rather than crowding
               the clock and the status cluster. */}
           <span
             aria-hidden="true"
-            className="absolute top-2.5 left-1/2 flex h-5 w-16 -translate-x-1/2 items-center justify-end rounded-full bg-zinc-600 pr-1.5 dark:bg-black"
+            className="absolute top-2.5 left-1/2 flex h-5 w-16 -translate-x-1/2 items-center justify-end rounded-full bg-zinc-200 pr-1.5 dark:bg-black"
           >
-            <span className="size-1.5 rounded-full bg-zinc-700 dark:bg-zinc-900" />
+            <span className="size-1.5 rounded-full bg-zinc-300 dark:bg-zinc-900" />
           </span>
           <StatusIcons />
         </div>

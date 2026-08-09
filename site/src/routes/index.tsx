@@ -109,12 +109,14 @@ function Eyebrow() {
       href={REPO_URL}
       target="_blank"
       rel="noreferrer"
-      className="inline-flex items-center gap-2 rounded-full border border-border py-1 pr-3 pl-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+      /* Nowrap and short on purpose: a pill that wraps to two lines stops
+         reading as a pill. */
+      className="inline-flex items-center gap-2 rounded-full border border-border py-1 pr-3 pl-1.5 text-sm whitespace-nowrap text-muted-foreground hover:bg-accent hover:text-foreground"
     >
       <span className="rounded-full bg-primary/10 px-2 py-0.5 font-mono text-xs font-medium text-primary">
         MIT
       </span>
-      Open source, and there is no hosted service
+      Open source, no hosted service
     </a>
   )
 }
