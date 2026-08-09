@@ -84,6 +84,8 @@ func main() {
 		err = cmdStatus()
 	case "relay":
 		err = cmdRelay(os.Args[2:])
+	case "version", "--version", "-v":
+		err = cmdVersion()
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -108,6 +110,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue relay address URL  repoint this machine at a custom domain on the same relay
   flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N] [--open]   run the daemon in the foreground
+  flue version            print the version (also --version, -v)
 `
 
 func usage() {
@@ -701,16 +704,34 @@ func openURL(port int, handoff, cwd string) string {
 	return u.String()
 }
 
+func cmdVersion() error {
+	return versionTo(os.Stdout)
+}
+
+// versionTo writes the one-line version report: the binary's name and the
+// version goreleaser stamped into it — "dev" from source, which is the
+// honest answer, since a from-source build corresponds to no release. This
+// is the entry point a script, a bug-report template, or a user checking an
+// install expects; unlike flue status it never talks to the daemon. It
+// prints the same package-level version flue status opens with — the two
+// must stay in agreement. The writer is the seam — same pattern as statusTo
+// — so the test reads the line without capturing os.Stdout.
+func versionTo(w io.Writer) error {
+	_, err := fmt.Fprintf(w, "flue %s\n", version)
+	return err
+}
+
 func cmdStatus() error {
 	return statusTo(os.Stdout)
 }
 
 // statusTo writes the status report. The first line is always the version —
 // "dev" from source, the release version when stamped — because status is
-// the CLI's only diagnostics surface and there is deliberately no version
-// subcommand to put it on. The writer is the seam — same pattern as
-// loadToken and openBrowser — so the test reads the report without
-// capturing os.Stdout.
+// the CLI's diagnostics surface and its output lands in bug reports, which
+// should name the build they describe. flue version (versionTo) prints the
+// same value on its own for anyone who only wants the number. The writer is
+// the seam — same pattern as loadToken and openBrowser — so the test reads
+// the report without capturing os.Stdout.
 func statusTo(w io.Writer) error {
 	fmt.Fprintf(w, "version:  %s\n", version)
 	if mgr, err := newServiceManager(); err == nil {

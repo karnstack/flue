@@ -1176,6 +1176,35 @@ func TestAcquireStartLockTimesOutWhenHeld(t *testing.T) {
 	}
 }
 
+// --- version ---
+
+// TestVersionToPrintsTheStampedVersion pins the CLI's scriptable version
+// surface: flue version — and the --version and -v spellings main routes to
+// the same place — answers with one line naming the stamped version, without
+// a daemon conversation. Under go test the binary is unstamped, so the
+// honest answer is the literal "dev"; goreleaser substitutes the release
+// version via -ldflags -X main.version at release time. If this line's
+// shape changes, flue status's opening line (TestStatusReportsTheStamped-
+// Version) is the other half of the same contract.
+func TestVersionToPrintsTheStampedVersion(t *testing.T) {
+	var buf bytes.Buffer
+	if err := versionTo(&buf); err != nil {
+		t.Fatalf("versionTo: %v", err)
+	}
+	if got, want := buf.String(), "flue dev\n"; got != want {
+		t.Fatalf("versionTo output = %q, want %q", got, want)
+	}
+}
+
+// TestUsageMentionsVersion keeps flue version in the help text — a command
+// nobody can discover may as well not exist, and the README's CLI table is
+// kept in agreement with usageText by hand.
+func TestUsageMentionsVersion(t *testing.T) {
+	if !strings.Contains(usageText, "flue version") {
+		t.Fatalf("usage text does not mention %q:\n%s", "flue version", usageText)
+	}
+}
+
 // --- status ---
 
 // TestStatusReportsTheStampedVersion pins the contract the release pipeline
