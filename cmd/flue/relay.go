@@ -100,10 +100,15 @@ const relayAddressUsage = "usage: flue relay address <wss://relay.example.com>"
 // Only the URL and origin change; the worker, the secret and this machine's
 // id are exactly what they were, because the Worker behind the name is.
 //
-// Browsers paired against the old origin keep working as long as that origin
-// still routes (workers.dev does not stop when a domain is added). A browser
-// opening the new origin pairs afresh — its keys and records are stored per
-// origin by the browser itself, and no amount of daemon config can move them.
+// What does not survive the move is any existing pairing. A pairing is pinned
+// to the origin the browser performed it on, and the daemon refuses channels
+// and pairing requests announced on any origin it did not dial
+// (internal/transport/relay/channel.go) — a security property, not a config
+// gap, so it holds against the old origin too, even while workers.dev still
+// routes. Every paired browser opens the new address and pairs afresh; its
+// keys and records live per origin in the browser anyway, and no amount of
+// daemon config can move them. relayAddressDone says so out loud, and
+// docs/RELAY.md's custom-domain section says why.
 func runRelayAddress(w io.Writer, args []string) error {
 	if len(args) != 1 {
 		return errors.New(relayAddressUsage)
@@ -125,9 +130,22 @@ func runRelayAddress(w io.Writer, args []string) error {
 		return fmt.Errorf("save the relay configuration: %w", err)
 	}
 	fmt.Fprintf(w, "  ✓ relay address is now wss://%s\n", host)
-	fmt.Fprint(w, relayJoinDone)
+	fmt.Fprint(w, relayAddressDone)
 	return nil
 }
+
+// relayAddressDone is relayJoinDone's restart note plus the one consequence
+// the ✓ line does not carry: the daemon serves exactly the origin it dials,
+// so every browser paired on the old one is refused from here on — a tab
+// left there reconnects forever — and each must pair again on the new
+// address. Said here because nothing else will say it: the old origin keeps
+// routing, so the stranding looks like a network fault, not a config change.
+const relayAddressDone = `
+relay address changed. restart the daemon (flue disable && flue enable, or
+restart flue serve) to dial it. every browser paired on the old origin must
+open the new address and pair again — pairings are pinned to the origin
+they were made on, and a tab on the old one will only ever reconnect.
+`
 
 const relaySetupUsage = "usage: flue relay setup [--worker <name>]"
 
