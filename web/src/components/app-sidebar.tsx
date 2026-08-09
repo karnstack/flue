@@ -1,9 +1,12 @@
 import type { ComponentProps } from 'react'
 import { Link } from '@tanstack/react-router'
+import { ChatBubbleLeftRightIcon } from '@heroicons/react/16/solid'
+import { ISSUES_URL, REPO_URL } from '@/lib/links'
 import { cn } from '@/lib/utils'
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarHeader,
@@ -13,7 +16,22 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar'
 import { isNavItemActive, NAV_ITEMS } from './nav'
-import { Wordmark } from './wordmark'
+import { UpdateNotice } from './update-notice'
+import { GithubMark, Wordmark } from './wordmark'
+
+/**
+ * The two places outside the app a reader might want to go, and the only
+ * reason the sidebar has a footer.
+ *
+ * Both leave the SPA, so both are plain anchors and neither is a router Link
+ * — and both are quieter than the nav above them: they are not screens, they
+ * never carry the current-page treatment, and a reader scanning the sidebar
+ * for where they are should not have to read past them.
+ */
+const OUTBOUND = [
+  { href: ISSUES_URL, label: 'Feedback', icon: ChatBubbleLeftRightIcon },
+  { href: REPO_URL, label: 'GitHub', icon: GithubMark },
+] as const
 
 export interface AppSidebarProps extends ComponentProps<typeof Sidebar> {
   currentPath: string
@@ -103,6 +121,38 @@ export function AppSidebar({ currentPath, ...props }: AppSidebarProps) {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
+      {/*
+        Pinned to the bottom by the primitive, not by the list above it: the
+        nav is short enough that the sidebar's empty middle would otherwise
+        leave these two sitting directly under Settings, reading as two more
+        screens the app has.
+      */}
+      <SidebarFooter>
+        <UpdateNotice />
+        <nav aria-label="Project">
+          <SidebarMenu role="list" className="gap-0.5">
+            {OUTBOUND.map(({ href, label, icon: Icon }) => (
+              <SidebarMenuItem key={href}>
+                <SidebarMenuButton
+                  asChild
+                  className="h-8 gap-x-2.5 font-medium text-sm/6 text-zinc-500 hover:text-zinc-950 sm:h-7 sm:text-control dark:text-zinc-400 dark:hover:text-white"
+                >
+                  {/*
+                    `noreferrer` alongside `noopener` deliberately: this app is
+                    served from a machine's own loopback address as often as
+                    from a relay, and neither is an address worth handing to
+                    GitHub in a Referer header.
+                  */}
+                  <a href={href} target="_blank" rel="noopener noreferrer">
+                    <Icon className="size-4 shrink-0" aria-hidden="true" />
+                    <span>{label}</span>
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            ))}
+          </SidebarMenu>
+        </nav>
+      </SidebarFooter>
     </Sidebar>
   )
 }

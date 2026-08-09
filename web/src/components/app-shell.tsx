@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { AppSidebar } from './app-sidebar'
+import { Credit } from './credit'
 import { Wordmark } from './wordmark'
 
 export interface AppShellProps {
@@ -50,6 +51,12 @@ export function AppShell({ currentPath, children }: AppShellProps) {
           off screen instead of scrolling.
         */}
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+        {/*
+          Last, and a sibling of the scroll area rather than a child of it, so
+          it stays in the panel's corner while the content moves under it. The
+          inset is already positioned, so this needs nothing of its own.
+        */}
+        <Credit />
       </SidebarInset>
     </SidebarProvider>
   )

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { FleetSession } from '@/fleet/types'
-import { PreviewCard, SessionPreview } from './session-preview'
+import { cursorAlignOffset, PreviewCard, SessionPreview } from './session-preview'
 
 /** One session, with everything a case did not care about filled in. */
 function fs(over: Partial<FleetSession> = {}): FleetSession {
@@ -26,6 +26,29 @@ function fs(over: Partial<FleetSession> = {}): FleetSession {
     ...over,
   }
 }
+
+describe('cursorAlignOffset', () => {
+  it('hangs the card just left of where the pointer actually is', () => {
+    // A row is the full width of the screen, so a card pinned to its leading
+    // edge opened a thousand pixels away from a reader looking at a session's
+    // machine or its timestamp. Measured across the row from its own left,
+    // which is the frame Radix positions in.
+    expect(cursorAlignOffset(24, 824)).toBe(776)
+  })
+
+  it('sits a little left of the pointer rather than under it', () => {
+    // Not zero: a card whose corner is exactly beneath the cursor reads as
+    // though it is about to swallow it.
+    expect(cursorAlignOffset(100, 100)).toBeLessThan(0)
+  })
+
+  it('falls back to the leading edge of the row when no pointer opened the card', () => {
+    // Keyboard focus opens this too, and there is nothing to aim at then —
+    // the focus ring the reader is following is already at the row's start.
+    expect(cursorAlignOffset(24, null)).toBe(0)
+    expect(cursorAlignOffset(undefined, 824)).toBe(0)
+  })
+})
 
 describe('PreviewCard', () => {
   it('names the session, its machine and its directory', () => {

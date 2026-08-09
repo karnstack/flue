@@ -642,9 +642,17 @@ export function SessionsRoute() {
               click starts a second shell whose `attached` arrives after this
               screen has navigated away on the first.
             */}
+            {/*
+              The default size, not `sm`, and that is a fact about the row
+              rather than a preference: the search field is an Input (h-8) and
+              the display-options trigger is an icon button (size-8), so a
+              28px control between them sat four pixels short at the top and
+              the bottom of a line whose other two members agreed. A toolbar
+              is read as one object, and one member of it being a different
+              height reads as a rendering fault rather than as emphasis.
+            */}
             <div className="flex items-center">
               <Button
-                size="sm"
                 disabled={starting}
                 onClick={() => spawnOn(primaryTarget)}
                 className="rounded-r-none"
@@ -654,7 +662,6 @@ export function SessionsRoute() {
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
-                    size="sm"
                     disabled={starting}
                     aria-label="Choose a machine for the new session"
                     className="-ml-px rounded-l-none px-1"

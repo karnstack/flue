@@ -143,6 +143,10 @@ type Server struct {
 	relayUIMu sync.Mutex
 	relayUI   RelayUI
 
+	// release is the update checker behind ReleasePath, injected the same way
+	// and nil by default. See release.go.
+	release releaseState
+
 	// baseCtx is the parent of every served connection's context, and
 	// baseCancel is how shutdown reaches them.
 	//
@@ -356,6 +360,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle(RelayUpdatePath, s.withAuth(http.HandlerFunc(s.handleRelayUpdate)))
 	mux.Handle(RelayJoinPath, s.withAuth(http.HandlerFunc(s.handleRelayJoin)))
 	mux.Handle(RelayAddressPath, s.withAuth(http.HandlerFunc(s.handleRelayAddress)))
+	mux.Handle(ReleasePath, s.withAuth(http.HandlerFunc(s.handleRelease)))
 	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
 	// never the app shell.
 	//

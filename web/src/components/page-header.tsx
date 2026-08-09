@@ -1,8 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 
-import { SidebarTrigger } from '@/components/ui/sidebar'
-
 /**
  * One step of the trail. `to` is absent on the step the reader is already
  * standing on, which is always the last one — a crumb that linked to the page
@@ -42,12 +40,14 @@ export interface PageHeaderProps {
  * carries — which crumbs, which actions, whether a second row exists at all —
  * is the route's own business, and a shell that owned it would have to be fed
  * every one of those through context to end up rendering the same markup.
- * One piece of shell furniture rides along anyway: the sidebar trigger, from
- * md up, because a bar of the shell's own above every screen held that one
- * small button and nothing else. The cost is that this component now expects
- * a SidebarProvider above it, which the shell provides everywhere it renders.
- * Below md the shell's mobile band still carries the trigger, wordmark and
- * all, so the one here stands down there.
+ *
+ * No shell furniture rides along. The sidebar trigger sat here from md up for
+ * a while, and it was the only thing on any of these screens whose subject was
+ * the app rather than the page: a permanent control for putting away a
+ * four-item nav that nothing on a desktop is short of room for. Collapsing is
+ * still there for anyone who wants it — the primitive binds mod+B — and the
+ * shell's mobile band keeps a trigger of its own, where the nav really does
+ * cost the screen it is on.
  */
 export function PageHeader({ crumbs, actions, children }: PageHeaderProps) {
   const current = crumbs.length - 1
@@ -72,7 +72,6 @@ export function PageHeader({ crumbs, actions, children }: PageHeaderProps) {
       */}
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
         <div className="flex min-w-0 items-center gap-x-1.5">
-          <SidebarTrigger className="-ml-1.5 max-md:hidden" />
           <nav aria-label="Breadcrumb" className="min-w-0">
             <ol className="flex flex-wrap items-baseline gap-x-2">
               {crumbs.map((crumb, i) => (

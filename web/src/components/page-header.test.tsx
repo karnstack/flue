@@ -11,18 +11,16 @@ const trail = () => screen.getByRole('navigation', { name: 'Breadcrumb' })
 const block = () => document.querySelector('[data-slot="page-header"]')!
 
 describe('PageHeader', () => {
-  it('carries the sidebar trigger beside the crumbs, for md and up', async () => {
-    // The shell used to spend a whole bar on this one button; now it sits on
-    // the heading's own line. Below md it stands down — the shell's mobile
-    // band still carries a trigger of its own there, beside the wordmark.
+  it('carries nothing of the shell, only the page', async () => {
+    // The sidebar trigger sat beside the crumbs from md up for a while, and
+    // it was the one control on any of these screens whose subject was the
+    // app rather than the page. Collapsing is still reachable — the primitive
+    // binds mod+B, and the shell's mobile band keeps a trigger of its own —
+    // so what came out is a permanent button, not the ability.
     await renderWithRouter(<PageHeader crumbs={[{ label: 'Sessions' }]} />)
 
-    const trigger = screen.getByRole('button', { name: 'Toggle Sidebar' })
-    expect(block().contains(trigger)).toBe(true)
-    expect(trigger.className).toMatch(/\bmax-md:hidden\b/)
-    // Outside the trail's landmark: the trigger is shell furniture, not a
-    // step on the way here.
-    expect(trail().contains(trigger)).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Toggle Sidebar' })).toBeNull()
+    expect(block().querySelector('button')).toBeNull()
   })
 
   it('renders a lone crumb as the page heading, with nothing before it', async () => {

@@ -125,7 +125,7 @@ function StatePanel({
   children: ReactNode
 }) {
   return (
-    <section className="flex max-w-3xl flex-col gap-y-4 rounded-lg bg-card p-4 shadow-low ring-1 ring-hairline sm:p-5">
+    <section className="flex flex-col gap-y-4 rounded-lg bg-card p-4 shadow-low ring-1 ring-hairline sm:p-5">
       <div className="flex items-start gap-x-3">
         <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-zinc-950/5 dark:bg-white/5">
           <Icon aria-hidden="true" className="size-4 text-zinc-500 dark:text-zinc-400" />
@@ -242,8 +242,18 @@ function Reachable({ origin }: { origin: string }) {
           The one filled control on the screen, taking its teal from --primary
           rather than naming a colour. A router Link, never a plain anchor: a
           page reload would tear down the tab's one socket.
+
+          The label reads at 13px now for a reason that has nothing to do with
+          this call site: `cn` was deleting the size off every filled button in
+          the app, so this one was set in the page's 16px. See lib/utils.ts.
+
+          What is here is the height alone, and only to buy a finger something
+          to hit — the default 32px control is right on a pointer and small on
+          a phone. No padding override: the default already trims its leading
+          edge when an icon leads (`has-data-[icon=inline-start]`), and naming
+          px here would fight that rule rather than replace it.
         */}
-        <Button size="sm" asChild>
+        <Button asChild className="h-9 sm:h-8">
           <Link to="/devices">
             <QrCodeIcon data-icon="inline-start" aria-hidden="true" />
             Pair a device
@@ -339,11 +349,18 @@ export function RemoteRoute() {
     relay.status === 'connected' && origin === '' ? 'connecting' : relay.status
 
   return (
-    <div className="flex flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
+    /*
+      The cap moves up here from the panels inside it, which each carried
+      their own 3xl: once the page itself is capped and centred they were the
+      same width as it and so did nothing, while the header above them stayed
+      left-ranged against a whole display. Same number as Devices and
+      Settings, so the heading does not jump sideways when the reader moves
+      between them.
+    */
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
       {/*
         PageHeader rather than a hand-rolled heading row, so this screen
-        carries the same trail markup — and the same sidebar trigger on the
-        heading's line — as every other management screen.
+        carries the same trail markup as every other management screen.
       */}
       <PageHeader
         crumbs={[{ label: 'Remote access' }]}
@@ -417,7 +434,7 @@ function AwaitingWelcome({ connecting }: { connecting: boolean }) {
   return (
     <section
       aria-hidden="true"
-      className="flex max-w-3xl flex-col gap-y-3 rounded-lg bg-card p-4 shadow-low ring-1 ring-hairline sm:p-5"
+      className="flex flex-col gap-y-3 rounded-lg bg-card p-4 shadow-low ring-1 ring-hairline sm:p-5"
     >
       <Skeleton className="h-5 w-48" />
       <Skeleton className="h-4 w-full" />

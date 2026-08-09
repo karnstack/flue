@@ -9,6 +9,7 @@ import { useRelayTransport } from '@/hooks/use-relay-transport'
 import { useFlueClient } from '@/client/provider'
 import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
 import { PageHeader } from '@/components/page-header'
+import { TEXT_LINK } from '@/components/text-link'
 import { Button } from '@/components/ui/button'
 import { ago } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -578,7 +579,17 @@ export function DevicesRoute() {
   const message = notice ?? connectionNotice(status)
 
   return (
-    <div className="flex flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
+    /*
+      Capped and centred, like Settings and Remote. Nothing on this screen is
+      a data grid: it is a paragraph, a card with a QR beside it, and a short
+      run of names and dates. Given a whole display each of those takes a
+      measure nobody can read across, and each row takes a hover band several
+      times the width of the words in it. 3xl is where the pairing card stops
+      being mostly empty, and the same number on all three screens is what
+      keeps the heading from jumping sideways when the reader moves between
+      them.
+    */
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
       <PageHeader
         crumbs={[{ label: 'Devices' }]}
         actions={
@@ -593,9 +604,13 @@ export function DevicesRoute() {
             while no device could reach the address the QR would carry — see
             `reachable` — since a pairing that succeeds against 127.0.0.1 is
             worse than one refused: it mints a device that can never connect.
+
+            The default size rather than `sm`, like the Sessions header's own
+            action: a page header's one filled control is the same height on
+            every screen, and on Sessions it shares a line with an Input and an
+            icon button that are both 32px.
           */
           <Button
-            size="sm"
             disabled={!connected || !reachable}
             // Only when that is the reason it is shut. A button held shut by a
             // socket that is down is already explained by the live region
@@ -645,10 +660,7 @@ export function DevicesRoute() {
               page load would tear down the tab's one socket, and this daemon
               is what that socket is to.
             */}
-            <Link
-              to="/remote"
-              className="font-medium text-zinc-950 underline underline-offset-4 dark:text-white"
-            >
+            <Link to="/remote" className={TEXT_LINK}>
               Set up remote access
             </Link>
           </p>
