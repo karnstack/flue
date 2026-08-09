@@ -85,10 +85,8 @@ export function SettingsRoute() {
   return (
     /*
       Capped and centred, at the same 3xl Devices and Remote use. Everything
-      on this page is a line of text, so without a cap the rows keep their
-      hover band all the way to the right edge of a wide display — a highlight
-      three times the width of the words in it, moving under a pointer that is
-      nowhere near them.
+      on this page is a line of text, so without a cap it would take a measure
+      nobody can read across on a wide display.
     */
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
       <PageHeader crumbs={[{ label: 'Settings' }]}>
@@ -98,12 +96,22 @@ export function SettingsRoute() {
         </p>
       </PageHeader>
 
-      <ul className="flex flex-col">
+      {/*
+        A gapped column, and no row surface of any kind.
+
+        These rows used to light up under the pointer, which was wrong twice
+        over. It was wrong on its own terms — the band was drawn on the `li`,
+        so it ran the full width of the page while the sentence inside it
+        stopped at 60ch, leaving a couple of hundred pixels of highlight past
+        the last word. And it was wrong in principle, which is the reason it
+        is gone rather than trimmed: nothing on this page can be clicked, and
+        a surface that reacts to a pointer is a promise that something will
+        happen when it arrives. The component note above says this screen has
+        no controls that look operable and are not; a hover state is one.
+      */}
+      <ul className="flex flex-col gap-y-4">
         {PLANNED.map(({ icon: Icon, title, blurb }) => (
-          <li
-            key={title}
-            className="flex items-start gap-x-3 rounded-md px-2 py-2.5 transition-colors hover:bg-row-hover"
-          >
+          <li key={title} className="flex items-start gap-x-3">
             <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-zinc-950/5 dark:bg-white/5">
               <Icon aria-hidden="true" className="size-3.5 text-zinc-500 dark:text-zinc-400" />
             </span>
