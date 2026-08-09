@@ -1414,13 +1414,20 @@ func TestStatusReportsAnIncompleteRelayConfig(t *testing.T) {
 		relay config.Relay
 		want  string
 	}{
-		{"no url", config.Relay{Secret: secret, Origin: "https://r.example", MachineID: "m-0001"}, "no url"},
-		{"no secret", config.Relay{URL: "wss://r.example", Origin: "https://r.example", MachineID: "m-0001"}, "no secret"},
-		{"no origin", config.Relay{URL: "wss://r.example", Secret: secret, MachineID: "m-0001"}, "no origin"},
+		{"no url", config.Relay{Secret: secret, FleetSeed: testFleetSeed, Origin: "https://r.example", MachineID: "m-0001"}, "no url"},
+		{"no secret", config.Relay{URL: "wss://r.example", FleetSeed: testFleetSeed, Origin: "https://r.example", MachineID: "m-0001"}, "no secret"},
+		{"no origin", config.Relay{URL: "wss://r.example", Secret: secret, FleetSeed: testFleetSeed, MachineID: "m-0001"}, "no origin"},
 		// A relay.json from before machines had ids, or one hand-edited into
 		// that shape: the daemon will not dial it (relay.New refuses), so the
 		// status line has to say why rather than call it configured.
-		{"no machine id", config.Relay{URL: "wss://r.example", Secret: secret, Origin: "https://r.example"}, "no machine id"},
+		{"no machine id", config.Relay{URL: "wss://r.example", Secret: secret, FleetSeed: testFleetSeed, Origin: "https://r.example"}, "no machine id"},
+		// The one an upgrade produces on its own: a relay.json written before
+		// the fleet key existed is complete by every older rule and refused by
+		// relay.New (spec/fleet-trust.md keeps no compatibility with those).
+		// Until this case existed, that machine lost remote access while
+		// `flue status`, `flue relay status` and /api/relay/info all called it
+		// configured and fine.
+		{"no fleet key", config.Relay{URL: "wss://r.example", Secret: secret, Origin: "https://r.example", MachineID: "m-0001"}, "no fleet key"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())

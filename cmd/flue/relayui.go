@@ -152,6 +152,12 @@ func (s *relayUIService) Status(ctx context.Context) daemon.RelayUIStatus {
 		return st
 	}
 	st.Configured = true
+	// The same faults `flue status` names, from the same function, so the
+	// terminal and the screen can never disagree about whether this file is
+	// one the daemon will dial. A relay.json from before the fleet key is the
+	// case that made this necessary: it parses, so Configured is true, and
+	// relay.New refuses it, so the transport never comes up.
+	st.Problems = relayProblems(cfg)
 	st.Origin = cfg.Origin
 	if w, err := updateWorkerName("", cfg); err == nil {
 		st.Worker = w
@@ -362,6 +368,16 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 	}
 	steps = append(steps, "fleet key minted (stays on your machines; Cloudflare never sees it)")
 	steps = append(steps, fmt.Sprintf("this machine joined as %s (%s)", machineName, machineID))
+	// Said out loud because the transport this deploy is about to start does
+	// not cover it. daemon.Identity is fixed at construction, so the fleet key
+	// this process signs with is whatever relay.json held when it booted —
+	// nothing, usually, and never the key minted three lines up. The dialling
+	// half picks the new key up immediately (startRelay reads the file), so
+	// this machine verifies its fleet's certs from now; the signing half —
+	// minting a device cert at pairing, a revocation at revoke — waits for a
+	// restart. A user who pairs a phone in between gets a phone that works
+	// here and cannot roam to the machines they add next.
+	steps = append(steps, "restart the daemon to sign with the new fleet key (until then it verifies fleet certs but mints none)")
 
 	if fromRequest {
 		// Stored by product decision — one 0600 file beside relay.json — so
@@ -398,8 +414,10 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 // joinCommand is the one spelling of the hand-off line, shared by the CLI's
 // setup print, the deploy result and the join endpoint so the three can
 // never drift. It carries the secret and the fleet key seed, which is the
-// line's whole point and its whole weight: docs/RELAY.md and
-// spec/fleet-trust.md both say what leaking it now costs.
+// line's whole point and its whole weight: docs/RELAY.md says what leaking
+// it now costs where it teaches the line ("Standing one up"), and
+// spec/fleet-trust.md fixes the words — a leaked join line used to buy
+// disruption, and with the fleet key aboard it buys the fleet.
 func joinCommand(host, secret, fleetSeed string) string {
 	return fmt.Sprintf("flue relay join wss://%s --secret %s --fleet %s", host, secret, fleetSeed)
 }

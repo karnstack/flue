@@ -273,9 +273,15 @@ func TestRevocationOutranksTheCert(t *testing.T) {
 	}
 
 	// A different key is unaffected, and Add — this machine's own ceremony —
-	// deliberately is too: rule 1 of the acceptance order is "pairing on
-	// this machine works as before", and a fresh ceremony mints a fresh key
-	// anyway.
+	// deliberately is too: rule 1 of the acceptance order is "pairing on this
+	// machine works as before". What that leaves is not free, and the old
+	// note here claimed otherwise ("a fresh ceremony mints a fresh key
+	// anyway" — it does not; web/src/crypto/keys.ts reuses the key in
+	// IndexedDB across pairings). So an operator who revokes a device and
+	// then re-pairs the same browser gets an entry FindByKey refuses: paired
+	// on the screen, closed on the wire. Deciding that — Add refusing, or a
+	// deliberate re-pairing clearing the revocation — is a design call about
+	// what un-revoking means, and it is open.
 	other := testKey(t)
 	if revoked, err := s.IsRevoked(other); err != nil || revoked {
 		t.Fatalf("IsRevoked(other) = %v, %v", revoked, err)
@@ -292,6 +298,48 @@ func TestRevocationOutranksTheCert(t *testing.T) {
 	}
 	if len(revs) != 1 || !bytes.Equal(revs[0].PublicKey, key) || string(revs[0].Cert) != "signed revocation" {
 		t.Fatalf("revocations = %+v, want the one original entry", revs)
+	}
+}
+
+// TestFindByKeyRefusesARevokedKey: the store's answer to "is this key one we
+// paired" has to account for the revocation list, because the two files are
+// written in a fixed order and the window between them is real. Revoking
+// records the signed revocation first and removes the registry entry second
+// (daemon.removeDevice), on the grounds that the first write is what kills
+// the key — and that only holds if every acceptance path reads it.
+//
+// The error direction matters as much as the answer: an unreadable
+// revocation list is a refusal, not a shrug, because a caller that cannot
+// know must not admit.
+func TestFindByKeyRefusesARevokedKey(t *testing.T) {
+	s := NewDeviceStore(t.TempDir())
+	key := testKey(t)
+	d, err := s.Add("phone", key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.FindByKey(key); err != nil || !ok {
+		t.Fatalf("FindByKey before the revoke = %v, %v", ok, err)
+	}
+
+	// Exactly the state a revoke leaves when its second write fails: the
+	// revocation is on file and the entry is still listed.
+	if err := s.AddRevocation(key, []byte("signed revocation")); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := s.List(); len(list) != 1 || list[0].ID != d.ID {
+		t.Fatalf("registry = %+v; this test needs the entry still there", list)
+	}
+	if got, ok, err := s.FindByKey(key); err != nil || ok {
+		t.Fatalf("FindByKey on a revoked but still-listed key = %+v, %v, %v; want no match", got, ok, err)
+	}
+
+	// An unreadable list refuses rather than falls back to the registry.
+	if err := os.WriteFile(s.revocationsPath(), []byte("{not a list"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := s.FindByKey(key); err == nil || ok {
+		t.Fatalf("FindByKey with an unreadable revocation list = %v, %v; want an error and no match", ok, err)
 	}
 }
 

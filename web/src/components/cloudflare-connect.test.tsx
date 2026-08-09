@@ -61,7 +61,7 @@ describe('CloudflareConnectCard', () => {
       {
         steps: ['token verified', 'worker deployed: flue-relay', 'secret set'],
         origin: 'https://flue-relay.karn.workers.dev',
-        join_command: 'flue relay join wss://flue-relay.karn.workers.dev --secret s3cret',
+        join_command: 'flue relay join wss://flue-relay.karn.workers.dev --secret s3cret --fleet fl33t',
       },
     ])
     render(<CloudflareConnectCard info={INFO} setupCommand="flue relay setup" />)
@@ -76,7 +76,7 @@ describe('CloudflareConnectCard', () => {
     expect(await screen.findByText('worker deployed: flue-relay')).toBeTruthy()
     expect(screen.getByText(/To add another machine/)).toBeTruthy()
     expect(
-      screen.getByText('flue relay join wss://flue-relay.karn.workers.dev --secret s3cret'),
+      screen.getByText('flue relay join wss://flue-relay.karn.workers.dev --secret s3cret --fleet fl33t'),
     ).toBeTruthy()
     expect(screen.getByText(/also available from this screen later/)).toBeTruthy()
     // The form is gone: the flow is over and the token state was cleared.

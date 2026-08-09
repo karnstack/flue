@@ -77,6 +77,14 @@ const (
 	// than inherit one.
 	maxStringBytes = 512
 
+	// maxIAT is the ceiling on iat, on encode and on decode both — one
+	// constant, because a value the encoder accepts and the decoder refuses
+	// is a cert this package would sign and then fail to verify. Unix
+	// seconds do not reach 2^62 (that is some 146 billion years out), so
+	// anything at or above it is not a time; refusing it here is what keeps
+	// every decoded iat safe to hand to time.Unix.
+	maxIAT = 1 << 62
+
 	// keyBytes is an X25519 public key, the only kind of key a cert names.
 	keyBytes = 32
 
@@ -338,6 +346,14 @@ func appendIAT(b []byte, iat int64) ([]byte, error) {
 	if iat < 0 {
 		return nil, fmt.Errorf("fleet: iat %d is negative", iat)
 	}
+	if iat > maxIAT {
+		// The same ceiling reader.iat holds the wire to. Without it this
+		// encoder would happily sign a math.MaxInt64 iat that its own Verify
+		// then refuses — a cert minted and dead in the same breath, and the
+		// kind of asymmetry a fixture cannot catch because no honest caller
+		// produces one.
+		return nil, fmt.Errorf("fleet: iat %d is not a unix time", iat)
+	}
 	return binary.BigEndian.AppendUint64(b, uint64(iat)), nil
 }
 
@@ -446,10 +462,9 @@ func (r *reader) iat() (int64, error) {
 		return 0, err
 	}
 	v := binary.BigEndian.Uint64(raw)
-	if v > 1<<62 {
-		// The encoder refuses negative iats, so a value this size is not a
-		// time; refusing it keeps every decoded iat safe to hand to
-		// time.Unix.
+	if v > maxIAT {
+		// The same ceiling appendIAT encodes under, so this package never
+		// signs bytes it would then refuse.
 		return 0, fmt.Errorf("%w: iat %d is not a unix time", ErrBadCert, v)
 	}
 	return int64(v), nil

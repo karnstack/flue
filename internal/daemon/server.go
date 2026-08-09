@@ -1174,9 +1174,12 @@ func validDeviceID(id string) bool {
 // into the registry on its next handshake (AddFromFleetCert) — so a
 // revocation that cannot be recorded fails the whole revoke, loudly, rather
 // than performing the half that does not stick. The converse partial (a
-// revocation recorded, the removal failed) is safe: the key is already dead
-// to the acceptance rule, the entry still shows on the Devices screen, and
-// the retry completes it.
+// revocation recorded, the removal failed) is safe, and safe by mechanism
+// rather than by luck: both acceptance paths read the revocation list inside
+// the same critical section as their registry read — crypto.FindByKey for
+// rule 1, AddFromFleetCert for rule 2 — so the key is already dead to the
+// acceptance rule while the entry still shows on the Devices screen, and the
+// retry completes it.
 //
 // The signed blob is kept by the store (crypto.StoredRevocation) because it
 // is the same artifact the fleet directory will publish so every other

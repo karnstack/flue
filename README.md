@@ -76,8 +76,8 @@ The daemon binds loopback and nothing else, so reaching it from elsewhere is
 opt-in and takes one command:
 
 ```sh
-flue relay setup                                   # machine 1: paste a Cloudflare token
-flue relay join wss://<your-relay> --secret <...>  # every other machine
+flue relay setup                                                 # machine 1: paste a Cloudflare token
+flue relay join wss://<your-relay> --secret <...> --fleet <...>  # every other machine
 ```
 
 That deploys a Worker **and** this web app into your own Cloudflare account,

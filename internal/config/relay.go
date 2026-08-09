@@ -52,6 +52,12 @@ type Relay struct {
 	// it between them. Never logged, never sent anywhere, and the second
 	// reason this file is 0600 — a leaked seed signs device certs every
 	// machine in the fleet honours.
+	//
+	// It rides argv exactly once, beside the secret and for the same
+	// reason: `flue relay join --fleet` is the deliberate hand-off. The
+	// cost is the same shell history, and the consequence is larger, which
+	// is why docs/RELAY.md states it where it teaches the line rather than
+	// leaving it to be inferred from the secret's warning.
 	FleetSeed string `json:"fleet_seed,omitempty"`
 
 	// MachineID is the slot this machine holds on the relay: the <id> in the

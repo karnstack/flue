@@ -78,8 +78,9 @@ Worker with its Durable Object migration and the whole web bundle as the
 Worker's static assets, served under the same `Referrer-Policy` and
 `Content-Security-Policy` the daemon serves its own UI with, minus the loopback
 sockets a relay origin has no use for, enables the `workers.dev` subdomain, sets a fresh
-32-byte `DAEMON_SECRET` on the script, mints this machine an id and a display
-name, and writes `relay.json` (mode 0600) into flue's config directory,
+32-byte `DAEMON_SECRET` on the script, mints a fresh **fleet key** it uploads
+nowhere, mints this machine an id and a display name, and writes `relay.json`
+(mode 0600) into flue's config directory,
 `$XDG_CONFIG_HOME/flue` or `~/.config/flue`. The API token is never stored:
 its whole life is that one command, and you can delete it afterwards. Restart
 the daemon to pick the relay up.
@@ -87,25 +88,23 @@ the daemon to pick the relay up.
 Setup ends by printing the line every other machine joins with:
 
 ```
-flue relay join wss://flue-relay.<sub>.workers.dev --secret <...>
+flue relay join wss://flue-relay.<sub>.workers.dev --secret <...> --fleet <...>
 ```
 
 Run it there and restart that daemon. That is the whole of adding a machine.
-Join never touches the Cloudflare API: the Worker exists and the secret is the
-whole credential, so everything it does is local, check the address, mint
-this machine a fresh id (`<hostname>-<4 hex>-<8 hex tag>`, its slot on the
-relay and the `<id>` in both wss paths — the tag is a MAC under the secret
-from the join line, which is why an id minted with a mistyped secret dials
-into `404 no such machine`), and write the same `relay.json` shape setup
-writes.
+Join never touches the Cloudflare API — the Worker already exists — so
+everything it does is local: check the address, take the two credentials off
+the line, mint this machine a fresh id (`<hostname>-<4 hex>-<8 hex tag>`, its
+slot on the relay and the `<id>` in both wss paths — the tag is a MAC under
+the secret from the join line, which is why an id minted with a mistyped
+secret dials into `404 no such machine`), and write the same `relay.json`
+shape setup writes. Both flags are required and `--fleet` is refused when
+missing rather than defaulted: a machine that joined without the fleet key
+would dial the relay fine and trust nothing its fleet signed, which is a
+worse failure than not joining.
 `--name` sets the label the machine picker shows; it defaults to the hostname
 and rides the pairing link's query (`n=`) so the pairing browser can write it
-down, never a path, and never anything the Worker routes on. The printed line carries the secret (that is the
-point, it is the deliberate hand-off) so paste it into the other machine's
-terminal, not into a chat that keeps history. Shell history keeps it just as
-well as chat history does (the join line lands in the other machine's history
-file, secret and all) so clear that entry on a machine whose history anyone
-else can read.
+down, never a path, and never anything the Worker routes on.
 
 Run it from a **release binary** (`make build`, or an installed flue). The
 Worker and the web app are both compiled into that binary, and a dev build
@@ -114,13 +113,16 @@ there.
 
 Re-running setup against the same account is safe for the Worker (the deploy
 and the secret are upserts) but it is a reset, not a repair: every run mints
-a fresh secret *and* a fresh machine id. The fresh secret is deliberate:
-setup is the recovery path for a leaked one, and a run that reused the old
-could never rotate it, and it means every machine that joined is now
-presenting a stale secret and has to run the newly printed join line — and,
-because ids carry a MAC tag minted under the secret, every old id stops
+a fresh secret, a fresh fleet key *and* a fresh machine id. The fresh secret
+is deliberate: setup is the recovery path for a leaked one, and a run that
+reused the old could never rotate it, and it means every machine that joined
+is now presenting a stale secret and has to run the newly printed join line —
+and, because ids carry a MAC tag minted under the secret, every old id stops
 routing at the same moment (the re-join each machine runs anyway mints its
-fresh one). The
+fresh one). The fresh fleet key is deliberate for the same reason and cuts
+deeper: it retires every device certificate the old key signed, so no device
+walks into any machine on a cert from before the reset, and every device
+pairs again. The
 fresh id means the old hub slot is simply abandoned: a browser that paired
 against it is dialling a slot no daemon dials, answered `503 daemon offline`
 until it pairs this machine again and forgets the old row in the picker. To
@@ -128,6 +130,40 @@ until it pairs this machine again and forgets the old row in the picker. To
 to run on machine two. Re-running setup against a *different* account leaves
 the old Worker live and reachable; there is no `flue relay teardown`, so
 delete it in the dashboard yourself (`docs/FOLLOW-UPS.md` item 12).
+
+### What the join line is worth
+
+It carries two credentials, and they are not the same kind of thing.
+`--secret` is the `DAEMON_SECRET`, which Cloudflare holds too: it gates the
+daemon leg, so it is exactly as safe as your Cloudflare account. `--fleet` is
+the **fleet key** ([`spec/fleet-trust.md`](../spec/fleet-trust.md)) — the
+private half of one Ed25519 keypair, held by every machine on this relay and
+by nothing else, which signs the certificates that say "this device is one of
+ours". It reaches the Worker in no binding, no secret and no log, and that is
+the entire point: the Worker gates *routing*, the fleet key gates *trust*, and
+the two fail independently. Someone who gets into your Cloudflare account can
+take remote access away; they cannot admit a device.
+
+Which is why the line's weight changed when the fleet key came aboard: **a
+leaked join line used to buy disruption; with the fleet key aboard it buys the
+fleet.** With the secret alone, whoever holds it can squat a machine's slot,
+knock its daemon off, and accept new pairings while pretending to be it
+("One secret for the fleet", below) — bad, and bounded by the ceremony a
+human still has to perform. With the fleet key too, they can sign a device
+certificate for a key they already hold, and every daemon on the relay will
+admit that device as one you paired: no ceremony, no prompt, on machines they
+have never touched.
+
+So treat the printed line as the root credential it is. Paste it into the
+other machine's terminal, not into a chat that keeps history — and shell
+history keeps it just as well as chat history does. The line lands in the
+other machine's history file with the secret *and* the fleet key in it, so
+clear that entry on any machine whose history someone else can read. If it
+does get out, recovery is re-setup: `flue relay setup` mints a fresh secret
+*and* a fresh fleet key, every machine re-joins with the new line, and every
+device pairs again. There is no way to retire one machine's copy of a fleet
+key while keeping the fleet — every machine holds the same key, deliberately
+(that trade is the one that buys pair-once-per-fleet).
 
 ### The Remote screen runs the same deploys
 
@@ -232,6 +268,35 @@ machines that still deserve it. The upgrade path (a per-machine secret,
 learned by each hub on its first daemon connect) changes no wire format and
 is deliberately deferred; until it lands, this section is the honest statement
 of what the shared secret does and does not separate.
+
+### And one key the Worker never holds
+
+The secret stopped being the only fleet-wide credential when the fleet key
+arrived. The layering, in full:
+
+| credential | held by | what it decides |
+|---|---|---|
+| `DAEMON_SECRET` | every machine, **and Cloudflare** | the daemon leg; which machine ids route |
+| fleet key (private) | every machine, nobody else | signs machine certs, device certs, revocations |
+| fleet key (public) | every machine, every paired device | verifies all three |
+
+That split is what makes "someone got into my Cloudflare account" an
+availability problem rather than a shell on every machine: the Worker can
+refuse to route, and it cannot admit a device, because it holds nothing that
+signs.
+
+The honest cost sits on the other side of the same line. Every machine holds
+the same private key — trust inside the fleet is symmetric, any machine can
+sign for the fleet, and there is no ceremony between machines — so a
+compromised machine can mint a device certificate every other machine will
+honour, and the shared-secret analysis above understates what it can do by
+exactly that much. That is the trade that buys pairing once for a fleet
+instead of once per machine, for the one-operator model this is built for,
+and it is why re-setup (fresh secret, fresh fleet key, everyone re-joins and
+re-pairs) is the whole of compromise recovery. Revoking a *device* is
+per-machine today; making a revocation reach the fleet needs the directory
+that distributes it, which is the next stage of
+[`spec/fleet-trust.md`](../spec/fleet-trust.md).
 
 ## Cost model
 

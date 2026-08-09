@@ -45,6 +45,12 @@ const TOKEN_PAGE = 'https://dash.cloudflare.com/profile/api-tokens'
 /** GET /api/relay/info, verbatim (daemon.RelayUIStatus). */
 export interface RelayUIInfo {
   configured: boolean
+  /**
+   * The faults that stop this daemon dialling the relay.json it has, in the
+   * daemon's own words — the same list `flue status` prints. Empty or absent
+   * when the file is one the transport accepts.
+   */
+  problems?: string[]
   origin?: string
   worker?: string
   can_deploy: boolean
@@ -632,12 +638,14 @@ function AddressChange({ origin }: { origin?: string }) {
 /**
  * The join line for adding another machine, behind a click.
  *
- * Behind a click and not on the page, because it carries the fleet secret:
- * the daemon will hand it to this authenticated loopback page whenever asked
- * (/api/relay/join rebuilds it from relay.json), but a secret should cross
- * onto a screen at the moment a human asked to see it, not on every visit.
- * Never rendered on a relay origin: the endpoint does not exist there, and
- * the secret must not be offered to a remote tab.
+ * Behind a click and not on the page, because it carries both of the relay's
+ * credentials — the daemon secret the Worker also holds, and the fleet key
+ * that nothing outside your own machines ever holds. The daemon will hand
+ * the line to this authenticated loopback page whenever asked
+ * (/api/relay/join rebuilds it from relay.json), but a credential should
+ * cross onto a screen at the moment a human asked to see it, not on every
+ * visit. Never rendered on a relay origin: the endpoint does not exist
+ * there, and neither credential may be offered to a remote tab.
  */
 export function JoinReveal() {
   const [cmd, setCmd] = useState('')
@@ -661,8 +669,9 @@ export function JoinReveal() {
     return (
       <div className="flex flex-col gap-y-1.5">
         <p className={NOTE}>
-          Run this on another machine to add it — it carries the relay's secret, so treat it like
-          one:
+          Run this on another machine to add it. It carries the relay's secret and the fleet key
+          that every machine here trusts, so anyone who gets the line gets the fleet — paste it into
+          a terminal, not into anything that keeps history:
         </p>
         <Copyable text={cmd} />
       </div>

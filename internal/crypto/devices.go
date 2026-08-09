@@ -267,9 +267,44 @@ func (s *DeviceStore) FindByID(id string) (Device, bool, error) {
 	return Device{}, false, nil
 }
 
+// FindByKey answers the acceptance rule's first question (spec/fleet-trust.md):
+// is this static key one this machine paired, and still paired?
+//
+// A key on the revocation list is never a yes, whatever devices.json still
+// says — and the two questions are one call, under one lock, for the reason
+// AddFromFleetCert checks revocation inside the same critical section as its
+// write. Revoking is two writes in a fixed order (daemon.removeDevice): the
+// signed revocation first, the registry entry second. A revoke that landed
+// the first and failed the second leaves an entry here that must not be
+// honoured, and a caller that asked the two questions separately would have a
+// window between them in which it was.
+//
+// It also simplifies the gossip handler the next stage brings: a revocation
+// arriving from the fleet directory for a device this machine never paired
+// has only to be recorded (AddRevocation), and every acceptance path — this
+// one and AddFromFleetCert both — is already refusing that key. Nothing has
+// to remember to ask a second question.
+//
+// An unreadable revocation list is an error rather than a false, the same
+// direction every other refusal here takes: a caller deciding whether to
+// admit a key must refuse when it cannot know.
+//
+// One edge this leaves standing, deliberately and not comfortably: Add does
+// not consult the revocation list, so re-pairing a revoked *key* — which the
+// browser does whenever its IndexedDB survives the revoke, since it reuses
+// its device key — writes an entry this function will then refuse. The
+// ceremony reports success and the relay channel closes anyway. Making Add
+// refuse, or making a deliberate re-pairing clear the revocation, is a
+// design call about what "un-revoking" means (the spec says: a new key, and
+// the old one stays dead) and is deliberately not decided here.
 func (s *DeviceStore) FindByKey(publicKey []byte) (Device, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if revoked, err := s.isRevokedLocked(publicKey); err != nil {
+		return Device{}, false, err
+	} else if revoked {
+		return Device{}, false, nil
+	}
 	devices, err := s.load()
 	if err != nil {
 		return Device{}, false, err

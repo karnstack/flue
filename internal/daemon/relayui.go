@@ -27,12 +27,14 @@ const (
 	RelayUpdatePath = "/api/relay/update"
 	// RelayJoinPath answers the join line for adding another machine — the
 	// same string the deploy result shows, rebuilt from relay.json on demand.
-	// It carries the fleet secret, which is why it is its own endpoint behind
-	// a click rather than a field on Info that every page load would fetch:
-	// the secret should cross into a page exactly when a human asked to see
-	// it. Loopback + auth is the boundary that makes even that acceptable —
-	// the cookie behind withAuth already spawns shells, so a page that can
-	// call this could do worse.
+	// It carries both of the relay's credentials — the `DAEMON_SECRET` the
+	// Worker also holds, and the fleet key's seed, which nothing but this
+	// fleet's own machines ever holds (spec/fleet-trust.md) — which is why it
+	// is its own endpoint behind a click rather than a field on Info that
+	// every page load would fetch: they should cross into a page exactly when
+	// a human asked to see them. Loopback + auth is the boundary that makes
+	// even that acceptable — the cookie behind withAuth already spawns
+	// shells, so a page that can call this could do worse.
 	RelayJoinPath = "/api/relay/join"
 	// RelayAddressPath takes {"address": "wss://..."} and repoints relay.json
 	// at a custom domain the user routed to the Worker themselves. No
@@ -53,6 +55,18 @@ type RelayUIStatus struct {
 	Configured bool   `json:"configured"`
 	Origin     string `json:"origin,omitempty"`
 	Worker     string `json:"worker,omitempty"`
+	// Problems are the faults that stop this daemon dialling the relay.json
+	// it has — the same list, in the same words, `flue status` and `flue
+	// relay status` print. Empty for a healthy file and for a machine with
+	// no relay at all.
+	//
+	// It exists because Configured answers a narrower question than the
+	// screen is asking. A file that parses is configured; a file the
+	// transport refuses is not *usable*; and reporting the first as though
+	// it were the second is exactly how an upgrade that silently ended
+	// remote access looked from every surface flue has — one stderr warning
+	// at startup, and three status reports all saying it was fine.
+	Problems []string `json:"problems,omitempty"`
 	// CanDeploy is false in a dev build, which embeds no Worker; Reason is
 	// the sentence the UI shows instead of a button.
 	CanDeploy       bool   `json:"can_deploy"`
@@ -110,8 +124,11 @@ type RelayUIDeployResult struct {
 	// Steps are the ✓ lines, in order — the same sentences the CLI prints.
 	Steps  []string `json:"steps,omitempty"`
 	Origin string   `json:"origin,omitempty"`
-	// JoinCommand is the hand-off line for other machines, secret included.
-	// Shown once, like the CLI's; it is not retrievable from Status.
+	// JoinCommand is the hand-off line for other machines, carrying both of
+	// the credentials a machine needs to join: the daemon secret and the
+	// fleet key's seed. Shown once, like the CLI's; it is not retrievable
+	// from Status — RelayJoinPath rebuilds it, behind a click, for the same
+	// reason.
 	JoinCommand string `json:"join_command,omitempty"`
 	// RestartNeeded is true when a relay transport was already running in
 	// this daemon: the new relay.json takes effect on the next restart, and

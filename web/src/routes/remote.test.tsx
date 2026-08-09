@@ -116,6 +116,42 @@ describe('RemoteRoute', () => {
     expect(screen.getByText(SETUP)).toBeTruthy()
   })
 
+  it('separates a relay it will not dial from having no relay, and names the fault', async () => {
+    // The transport reports `off` for both "no relay configured" and "a
+    // relay.json this daemon refuses" — so the second rendered as the first:
+    // a badge saying nothing was set up and a paragraph of setup instructions,
+    // on a machine whose relay had just stopped working. The upgrade that
+    // produces it is silent otherwise (a relay.json from before the fleet key
+    // carries no seed, and relay.New refuses that), so the daemon names each
+    // fault on /api/relay/info and this screen repeats it.
+    const info = {
+      configured: true,
+      problems: ['no fleet key'],
+      can_deploy: true,
+      version: 'v',
+    }
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify(info), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    )
+    vi.stubGlobal('fetch', fetchImpl)
+    try {
+      await mountRemote()
+
+      expect(await screen.findByText('Not usable')).toBeTruthy()
+      expect(screen.queryByText('Not configured')).toBeNull()
+      // The daemon's word for it, verbatim, and the command that says the
+      // same thing in a terminal.
+      expect(screen.getByText(/no fleet key/)).toBeTruthy()
+      expect(screen.getByText(STATUS)).toBeTruthy()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('copies the address the relay carries this machine at', async () => {
     // Copyable for the same reason the commands are: this is a string somebody
     // sends to themselves, and it is longer than a phone is wide.
@@ -264,7 +300,7 @@ describe('JoinReveal', () => {
       const body =
         url === '/api/relay/info'
           ? { configured: true, can_deploy: true, version: 'v', worker: 'flue-relay' }
-          : { join_command: 'flue relay join wss://r --secret s' }
+          : { join_command: 'flue relay join wss://r --secret s --fleet f' }
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -282,7 +318,7 @@ describe('JoinReveal', () => {
 
       await user.click(await screen.findByRole('button', { name: 'Show the join command' }))
 
-      expect(await screen.findByText('flue relay join wss://r --secret s')).toBeTruthy()
+      expect(await screen.findByText('flue relay join wss://r --secret s --fleet f')).toBeTruthy()
       expect(fetchImpl.mock.calls.map((c) => String(c[0]))).toContain('/api/relay/join')
     } finally {
       vi.unstubAllGlobals()

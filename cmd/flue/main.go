@@ -107,7 +107,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue disable            remove the login service
   flue status             daemon, login service, and session diagnostics
   flue relay setup        deploy a relay to your own Cloudflare account
-  flue relay join URL --secret S   point this machine at an existing relay
+  flue relay join URL --secret S --fleet K   point this machine at an existing relay
   flue relay status       show the configured relay
   flue relay update       redeploy this release's relay; secret and pairings kept
   flue relay address URL  repoint this machine at a custom domain on the same relay
@@ -382,13 +382,36 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 
 	// The public half only: signing stays with the daemon (pairing,
 	// revocation), while the transport verifies the certs strangers present.
-	// identity.Fleet is the parsed form of this same file's seed — loaded by
-	// loadIdentity, which is fatal on a seed that does not parse — so a nil
-	// Public() here means relay.json carries no fleet key at all, and
-	// relay.New refuses that by name: the file predates the fleet key, and
-	// the re-join line is the way forward (spec/fleet-trust.md keeps no
+	//
+	// Parsed from the file this function just read rather than taken from
+	// identity.Fleet, which is the same value only at boot. The path where
+	// they differ is the one that matters: a relay deployed from the Remote
+	// screen writes a brand-new relay.json — fresh secret, fresh fleet key —
+	// and then calls this in a process whose boot-time identity has no fleet
+	// key at all, or an older one. Reading it from the identity there would
+	// hand relay.New a nil public key, have it refuse the relay the user had
+	// just deployed, and leave one log line behind.
+	//
+	// What still waits for a restart is the *signing* half: Identity is fixed
+	// at construction, so a daemon that deployed a relay from the screen
+	// verifies its fleet's certs from this moment and mints none of its own
+	// until it comes back. relayUIService.Provision says so in its steps; a
+	// nil Public() here, meanwhile, means relay.json carries no fleet key at
+	// all, which relay.New refuses by name (spec/fleet-trust.md keeps no
 	// compatibility with pre-fleet files, deliberately).
-	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin, MachineID: rc.MachineID, FleetPub: identity.Fleet.Public()}
+	//
+	// A seed that does not parse costs remote access and nothing else, like
+	// every other fault here. loadIdentity is the one that refuses a bad seed
+	// outright, and it has already run by the time this does.
+	var fleetKey fleet.Key
+	if rc.FleetSeed != "" {
+		fleetKey, err = fleet.Parse(rc.FleetSeed)
+		if err != nil {
+			logger.Warn("relay not started", "err", err)
+			return false
+		}
+	}
+	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin, MachineID: rc.MachineID, FleetPub: fleetKey.Public()}
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
 	if err != nil {
 		logger.Warn("relay not started", "err", err)
@@ -1325,10 +1348,12 @@ func relayLine() string {
 	}
 
 	// A file the daemon will not dial must not be reported as "configured".
-	// This is the report somebody reads to find out why remote access does not
-	// work, and the faults are the ones relay.New refuses: a missing field, or
-	// — only possible by hand — both kinds of credential at once, which cannot
-	// be resolved into one dial. The problems are named; no value ever is.
+	// This is the report somebody reads to find out why remote access does
+	// not work, and the faults listed are exactly the ones relay.New refuses
+	// — a field it requires and this file does not carry. Keeping the two
+	// lists in step is a standing obligation: a fault relay.New grows and
+	// this one does not is a daemon that silently stops dialling while every
+	// report says it is fine. The problems are named; no value ever is.
 	if problems := relayProblems(rc); len(problems) > 0 {
 		return fmt.Sprintf("relay:    configured, but not usable (%s): the daemon will not dial it",
 			strings.Join(problems, ", "))
@@ -1356,6 +1381,18 @@ func relayProblems(rc config.Relay) []string {
 		// nothing to dial as; `flue relay join` against the existing relay is
 		// the fix, and mints one.
 		problems = append(problems, "no machine id")
+	}
+	if rc.FleetSeed == "" {
+		// A relay.json from before the fleet key existed. relay.New refuses
+		// it by name (spec/fleet-trust.md keeps no compatibility with
+		// pre-fleet files, deliberately), so this daemon dials nothing at all
+		// — which is the whole reason it is listed here: the upgrade that
+		// produces this state is silent otherwise, one stderr warning at
+		// startup and a status line that used to say everything was fine.
+		// The fix is a join line carrying `--fleet`: re-run the one printed
+		// by `flue relay setup` on a machine that has it, or re-run setup
+		// itself, which mints a fresh fleet key with the fresh secret.
+		problems = append(problems, "no fleet key")
 	}
 	return problems
 }

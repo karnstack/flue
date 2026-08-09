@@ -520,6 +520,50 @@ func TestRelayChannelAdmitsAFleetCertifiedDevice(t *testing.T) {
 	}
 }
 
+// TestRelayChannelNormalisesTheCertName: a fleet-signed name is authentic,
+// which is not the same as bounded. The cert encoding permits 512 bytes with
+// newlines and control characters in them, and the value's destination is
+// devices.json and a row on the Devices screen — so it goes through the same
+// normaliser a local ceremony's label does (daemon.DeviceLabel), and there is
+// one rule for what a device may be called however the name arrived.
+func TestRelayChannelNormalisesTheCertName(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv, _ := newDaemonServer(t, id)
+	tr := newChannelTransport(t, r, srv, id, nil)
+	runTransport(t, tr)
+
+	c := r.accept(t)
+	long := unpairedKey(t)
+	// Padded with the whitespace a trim removes and 200 multibyte runes,
+	// which is well inside the encoding's 512-byte ceiling and well past the
+	// 64 runes a label may be.
+	b := attachWithPayload(t, c, 1, long, id.key.Public,
+		id.deviceCert(t, long.Public, "  \n"+strings.Repeat("é", 200)+"\n"))
+	if _, ok := b.recvControl().(wire.Welcome); !ok {
+		t.Fatal("the fleet-certified device was not welcomed")
+	}
+	got, ok, err := id.devices.FindByKey(long.Public)
+	if err != nil || !ok {
+		t.Fatalf("the admitted device is not in the registry: %v, %v", ok, err)
+	}
+	if want := strings.Repeat("é", 64); got.Label != want {
+		t.Fatalf("registry label = %q (%d runes), want it trimmed and capped at 64", got.Label, len([]rune(got.Label)))
+	}
+
+	// And the empty name the encoding allows but no ceremony produces: the
+	// fallback comes from the same one place.
+	blank := unpairedKey(t)
+	b = attachWithPayload(t, c, 2, blank, id.key.Public, id.deviceCert(t, blank.Public, ""))
+	if _, ok := b.recvControl().(wire.Welcome); !ok {
+		t.Fatal("the device with a blank cert name was not welcomed")
+	}
+	if got, _, _ := id.devices.FindByKey(blank.Public); got.Label != "unnamed device" {
+		t.Fatalf("registry label for a blank cert name = %q", got.Label)
+	}
+}
+
 // TestRelayChannelRefusesAFleetCertForADifferentKey: the cert is a public
 // artifact, so holding one proves nothing — the handshake's own static key
 // is what the initiator proved possession of, and the cert must name
@@ -663,6 +707,54 @@ func TestRelayRevocationOutranksTheFleetCert(t *testing.T) {
 	}
 	if _, err := fleet.Verify(id.fleet.Public(), revs[0].Cert); err != nil {
 		t.Errorf("the stored revocation does not verify under the fleet key: %v", err)
+	}
+}
+
+// TestRelayChannelRefusesARevokedKeyStillInTheRegistry pins the acceptance
+// rule's *first* branch against the one state that can produce this: a revoke
+// that recorded its signed revocation and then failed to remove the registry
+// entry. daemon.removeDevice writes the two in that order deliberately, on
+// the grounds that a revocation on file is what makes the key dead — and
+// while rule 1 was a registry lookup and nothing else, that grounds was
+// false. The entry alone let the key straight back in, and the operator's
+// revoke bought nothing at all until some later retry happened to land.
+func TestRelayChannelRefusesARevokedKeyStillInTheRegistry(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv := &readingServer{}
+	sink := &syncBuffer{}
+	tr := newChannelTransport(t, r, srv, id, slog.New(slog.NewTextHandler(sink, nil)))
+	runTransport(t, tr)
+
+	// The half-completed revoke, assembled directly: the revocation lands and
+	// the paired entry is left exactly where it was, which is what a failed
+	// DeviceStore.Remove leaves behind.
+	blob, err := id.fleet.Sign(fleet.Revocation{Device: id.deviceKey.Public, IAT: time.Now().Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := id.devices.AddRevocation(id.deviceKey.Public, blob); err != nil {
+		t.Fatalf("AddRevocation: %v", err)
+	}
+	list, err := id.devices.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != id.device.ID {
+		t.Fatalf("registry = %+v; this test needs the revoked device still listed", list)
+	}
+
+	c := r.accept(t)
+	attach(t, c, 1, id.deviceKey, id.key.Public)
+
+	expectClose(t, c, 1)
+	waitForLog(t, sink, "unpaired device", crypto.DeviceID(id.deviceKey.Public))
+	if n := len(srv.served()); n != 0 {
+		t.Fatalf("the daemon served %d connections for a revoked key, want 0", n)
+	}
+	if !c.stillOpen() {
+		t.Fatal("refusing one channel took the whole socket down")
 	}
 }
 

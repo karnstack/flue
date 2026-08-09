@@ -114,8 +114,18 @@ The daemon joins a tunnel like any relay:
 
 ```sh
 XDG_CONFIG_HOME=~/.config/flue-dev go run -tags dev ./cmd/flue relay join \
-  wss://<tunnel-host> --secret <the .dev.vars value>
+  wss://<tunnel-host> --secret <the .dev.vars value> \
+  --fleet "$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
 ```
+
+`--fleet` is required and this tier never runs `flue relay setup`, so there
+is no printed line to copy one from — mint it yourself, as above. That works
+because the fleet key is just 32 random bytes in unpadded base64url and the
+Worker never holds it ([`spec/fleet-trust.md`](../spec/fleet-trust.md)):
+nothing at the relay has to agree with the value, only the other machines in
+the same dev fleet do. So keep it if you join a second dev machine — two
+machines holding different fleet keys will not honour each other's device
+certificates — and do not paste in the one a real relay printed.
 
 ### 3. A deployed dev relay (using the relay path day to day)
 

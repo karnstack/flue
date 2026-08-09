@@ -7,11 +7,12 @@ package relay
 // paired? The relay cannot answer it and is not asked to: it forwards opaque
 // bytes, and the proof arrives out of a Noise IK handshake this process runs
 // itself. Two proofs are accepted, in order (spec/fleet-trust.md): the
-// initiator's static key is in this machine's own device registry, or the
-// handshake's first message carried a device certificate for exactly that
-// key, signed by the fleet key and not revoked — a device paired on a
-// sibling machine, which this one then records as its own. A key with
-// neither is closed, not served, however well-formed its handshake was.
+// initiator's static key is in this machine's own device registry and not on
+// its revocation list, or the handshake's first message carried a device
+// certificate for exactly that key, signed by the fleet key and not revoked —
+// a device paired on a sibling machine, which this one then records as its
+// own. A key with neither is closed, not served, however well-formed its
+// handshake was.
 
 import (
 	"bytes"
@@ -354,11 +355,18 @@ func (t *Transport) serveChannel(s *socket, ch *channel, origin string) {
 		return
 	}
 
+	// Rule 1, and both halves of it: FindByKey answers "paired here, and not
+	// revoked here" in one critical section (crypto.DeviceStore.FindByKey).
+	// The revocation half is not belt and braces — revoking writes the
+	// revocation before it removes the registry entry, so an entry that
+	// outlived a half-completed revoke is exactly the case a registry-only
+	// lookup would wave through.
 	dev, paired, err := t.devices.FindByKey(peerStatic)
 	if err != nil {
-		// The registry could not be read. Refusing is the only safe direction:
-		// this daemon cannot tell a paired device from an unpaired one right
-		// now, and it is not going to guess.
+		// The registry, or the revocation list it is read against, could not
+		// be read. Refusing is the only safe direction: this daemon cannot
+		// tell a paired device from an unpaired or a revoked one right now,
+		// and it is not going to guess.
 		t.log.Error("could not read the device registry for a relayed browser",
 			"channel", ch.id, "err", err)
 		t.tell(s, relaywire.Close{Channel: ch.id})
@@ -369,7 +377,9 @@ func (t *Transport) serveChannel(s *socket, ch *channel, origin string) {
 		// carrying a fleet device cert in its handshake payload. Rule 1 above
 		// deliberately never looked at the payload — a device in the registry
 		// is served cert or no cert, so pairing on this machine keeps working
-		// if the fleet key ever rotates away.
+		// if the fleet key ever rotates away. A revoked key reaches here too,
+		// and meets the same refusal on the way through: AddFromFleetCert
+		// checks the revocation list inside its own write.
 		dev, paired = t.admitByFleetCert(ch, peerStatic, payload)
 	}
 	if !paired {
@@ -439,13 +449,16 @@ func (t *Transport) admitByFleetCert(ch *channel, peerStatic, payload []byte) (c
 		return crypto.Device{}, false
 	}
 
-	name := cert.Name
-	if name == "" {
-		// The minting machine's ceremony never records an empty label
-		// (daemon.deviceLabel), but the encoding allows one and the Devices
-		// screen must not show a row nobody can safely act on.
-		name = "unnamed device"
-	}
+	// Signed is not the same as tame. The cert's name is authentic — the
+	// fleet vouched for it — and still arbitrary: the encoding bounds it at
+	// 512 bytes and permits newlines and control characters, while its
+	// destination is devices.json and a row on the Devices screen. So it goes
+	// through the normaliser the local pairing ceremony puts its own labels
+	// through (trimmed, 64 runes, never empty), rather than a second and
+	// laxer rule for names that happen to arrive over the fleet. An empty
+	// name — which the minting ceremony never records but the encoding
+	// allows — comes back as "unnamed device" from the same place.
+	name := daemon.DeviceLabel(cert.Name)
 	dev, err := t.devices.AddFromFleetCert(name, peerStatic, payload, time.Unix(cert.IAT, 0))
 	switch {
 	case errors.Is(err, crypto.ErrDeviceRevoked):

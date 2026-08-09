@@ -3254,7 +3254,7 @@ func (s *stubRelayUI) SetAddress(context.Context, string) (RelayUIDeployResult, 
 // daemon whose service has none answers 404 — the same shape as unconfigured.
 func TestRelayUIJoinEndpoint(t *testing.T) {
 	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
-	srv.SetRelayUI(&stubRelayUI{join: "flue relay join wss://r --secret s"})
+	srv.SetRelayUI(&stubRelayUI{join: "flue relay join wss://r --secret s --fleet f"})
 
 	req, err := http.NewRequest(http.MethodGet, ts.URL+RelayJoinPath, nil)
 	if err != nil {
@@ -3276,7 +3276,7 @@ func TestRelayUIJoinEndpoint(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decoding: %v", err)
 	}
-	if body.JoinCommand != "flue relay join wss://r --secret s" {
+	if body.JoinCommand != "flue relay join wss://r --secret s --fleet f" {
 		t.Fatalf("join_command = %q", body.JoinCommand)
 	}
 

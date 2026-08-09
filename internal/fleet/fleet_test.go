@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
@@ -151,6 +153,91 @@ func TestEncodeRefusesBadFields(t *testing.T) {
 		if _, err := Encode(tc.cert); err == nil {
 			t.Errorf("%s: Encode accepted it", tc.name)
 		}
+	}
+}
+
+// signRaw signs canonical bytes no Cert value could produce, so the tests
+// below can present a blob whose *only* fault is the one under test. Without
+// it every one of them would pass for the wrong reason — an unsigned blob
+// fails the signature check whatever its fields say, which proves nothing
+// about the parse.
+func signRaw(t *testing.T, k Key, canonical []byte) []byte {
+	t.Helper()
+	return append(bytes.Clone(canonical), ed25519.Sign(k.priv, canonical)...)
+}
+
+// TestVerifyRefusesAnUnknownVersion: a version byte this implementation does
+// not speak is refused even under a perfect fleet signature. The version is
+// inside the signed bytes precisely so it cannot be edited by anyone but the
+// fleet — and a future v2 must not be read as a v1 with different meanings.
+func TestVerifyRefusesAnUnknownVersion(t *testing.T) {
+	k := testKey(t)
+	canonical, err := Encode(testCerts()[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical[len(certPrefix)] = certVersion + 1
+	_, err = Verify(k.Public(), signRaw(t, k, canonical))
+	if !errors.Is(err, ErrBadCert) || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("a signed v%d blob = %v, want ErrBadCert naming the version", certVersion+1, err)
+	}
+}
+
+// TestVerifyRefusesAnUnknownKind: the kind byte is the tag the three layouts
+// are told apart by, so a fourth value has no layout to parse and must not be
+// guessed at. Signed, for the reason above.
+func TestVerifyRefusesAnUnknownKind(t *testing.T) {
+	k := testKey(t)
+	canonical, err := Encode(testCerts()[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical[len(certPrefix)+1] = kindRevoke + 1
+	_, err = Verify(k.Public(), signRaw(t, k, canonical))
+	if !errors.Is(err, ErrBadCert) || !strings.Contains(err.Error(), "kind byte") {
+		t.Fatalf("a signed blob with an unknown kind = %v, want ErrBadCert naming the kind byte", err)
+	}
+}
+
+// TestDecodeRefusesAnOversizedStringLength: the decoder holds its own ceiling
+// on a length it reads out of a blob, rather than inheriting the bounds the
+// minting paths happen to impose. Signed under the real fleet key, because
+// the ceiling has to hold against a blob that verifies — a fleet key on a
+// compromised machine, or simply a future field bound that grew — and not
+// only against garbage.
+func TestDecodeRefusesAnOversizedStringLength(t *testing.T) {
+	k := testKey(t)
+	var canonical []byte
+	canonical = append(canonical, certPrefix...)
+	canonical = append(canonical, certVersion, kindMachine)
+	canonical = binary.BigEndian.AppendUint16(canonical, uint16(maxStringBytes+1))
+	canonical = append(canonical, bytes.Repeat([]byte{'a'}, maxStringBytes+1)...)
+	canonical = binary.BigEndian.AppendUint16(canonical, 0)
+	canonical = append(canonical, key32(0x11)...)
+	canonical = binary.BigEndian.AppendUint64(canonical, 1754700000)
+
+	_, err := Verify(k.Public(), signRaw(t, k, canonical))
+	if !errors.Is(err, ErrBadCert) || !strings.Contains(err.Error(), "ceiling") {
+		t.Fatalf("a signed blob with a %d-byte string field = %v, want ErrBadCert naming the ceiling", maxStringBytes+1, err)
+	}
+}
+
+// TestIATCeilingIsSharedByBothSides: the encoder must never sign an iat its
+// own Verify refuses. maxIAT is one constant for exactly that reason — before
+// it was, Sign(IAT: math.MaxInt64) succeeded and Verify rejected the bytes it
+// had just produced.
+func TestIATCeilingIsSharedByBothSides(t *testing.T) {
+	k := testKey(t)
+	if _, err := k.Sign(Revocation{Device: key32(0x22), IAT: math.MaxInt64}); err == nil {
+		t.Fatal("Sign accepted an iat that is not a unix time")
+	}
+	// The ceiling itself is on the accepting side of the line on both ends.
+	blob, err := k.Sign(Revocation{Device: key32(0x22), IAT: maxIAT})
+	if err != nil {
+		t.Fatalf("Sign at the ceiling: %v", err)
+	}
+	if _, err := Verify(k.Public(), blob); err != nil {
+		t.Fatalf("Verify of a blob signed at the ceiling: %v", err)
 	}
 }
 
