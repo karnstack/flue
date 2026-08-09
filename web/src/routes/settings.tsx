@@ -84,13 +84,13 @@ const PLANNED = [
 export function SettingsRoute() {
   return (
     /*
-      Capped, and at the same 3xl the Remote screen's panels use. Everything
+      Capped and centred, at the same 3xl Devices and Remote use. Everything
       on this page is a line of text, so without a cap the rows keep their
       hover band all the way to the right edge of a wide display — a highlight
       three times the width of the words in it, moving under a pointer that is
       nowhere near them.
     */
-    <div className="flex max-w-3xl flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
       <PageHeader crumbs={[{ label: 'Settings' }]}>
         <p className={cn(PROSE, 'max-w-[65ch]')}>
           flue keeps almost nothing configurable on purpose — the defaults are the product. These

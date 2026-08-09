@@ -372,7 +372,7 @@ export function CloudflareConnectCard({
   setupCommand: string
 }) {
   return (
-    <Card className="max-w-3xl">
+    <Card>
       <CardHeader>
         <div className="flex items-center justify-between gap-x-3">
           <CloudflareMark />
@@ -432,7 +432,7 @@ export function CloudflareConfiguredCard({ info }: { info: RelayUIInfo }) {
   */
   const [updating, setUpdating] = useState(false)
   return (
-    <Card className="max-w-3xl">
+    <Card>
       <CardHeader>
         <div className="flex items-center justify-between gap-x-3">
           <CloudflareMark />

@@ -579,7 +579,17 @@ export function DevicesRoute() {
   const message = notice ?? connectionNotice(status)
 
   return (
-    <div className="flex flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
+    /*
+      Capped and centred, like Settings and Remote. Nothing on this screen is
+      a data grid: it is a paragraph, a card with a QR beside it, and a short
+      run of names and dates. Given a whole display each of those takes a
+      measure nobody can read across, and each row takes a hover band several
+      times the width of the words in it. 3xl is where the pairing card stops
+      being mostly empty, and the same number on all three screens is what
+      keeps the heading from jumping sideways when the reader moves between
+      them.
+    */
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-y-6 p-4 sm:p-6 lg:p-8">
       <PageHeader
         crumbs={[{ label: 'Devices' }]}
         actions={
