@@ -63,6 +63,7 @@ flue relay status  # show the configured relay
 flue relay update  # redeploy this release's relay; secret and pairings kept
 flue relay address # repoint this machine at a custom domain on the same relay
 flue serve         # run the daemon in the foreground, no login service
+flue version       # print the version (also --version, -v)
 ```
 
 ## Remote access
