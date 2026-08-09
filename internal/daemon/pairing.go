@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/karnstack/flue/internal/fleet"
 )
 
 // PairPath is the second of the two routes that may be reached by a method
@@ -343,7 +345,37 @@ func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
 		return s.refusePair(peer, res.String())
 	}
 
-	dev, err := s.identity.Devices.Add(deviceLabel(req.Label), key)
+	label := deviceLabel(req.Label)
+
+	// The ceremony that just completed is the moment the spec mints the fleet
+	// device cert (spec/fleet-trust.md, Certificates): this machine signs
+	// {device key, name, this machine's id, now} under the fleet key, and the
+	// registry entry carries the blob. Today the cert is what lets this
+	// device into every daemon that holds the fleet public key — it presents
+	// the blob in its handshake — and the stored copy is what the fleet
+	// directory will publish once that stage lands.
+	//
+	// A daemon without a fleet key mints nothing and pairs exactly as it
+	// always did. A signing failure is treated the same way, minus a log
+	// line: it is unreachable short of a corrupt key (the fields here are
+	// already validated), and refusing the user's ceremony over the cert
+	// would take working local pairing away to protect a convenience.
+	var cert []byte
+	if s.identity.Fleet.Valid() {
+		blob, err := s.identity.Fleet.Sign(fleet.DeviceCert{
+			Device:   key,
+			Name:     label,
+			PairedOn: s.relayMachine().id,
+			IAT:      time.Now().Unix(),
+		})
+		if err != nil {
+			s.logger().Error("could not mint a fleet device cert; the device is paired to this machine only", "err", err)
+		} else {
+			cert = blob
+		}
+	}
+
+	dev, err := s.identity.Devices.Add(label, key, cert)
 	if err != nil {
 		// The window is already spent, so this is not a retry loop the caller
 		// can drive; it is a device that was already paired, or a registry

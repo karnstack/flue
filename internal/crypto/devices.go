@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +20,15 @@ type Device struct {
 	PublicKey []byte    `json:"publicKey"`
 	PairedAt  time.Time `json:"pairedAt"`
 	LastSeen  time.Time `json:"lastSeen"`
+
+	// Cert is the fleet device certificate for this key — the signed blob
+	// exactly as internal/fleet produces it — when there is one: minted by
+	// this machine's own pairing ceremony, or presented by the device in
+	// its handshake after pairing elsewhere (spec/fleet-trust.md). Opaque
+	// to this package, kept so the machine can hand the cert onward — the
+	// fleet directory will publish it — and empty for devices paired
+	// before the fleet key existed.
+	Cert []byte `json:"cert,omitempty"`
 }
 
 // DeviceID derives the identity from the key itself, so an entry cannot
@@ -60,7 +70,13 @@ func (s *DeviceStore) save(devices []Device) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), "devices.json.*")
+	return s.writeFileLocked(s.path, blob)
+}
+
+// writeFileLocked writes one registry file atomically at 0600. Callers hold
+// s.mu; the name says so.
+func (s *DeviceStore) writeFileLocked(path string, blob []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
@@ -93,7 +109,7 @@ func (s *DeviceStore) save(devices []Device) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.path)
+	return os.Rename(tmp.Name(), path)
 }
 
 func (s *DeviceStore) List() ([]Device, error) {
@@ -102,7 +118,10 @@ func (s *DeviceStore) List() ([]Device, error) {
 	return s.load()
 }
 
-func (s *DeviceStore) Add(label string, publicKey []byte) (Device, error) {
+// Add registers a freshly paired device. cert is its fleet device
+// certificate — nil on a daemon with no fleet key, which pairs exactly as it
+// always did.
+func (s *DeviceStore) Add(label string, publicKey, cert []byte) (Device, error) {
 	if len(publicKey) != 32 {
 		return Device{}, fmt.Errorf("crypto: device key must be 32 bytes, got %d", len(publicKey))
 	}
@@ -123,7 +142,62 @@ func (s *DeviceStore) Add(label string, publicKey []byte) (Device, error) {
 		}
 	}
 	now := time.Now().UTC()
-	d := Device{ID: id, Label: label, PublicKey: slices.Clone(publicKey), PairedAt: now, LastSeen: now}
+	d := Device{ID: id, Label: label, PublicKey: slices.Clone(publicKey), PairedAt: now, LastSeen: now, Cert: slices.Clone(cert)}
+	if err := s.save(append(devices, d)); err != nil {
+		return Device{}, err
+	}
+	return d, nil
+}
+
+// ErrDeviceRevoked is AddFromFleetCert refusing a key on the revocation
+// list. A revocation permanently outranks a device cert for the same key,
+// whatever either one's timestamp says (spec/fleet-trust.md): the check is
+// membership, never a time comparison, and it happens in the same critical
+// section as the add so a concurrent revoke cannot slip between them.
+var ErrDeviceRevoked = errors.New("crypto: this device key is revoked")
+
+// AddFromFleetCert registers a device this machine never paired itself — it
+// arrived with a fleet certificate another machine's ceremony minted — and
+// is what makes the Devices screen show it and LastSeen work.
+//
+// It is idempotent where Add is not: two channels racing the same new
+// device both succeed, the second finding the entry the first wrote. That
+// is the honest semantic — "make sure this certified key is registered" —
+// where Add's is "record the ceremony that just happened", which must never
+// happen twice. An existing entry is returned untouched, label and cert
+// included: the registry is this machine's record, and a reconnect is not
+// an edit.
+//
+// pairedAt is the cert's iat — when the device joined the fleet, which is
+// the fact the column shows — while LastSeen starts now.
+func (s *DeviceStore) AddFromFleetCert(label string, publicKey, cert []byte, pairedAt time.Time) (Device, error) {
+	if len(publicKey) != 32 {
+		return Device{}, fmt.Errorf("crypto: device key must be 32 bytes, got %d", len(publicKey))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if revoked, err := s.isRevokedLocked(publicKey); err != nil {
+		return Device{}, err
+	} else if revoked {
+		return Device{}, ErrDeviceRevoked
+	}
+	devices, err := s.load()
+	if err != nil {
+		return Device{}, err
+	}
+	for _, d := range devices {
+		if bytes.Equal(d.PublicKey, publicKey) {
+			return d, nil
+		}
+	}
+	d := Device{
+		ID:        DeviceID(publicKey),
+		Label:     label,
+		PublicKey: slices.Clone(publicKey),
+		PairedAt:  pairedAt.UTC(),
+		LastSeen:  time.Now().UTC(),
+		Cert:      slices.Clone(cert),
+	}
 	if err := s.save(append(devices, d)); err != nil {
 		return Device{}, err
 	}
@@ -176,6 +250,23 @@ func (s *DeviceStore) UpdateLastSeen(id string, now time.Time) (bool, error) {
 	return false, nil
 }
 
+// FindByID looks a device up by its display identity — what the revocation
+// path holds — without changing anything.
+func (s *DeviceStore) FindByID(id string) (Device, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	devices, err := s.load()
+	if err != nil {
+		return Device{}, false, err
+	}
+	for _, d := range devices {
+		if d.ID == id {
+			return d, true, nil
+		}
+	}
+	return Device{}, false, nil
+}
+
 func (s *DeviceStore) FindByKey(publicKey []byte) (Device, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -197,4 +288,109 @@ func (s *DeviceStore) FindByKey(publicKey []byte) (Device, bool, error) {
 		}
 	}
 	return Device{}, false, nil
+}
+
+// --- the revocation set ---
+
+// Revocations live in revocations.json beside devices.json, under the same
+// lock, because the two are one fact with two signs: a device is paired, or
+// its key is dead. Removing an entry from devices.json stopped being a
+// complete revocation the day fleet certs existed — the cert would walk the
+// device straight back in through AddFromFleetCert — so the revocation is
+// recorded here, permanently. Un-revoking is pairing again under a fresh
+// key (spec/fleet-trust.md); nothing ever deletes from this file.
+//
+// Each entry keeps the signed revocation blob the fleet key produced, so
+// the record that refuses the key locally is the same artifact the fleet
+// directory will publish to every other machine.
+
+// revocationsFileName is the set's file, 0600 like devices.json — not
+// because revocations are secret (they are signed, public artifacts) but
+// because one loose mode in this directory would be one to explain.
+const revocationsFileName = "revocations.json"
+
+// StoredRevocation is one dead key: the key itself, and the signed
+// fleet revocation for it.
+type StoredRevocation struct {
+	PublicKey []byte `json:"publicKey"`
+	Cert      []byte `json:"cert"`
+}
+
+func (s *DeviceStore) revocationsPath() string {
+	return filepath.Join(filepath.Dir(s.path), revocationsFileName)
+}
+
+func (s *DeviceStore) loadRevocations() ([]StoredRevocation, error) {
+	raw, err := os.ReadFile(s.revocationsPath())
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []StoredRevocation
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("crypto: %s is not a revocation list: %w", s.revocationsPath(), err)
+	}
+	return out, nil
+}
+
+func (s *DeviceStore) isRevokedLocked(publicKey []byte) (bool, error) {
+	revs, err := s.loadRevocations()
+	if err != nil {
+		return false, err
+	}
+	for _, r := range revs {
+		if bytes.Equal(r.PublicKey, publicKey) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// IsRevoked reports whether publicKey is on the revocation list. An
+// unreadable list is an error, not a false: the caller deciding whether to
+// admit a key must refuse when it cannot know, the same direction FindByKey
+// errors push.
+func (s *DeviceStore) IsRevoked(publicKey []byte) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isRevokedLocked(publicKey)
+}
+
+// AddRevocation records a dead key with its signed revocation. Idempotent
+// by key — revoking twice, or hearing the same revocation again from the
+// directory one stage on, is one entry — and the first blob recorded wins,
+// which is safe because any verifying revocation for a key is exactly as
+// dead as any other.
+func (s *DeviceStore) AddRevocation(publicKey, cert []byte) error {
+	if len(publicKey) != 32 {
+		return fmt.Errorf("crypto: device key must be 32 bytes, got %d", len(publicKey))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revs, err := s.loadRevocations()
+	if err != nil {
+		return err
+	}
+	for _, r := range revs {
+		if bytes.Equal(r.PublicKey, publicKey) {
+			return nil
+		}
+	}
+	revs = append(revs, StoredRevocation{PublicKey: slices.Clone(publicKey), Cert: slices.Clone(cert)})
+	blob, err := json.MarshalIndent(revs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return s.writeFileLocked(s.revocationsPath(), blob)
+}
+
+// Revocations is the whole set — what the directory publisher one stage on
+// pushes for the machines that were not in the room when the revoke
+// happened.
+func (s *DeviceStore) Revocations() ([]StoredRevocation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadRevocations()
 }

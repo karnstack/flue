@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -52,7 +53,7 @@ func TestDeviceStoreRoundTrip(t *testing.T) {
 	s := NewDeviceStore(dir)
 
 	key := testKey(t)
-	d, err := s.Add("karn's phone", key)
+	d, err := s.Add("karn's phone", key, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,14 +84,14 @@ func TestDeviceStoreRoundTrip(t *testing.T) {
 
 func TestDeviceStoreRejectsBadAndDuplicateKeys(t *testing.T) {
 	s := NewDeviceStore(t.TempDir())
-	if _, err := s.Add("short", []byte{1, 2, 3}); err == nil {
+	if _, err := s.Add("short", []byte{1, 2, 3}, nil); err == nil {
 		t.Fatal("accepted a non-32-byte key")
 	}
 	key := testKey(t)
-	if _, err := s.Add("first", key); err != nil {
+	if _, err := s.Add("first", key, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Add("second", key); err == nil {
+	if _, err := s.Add("second", key, nil); err == nil {
 		t.Fatal("accepted the same key twice")
 	}
 }
@@ -168,7 +169,7 @@ func TestAddDecidesDuplicatesOnTheWholeKey(t *testing.T) {
 	fresh := testKey(t)
 	writeRegistry(t, dir, []Device{planted(DeviceID(fresh), paired)})
 
-	d, err := s.Add("second phone", fresh)
+	d, err := s.Add("second phone", fresh, nil)
 	if err != nil {
 		t.Fatalf("Add refused a key the registry does not hold: %v", err)
 	}
@@ -177,7 +178,7 @@ func TestAddDecidesDuplicatesOnTheWholeKey(t *testing.T) {
 	}
 
 	// The true duplicate is still refused, on the bytes.
-	if _, err := s.Add("again", fresh); err == nil {
+	if _, err := s.Add("again", fresh, nil); err == nil {
 		t.Fatal("Add accepted the same key twice")
 	}
 }
@@ -187,7 +188,7 @@ func TestAddDecidesDuplicatesOnTheWholeKey(t *testing.T) {
 // a connection may be stamping itself at the moment it is revoked.
 func TestUpdateLastSeen(t *testing.T) {
 	s := NewDeviceStore(t.TempDir())
-	dev, err := s.Add("phone", testKey(t))
+	dev, err := s.Add("phone", testKey(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,9 +219,100 @@ func TestUpdateLastSeen(t *testing.T) {
 	}
 }
 
+// TestAddFromFleetCert: the fleet-admission write is idempotent — two
+// channels racing the same new device both succeed on one entry — and the
+// entry carries the cert, the cert's pairing time, and a fresh LastSeen.
+func TestAddFromFleetCert(t *testing.T) {
+	s := NewDeviceStore(t.TempDir())
+	key := testKey(t)
+	cert := []byte("a signed blob, opaque to this package")
+	pairedAt := time.Now().Add(-24 * time.Hour).Truncate(time.Second)
+
+	d, err := s.AddFromFleetCert("attic phone", key, cert, pairedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Label != "attic phone" || !bytes.Equal(d.Cert, cert) || !d.PairedAt.Equal(pairedAt) {
+		t.Fatalf("admitted device = %+v", d)
+	}
+	if !d.LastSeen.After(pairedAt) {
+		t.Fatalf("LastSeen = %v, want now rather than the cert's iat", d.LastSeen)
+	}
+
+	// Again, with a different label: the existing entry wins, untouched.
+	again, err := s.AddFromFleetCert("someone renamed it", key, []byte("another blob"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Label != "attic phone" || !bytes.Equal(again.Cert, cert) {
+		t.Fatalf("a second admission rewrote the entry: %+v", again)
+	}
+	if list, _ := s.List(); len(list) != 1 {
+		t.Fatalf("registry holds %d entries, want 1", len(list))
+	}
+}
+
+// TestRevocationOutranksTheCert is the spec's precedence rule at the store:
+// a revoked key is refused by AddFromFleetCert however fresh the cert that
+// presents it, because the check is set membership and never a timestamp.
+func TestRevocationOutranksTheCert(t *testing.T) {
+	s := NewDeviceStore(t.TempDir())
+	key := testKey(t)
+
+	if err := s.AddRevocation(key, []byte("signed revocation")); err != nil {
+		t.Fatal(err)
+	}
+	if revoked, err := s.IsRevoked(key); err != nil || !revoked {
+		t.Fatalf("IsRevoked = %v, %v", revoked, err)
+	}
+	if _, err := s.AddFromFleetCert("it's back", key, []byte("a newer cert"), time.Now()); !errors.Is(err, ErrDeviceRevoked) {
+		t.Fatalf("AddFromFleetCert on a revoked key = %v, want ErrDeviceRevoked", err)
+	}
+	if list, _ := s.List(); len(list) != 0 {
+		t.Fatalf("the revoked key reached the registry: %+v", list)
+	}
+
+	// A different key is unaffected, and Add — this machine's own ceremony —
+	// deliberately is too: rule 1 of the acceptance order is "pairing on
+	// this machine works as before", and a fresh ceremony mints a fresh key
+	// anyway.
+	other := testKey(t)
+	if revoked, err := s.IsRevoked(other); err != nil || revoked {
+		t.Fatalf("IsRevoked(other) = %v, %v", revoked, err)
+	}
+
+	// Recording the same key again is one entry, and the set survives a
+	// fresh store over the same directory.
+	if err := s.AddRevocation(key, []byte("recorded twice")); err != nil {
+		t.Fatal(err)
+	}
+	revs, err := NewDeviceStore(filepath.Dir(s.revocationsPath())).Revocations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revs) != 1 || !bytes.Equal(revs[0].PublicKey, key) || string(revs[0].Cert) != "signed revocation" {
+		t.Fatalf("revocations = %+v, want the one original entry", revs)
+	}
+}
+
+func TestFindByID(t *testing.T) {
+	s := NewDeviceStore(t.TempDir())
+	d, err := s.Add("phone", testKey(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.FindByID(d.ID)
+	if err != nil || !ok || got.ID != d.ID {
+		t.Fatalf("FindByID = %+v, %v, %v", got, ok, err)
+	}
+	if _, ok, err := s.FindByID("000000000000"); err != nil || ok {
+		t.Fatalf("FindByID of an unknown id = %v, %v, want false and no error", ok, err)
+	}
+}
+
 func TestDeviceStoreRemove(t *testing.T) {
 	s := NewDeviceStore(t.TempDir())
-	d, err := s.Add("phone", testKey(t))
+	d, err := s.Add("phone", testKey(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

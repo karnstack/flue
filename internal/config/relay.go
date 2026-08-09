@@ -42,6 +42,18 @@ type Relay struct {
 	// (docs/RELAY.md says so where the line is printed).
 	Secret string `json:"secret,omitempty"`
 
+	// FleetSeed is the fleet key's Ed25519 seed, unpadded base64url —
+	// exactly the value `flue relay join --fleet` was given, minted by
+	// `flue relay setup` alongside the secret (spec/fleet-trust.md and
+	// internal/fleet own its meaning; this package only stores the string).
+	// It is the one credential in this file the Worker never holds: the
+	// secret's other copy lives on Cloudflare, the fleet key's copies live
+	// only in the fleet's relay.json files and the join line that carried
+	// it between them. Never logged, never sent anywhere, and the second
+	// reason this file is 0600 — a leaked seed signs device certs every
+	// machine in the fleet honours.
+	FleetSeed string `json:"fleet_seed,omitempty"`
+
 	// MachineID is the slot this machine holds on the relay: the <id> in the
 	// /daemon/<id> leg the daemon dials and the /client/<id> URLs browsers
 	// open. Minted by `flue relay setup` and `flue relay join` (MintMachineID),

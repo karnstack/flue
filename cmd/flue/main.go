@@ -25,6 +25,7 @@ import (
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/service"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
@@ -323,7 +324,27 @@ func loadIdentity() (daemon.Identity, error) {
 	if err != nil {
 		return daemon.Identity{}, fmt.Errorf("load the daemon static key: %w", err)
 	}
-	return daemon.Identity{Key: key, Devices: crypto.NewDeviceStore(dir)}, nil
+	id := daemon.Identity{Key: key, Devices: crypto.NewDeviceStore(dir)}
+
+	// The fleet key rides relay.json (spec/fleet-trust.md), so it is read
+	// here beside the other identity material rather than by the relay
+	// startup: pairing mints device certs and revocation mints revocations
+	// whether or not the transport ever comes up. An unreadable or absent
+	// relay.json leaves the identity fleet-less — startRelay reports the
+	// unreadable case, and a daemon without a fleet key pairs exactly as it
+	// always did. A relay.json that parses but carries a seed this daemon
+	// cannot use is fatal, by the same reasoning as the static key above: a
+	// daemon that started anyway would sign nothing and verify nothing while
+	// looking perfectly healthy, and a corrupted credential file is a thing
+	// to say out loud, not to route around.
+	if rc, ok, err := config.LoadRelay(); err == nil && ok && rc.FleetSeed != "" {
+		fk, err := fleet.Parse(rc.FleetSeed)
+		if err != nil {
+			return daemon.Identity{}, fmt.Errorf("relay.json carries a fleet seed this daemon cannot use: %w", err)
+		}
+		id.Fleet = fk
+	}
+	return id, nil
 }
 
 // startRelay dials the configured relay, if there is one, and keeps it dialled
@@ -359,7 +380,15 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 		return false
 	}
 
-	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin, MachineID: rc.MachineID}
+	// The public half only: signing stays with the daemon (pairing,
+	// revocation), while the transport verifies the certs strangers present.
+	// identity.Fleet is the parsed form of this same file's seed — loaded by
+	// loadIdentity, which is fatal on a seed that does not parse — so a nil
+	// Public() here means relay.json carries no fleet key at all, and
+	// relay.New refuses that by name: the file predates the fleet key, and
+	// the re-join line is the way forward (spec/fleet-trust.md keeps no
+	// compatibility with pre-fleet files, deliberately).
+	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin, MachineID: rc.MachineID, FleetPub: identity.Fleet.Public()}
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
 	if err != nil {
 		logger.Warn("relay not started", "err", err)

@@ -19,6 +19,7 @@ import (
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaydeploy"
 	relaybundle "github.com/karnstack/flue/relay"
 	"github.com/karnstack/flue/web"
@@ -273,6 +274,20 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 	}
 	origin := "https://" + host
 
+	// The fleet key, minted beside the fresh secret and — unlike it — never
+	// sent anywhere: no binding, no secret upload, no log line
+	// (spec/fleet-trust.md). It travels only in relay.json below and in the
+	// join line printed at the end, and it is what signs the device certs
+	// every machine on this relay honours. Fresh on every setup for the same
+	// reason the secret is: setup is the recovery path, and rotating the
+	// fleet key is what un-trusts every cert a compromised machine could
+	// have signed.
+	fleetKey, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "  ✓ fleet key minted (stays on your machines; Cloudflare never sees it)")
+
 	// This machine's identity on the relay: the id is the slot it dials
 	// (/daemon/<id>) and the name is its human label. Minted fresh on every
 	// run like the secret — setup is the recovery path, and a stale id would
@@ -297,6 +312,7 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 	if err := config.SaveRelay(config.Relay{
 		URL:         "wss://" + host,
 		Secret:      secret,
+		FleetSeed:   fleetKey.Seed(),
 		Origin:      origin,
 		MachineID:   machineID,
 		MachineName: machineName,
@@ -318,11 +334,15 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 		}
 	}
 
-	// The one line another machine needs, exactly as it should be run there.
-	// It carries the secret — that is the point: the relay is shared by
-	// machines that share it, and this is the deliberate hand-off, printed
-	// once at the moment the user is wiring their fleet up.
-	fmt.Fprintf(w, "\nto add another machine, run this on it:\n\n  flue relay join wss://%s --secret %s\n", host, secret)
+	// The one line another machine needs, exactly as it should be run there,
+	// spelled by joinCommand so this print and the Remote screen's copy can
+	// never drift. It carries the secret and now the fleet key — that is the
+	// point: the relay is shared by machines that share them, and this is
+	// the deliberate hand-off, printed once at the moment the user is wiring
+	// their fleet up. Its weight changed when the fleet key came aboard:
+	// leaking this line used to buy disruption, and now it buys the fleet —
+	// docs/RELAY.md says so where it teaches the line.
+	fmt.Fprintf(w, "\nto add another machine, run this on it:\n\n  %s\n", joinCommand(host, secret, fleetKey.Seed()))
 
 	fmt.Fprint(w, relaySetupDone)
 	return nil
@@ -333,7 +353,7 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 // a machine list rendering as a list.
 const machineNameMaxRunes = 64
 
-const relayJoinUsage = "usage: flue relay join <url> --secret <secret> [--name <label>]"
+const relayJoinUsage = "usage: flue relay join <url> --secret <secret> --fleet <fleet key> [--name <label>]"
 
 // relayJoinDone mirrors relaySetupDone's restart note without the token line:
 // join never saw a Cloudflare credential, so there is nothing to tell the user
@@ -360,6 +380,7 @@ func runRelayJoin(w io.Writer, args []string) error {
 	fs := flag.NewFlagSet("relay join", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	secret := fs.String("secret", "", "the relay's daemon secret, from flue relay setup")
+	fleetSeed := fs.String("fleet", "", "the fleet key, from flue relay setup")
 	name := fs.String("name", "", "a display name for this machine (defaults to the hostname)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return fmt.Errorf("%w; %s", err, relayJoinUsage)
@@ -369,6 +390,27 @@ func runRelayJoin(w io.Writer, args []string) error {
 	}
 	if *secret == "" {
 		return errors.New("no --secret was given; " + relayJoinUsage)
+	}
+	// Required unconditionally, not "when the relay was set up with one".
+	// Join is a local command — it never talks to the relay, so it cannot
+	// ask how setup ran — and every setup from this flue on mints a fleet
+	// key, so the only line without --fleet is one printed by an older
+	// setup, whose relay the compatibility rules retire anyway
+	// (spec/fleet-trust.md): its ids stopped routing on the Worker this
+	// binary deploys, and the fix is re-running setup, which prints a line
+	// this check accepts. One rule, no state to consult, and a lost flag —
+	// the ordinary paste accident — is caught here rather than as a daemon
+	// that quietly cannot admit its fleet's devices.
+	if *fleetSeed == "" {
+		return errors.New("no --fleet was given; " + relayJoinUsage)
+	}
+	fleetKey, err := fleet.Parse(*fleetSeed)
+	if err != nil {
+		// The parse error says what the value failed to be (base64url, 32
+		// bytes) and never echoes it: the seed is the fleet's signing key,
+		// and a near-miss paste is close enough to the credential to keep
+		// out of the transcript.
+		return fmt.Errorf("--fleet: %w", err)
 	}
 	if utf8.RuneCountInString(*name) > machineNameMaxRunes {
 		return fmt.Errorf("--name is longer than %d characters", machineNameMaxRunes)
@@ -395,10 +437,14 @@ func runRelayJoin(w io.Writer, args []string) error {
 
 	// The same shape setup writes, derived the same way: bare wss:// URL, the
 	// https origin on the same host. SaveRelay is 0600 — the file holds the
-	// relay's whole credential.
+	// relay's whole credential, the fleet key now included. The seed is
+	// stored as the parsed key re-spells it, which for a value that passed
+	// fleet.Parse is the input verbatim; going through the round trip means
+	// the file can only ever hold a spelling Parse accepts.
 	if err := config.SaveRelay(config.Relay{
 		URL:         "wss://" + host,
 		Secret:      *secret,
+		FleetSeed:   fleetKey.Seed(),
 		Origin:      "https://" + host,
 		MachineID:   machineID,
 		MachineName: machineName,

@@ -2596,7 +2596,7 @@ func TestAuditDoesNotLogAnAcceptedRequest(t *testing.T) {
 // the state it leaves behind.
 func addDevice(t *testing.T, srv *Server, label string, fill byte) crypto.Device {
 	t.Helper()
-	d, err := srv.identity.Devices.Add(label, deviceKey(fill))
+	d, err := srv.identity.Devices.Add(label, deviceKey(fill), nil)
 	if err != nil {
 		t.Fatalf("Add(%q): %v", label, err)
 	}

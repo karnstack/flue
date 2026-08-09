@@ -19,6 +19,7 @@ package relay
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -146,15 +147,26 @@ const (
 
 // Config is everything the adapter needs to reach a deployed relay.
 //
-// All four fields are required: where to dial, which machine's slot to dial
-// it as, what the dial presents, and the origin the relay serves browsers on.
-// The daemon and the Worker share one long-lived DAEMON_SECRET, set at deploy
-// time by `flue relay setup`.
+// All five fields are required: where to dial, which machine's slot to dial
+// it as, what the dial presents, the origin the relay serves browsers on,
+// and the fleet public key the acceptance rule verifies device certs under.
+// The daemon and the Worker share one long-lived DAEMON_SECRET, set at
+// deploy time by `flue relay setup`; the fleet key was minted beside it and
+// the Worker never sees either half of it.
 type Config struct {
 	URL       string // the bare relay address: wss://flue-relay.<sub>.workers.dev
 	Secret    string // the DAEMON_SECRET set at deploy time
 	Origin    string // https origin the relay serves the UI on
 	MachineID string // the machine's slot on the relay: the <id> of /daemon/<id>
+
+	// FleetPub is the fleet public key (spec/fleet-trust.md), derived from
+	// the seed relay.json carries. Required like the rest, deliberately: a
+	// relay.json without a fleet seed is from a flue that predates the key,
+	// and the honest answer is the re-join the operator is one printed line
+	// away from — not a transport that quietly serves rule 1 of the
+	// acceptance order and silently drops rule 2 (channel.go). Only the
+	// public half ever reaches this package.
+	FleetPub ed25519.PublicKey
 }
 
 // ErrIncompleteConfig is what New answers a Config it cannot dial with: a
@@ -290,6 +302,12 @@ func New(cfg Config, srv Server, identity noise.DHKey, devices *crypto.DeviceSto
 		// staring at a hand-edited relay.json needs to see which value the
 		// grammar refused.
 		return nil, fmt.Errorf("%w: machine id %q is not a valid slug", ErrIncompleteConfig, cfg.MachineID)
+	case len(cfg.FleetPub) != ed25519.PublicKeySize:
+		// The message names the way out because there is exactly one: the
+		// fleet key rides the join line, and a relay.json without one is
+		// from before it existed (spec/fleet-trust.md keeps no
+		// compatibility with those, deliberately).
+		return nil, fmt.Errorf("%w: no fleet key; re-run the join line printed by `flue relay setup` on this machine", ErrIncompleteConfig)
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)

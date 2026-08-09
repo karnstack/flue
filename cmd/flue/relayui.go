@@ -18,6 +18,7 @@ import (
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaydeploy"
 	relaybundle "github.com/karnstack/flue/relay"
 )
@@ -339,13 +340,19 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 	}
 
 	// The same record `flue relay setup` writes, for the same reasons — see
-	// runRelaySetup for why the id and secret are fresh, why the id is minted
-	// under the fresh secret, and why the write is last.
+	// runRelaySetup for why the id, the secret and the fleet key are fresh,
+	// why the id is minted under the fresh secret, why the fleet key goes
+	// nowhere but this file and the join line, and why the write is last.
+	fleetKey, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		return daemon.RelayUIDeployResult{}, err
+	}
 	machineID := config.MintMachineID(hostname, secret, rand.Reader)
 	machineName := truncateRunes(hostname, machineNameMaxRunes)
 	if err := config.SaveRelay(config.Relay{
 		URL:         "wss://" + host,
 		Secret:      secret,
+		FleetSeed:   fleetKey.Seed(),
 		Origin:      "https://" + host,
 		MachineID:   machineID,
 		MachineName: machineName,
@@ -353,6 +360,7 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 	}); err != nil {
 		return daemon.RelayUIDeployResult{}, fmt.Errorf("save the relay configuration: %w", err)
 	}
+	steps = append(steps, "fleet key minted (stays on your machines; Cloudflare never sees it)")
 	steps = append(steps, fmt.Sprintf("this machine joined as %s (%s)", machineName, machineID))
 
 	if fromRequest {
@@ -369,7 +377,7 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 	res := daemon.RelayUIDeployResult{
 		Steps:       steps,
 		Origin:      "https://" + host,
-		JoinCommand: joinCommand(host, secret),
+		JoinCommand: joinCommand(host, secret, fleetKey.Seed()),
 	}
 	if started, already := s.runtime.startOnce(); already {
 		// A transport is already up, dialling whatever relay.json said when it
@@ -387,10 +395,13 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 	return res, nil
 }
 
-// joinCommand is the one spelling of the hand-off line, shared by the deploy
-// result and the join endpoint so the two can never drift.
-func joinCommand(host, secret string) string {
-	return fmt.Sprintf("flue relay join wss://%s --secret %s", host, secret)
+// joinCommand is the one spelling of the hand-off line, shared by the CLI's
+// setup print, the deploy result and the join endpoint so the three can
+// never drift. It carries the secret and the fleet key seed, which is the
+// line's whole point and its whole weight: docs/RELAY.md and
+// spec/fleet-trust.md both say what leaking it now costs.
+func joinCommand(host, secret, fleetSeed string) string {
+	return fmt.Sprintf("flue relay join wss://%s --secret %s --fleet %s", host, secret, fleetSeed)
 }
 
 // SetAddress is `flue relay address` behind the card: the user routed a
@@ -445,12 +456,17 @@ func (s *relayUIService) JoinCommand(ctx context.Context) (string, bool, error) 
 	if err != nil || !ok {
 		return "", false, err
 	}
-	if cfg.Secret == "" {
-		// A relay.json without a secret cannot join anything.
+	if cfg.Secret == "" || cfg.FleetSeed == "" {
+		// A relay.json without a secret cannot join anything, and one
+		// without a fleet key cannot be joined faithfully: join requires
+		// --fleet, and a line rebuilt without it would be one the command
+		// refuses. A file missing the seed predates the fleet key, and the
+		// path back is re-running setup — which mints one and makes this
+		// answer true again — not a synthesized line.
 		return "", false, nil
 	}
 	host := strings.TrimPrefix(cfg.URL, "wss://")
-	return joinCommand(host, cfg.Secret), true, nil
+	return joinCommand(host, cfg.Secret, cfg.FleetSeed), true, nil
 }
 
 func (s *relayUIService) Update(ctx context.Context, req daemon.RelayUIDeployRequest) (daemon.RelayUIDeployResult, error) {

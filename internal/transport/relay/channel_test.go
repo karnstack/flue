@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/flynn/noise"
 	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaywire"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
@@ -34,13 +36,15 @@ const localToken = "0123456789abcdef"
 
 // --- fixtures ---
 
-// identity is a daemon's static key, its paired-device registry, and one
-// device already in it: the state a browser can actually attach against.
+// identity is a daemon's static key, its paired-device registry, one device
+// already in it, and a fleet key: the state a browser can actually attach
+// against.
 type identity struct {
 	key       noise.DHKey
 	devices   *crypto.DeviceStore
 	device    crypto.Device
 	deviceKey noise.DHKey
+	fleet     fleet.Key
 }
 
 func newIdentity(t *testing.T) *identity {
@@ -55,7 +59,7 @@ func newIdentity(t *testing.T) *identity {
 		t.Fatalf("GenerateKeypair: %v", err)
 	}
 	store := crypto.NewDeviceStore(dir)
-	dev, err := store.Add("phone", devKey.Public)
+	dev, err := store.Add("phone", devKey.Public, nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -65,7 +69,22 @@ func newIdentity(t *testing.T) *identity {
 	if ok, err := store.UpdateLastSeen(dev.ID, time.Now().Add(-time.Hour)); err != nil || !ok {
 		t.Fatalf("backdating the device: %v, %v", ok, err)
 	}
-	return &identity{key: key, devices: store, device: dev, deviceKey: devKey}
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	return &identity{key: key, devices: store, device: dev, deviceKey: devKey, fleet: fk}
+}
+
+// deviceCert signs a fleet device cert for key under id's fleet key, the way
+// a sibling machine's pairing ceremony would have.
+func (id *identity) deviceCert(t *testing.T, key []byte, name string) []byte {
+	t.Helper()
+	blob, err := id.fleet.Sign(fleet.DeviceCert{Device: key, Name: name, PairedOn: "sibling-mac-a1b2-0f9a12cd", IAT: time.Now().Unix()})
+	if err != nil {
+		t.Fatalf("signing a device cert: %v", err)
+	}
+	return blob
 }
 
 // unpairedKey is a browser key this daemon has never seen.
@@ -84,7 +103,7 @@ func newChannelTransport(t *testing.T, r *fakeRelay, srv Server, id *identity, l
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	tr, err := New(Config{URL: r.URL(), Secret: "s", Origin: testOrigin, MachineID: testMachineID}, srv, id.key, id.devices, log)
+	tr, err := New(Config{URL: r.URL(), Secret: "s", Origin: testOrigin, MachineID: testMachineID, FleetPub: id.fleet.Public()}, srv, id.key, id.devices, log)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -98,7 +117,7 @@ func newChannelTransport(t *testing.T, r *fakeRelay, srv Server, id *identity, l
 func newDaemonServer(t *testing.T, id *identity) (*daemon.Server, *httptest.Server) {
 	t.Helper()
 	srv := daemon.New(session.NewRegistry(time.Now), nil, nil, "test",
-		daemon.Identity{Key: id.key, Devices: id.devices})
+		daemon.Identity{Key: id.key, Devices: id.devices, Fleet: id.fleet})
 	t.Cleanup(srv.Shutdown)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -225,18 +244,25 @@ type browser struct {
 }
 
 // attach announces a channel the way the Worker does and completes the
-// handshake the browser drives.
+// handshake the browser drives, presenting no cert — the pre-fleet browser,
+// and the shape every existing test exercises.
 func attach(t *testing.T, c *relayConn, chanID uint32, key noise.DHKey, daemonPub []byte) *browser {
+	return attachWithPayload(t, c, chanID, key, daemonPub, nil)
+}
+
+// attachWithPayload is attach with message A's encrypted payload — the
+// fleet device cert, or whatever bytes a test wants judged in its place.
+func attachWithPayload(t *testing.T, c *relayConn, chanID uint32, key noise.DHKey, daemonPub, payload []byte) *browser {
 	t.Helper()
 	c.sendControl(t, relaywire.Open{Channel: chanID, Origin: testOrigin})
-	return handshake(t, c, chanID, key, daemonPub)
+	return handshake(t, c, chanID, key, daemonPub, payload)
 }
 
 // handshake drives the IK handshake on an already-announced channel.
-func handshake(t *testing.T, c *relayConn, chanID uint32, key noise.DHKey, daemonPub []byte) *browser {
+func handshake(t *testing.T, c *relayConn, chanID uint32, key noise.DHKey, daemonPub, payload []byte) *browser {
 	t.Helper()
 	b := &browser{t: t, c: c, id: chanID}
-	ch, err := crypto.InitiatorHandshake(key, daemonPub, nil, b.recvRaw, b.sendRaw)
+	ch, err := crypto.InitiatorHandshake(key, daemonPub, payload, nil, b.recvRaw, b.sendRaw)
 	if err != nil {
 		t.Fatalf("the browser could not complete the handshake on channel %d: %v", chanID, err)
 	}
@@ -444,6 +470,198 @@ func TestRelayChannelRefusesAnUnknownDeviceKey(t *testing.T) {
 	}
 	if !c.stillOpen() {
 		t.Fatal("refusing one channel took the whole socket down")
+	}
+}
+
+// TestRelayChannelAdmitsAFleetCertifiedDevice is the fleet key doing its
+// job (spec/fleet-trust.md): a device this machine never paired presents,
+// in its handshake payload, the device cert a sibling machine's ceremony
+// minted — and is served, and written into this machine's own registry
+// under the cert's name, cert attached, so the Devices screen shows it,
+// LastSeen works, and a later stage can publish the blob onward.
+func TestRelayChannelAdmitsAFleetCertifiedDevice(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv, _ := newDaemonServer(t, id)
+	tr := newChannelTransport(t, r, srv, id, nil)
+	runTransport(t, tr)
+
+	c := r.accept(t)
+	stranger := unpairedKey(t)
+	cert := id.deviceCert(t, stranger.Public, "attic phone")
+	b := attachWithPayload(t, c, 1, stranger, id.key.Public, cert)
+
+	if w, ok := b.recvControl().(wire.Welcome); !ok {
+		t.Fatalf("the fleet-certified device's first frame was %#v, want a welcome", w)
+	}
+	b.sendControl(wire.List{})
+	if s, ok := b.recvControl().(wire.Sessions); !ok {
+		t.Fatalf("list was answered with %#v, want sessions", s)
+	}
+
+	list, err := id.devices.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("registry holds %d devices, want the paired one and the admitted one", len(list))
+	}
+	got, ok, err := id.devices.FindByKey(stranger.Public)
+	if err != nil || !ok {
+		t.Fatalf("the admitted device is not in the registry: %v, %v", ok, err)
+	}
+	if got.Label != "attic phone" {
+		t.Errorf("registry label = %q, want the cert's name", got.Label)
+	}
+	if !bytes.Equal(got.Cert, cert) {
+		t.Error("the registry entry does not carry the cert it was admitted on")
+	}
+}
+
+// TestRelayChannelRefusesAFleetCertForADifferentKey: the cert is a public
+// artifact, so holding one proves nothing — the handshake's own static key
+// is what the initiator proved possession of, and the cert must name
+// exactly it.
+func TestRelayChannelRefusesAFleetCertForADifferentKey(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv := &readingServer{}
+	sink := &syncBuffer{}
+	tr := newChannelTransport(t, r, srv, id, slog.New(slog.NewTextHandler(sink, nil)))
+	runTransport(t, tr)
+
+	c := r.accept(t)
+	victim := unpairedKey(t)
+	thief := unpairedKey(t)
+	// A perfectly valid cert — for the victim's key, presented by a
+	// handshake run under the thief's.
+	stolen := id.deviceCert(t, victim.Public, "victim phone")
+	attachWithPayload(t, c, 1, thief, id.key.Public, stolen)
+
+	expectClose(t, c, 1)
+	waitForLog(t, sink, "different key")
+	if n := len(srv.served()); n != 0 {
+		t.Fatalf("the daemon served %d connections on a stolen cert, want 0", n)
+	}
+	if _, ok, _ := id.devices.FindByKey(thief.Public); ok {
+		t.Fatal("the thief's key reached the registry")
+	}
+}
+
+// TestRelayChannelRefusesAForeignFleetsCert: a cert signed by some other
+// fleet's key — a hostile relay minting its own — verifies under nothing
+// this daemon trusts.
+func TestRelayChannelRefusesAForeignFleetsCert(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv := &readingServer{}
+	sink := &syncBuffer{}
+	tr := newChannelTransport(t, r, srv, id, slog.New(slog.NewTextHandler(sink, nil)))
+	runTransport(t, tr)
+
+	otherFleet, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stranger := unpairedKey(t)
+	foreign, err := otherFleet.Sign(fleet.DeviceCert{Device: stranger.Public, Name: "impostor", PairedOn: "x-a1b2-0f9a12cd", IAT: time.Now().Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := r.accept(t)
+	attachWithPayload(t, c, 1, stranger, id.key.Public, foreign)
+
+	expectClose(t, c, 1)
+	waitForLog(t, sink, "not a verifying fleet device cert")
+	if n := len(srv.served()); n != 0 {
+		t.Fatalf("the daemon served %d connections for a foreign fleet's cert, want 0", n)
+	}
+}
+
+// TestRelayChannelRefusesGarbageInThePayload: bytes that are not a cert at
+// all get the same close an unpaired key gets — the payload can never make
+// an outcome worse than sending nothing.
+func TestRelayChannelRefusesGarbageInThePayload(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv := &readingServer{}
+	tr := newChannelTransport(t, r, srv, id, nil)
+	runTransport(t, tr)
+
+	c := r.accept(t)
+	stranger := unpairedKey(t)
+	attachWithPayload(t, c, 1, stranger, id.key.Public, []byte("not a certificate"))
+
+	expectClose(t, c, 1)
+	if n := len(srv.served()); n != 0 {
+		t.Fatalf("the daemon served %d connections for a garbage payload, want 0", n)
+	}
+	if !c.stillOpen() {
+		t.Fatal("refusing one channel took the whole socket down")
+	}
+}
+
+// TestRelayRevocationOutranksTheFleetCert is the spec's precedence rule end
+// to end: revoke a device on this machine's Devices flow, and its fleet
+// cert — minted after the revocation, even — no longer admits it. Time is
+// deliberately no part of the rule; un-revoking is pairing afresh under a
+// new key.
+func TestRelayRevocationOutranksTheFleetCert(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv, ts := newDaemonServer(t, id)
+	tr := newChannelTransport(t, r, srv, id, nil)
+	runTransport(t, tr)
+
+	c := r.accept(t)
+	// Admit the device on its cert first, so the revoke below runs against
+	// a real fleet-admitted entry.
+	stranger := unpairedKey(t)
+	cert := id.deviceCert(t, stranger.Public, "attic phone")
+	b := attachWithPayload(t, c, 1, stranger, id.key.Public, cert)
+	if _, ok := b.recvControl().(wire.Welcome); !ok {
+		t.Fatal("the fleet-certified device was not welcomed")
+	}
+
+	// The operator revokes it, from a local client, the way the Devices
+	// screen does.
+	laptop := dialLocal(t, ts)
+	writeLocalControl(t, laptop, wire.Hello{Ver: "test"})
+	writeLocalControl(t, laptop, wire.Revoke{DeviceID: crypto.DeviceID(stranger.Public)})
+	for {
+		if _, ok := b.recvControl().(wire.Revoked); ok {
+			expectClose(t, c, 1)
+			break
+		}
+	}
+
+	// The same cert — and a fresher one — must both be dead now.
+	fresher := id.deviceCert(t, stranger.Public, "attic phone, again")
+	for i, blob := range [][]byte{cert, fresher} {
+		ch := uint32(10 + i)
+		attachWithPayload(t, c, ch, stranger, id.key.Public, blob)
+		expectClose(t, c, ch)
+	}
+	if _, ok, _ := id.devices.FindByKey(stranger.Public); ok {
+		t.Fatal("the revoked device is back in the registry")
+	}
+	// And the revocation is on file, signed, for the directory stage to
+	// publish.
+	revs, err := id.devices.Revocations()
+	if err != nil || len(revs) != 1 {
+		t.Fatalf("Revocations = %d entries, %v; want the one record", len(revs), err)
+	}
+	if !bytes.Equal(revs[0].PublicKey, stranger.Public) {
+		t.Error("the revocation names a different key")
+	}
+	if _, err := fleet.Verify(id.fleet.Public(), revs[0].Cert); err != nil {
+		t.Errorf("the stored revocation does not verify under the fleet key: %v", err)
 	}
 }
 

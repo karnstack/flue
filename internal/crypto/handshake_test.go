@@ -19,6 +19,14 @@ func (p *pipe) bSend(b []byte) error   { p.b2a <- b; return nil }
 func (p *pipe) bRecv() ([]byte, error) { return <-p.a2b, nil }
 
 func handshakePair(t *testing.T) (initiator, responder *Channel, deviceStatic []byte) {
+	i, r, static, payload := handshakePairWithPayload(t, nil)
+	if len(payload) != 0 {
+		t.Fatalf("an initiator that sent no payload delivered %d bytes of one", len(payload))
+	}
+	return i, r, static
+}
+
+func handshakePairWithPayload(t *testing.T, payload []byte) (initiator, responder *Channel, deviceStatic, gotPayload []byte) {
 	t.Helper()
 	daemonKey, err := Suite().GenerateKeypair(rand.Reader)
 	if err != nil {
@@ -30,16 +38,17 @@ func handshakePair(t *testing.T) (initiator, responder *Channel, deviceStatic []
 	}
 	p := newPipe()
 	type res struct {
-		ch   *Channel
-		peer []byte
-		err  error
+		ch      *Channel
+		peer    []byte
+		payload []byte
+		err     error
 	}
 	done := make(chan res, 1)
 	go func() {
-		ch, peer, err := ResponderHandshake(daemonKey, nil, p.bRecv, p.bSend)
-		done <- res{ch, peer, err}
+		ch, peer, pl, err := ResponderHandshake(daemonKey, nil, p.bRecv, p.bSend)
+		done <- res{ch, peer, pl, err}
 	}()
-	ich, err := InitiatorHandshake(deviceKey, daemonKey.Public, nil, p.aRecv, p.aSend)
+	ich, err := InitiatorHandshake(deviceKey, daemonKey.Public, payload, nil, p.aRecv, p.aSend)
 	if err != nil {
 		t.Fatalf("initiator: %v", err)
 	}
@@ -50,7 +59,25 @@ func handshakePair(t *testing.T) (initiator, responder *Channel, deviceStatic []
 	if !bytes.Equal(r.peer, deviceKey.Public) {
 		t.Fatal("responder saw the wrong initiator static key")
 	}
-	return ich, r.ch, deviceKey.Public
+	return ich, r.ch, deviceKey.Public, r.payload
+}
+
+// TestHandshakePayloadRoundTrips: message A's encrypted payload — where the
+// fleet device cert rides (spec/fleet-trust.md) — reaches the responder byte
+// for byte, and the channel that follows works exactly as one without it.
+func TestHandshakePayloadRoundTrips(t *testing.T) {
+	want := []byte("an opaque cert blob, as far as this layer knows")
+	i, r, _, payload := handshakePairWithPayload(t, want)
+	if !bytes.Equal(payload, want) {
+		t.Fatalf("responder read payload %q, want %q", payload, want)
+	}
+	ct, err := i.Seal([]byte("after the payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt, err := r.Open(ct); err != nil || string(pt) != "after the payload" {
+		t.Fatalf("transport after a payload handshake: %q, %v", pt, err)
+	}
 }
 
 func TestHandshakeAndBothDirections(t *testing.T) {
@@ -117,12 +144,12 @@ func TestWrongPinnedStaticKeyFailsTheHandshake(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, _, err := ResponderHandshake(daemonKey, nil, recvWithTimeout(p.bRecv), sendWithTimeout(p.bSend))
+		_, _, _, err := ResponderHandshake(daemonKey, nil, recvWithTimeout(p.bRecv), sendWithTimeout(p.bSend))
 		errCh <- err
 	}()
 	// The initiator pins the imposter's key; IK's first message encrypts to
 	// the pinned key, so the real daemon must fail to read it.
-	if _, err := InitiatorHandshake(deviceKey, imposter.Public, nil, recvWithTimeout(p.aRecv), sendWithTimeout(p.aSend)); err == nil {
+	if _, err := InitiatorHandshake(deviceKey, imposter.Public, nil, nil, recvWithTimeout(p.aRecv), sendWithTimeout(p.aSend)); err == nil {
 		// The initiator may or may not detect it first depending on where
 		// decryption fails; the responder must.
 		if err := <-errCh; err == nil {
