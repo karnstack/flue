@@ -3,6 +3,7 @@ package session
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoginShellPrefersSHELL(t *testing.T) {
@@ -79,6 +80,84 @@ func TestSessionEnvKeepsAnExistingSHELL(t *testing.T) {
 	}
 	if !contains(env, "SHELL=/usr/bin/fish") {
 		t.Fatalf("sessionEnv lost the daemon's own SHELL: %v", env)
+	}
+}
+
+// TestSpawnDefaultsCwdToHome pins where a session with no stated directory
+// opens: the user's home, like any terminal emulator or sshd. The alternative
+// — inheriting the daemon's own directory — is the launchd/systemd bug: a
+// service-started daemon runs at /, so every plain new session opened there.
+// os.UserHomeDir answers from $HOME on every platform flue targets, so
+// setting it is setting the expectation. Both the recorded cwd and the
+// child's real one are checked, because the fix is one resolution feeding
+// both — a seed that disagreed with the process would be the old split back
+// again. The poll and the symlink resolution are cwd_test.go's, for
+// cwd_test.go's reasons.
+func TestSpawnDefaultsCwdToHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := resolved(t, home)
+
+	r := NewRegistry(nil)
+	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	s.mu.Lock()
+	seeded := s.info.Cwd
+	s.mu.Unlock()
+	if seeded != home {
+		t.Fatalf("recorded Cwd = %q, want the home %q", seeded, home)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := processCwd(s.pid)
+		if err == nil && resolved(t, got) == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("processCwd(%d) = %q, %v; want %q", s.pid, got, err, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestSpawnKeepsExplicitCwd is the other half of the default: a caller that
+// states a directory gets that directory, and home never competes with it.
+// The stated one is deliberately not $HOME, so a spawn that reached for home
+// anyway could not pass by coincidence.
+func TestSpawnKeepsExplicitCwd(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	want := resolved(t, dir)
+
+	r := NewRegistry(nil)
+	s, err := r.Spawn(SpawnOpts{Cwd: dir, Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	s.mu.Lock()
+	seeded := s.info.Cwd
+	s.mu.Unlock()
+	if seeded != dir {
+		t.Fatalf("recorded Cwd = %q, want the stated %q", seeded, dir)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := processCwd(s.pid)
+		if err == nil && resolved(t, got) == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("processCwd(%d) = %q, %v; want %q", s.pid, got, err, want)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
