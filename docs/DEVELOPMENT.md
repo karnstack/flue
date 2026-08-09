@@ -130,9 +130,9 @@ XDG_CONFIG_HOME=~/.config/flue-dev bin/flue relay setup --worker flue-relay-dev
 ```
 
 The Remote screen offers the same deploy as a card (token field, Deploy
-button) against the daemon's `/api/relay/*` endpoints — same code, via
+button) against the daemon's `/api/relay/*` endpoints, same code, via
 `internal/relaydeploy`. Note the dev-loop wrinkle: `make run` is a dev
-build, which embeds no Worker — there are no bytes it could deploy — so the
+build, which embeds no Worker (there are no bytes it could deploy) so the
 card says it cannot. When you want to deploy from the card (or exercise the
 relay path at all):
 

@@ -19,10 +19,10 @@ export function SiteFooter() {
         <div className="flex items-center gap-x-6 gap-y-3 max-sm:flex-wrap">
           <nav className="flex items-center gap-x-6" aria-label="Documentation">
             <a
-              href="/docs/relay"
+              href="/docs/how-it-works"
               className="text-base font-normal text-muted-foreground hover:text-foreground sm:text-sm"
             >
-              Relay
+              How it works
             </a>
             <a
               href="/docs/faq"
@@ -31,10 +31,10 @@ export function SiteFooter() {
               FAQ
             </a>
             <a
-              href="/docs/developing"
+              href="/docs/relay"
               className="text-base font-normal text-muted-foreground hover:text-foreground sm:text-sm"
             >
-              Developing
+              Remote access
             </a>
           </nav>
           <div className="flex items-center gap-1">

@@ -5,8 +5,8 @@ import { REPO_URL } from '@/lib/site'
 
 const NAV = [
   { href: '/#problem', label: 'Why' },
-  { href: '/#how', label: 'How it works' },
-  { href: '/#remote', label: 'Remote' },
+  { href: '/docs/how-it-works', label: 'How it works' },
+  { href: '/docs/relay', label: 'Remote' },
   { href: '/docs/faq', label: 'Docs' },
 ] as const
 

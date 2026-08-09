@@ -5,7 +5,7 @@
  * they theme with the page and stay crisp anywhere. Each is the same size and
  * uses the same vocabulary as the rest of the page — dashed for what is
  * absent or waiting, solid for what is real, teal for the one thing the eye
- * should land on — so three of them in a row read as a set rather than as
+ * should land on, so three of them in a row read as a set rather than as
  * three drawings.
  */
 

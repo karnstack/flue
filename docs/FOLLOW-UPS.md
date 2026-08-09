@@ -164,7 +164,7 @@ local pairing ceremony, the Devices screen and `/pair`). Part 2 is the relay —
 Part 2's first plan — `cfrelay`, the relay substrate — has now landed, and the
 items it closed are marked inline below with the commit that closed them. The
 unmarked ones still stand, and the first bullet got worse rather than better:
-see §11.
+see item 11 below.
 
 - **The pairing pin is only as trustworthy as the code that reads it.** The QR now
   carries the daemon's static key (`?k=`, `internal/daemon/conn.go`), and `/pair`
@@ -182,7 +182,7 @@ see §11.
 
   **Still open, and now live rather than latent** — the wiring task pointed the
   QR at the relay deliberately, because a phone that is not on this LAN cannot
-  open `http://127.0.0.1:7717`. §11 is the whole accounting.
+  open `http://127.0.0.1:7717`. item 11 is the whole accounting.
 - `registerDeviceConn` has two latent races (`internal/daemon/server.go:778`): a
   connection that flaps can leave its predecessor's entry behind, and a revoke
   landing mid-handshake is undone by the registration that follows it. Neither is
@@ -372,7 +372,7 @@ frame, so a modified bundle reads the plaintext where the plaintext already is
 — item 8's original observation with the pairing step deleted, and the FAQ's
 first answer states it directly. The fixes are unchanged and still unbuilt: a
 native client, an integrity-pinned bundle, or a published and attested digest
-(§13, last bullet).
+(item 13, last bullet).
 
 The other half of the same problem *is* fixed: the loopback QR that started this
 work — Pair, over a `local`-only daemon, printing a `127.0.0.1` URL no other
@@ -436,7 +436,7 @@ documented promise depends on.
   (`docs/RELAY.md`, the cost model). The cap wants a real number — the
   99th-percentile session's frame rate, so ordinary interactive use never
   touches it — which is what the month of counters in the same document is for.
-  Distinct from §10, which is the daemon's own outbound queue rather than the
+  Distinct from item 10, which is the daemon's own outbound queue rather than the
   relay's.
 
   **Still open, and it changes character on a hosted relay.** Self-hosted, the

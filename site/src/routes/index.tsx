@@ -37,7 +37,7 @@ const PROBLEMS = [
   {
     term: 'You close the lid and the build dies.',
     detail:
-      'A shell belongs to the window that opened it. Lose the window — a reboot, a dropped SSH, a closed tab — and you lose whatever was running in it, plus the twenty minutes it takes to get back to where you were.',
+      'A shell belongs to the window that opened it. Lose the window (a reboot, a dropped SSH, a closed tab) and you lose whatever was running in it, plus the twenty minutes it takes to get back to where you were.',
     figure: LidFigure,
   },
   {
@@ -154,7 +154,7 @@ function InstallBlock({ align = 'left' }: { align?: 'left' | 'center' }) {
       <p
         className={`mt-1 text-base text-muted-foreground sm:text-sm ${align === 'center' ? 'text-center' : ''}`}
       >
-        macOS, Linux, WSL. One static Go binary — no Node, no Python, no toolchain.
+        macOS, Linux, WSL. One static Go binary. No Node, no Python, no toolchain.
       </p>
     </div>
   )
@@ -262,7 +262,7 @@ function How() {
               laptop.
             </p>
             <a
-              href="/docs/developing"
+              href="/docs/how-it-works"
               className="mt-6 inline-flex items-center gap-1.5 text-base font-medium text-primary hover:underline sm:text-sm"
             >
               How it is built
@@ -302,7 +302,7 @@ function Remote() {
               Everything crossing the relay is end-to-end encrypted with Noise IK, the
               daemon&rsquo;s key pinned when the browser pairs, so the Worker forwards ciphertext it
               holds no key for. The relay is new: built and working, but not yet through its release
-              gate — ready to try rather than ready to rely on.
+              gate, so treat it as ready to try rather than ready to rely on.
             </p>
             <a
               href="/docs/relay"
@@ -350,8 +350,8 @@ function Trust() {
           There is no hosted service.
         </h2>
         <p className="mt-5 max-w-[56ch] text-lg text-pretty text-muted-foreground">
-          No flue account, no flue server, no billing. Three places, all yours &mdash; and flue.sh
-          is docs and downloads, never part of the data path.
+          No flue account, no flue server, no billing. Three places, all yours, and flue.sh is
+          docs and downloads, never part of the data path.
         </p>
 
         {/* The three places, as a path rather than as three cards: dashed
