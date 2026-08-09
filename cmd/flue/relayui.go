@@ -339,8 +339,9 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 	}
 
 	// The same record `flue relay setup` writes, for the same reasons — see
-	// runRelaySetup for why the id and secret are fresh and the write is last.
-	machineID := config.MintMachineID(hostname, rand.Reader)
+	// runRelaySetup for why the id and secret are fresh, why the id is minted
+	// under the fresh secret, and why the write is last.
+	machineID := config.MintMachineID(hostname, secret, rand.Reader)
 	machineName := truncateRunes(hostname, machineNameMaxRunes)
 	if err := config.SaveRelay(config.Relay{
 		URL:         "wss://" + host,

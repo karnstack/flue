@@ -48,10 +48,15 @@ type wireMetadata struct {
 	MainModule        string `json:"main_module"`
 	CompatibilityDate string `json:"compatibility_date"`
 	Bindings          []struct {
-		Type      string `json:"type"`
-		Name      string `json:"name"`
-		ClassName string `json:"class_name"`
-		Text      string `json:"text"`
+		Type        string `json:"type"`
+		Name        string `json:"name"`
+		ClassName   string `json:"class_name"`
+		Text        string `json:"text"`
+		NamespaceID string `json:"namespace_id"`
+		Simple      *struct {
+			Limit  int `json:"limit"`
+			Period int `json:"period"`
+		} `json:"simple"`
 	} `json:"bindings"`
 	KeepBindings []string `json:"keep_bindings"`
 	Migrations   *struct {
@@ -357,9 +362,25 @@ func writeAPIErrorCode(w http.ResponseWriter, code int, msg string) {
 
 // --- helpers -----------------------------------------------------------------
 
-// machineIDRe is the relay's id grammar (relay/src/index.ts), which every id
-// this command mints has to satisfy or the Worker answers the dial with 404.
-var machineIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+// machineIDRe is the relay's id grammar (relay/src/index.ts): a slug, then an
+// 8-hex MAC tag. Every id this command mints has to satisfy it — and its tag
+// has to verify under the secret saved beside it (config.MachineIDTag) — or
+// the Worker answers the dial with 404.
+var machineIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,53}-[0-9a-f]{8}$`)
+
+// assertMachineIDMinted checks an id the CLI minted: inside the grammar, and
+// tagged under the secret it will dial with — the property the Worker's
+// verifyMachineId enforces before any id picks a Durable Object.
+func assertMachineIDMinted(t *testing.T, id, secret string) {
+	t.Helper()
+	if !machineIDRe.MatchString(id) {
+		t.Fatalf("machine id %q is not inside the relay's grammar", id)
+	}
+	slug, tag := id[:len(id)-9], id[len(id)-8:]
+	if want := config.MachineIDTag(secret, slug); tag != want {
+		t.Fatalf("machine id %q carries tag %q, want %q — the tag must be the MAC of the slug under the saved secret, or the relay will never route this machine", id, tag, want)
+	}
+}
 
 func oneAccount() []cloudflare.Account {
 	return []cloudflare.Account{{ID: "acct-0123456789abcdef", Name: "Karn's Account"}}
@@ -462,7 +483,7 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	// running: without the ASSETS binding every /api/* fallthrough calls fetch
 	// on undefined, and without observability there are no logs to find out
 	// with. Both are silent in a deploy that otherwise reports success.
-	var gotAssets, gotHub, gotVersion bool
+	var gotAssets, gotHub, gotVersion, gotRate bool
 	for _, b := range f.meta.Bindings {
 		switch {
 		case b.Type == "assets" && b.Name == "ASSETS":
@@ -473,6 +494,14 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 			// The version stamp: what the Worker reports on /api/health, and
 			// what lets a daemon see a relay older than itself.
 			gotVersion = true
+		case b.Type == "ratelimit" && b.Name == "CLIENT_RATE":
+			// The per-IP bound on the credential-less routes. The numbers are
+			// pinned here because they have a dev-only twin in
+			// relay/wrangler.jsonc, and this deploy is the one users run.
+			if b.NamespaceID != "1001" || b.Simple == nil || b.Simple.Limit != 300 || b.Simple.Period != 60 {
+				t.Fatalf("ratelimit binding = %+v, want namespace 1001, 300 per 60s", b)
+			}
+			gotRate = true
 		}
 	}
 	if !gotVersion {
@@ -483,6 +512,9 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	}
 	if !gotHub {
 		t.Fatalf("no HUB -> DaemonHub durable object binding in %+v", f.meta.Bindings)
+	}
+	if !gotRate {
+		t.Fatalf("no CLIENT_RATE ratelimit binding in %+v; the deployed relay would serve its credential-less routes unmetered", f.meta.Bindings)
 	}
 	if f.meta.Observability == nil || !f.meta.Observability.Enabled {
 		t.Fatalf("observability = %+v, want enabled", f.meta.Observability)
@@ -557,9 +589,7 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	if saved.Origin != "https://"+host {
 		t.Fatalf("relay.json origin = %q", saved.Origin)
 	}
-	if !machineIDRe.MatchString(saved.MachineID) {
-		t.Fatalf("relay.json machine_id = %q, which is not a valid machine id", saved.MachineID)
-	}
+	assertMachineIDMinted(t, saved.MachineID, saved.Secret)
 	hostname, err := os.Hostname()
 	if err != nil {
 		t.Fatalf("os.Hostname: %v", err)
@@ -883,9 +913,7 @@ func TestRunRelayJoinWritesTheRelayConfig(t *testing.T) {
 	if saved.Secret != "s3cr3t-from-setup" {
 		t.Fatalf("relay.json secret = %q, want the one given", saved.Secret)
 	}
-	if !machineIDRe.MatchString(saved.MachineID) {
-		t.Fatalf("relay.json machine_id = %q, which is not a valid machine id", saved.MachineID)
-	}
+	assertMachineIDMinted(t, saved.MachineID, saved.Secret)
 	hostname, err := os.Hostname()
 	if err != nil {
 		t.Fatalf("os.Hostname: %v", err)
@@ -1009,7 +1037,7 @@ func TestRunRelayStatusReportsTheConfiguredRelay(t *testing.T) {
 		URL:         "wss://flue-relay.karn.workers.dev",
 		Secret:      "s3cret-value",
 		Origin:      "https://flue-relay.karn.workers.dev",
-		MachineID:   "karns-macbook-pro-a1b2",
+		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
 		MachineName: "Karn's MacBook Pro",
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)

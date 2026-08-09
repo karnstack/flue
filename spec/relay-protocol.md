@@ -184,14 +184,50 @@ size of one client message.
 Both legs, and `POST /api/pair`, carry a **machine id** in the path —
 `/daemon/<id>`, `/client/<id>`, `/api/pair/<id>` — and the Worker routes on it:
 `idFromName(id)` selects that machine's Durable Object, and the hub receives
-the bare prefix, never the id. The id is a lowercase hostname-shaped slug of
-1–63 characters (`^[a-z0-9][a-z0-9-]{0,62}$`), minted at setup or join time;
-anything outside that — a bare prefix, an empty id, an embedded segment — is
-answered `404 {"error":"no such machine"}` before any hub wakes. The id is
-routing, not identity: the one bearer secret authorizes the daemon leg of
-*every* machine's hub, and what keeps a machine's sessions its own is the
-per-machine Noise key a browser pins at pairing, not the path. The honest
+the bare prefix, never the id. The id is **self-certifying**:
+
+```
+machine-id  =  <slug> "-" <tag>
+slug        =  lowercase hostname slug + "-" + 4 random hex, minted at setup
+               or join time (the randomness is what keeps two machines named
+               "mac" distinct — the tag is deterministic and cannot)
+tag         =  first 8 lowercase hex of
+               HMAC-SHA256(DAEMON_SECRET, "flue-machine-id/" + slug)
+```
+
+The whole id matches `^[a-z0-9][a-z0-9-]{0,53}-[0-9a-f]{8}$` — at most 63
+characters, tag included. The Worker checks the tag statelessly beside the
+grammar: an id whose tag does not verify is answered the same
+`404 {"error":"no such machine"}` a malformed id gets — a bare prefix, an
+empty id, an embedded segment, a pre-tag id — and no hub wakes. That is what
+closes the open id namespace a stateless router would otherwise have: forging
+a routable id means holding the secret, or driving 2^32 online guesses
+through a Worker whose credential-less routes are rate limited (below). On
+the daemon leg the tag is checked *after* the bearer secret, deliberately:
+that leg is the one route the rate rule does not meter, and checking the tag
+first would hand it an unthrottled tag oracle (404 for a bad tag, 401 for a
+good one) plus an HMAC per anonymous probe — while a caller past the bearer
+check holds the very secret tags are minted from, so the check behind it only
+catches an id minted under a secret that has since rotated away. Rotating
+`DAEMON_SECRET` (re-setup) therefore invalidates every id, which re-setup's
+re-join re-mints anyway.
+
+The id is routing, not identity: the one bearer secret authorizes the daemon
+leg of *every* machine's hub, and what keeps a machine's sessions its own is
+the per-machine Noise key a browser pins at pairing, not the path. The honest
 limit of that shared secret is `docs/RELAY.md`, "One secret for the fleet".
+The tag changes none of that — it authenticates the *mint*, not the caller.
+
+The real id is semi-public (it rides pairing links), and the Worker bills
+every request before any of this runs, so the credential-less routes also sit
+behind a **rate rule**: one Cloudflare rate-limiting binding, keyed by
+connecting IP, over `/client/*` and `POST /api/pair/*` — 300 requests per
+60 s per IP per Cloudflare location, answered `429 {"error":"rate limited"}`
+over it. Generous enough that a fleet of tabs never sees it; tight enough
+that burning quota, or walking the tag space, needs a botnet. The daemon leg
+is not rate limited: it is secret-gated and one socket per machine. The rule
+is fail-open by design — a Worker deployed without the binding routes rather
+than refuses — because it bounds cost, not access.
 
 The size cap is **1 MiB**, and it is the relay's to enforce rather than the
 daemon's. A client frame over it closes that socket alone with `1009`
@@ -252,3 +288,14 @@ role `testdata/noise/ik.json` plays for the handshake and
 
 Regenerate with `go test ./internal/relaywire/ -update`; the committed file is
 the artifact, and every case in it is asserted on every ordinary test run.
+
+`testdata/relay/machine-ids.json` plays the same role for the machine-id MAC:
+`{name, secret, slug, tag, id}` cases, generated from `internal/config`
+(`go test ./internal/config/ -update`, which also re-derives every committed
+case on ordinary runs) and walked by the Worker suite
+(`relay/test/machineid.test.ts`). An implementation must derive `tag` from
+`(secret, slug)` exactly, and accept `id` under `secret` and under nothing
+else. The cases include the hostname-fallback slug, the 24-character
+truncation ceiling, inner double dashes, a hex-shaped slug — the case a
+parser that hunts for "the hex part" instead of "the last nine characters"
+gets wrong — and one slug tagged under two secrets.

@@ -391,6 +391,13 @@ type DeployInput struct {
 	// script in the dashboard — nothing secret may ever ride one.
 	PlainTextVars map[string]string
 
+	// RateLimits become bindings of type "ratelimit" — Cloudflare's Workers
+	// rate-limiting binding, the same object wrangler's `ratelimits` config
+	// key produces. The wire shape is
+	// {"type":"ratelimit","name":…,"namespace_id":…,"simple":{"limit":…,"period":…}},
+	// pinned by testdata/deploy_metadata.json.
+	RateLimits []RateLimit
+
 	// AssetHeaders is a `_headers` document — response headers for the static
 	// assets, in the file format Cloudflare's asset router parses. Empty sends
 	// no header config at all. See assetsConfig.Headers for why this travels in
@@ -445,6 +452,28 @@ type binding struct {
 	ClassName string `json:"class_name,omitempty"`
 	// Text is only present on plain_text bindings; every other type omits it.
 	Text string `json:"text,omitempty"`
+	// NamespaceID and Simple are only present on ratelimit bindings. The
+	// namespace id is a string on the wire — Cloudflare's schema says so,
+	// wrangler sends it so — even though its content is an integer.
+	NamespaceID string           `json:"namespace_id,omitempty"`
+	Simple      *rateLimitSimple `json:"simple,omitempty"`
+}
+
+// RateLimit is one Workers rate-limiting binding: name is what the Worker
+// reads it off env as, namespace_id keys the limiter's state (unique per
+// limiter within the account), and limit/period are the rule — at most limit
+// requests per period seconds per key per Cloudflare location. Cloudflare
+// accepts only 10 or 60 for period.
+type RateLimit struct {
+	Name        string
+	NamespaceID string
+	Limit       int
+	Period      int
+}
+
+type rateLimitSimple struct {
+	Limit  int `json:"limit"`
+	Period int `json:"period"`
 }
 
 type observability struct {
@@ -533,6 +562,20 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 			Type: "plain_text",
 			Name: name,
 			Text: in.PlainTextVars[name],
+		})
+	}
+
+	// Rate limiters after the plain-text vars, sorted by name like the rest:
+	// deterministic order is what keeps two deploys of the same input the same
+	// request.
+	limiters := append([]RateLimit(nil), in.RateLimits...)
+	sort.Slice(limiters, func(i, j int) bool { return limiters[i].Name < limiters[j].Name })
+	for _, rl := range limiters {
+		meta.Bindings = append(meta.Bindings, binding{
+			Type:        "ratelimit",
+			Name:        rl.Name,
+			NamespaceID: rl.NamespaceID,
+			Simple:      &rateLimitSimple{Limit: rl.Limit, Period: rl.Period},
 		})
 	}
 

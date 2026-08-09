@@ -10,7 +10,7 @@ import { expect } from 'vitest'
 import { decodeFrame, encodeFrame } from '../src/frame'
 // Aliased: workers-types also declares a global `Env`, which would shadow a
 // bare `Env` inside the augmentation below.
-import { machineIdFrom, type Env as RelayEnv } from '../src/index'
+import { machineIdFrom, machineTag, type Env as RelayEnv } from '../src/index'
 
 // vitest-pool-workers 0.20 types `env` as `Cloudflare.Env`; teach it our bindings.
 declare global {
@@ -21,13 +21,28 @@ declare global {
 
 export const BASE = 'https://relay.example'
 
+/** The DAEMON_SECRET the vitest pool binds (vitest.config.ts). Ids the Worker
+ * suites dial must carry tags minted under it, or the router 404s them the
+ * way it 404s any forged id. */
+export const TEST_SECRET = 'test-secret'
+
+/**
+ * A MAC-valid machine id for a slug, tagged under the pool's secret — the
+ * shared helper every suite mints its ids through, exactly as `flue relay
+ * setup`/`join` mint real ones (internal/config, MintMachineID).
+ */
+export async function machineId(slug: string): Promise<string> {
+  return `${slug}-${await machineTag(TEST_SECRET, slug)}`
+}
+
 /**
  * The one machine the DO suites live on. Which id is irrelevant to hub
  * internals — the Worker has already picked the object by the time the hub
  * runs — but every dial spells the public shape, so the suites read like the
- * traffic they stand in for.
+ * traffic they stand in for: slug, then the MAC tag the router would have
+ * verified before any real request reached the hub.
  */
-export const MACHINE = 'test-machine-0a1b'
+export const MACHINE = await machineId('test-machine-0a1b')
 
 /**
  * The path the hub itself receives for a public machine path. The Worker owns

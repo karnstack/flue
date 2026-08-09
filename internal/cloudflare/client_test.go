@@ -53,6 +53,7 @@ func deployFixture() DeployInput {
 		AssetsRunWorkerFirst: []string{"/daemon", "/client", "/api/*"},
 		AssetHeaders:         "/*\n  X-Fixture: yes\n",
 		AssetsBinding:        "ASSETS",
+		RateLimits:           []RateLimit{{Name: "CLIENT_RATE", NamespaceID: "1001", Limit: 300, Period: 60}},
 		Observability:        true,
 	}
 }

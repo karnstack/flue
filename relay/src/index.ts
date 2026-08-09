@@ -2,6 +2,14 @@ export interface Env {
   HUB: DurableObjectNamespace
   ASSETS: Fetcher
   DAEMON_SECRET: string
+  /** The per-IP rate limiter over the credential-less routes (`/client/*`,
+   * `POST /api/pair/*`) — a Cloudflare rate-limiting binding, declared in
+   * wrangler.jsonc (`ratelimits`) and in the deploy `flue relay setup` builds
+   * (internal/relaydeploy, RateLimitBinding); the two must agree. Optional
+   * and fail-open: the rule bounds quota burn, it is not auth, and a Worker
+   * mid-upgrade (or an old deploy) must keep serving the fleet rather than
+   * refuse everyone until the binding lands. */
+  CLIENT_RATE?: RateLimit
   /** Handshake deadline in ms — a test seam (vitest binds 50). Unset in
    * production, where the hub defaults to 30 000. */
   HANDSHAKE_TIMEOUT_MS?: string | number
@@ -37,8 +45,15 @@ export function authorizeDaemon(req: Request, env: Env): boolean {
   return diff === 0
 }
 
-/** The machine-id grammar: a lowercase hostname-shaped slug, 1–63 characters. */
-const MACHINE_ID = /^[a-z0-9][a-z0-9-]{0,62}$/
+/**
+ * The machine-id grammar: `<slug>-<tag>`, at most 63 characters in all — a
+ * lowercase hostname-shaped slug, then a dash, then an 8-hex MAC tag
+ * (spec/relay-protocol.md, Auth). The grammar is the cheap gate; whether the
+ * tag actually *verifies* under DAEMON_SECRET is `verifyMachineId`, run only
+ * on ids this expression admits, because `run_worker_first` puts this router
+ * in front of every request and a regex reject must not cost an HMAC.
+ */
+const MACHINE_ID = /^([a-z0-9][a-z0-9-]{0,53})-([0-9a-f]{8})$/
 
 /**
  * The machine id in `<prefix>/<id>`, or null when the path is not exactly
@@ -50,6 +65,47 @@ export function machineIdFrom(pathname: string, prefix: string): string | null {
   if (!pathname.startsWith(`${prefix}/`)) return null
   const id = pathname.slice(prefix.length + 1)
   return MACHINE_ID.test(id) ? id : null
+}
+
+/**
+ * The MAC tag for a slug: the first 8 lowercase hex characters of
+ * HMAC-SHA256(secret, "flue-machine-id/" + slug). The Go mint is the other
+ * half of this contract (internal/config, MachineIDTag) and
+ * testdata/relay/machine-ids.json pins the two to each other.
+ */
+export async function machineTag(secret: string, slug: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`flue-machine-id/${slug}`))
+  return [...new Uint8Array(mac, 0, 4)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * Does this grammar-valid id end in the tag the secret would mint for its
+ * slug? This is what closes the open id namespace: a stateless router cannot
+ * know which ids exist, but it holds the one credential ids are minted under
+ * (spec/fleet-trust.md, "Self-certifying machine ids"). An id that fails is
+ * answered with the same 404 a malformed id gets, and no Durable Object
+ * wakes. False when the secret was never bound: no secret means no mint ever
+ * happened, so no id can be routable — the same fail-closed rule
+ * authorizeDaemon applies.
+ */
+export async function verifyMachineId(id: string, secret: string): Promise<boolean> {
+  if (!secret) return false
+  const m = MACHINE_ID.exec(id)
+  if (!m) return false
+  const want = await machineTag(secret, m[1] as string)
+  const got = m[2] as string
+  // Constant-time compare, same shape as authorizeDaemon: both strings are 8
+  // hex characters by construction.
+  let diff = 0
+  for (let i = 0; i < want.length; i++) diff |= got.charCodeAt(i) ^ want.charCodeAt(i)
+  return diff === 0
 }
 
 /** Does this path claim the prefix — the prefix itself or anything under it? */
@@ -70,6 +126,40 @@ const noSuchMachine = () =>
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
   })
 
+const rateLimited = () =>
+  new Response('{"error":"rate limited"}', {
+    status: 429,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  })
+
+/**
+ * May this credential-less request proceed, under the per-IP rate rule?
+ *
+ * MAC ids close the *fake*-id surface (no Durable Object wakes for a forged
+ * id), but the real id is semi-public — it rides pairing links — and
+ * `run_worker_first` bills every request before any of this runs. This is the
+ * bound on that quota burn: one Cloudflare rate-limiting rule, keyed by
+ * connecting IP, generous enough that a fleet of tabs never sees it and tight
+ * enough that burning the daily allowance needs a botnet
+ * (spec/fleet-trust.md, "Rate rule"). It runs after the grammar check (a
+ * regex reject should not spend a limiter token) and before the tag HMAC (an
+ * over-limit caller gets no more crypto out of us, and the 2^32 tag-guessing
+ * walk the spec prices in is throttled to this same rule).
+ *
+ * Absent binding means allow: the rule bounds cost, it is not auth, and a
+ * deploy mid-upgrade must not refuse the whole fleet. The daemon leg is
+ * deliberately not behind this — it is secret-gated and one socket per
+ * machine.
+ */
+async function allowRate(req: Request, env: Env): Promise<boolean> {
+  if (!env.CLIENT_RATE) return true
+  // Absent header (local dev, the vitest pool) means one shared bucket,
+  // which is exactly what those environments are.
+  const key = req.headers.get('CF-Connecting-IP') ?? ''
+  const { success } = await env.CLIENT_RATE.limit({ key })
+  return success
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url)
@@ -85,20 +175,40 @@ export default {
     if (claims(url.pathname, '/daemon')) {
       const id = machineIdFrom(url.pathname, '/daemon')
       if (id === null) return noSuchMachine()
+      // Bearer before tag, deliberately. The daemon leg is the one route the
+      // rate rule does not cover (it is secret-gated, one socket per
+      // machine), so the order is what keeps it that way: tag-first would
+      // hand the unthrottled route a free HMAC per anonymous request *and* a
+      // tag oracle — 404 for a bad tag, 401 for a good one — that lets the
+      // 2^32 guessing walk run where nothing meters it. Bearer-first answers
+      // every secretless probe 401, tag right or wrong. And a caller who
+      // passes the bearer check holds the very secret tags are minted from,
+      // so the tag check behind it can only ever catch honest staleness — an
+      // id minted under a secret that has since rotated away — for which "no
+      // such machine" is the truthful answer: re-setup abandoned that slot.
       if (!authorizeDaemon(req, env)) return unauthorized()
+      if (!(await verifyMachineId(id, env.DAEMON_SECRET))) return noSuchMachine()
       return toHub(id, '/daemon')
     }
     if (claims(url.pathname, '/client')) {
       const id = machineIdFrom(url.pathname, '/client')
       if (id === null) return noSuchMachine()
+      if (!(await allowRate(req, env))) return rateLimited()
+      if (!(await verifyMachineId(id, env.DAEMON_SECRET))) return noSuchMachine()
       return toHub(id, '/client')
     }
     if (claims(url.pathname, '/api/pair')) {
       const id = machineIdFrom(url.pathname, '/api/pair')
       if (id === null) return noSuchMachine()
-      if (req.method === 'POST') return toHub(id, '/api/pair')
+      if (req.method === 'POST') {
+        if (!(await allowRate(req, env))) return rateLimited()
+        if (!(await verifyMachineId(id, env.DAEMON_SECRET))) return noSuchMachine()
+        return toHub(id, '/api/pair')
+      }
       // A GET of a well-formed pair URL is a browser following a link; the
-      // SPA below answers it, the API does not.
+      // SPA below answers it, the API does not — so it spends no limiter
+      // token and earns no HMAC: asset requests are unmetered, and the tag
+      // check exists to guard Durable Object wakes, not page loads.
     }
     if (url.pathname === '/api/health' && req.method === 'GET') {
       // Liveness of the Worker and nothing else — no id, no Durable Object

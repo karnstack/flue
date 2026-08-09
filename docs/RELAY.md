@@ -25,10 +25,14 @@ daemon  ---- wss /daemon/<id> ---->  Worker + one DO per machine  <---- wss /cli
 ```
 
 - **The `<id>` in the path is routing, not identity.** It is the machine id a
-  daemon joined under (`<hostname>-<4 hex>`, minted by setup and join) and
-  the Worker turns it into that machine's own Durable Object (`idFromName`),
-  handing the hub the bare path. One lowercase slug of 1–63 characters;
-  anything else, including a bare `/daemon` or `/client`, is answered
+  daemon joined under (`<hostname>-<4 hex>-<8 hex tag>`, minted by setup and
+  join) and the Worker turns it into that machine's own Durable Object
+  (`idFromName`), handing the hub the bare path. The tag is a MAC over the
+  rest of the id under the daemon secret, and the Worker verifies it before
+  routing — so only ids this relay's own setup or join minted exist, and a
+  guessed or hand-made id wakes nothing. One lowercase slug of at most 63
+  characters ending in the 8-hex tag; anything else — a bare `/daemon` or
+  `/client`, a tampered tag, an id from before tags — is answered
   `404 {"error":"no such machine"}` and never with an asset.
 - **The daemon leg is outbound.** Nothing on your machine listens for the
   relay's sake. Every binary message on it is `[4-byte big-endian channel]` then
@@ -89,8 +93,11 @@ flue relay join wss://flue-relay.<sub>.workers.dev --secret <...>
 Run it there and restart that daemon. That is the whole of adding a machine.
 Join never touches the Cloudflare API: the Worker exists and the secret is the
 whole credential, so everything it does is local, check the address, mint
-this machine a fresh id (`<hostname>-<4 hex>`, its slot on the relay and the
-`<id>` in both wss paths), and write the same `relay.json` shape setup writes.
+this machine a fresh id (`<hostname>-<4 hex>-<8 hex tag>`, its slot on the
+relay and the `<id>` in both wss paths — the tag is a MAC under the secret
+from the join line, which is why an id minted with a mistyped secret dials
+into `404 no such machine`), and write the same `relay.json` shape setup
+writes.
 `--name` sets the label the machine picker shows; it defaults to the hostname
 and rides the pairing link's query (`n=`) so the pairing browser can write it
 down, never a path, and never anything the Worker routes on. The printed line carries the secret (that is the
@@ -110,7 +117,10 @@ and the secret are upserts) but it is a reset, not a repair: every run mints
 a fresh secret *and* a fresh machine id. The fresh secret is deliberate:
 setup is the recovery path for a leaked one, and a run that reused the old
 could never rotate it, and it means every machine that joined is now
-presenting a stale secret and has to run the newly printed join line. The
+presenting a stale secret and has to run the newly printed join line — and,
+because ids carry a MAC tag minted under the secret, every old id stops
+routing at the same moment (the re-join each machine runs anyway mints its
+fresh one). The
 fresh id means the old hub slot is simply abandoned: a browser that paired
 against it is dialling a slot no daemon dials, answered `503 daemon offline`
 until it pairs this machine again and forgets the old row in the picker. To
@@ -298,6 +308,25 @@ machine:
 | pairing body cap | 4 KiB | an oversized POST; over it, `413` |
 | pairing answer deadline | 10 s | a daemon that never answers; `504` |
 
+Two more run in the Worker itself, before any hub is picked:
+
+- **MAC machine ids.** An id only routes if its 8-hex tag verifies under the
+  daemon secret (`spec/relay-protocol.md`, Auth), so the whole space of
+  guessed, scanned or hand-made ids answers `404` without waking a Durable
+  Object. What used to be "any grammar-valid id wakes an object" is now "only
+  ids this relay minted exist".
+- **A per-IP rate rule.** A Cloudflare rate-limiting binding covers
+  `/client/*` and `POST /api/pair/*`: 300 requests per minute per IP (per
+  Cloudflare location), `429 {"error":"rate limited"}` over it. A fleet of
+  tabs — reconnect storms included — never sees it; spending a free-plan
+  relay's daily request allowance, or brute-walking the 2^32 tag space,
+  needs a botnet. The daemon leg is exempt: secret-gated, one socket per
+  machine. Wired by `flue relay setup`/`update` (internal/relaydeploy) and
+  by `relay/wrangler.jsonc` for dev, so a deployed relay and the one under
+  `pnpm dev` carry the same rule. Cloudflare's own WAF rate-limiting rules
+  (dashboard → Security) remain available on top if your traffic wants a
+  tighter number.
+
 The message cap is the one whose *number* matters beyond itself: the daemon
 reads the socket carrying every browser on your machine with a 2 MiB limit that
 kills the connection rather than the message, so the relay's 1 MiB has to stay
@@ -310,16 +339,14 @@ anyone holding the relay URL can probe which of your machines are up, which
 machines exist and when they are online, never what they carry, because
 everything a channel forwards is still behind Noise.
 
-**Worth adding yourself: a rate limit on `/api/pair`.** That endpoint carries no
-credential by design, and the caps above bound how many attempts one caller can
-*hold* rather than how fast they can arrive. A wrong token costs you nothing:
-it does not spend your pairing window, so a flood cannot stop you pairing, but
-it can spend a free-plan relay's daily request allowance. Cloudflare's own
-**Rate Limiting rules** (dashboard → your Worker's route → Security → WAF) are
-free, run at the edge before the Durable Object wakes, and are the right place
-for a limit that depends on your traffic rather than on this code. Something
-like 10 requests per minute per IP on `/api/pair` is far above any human
-ceremony (`docs/FOLLOW-UPS.md` item 13).
+The rate rule above is the shipped answer to the flood that used to be worth
+adding a WAF rule for: a wrong pairing token still costs you nothing (it does
+not spend your pairing window), and now the arrival *rate* is bounded too,
+not just how many attempts one caller can hold. What the in-code rule cannot
+be is traffic-aware — 300/min/IP is a ceiling for abuse, not a fit to your
+usage — so a WAF Rate Limiting rule on `/api/pair` (something like 10
+requests per minute per IP, far above any human ceremony) remains a sensible
+addition on a relay that sees hostile traffic (`docs/FOLLOW-UPS.md` item 13).
 
 **What does not exist yet is an output-rate cap.** A session that streams
 continuously (`yes`, `tail -f` on a firehose) pins the object active and floods
@@ -429,8 +456,9 @@ a dev build carries no Worker to deploy.
 - [ ] The isolation check, by hand: stop machine A's daemon, leave B's up, and
       `curl -si --http1.1 -H 'Upgrade: websocket' https://<relay>/client/<A's id>`
       answers `503` `{"error":"daemon offline"}`. B's daemon being up must
-      never answer for A. The same command against a bare `/client`, or an id
-      with a capital in it, answers `404` `{"error":"no such machine"}`.
+      never answer for A. The same command against a bare `/client`, an id
+      with a capital in it, or A's id with one tag character changed, answers
+      `404` `{"error":"no such machine"}`.
 - [ ] Re-run `flue relay setup` on the same account. It succeeds (the deploy
       and the secret are upserts) and it is a reset: the phone pairs this
       machine again (the fresh machine id abandons the slot its old row

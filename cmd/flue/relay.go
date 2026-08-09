@@ -276,8 +276,11 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 	// This machine's identity on the relay: the id is the slot it dials
 	// (/daemon/<id>) and the name is its human label. Minted fresh on every
 	// run like the secret — setup is the recovery path, and a stale id would
-	// resurrect whatever state the old hub was left holding.
-	machineID := config.MintMachineID(hostname, rand.Reader)
+	// resurrect whatever state the old hub was left holding. Minted under the
+	// fresh secret, necessarily: the id carries a MAC tag the Worker verifies
+	// against DAEMON_SECRET before routing (config.MachineIDTag), so an id and
+	// the secret it was minted under can only ever travel together.
+	machineID := config.MintMachineID(hostname, secret, rand.Reader)
 	machineName := truncateRunes(hostname, machineNameMaxRunes)
 
 	// Last, deliberately. relay.json is what makes the daemon dial, and every
@@ -384,7 +387,11 @@ func runRelayJoin(w io.Writer, args []string) error {
 	if machineName == "" {
 		machineName = truncateRunes(hostname, machineNameMaxRunes)
 	}
-	machineID := config.MintMachineID(hostname, rand.Reader)
+	// Minted under the secret from the join line: the id's MAC tag is what the
+	// Worker checks before routing (config.MachineIDTag), so a join pasted
+	// with the wrong secret produces an id the relay 404s — the same failure
+	// the daemon leg's 401 reports, found one dial later.
+	machineID := config.MintMachineID(hostname, *secret, rand.Reader)
 
 	// The same shape setup writes, derived the same way: bare wss:// URL, the
 	// https origin on the same host. SaveRelay is 0600 — the file holds the

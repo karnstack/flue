@@ -164,16 +164,21 @@ type Config struct {
 // the message names which field it was.
 var ErrIncompleteConfig = errors.New("relay: incomplete config")
 
-// machineIDRe is the relay's own id grammar (relay/src/index.ts, MACHINE_ID;
-// the browser's records are held to the same expression in
-// web/src/relay/machines.ts): one lowercase slug of 1–63 characters. New
+// machineIDRe is the relay's own id grammar (relay/src/index.ts, MACHINE_ID):
+// one lowercase slug ending in an 8-hex MAC tag, at most 63 characters. New
 // holds MachineID to it because the id is the path this transport dials, and
 // the Worker answers anything outside the grammar with the same 404 a missing
 // machine gets — minted ids are always inside it (config.MintMachineID), so
-// what this catches is a relay.json edited by hand, a `machine_id: "My-Mac"`
-// that would otherwise dial into "no such machine" forever while the config
-// looked complete.
-var machineIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+// what this catches is a relay.json edited by hand — a `machine_id: "My-Mac"`
+// — or one written before ids carried tags; either would otherwise dial into
+// "no such machine" forever while the config looked complete. Shape only,
+// deliberately: whether the tag *verifies* is the Worker's call, made against
+// the secret the Worker holds, and a local recomputation could only agree
+// with a relay.json that is self-consistent, not with the deployed relay.
+// (The browser's records are held to the looser pre-tag expression in
+// web/src/relay/machines.ts, which tagged ids also satisfy — the browser
+// receives ids and never mints one, so it has no tag to check.)
+var machineIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,53}-[0-9a-f]{8}$`)
 
 // Server is the surface the adapter drives — implemented by *daemon.Server.
 //

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -61,8 +63,9 @@ type Relay struct {
 }
 
 // Machine-id shape. The relay refuses ids outside its grammar with a 404
-// (relay/src/index.ts, one lowercase slug of at most 63 characters), so
-// everything here exists to make a mint from any hostname land inside it.
+// (relay/src/index.ts: one lowercase slug ending in an 8-hex tag, at most 63
+// characters), so everything here exists to make a mint from any hostname
+// land inside it.
 const (
 	// machineIDHostChars is how much of the sanitized hostname an id keeps.
 	// Enough to recognise the machine in a list; short enough that the id
@@ -71,18 +74,50 @@ const (
 	// machineIDRandBytes is the entropy after the hostname, hex-encoded. Two
 	// bytes is not a credential — the id is public, it appears in URLs — it is
 	// what keeps two machines that share a hostname from silently replacing
-	// each other on the relay.
+	// each other on the relay. The MAC tag below is deterministic and cannot
+	// do that job.
 	machineIDRandBytes = 2
+
+	// machineIDTagPrefix is the domain separator the tag's HMAC runs under, so
+	// a machine-id tag can never be confused with any other MAC the secret
+	// might one day compute. The exact string is part of the wire contract:
+	// the Worker recomputes it (relay/src/index.ts, machineTag) and
+	// testdata/relay/machine-ids.json pins both sides to it.
+	machineIDTagPrefix = "flue-machine-id/"
+	// machineIDTagBytes is how much of the HMAC the tag keeps, hex-encoded to
+	// 8 characters. The tag is not a credential — the id is public, it rides
+	// pairing links — it only has to make *minting* a routable id require the
+	// daemon secret, and 2^32 online guesses through a rate-limited Worker is
+	// the bound the spec asks for (spec/fleet-trust.md).
+	machineIDTagBytes = 4
 )
 
-// MintMachineID makes the id a machine joins the relay under:
-// `<hostname sanitized, truncated to 24>-<4 lowercase hex>`.
+// MachineIDTag is the self-certifying suffix of a machine id: the first 8
+// lowercase hex characters of HMAC-SHA256(secret, "flue-machine-id/"+slug).
 //
-// The hostname part is for the human reading a machine list; the hex is for
-// the relay, where the id is the routing key and a collision means the second
-// machine evicts the first from its hub. r is crypto/rand.Reader everywhere
-// but tests, which inject fixed bytes to pin the format.
-func MintMachineID(hostname string, r io.Reader) string {
+// The Worker recomputes exactly this before it lets any id pick a Durable
+// Object (relay/src/index.ts, machineTag), which is what closes the open id
+// namespace: an id whose tag does not verify is answered with the same 404 a
+// malformed id gets, and no object wakes. The two implementations are pinned
+// to each other by testdata/relay/machine-ids.json.
+func MachineIDTag(secret, slug string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(machineIDTagPrefix + slug))
+	return hex.EncodeToString(mac.Sum(nil)[:machineIDTagBytes])
+}
+
+// MintMachineID makes the id a machine joins the relay under:
+// `<hostname sanitized, truncated to 24>-<4 lowercase hex>-<8 hex tag>`.
+//
+// The hostname part is for the human reading a machine list; the random hex
+// is for the relay, where the id is the routing key and a collision means the
+// second machine evicts the first from its hub; the tag is MachineIDTag over
+// everything before it, and is what makes the id verifiable by the Worker
+// without any registry. secret is the relay's DAEMON_SECRET — both minting
+// commands (`flue relay setup`, `flue relay join`) hold it at mint time, and
+// an id minted under any other string is unroutable. r is crypto/rand.Reader
+// everywhere but tests, which inject fixed bytes to pin the format.
+func MintMachineID(hostname, secret string, r io.Reader) string {
 	host := sanitizeHostname(hostname)
 	if host == "" {
 		// A hostname of dots, dashes or characters no slug can keep. The id
@@ -97,7 +132,8 @@ func MintMachineID(hostname string, r io.Reader) string {
 		// should fail loudly rather than register on a relay.
 		panic(fmt.Sprintf("config: reading randomness for a machine id: %v", err))
 	}
-	return host + "-" + hex.EncodeToString(raw[:])
+	slug := host + "-" + hex.EncodeToString(raw[:])
+	return slug + "-" + MachineIDTag(secret, slug)
 }
 
 // sanitizeHostname folds a hostname into the id grammar: lowercased, spaces
