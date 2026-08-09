@@ -9,6 +9,7 @@ import {
   savePinnedDaemonKeyFor,
   type DeviceKey,
 } from '@/crypto/keys'
+import { scrubPairingParams } from '@/lib/url'
 import { cn } from '@/lib/utils'
 import { MACHINE_ID, SELECTED_KEY, saveMachine } from '@/relay/machines'
 import { isRelayOrigin } from '@/relay/mode'
@@ -302,7 +303,33 @@ function Frame({ title, children }: { title: string; children: ReactNode }) {
  * runtime.
  */
 export function PairRoute() {
-  const { t, k, d, n } = useSearch({ from: '/pair' })
+  const search = useSearch({ from: '/pair' })
+  /*
+   * Captured on first render, because the effect below rewrites the URL out
+   * from under useSearch. TanStack's history patches history.replaceState and
+   * re-parses the location on any call to it, so the scrub re-renders this
+   * route with a search holding no `t` and no `k`, and a page still reading
+   * it live would lose the token to its own hygiene mid-ceremony. The ref keeps
+   * what the link carried for as long as the page is mounted, which is
+   * exactly as long as it is needed: the token is single-use, so a reload
+   * landing on the no-token explanation is the ceremony over, not broken.
+   */
+  const link = useRef(search)
+  const { t, k, d, n } = link.current
+
+  /*
+   * The one look the address bar gets. The moment the render above has the
+   * secrets in memory they have no business outliving in the URL — the token
+   * is a live bearer credential until the daemon's window closes, and the
+   * address bar is a history entry, a screenshot and a paste. After the
+   * mount that read them, so the ceremony always starts first; see
+   * scrubPairingParams for why main.tsx cannot do this one the way it does
+   * the handoff token.
+   */
+  useEffect(() => {
+    scrubPairingParams()
+  }, [])
+
   /*
    * The route's validateSearch narrows every parameter to a non-empty string,
    * and the types here say it did — but a route's search is its parent's

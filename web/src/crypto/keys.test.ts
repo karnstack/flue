@@ -59,6 +59,47 @@ describe('the pinned daemon key', () => {
   })
 })
 
+describe('a malformed pinned record', () => {
+  // Why absent rather than as-stored: a pin that is not 32 bytes is not an
+  // X25519 static key, and a boot that hands it to the handshake anyway
+  // throws inside messageA — a shutdown the client answers by reconnecting
+  // into the identical throw, forever, with nothing on screen to say why.
+  // Read as absent, the same wrong bytes fail closed into the picker and the
+  // pairing ceremony, which is the one path that can replace them.
+
+  it('reads as absent when the stored key is not 32 bytes', async () => {
+    const db = new IDBFactory()
+    await savePinnedDaemonKey(new Uint8Array(31), db)
+    expect(await loadPinnedDaemonKey(db)).toBeNull()
+  })
+
+  it('reads as absent whichever way the length is wrong', async () => {
+    const db = new IDBFactory()
+    await savePinnedDaemonKey(new Uint8Array(33), db)
+    expect(await loadPinnedDaemonKey(db)).toBeNull()
+
+    await savePinnedDaemonKey(new Uint8Array(0), db)
+    expect(await loadPinnedDaemonKey(db)).toBeNull()
+  })
+
+  it('reads as absent for a per-machine pin too', async () => {
+    const db = new IDBFactory()
+    await savePinnedDaemonKeyFor('b5d05f15398a', new Uint8Array(16), db)
+    expect(await loadPinnedDaemonKeyFor('b5d05f15398a', db)).toBeNull()
+  })
+
+  it('does not shadow a well-formed pin beside it', async () => {
+    // One machine's corrupt record is that machine's problem alone.
+    const db = new IDBFactory()
+    const good = new Uint8Array(32).fill(9)
+    await savePinnedDaemonKeyFor('aaaaaaaaaaaa', good, db)
+    await savePinnedDaemonKeyFor('bbbbbbbbbbbb', new Uint8Array(31), db)
+
+    expect(await loadPinnedDaemonKeyFor('aaaaaaaaaaaa', db)).toEqual(good)
+    expect(await loadPinnedDaemonKeyFor('bbbbbbbbbbbb', db)).toBeNull()
+  })
+})
+
 describe('a daemon key pinned per device', () => {
   const KEY_A = new Uint8Array(32).fill(0xaa)
   const KEY_B = new Uint8Array(32).fill(0xbb)
