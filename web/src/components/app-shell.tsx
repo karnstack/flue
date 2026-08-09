@@ -1,9 +1,7 @@
 import type { ReactNode } from 'react'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
-import { Toaster } from '@/components/ui/sonner'
 import { AppSidebar } from './app-sidebar'
 import { Credit } from './credit'
-import { RelayUpdateNotice } from './relay-update'
 import { Wordmark } from './wordmark'
 
 export interface AppShellProps {
@@ -60,15 +58,6 @@ export function AppShell({ currentPath, children }: AppShellProps) {
         */}
         <Credit />
       </SidebarInset>
-      {/*
-        Outside the panel, because both of these belong to the window rather
-        than to the screen inside it: the notice is raised by the daemon's
-        state and not by whatever route happens to be mounted, and the window
-        it opens portals to the body anyway. Mounted once, here, so a route
-        change cannot re-raise a notice the reader has already sent away.
-      */}
-      <Toaster />
-      <RelayUpdateNotice currentPath={currentPath} />
     </SidebarProvider>
   )
 }

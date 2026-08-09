@@ -1,8 +1,7 @@
 import type { ComponentProps } from 'react'
 import { Link } from '@tanstack/react-router'
 import { ChatBubbleLeftRightIcon } from '@heroicons/react/16/solid'
-import { useDaemonVersion } from '@/hooks/use-daemon-version'
-import { ISSUES_URL, RELEASES_URL, REPO_URL } from '@/lib/links'
+import { ISSUES_URL, REPO_URL } from '@/lib/links'
 import { cn } from '@/lib/utils'
 import {
   Sidebar,
@@ -17,6 +16,7 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar'
 import { isNavItemActive, NAV_ITEMS } from './nav'
+import { UpdateNotice } from './update-notice'
 import { GithubMark, Wordmark } from './wordmark'
 
 /**
@@ -32,41 +32,6 @@ const OUTBOUND = [
   { href: ISSUES_URL, label: 'Feedback', icon: ChatBubbleLeftRightIcon },
   { href: REPO_URL, label: 'GitHub', icon: GithubMark },
 ] as const
-
-/**
- * Which flue this tab is talking to, at the foot of the sidebar.
- *
- * The version of the *daemon*, not of the bundle — they are the same build in
- * a release, and on a relay origin the bundle is whatever was last deployed
- * there while the daemon on the other end of the socket may be newer. The one
- * worth printing is the one running the sessions, so it comes off the welcome
- * rather than out of the build.
- *
- * Absent until the socket has been greeted, and absent on a screen with no
- * client at all. Nothing is reserved for it and nothing stands in for it: a
- * skeleton in the sidebar's corner would be a loading state for a line nobody
- * is waiting on.
- *
- * Mono, because it is an identifier rather than a word — the same reason the
- * wordmark is. Linked to the releases page rather than to a tag: a tag URL
- * assembled from this string is a guess about how the project spells its
- * tags, and a wrong guess is a 404 on a link that promised release notes.
- */
-function DaemonVersion() {
-  const version = useDaemonVersion()
-  if (version === null) return null
-  return (
-    <a
-      href={RELEASES_URL}
-      target="_blank"
-      rel="noopener noreferrer"
-      title="Release notes"
-      className="rounded-sm px-2 py-0.5 font-mono text-xs text-zinc-400 transition-colors outline-none hover:text-zinc-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring dark:text-zinc-500 dark:hover:text-white"
-    >
-      flue {version}
-    </a>
-  )
-}
 
 export interface AppSidebarProps extends ComponentProps<typeof Sidebar> {
   currentPath: string
@@ -163,7 +128,7 @@ export function AppSidebar({ currentPath, ...props }: AppSidebarProps) {
         screens the app has.
       */}
       <SidebarFooter>
-        <DaemonVersion />
+        <UpdateNotice />
         <nav aria-label="Project">
           <SidebarMenu role="list" className="gap-0.5">
             {OUTBOUND.map(({ href, label, icon: Icon }) => (

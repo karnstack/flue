@@ -46,20 +46,6 @@ if (globalThis.Element && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = function scrollIntoView() {}
 }
 
-// Nor the pointer-capture trio, which jsdom omits entirely. Sonner's toast
-// grabs the pointer on the way down so a swipe keeps tracking after the
-// finger leaves the toast's own box; unstubbed, the very first press on a
-// notice throws out of the event handler — past the test that pressed it, so
-// it lands as an unhandled error rather than a failure with a stack anyone
-// can read.
-if (globalThis.Element && !Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = function setPointerCapture() {}
-  Element.prototype.releasePointerCapture = function releasePointerCapture() {}
-  Element.prototype.hasPointerCapture = function hasPointerCapture() {
-    return false
-  }
-}
-
 /*
  * Fail a test that logged one of flue's own swallowed errors.
  *

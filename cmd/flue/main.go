@@ -255,6 +255,13 @@ func cmdServe(args []string) error {
 		runtime: rt,
 		log:     logger,
 	})
+	// The one third party this app talks to, and it talks to it from here
+	// rather than from the tab: one machine asking GitHub twice a day, instead
+	// of every open tab asking on every load — including remote tabs, which
+	// would be announcing a flue instance from whatever network the reader is
+	// on. Nothing is asked until a tab reads the endpoint, and nothing waits
+	// on the answer; see release.go.
+	srv.SetReleaseChecker(newReleaseChecker(version))
 
 	// Only now, after the bind is confirmed and the runtime record is in place,
 	// so the link is never printed for a daemon that turned out not to be
