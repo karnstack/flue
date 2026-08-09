@@ -92,6 +92,19 @@ func (s *Systemd) Enable() error {
 // Warnings reports the advisories from the most recent Enable.
 func (s *Systemd) Warnings() []string { return s.warnings }
 
+// Restart is systemd's own word for it: systemctl --user restart flue. The
+// unit is stopped with SIGTERM — the graceful path cmdServe saves session
+// snapshots on — and started from the unit file on disk, so a binary swapped
+// since the last start is the one that execs. restart also starts a unit
+// that happens to be dead, which is the convergence an update wants: the
+// point is that the next running daemon is the new build.
+func (s *Systemd) Restart() error {
+	if out, err := s.run.Run("systemctl", "--user", "restart", "flue"); err != nil {
+		return fmt.Errorf("systemctl --user restart flue: %v: %s", err, out)
+	}
+	return nil
+}
+
 // Disable stops and disables the unit, removes the file, and reloads. Every
 // systemctl failure is tolerated: on a machine with no user manager the file
 // removal is the whole operation, and "already disabled" is a success.

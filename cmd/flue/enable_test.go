@@ -16,9 +16,12 @@ import (
 type fakeManager struct {
 	st           service.Status
 	enableErr    error
+	restartErr   error
 	warns        []string // what Warnings reports after Enable
+	onRestart    func()   // runs inside Restart, before it reports back
 	enableCalls  int
 	disableCalls int
+	restartCalls int
 	statusCalls  int
 }
 
@@ -33,6 +36,17 @@ func (f *fakeManager) Enable() error {
 func (f *fakeManager) Disable() error {
 	f.disableCalls++
 	f.st = service.Status{}
+	return nil
+}
+func (f *fakeManager) Restart() error {
+	f.restartCalls++
+	if f.restartErr != nil {
+		return f.restartErr
+	}
+	if f.onRestart != nil {
+		f.onRestart()
+	}
+	f.st = service.Status{Installed: true, Running: true}
 	return nil
 }
 func (f *fakeManager) Status() (service.Status, error) {

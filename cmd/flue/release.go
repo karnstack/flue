@@ -112,9 +112,14 @@ func (c *releaseChecker) refresh(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	c.latest, c.url = tag, url
+	c.latest, c.url = strings.TrimPrefix(tag, "v"), url
 }
 
+// fetch asks GitHub for the latest stable release. The tag comes back raw —
+// leading v and all — because it is the release's address: flue update builds
+// download URLs under /releases/download/<tag>/ from it, exactly as
+// install.sh does. Callers that want a version to compare or render trim the
+// v themselves, as refresh does for the cache.
 func (c *releaseChecker) fetch(ctx context.Context) (tag, url string, err error) {
 	res, err := c.get(ctx, releaseAPI)
 	if err != nil {
@@ -136,7 +141,7 @@ func (c *releaseChecker) fetch(ctx context.Context) (tag, url string, err error)
 	if body.Draft || body.Pre {
 		return "", "", fmt.Errorf("latest release is not a stable one")
 	}
-	return strings.TrimPrefix(body.TagName, "v"), body.HTMLURL, nil
+	return body.TagName, body.HTMLURL, nil
 }
 
 // newer says whether `latest` is a later release than `current`.

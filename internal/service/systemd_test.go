@@ -183,6 +183,37 @@ func TestSystemdStatus(t *testing.T) {
 	}
 }
 
+// TestSystemdRestartRunsTheExactCommand: systemctl --user restart flue, the
+// spec's own spelling — SIGTERM to the old daemon, the unit file on disk for
+// the new one.
+func TestSystemdRestartRunsTheExactCommand(t *testing.T) {
+	r := &fakeRunner{}
+	s, _ := newSystemdUnderTest(t, r)
+
+	if err := s.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if len(r.calls) != 1 || strings.Join(r.calls[0], " ") != "systemctl --user restart flue" {
+		t.Fatalf("calls = %v, want exactly [systemctl --user restart flue]", r.calls)
+	}
+}
+
+func TestSystemdRestartReportsAFailure(t *testing.T) {
+	r := &fakeRunner{
+		fail: map[string]error{"restart": errors.New("exit status 1")},
+		out:  map[string]string{"restart": "Failed to restart flue.service: Unit not found."},
+	}
+	s, _ := newSystemdUnderTest(t, r)
+
+	err := s.Restart()
+	if err == nil {
+		t.Fatal("Restart = nil when systemctl failed, want the error")
+	}
+	if !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("Restart error = %q, want it to name the failing command", err)
+	}
+}
+
 func TestForPlatform(t *testing.T) {
 	r := &fakeRunner{}
 	if m, err := ForPlatform("darwin", "/x/flue", t.TempDir(), 501, r); err != nil || m == nil {

@@ -25,15 +25,21 @@ type Status struct {
 	Running   bool // the service manager reports it alive
 }
 
-// Manager installs, removes, and inspects the flue login service.
+// Manager installs, removes, restarts, and inspects the flue login service.
 //
 //   - Enable converges: it rewrites the unit if it drifted, loads it if it is
 //     not loaded, and starts it if it is dead — without restarting a healthy
 //     daemon, whose sessions must survive a re-run of flue enable.
 //   - Disable is idempotent: disabling what is not enabled is nil.
+//   - Restart bounces the daemon on purpose — the one thing Enable refuses to
+//     do — for the caller that has just replaced the binary and needs the
+//     running process to be the new one (flue update). Both implementations
+//     stop the daemon with SIGTERM, which is the graceful path cmdServe
+//     snapshots sessions on, so live sessions ride across the restart.
 type Manager interface {
 	Enable() error
 	Disable() error
+	Restart() error
 	Status() (Status, error)
 }
 

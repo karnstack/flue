@@ -75,6 +75,26 @@ func (l *Launchd) Enable() error {
 	return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
 }
 
+// Restart stops the loaded job and bootstraps the plist on disk — the same
+// bootout+bootstrap sequence Enable uses when the plist has drifted, chosen
+// over `launchctl kickstart -k` on purpose: bootout tears the job down the
+// graceful way (SIGTERM, then launchd's exit timeout), which is the signal
+// cmdServe saves session snapshots on, while kickstart -k kills. A restart
+// after an upgrade exists to carry live sessions onto the new build, so the
+// graceful spelling is the only right one.
+//
+// The bootout error is tolerated for the reason Enable tolerates it: an
+// unloaded label is not a failure to stop it, and the bootstrap — which reads
+// the plist fresh, so it also converges any drift — is the call whose error
+// matters.
+func (l *Launchd) Restart() error {
+	_, _ = l.run.Run("launchctl", "bootout", l.serviceTarget())
+	if out, err := l.run.Run("launchctl", "bootstrap", l.domainTarget(), l.unitPath()); err != nil {
+		return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
+	}
+	return nil
+}
+
 // Disable boots the agent out and removes the plist. Both halves tolerate
 // absence: a bootout of an unloaded label and a remove of a missing file are
 // what "already disabled" looks like, and that is a success.

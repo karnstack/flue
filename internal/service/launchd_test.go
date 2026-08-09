@@ -216,3 +216,57 @@ func TestLaunchdStatus(t *testing.T) {
 type errFake string
 
 func (e errFake) Error() string { return string(e) }
+
+// TestLaunchdRestartBootsOutAndBootstraps pins the graceful spelling: bootout
+// (SIGTERM, the signal the daemon snapshots sessions on) and then bootstrap of
+// the plist on disk — never kickstart -k, which kills.
+func TestLaunchdRestartBootsOutAndBootstraps(t *testing.T) {
+	r := &fakeRunner{}
+	l, plist := newLaunchdUnderTest(t, r)
+	if err := l.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	r.calls = nil
+
+	if err := l.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if vs := strings.Join(r.verbs(), ","); vs != "bootout,bootstrap" {
+		t.Fatalf("verbs = %v, want [bootout bootstrap]", r.verbs())
+	}
+	want := []string{"launchctl", "bootstrap", "gui/501", plist}
+	if got := r.calls[len(r.calls)-1]; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("bootstrap call = %v, want %v", got, want)
+	}
+}
+
+// TestLaunchdRestartToleratesAnUnloadedLabel: a service that is installed but
+// not loaded has nothing to boot out, and that is not a failure to stop it —
+// the bootstrap is what a restart is for.
+func TestLaunchdRestartToleratesAnUnloadedLabel(t *testing.T) {
+	r := &fakeRunner{fail: map[string]error{"bootout": errFake("Boot-out failed: 5: Input/output error")}}
+	l, _ := newLaunchdUnderTest(t, r)
+	if err := l.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	if err := l.Restart(); err != nil {
+		t.Fatalf("Restart with nothing loaded: %v", err)
+	}
+}
+
+func TestLaunchdRestartReportsABootstrapFailure(t *testing.T) {
+	r := &fakeRunner{
+		fail: map[string]error{"bootstrap": errFake("exit status 5")},
+		out:  map[string]string{"bootstrap": "Bootstrap failed: 5: Input/output error"},
+	}
+	l, _ := newLaunchdUnderTest(t, r)
+
+	err := l.Restart()
+	if err == nil {
+		t.Fatal("Restart = nil when bootstrap failed, want the error")
+	}
+	if !strings.Contains(err.Error(), "bootstrap") {
+		t.Fatalf("Restart error = %q, want it to name the failing call", err)
+	}
+}
