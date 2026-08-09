@@ -332,6 +332,35 @@ has stopped reading — rather than "one browser was briefly noisy". The constan
 doc comment in `relay.go` states the asymmetry so nobody reads `outboxDepth = 256`
 as the isolation the inbox gives.
 
+**Done** — the credit shape, and no wire change was needed: the accounting is
+entirely between `channelConn.Write` and the socket's writer. Each channel holds
+`channelCredit` (8) tokens; a queued frame carries one and the writer returns it
+after the write, so a channel can never occupy more than its allowance of the
+shared outbox. The outbox is sized to every channel's full credit plus a
+`controlReserve` (64) for channel-0 messages, which stay in the same queue
+because their ordering against data frames is load-bearing (`channelConn.Close`
+must trail the revoked frame it concludes). A channel out of credit *waits*, on
+its own write path, under the daemon's `writeTimeout` — the two blocking-shape
+worries above are what the credit dissolves: the wait is per-channel, and a
+waiting channel's frames cannot sit in the queue past its allowance. So a fast
+session is flow-controlled to the socket's drain rate the way loopback flow
+controls it, with the daemon's per-conn outbox and `lagged` machinery deciding
+when a client is truly gone; a channel whose credit never returns inside the
+deadline is closed alone (`errChannelBacklogged` → the daemon fails that one
+conn → the ordinary `close{channel}`). Keepalives ride their own one-deep lane,
+drained first, dropped (never failed) when one is already pending — the ping
+can no longer be starved by a transfer or blamed for a full queue.
+`errSocketBacklogged` survives only as the last resort it was meant to be: a
+control message finding the queue full past the reserve, which credit makes
+unreachable for data and ordinary operation never reaches.
+`TestRelayOutboundBackpressureFlowControlsOneChannelNotTheSocket` is the
+outbound mirror of the inbox test (verified failing, with the old whole-socket
+teardown, against the pre-fix code); `TestRelayOutboundCreditBoundsOneChannel`
+and `TestRelayOutboundSocketFailureIsTheLastResort` pin the mechanism. What
+remains is item 13's first bullet, unchanged: a *rate* cap is still the relay's
+own missing number — credit bounds queue occupancy on this side, not
+invocations on that one.
+
 ### 11. The pairing page is now served by the relay whenever one is live
 
 Item 8 above asked part 2 to keep `/pair` out of relay control. The wiring task

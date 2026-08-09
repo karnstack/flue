@@ -58,24 +58,41 @@ const (
 	// the only place anything ever waits on this socket.
 	writeTimeout = 10 * time.Second
 
-	// outboxDepth is how many frames may be queued for the socket before it is
-	// torn down. It matches the daemon's per-connection outbox: a relay that has
-	// not drained this many frames is not a slow relay, it is a gone one.
+	// channelCredit is how many frames one channel may hold on the socket's
+	// outbox at once — the outbound mirror of inboxDepth, and the rule that
+	// makes the outbound direction per-channel the way the inbound one already
+	// is. A frame takes a token from its channel when it is queued and the
+	// writer returns the token once the frame has been written, so a channel
+	// producing faster than the socket drains runs out of credit and waits on
+	// its own write path (bounded by its caller's deadline) rather than
+	// flooding the queue every other browser shares. One fast session — a
+	// `cat` of something large, a build log — is flow-controlled to the
+	// socket's drain rate instead of tearing anything down; only a channel
+	// whose credit does not return within the daemon's writeTimeout is closed,
+	// and it is closed alone.
 	//
-	// The two directions are not symmetric, and the asymmetry is the thing to
-	// know before touching this number. Inbound is per-channel: every browser
-	// has its own inboxDepth queue (channel.go), so one that will not drain
-	// loses itself and nothing else. Outbound is *shared* — every channel's
-	// writes funnel through this one queue via socket.enqueue — so a single
-	// channel that produces faster than the socket drains fills it, and
-	// enqueue's answer to a full outbox is s.fail(errSocketBacklogged), which
-	// tears down the socket and with it every other browser on this machine.
-	// 256 frames is not much cover: one browser attached to a high-rate session
-	// can put that many frames in flight in milliseconds, so a TCP write stall
-	// of that length is enough. The honest fix is per-channel outbound credit
-	// rather than a bigger shared queue; it is a design change, and it is
-	// recorded as such in docs/FOLLOW-UPS.md ("relay carry-forwards").
-	outboxDepth = 256
+	// The number is small on purpose: the writer drains continuously, so a few
+	// frames of runway sustain full throughput, and the credit's whole job is
+	// to bound how far ahead of its siblings one channel can be.
+	channelCredit = 8
+
+	// controlReserve is outbox capacity held above the sum of every channel's
+	// credit, for the channel-0 control messages — closes, pairing results —
+	// that share the queue because their ordering against data frames is
+	// load-bearing (see channelConn.Close). Data frames can never take these
+	// slots: they are bounded by credit below the reserve line.
+	controlReserve = 64
+
+	// outboxDepth is the socket outbox: every channel's full credit, plus the
+	// control reserve. Sized that way so a data frame holding a credit token
+	// always has a slot waiting, which is what makes the outbound direction
+	// symmetric with inbound — per-channel bounds, per-channel consequences.
+	// A full outbox is therefore no longer what one busy session looks like;
+	// it is a writer that has genuinely stopped draining, and only the control
+	// path still answers it by failing the socket, as a last resort (see
+	// socket.enqueue). Keepalives ride their own one-deep lane (socket.ka) so
+	// they can be neither starved nor blamed.
+	outboxDepth = maxChannels*channelCredit + controlReserve
 
 	// dialTimeout bounds a handshake, not a connection. Without it a relay that
 	// accepts the TCP connection and then says nothing parks the reconnect loop
@@ -550,20 +567,36 @@ func (t *Transport) dispatch(s *socket, f relaywire.Frame) {
 func (t *Transport) runWriter(s *socket, done chan<- struct{}) {
 	defer close(done)
 	for {
+		// The keepalive lane first, and biased: a ping asked for while the
+		// outbox is deep in one session's output must not wait its turn behind
+		// it. The nested select is the bias — a bare two-queue select picks
+		// uniformly, which under a saturated outbox delays the ping by however
+		// many coin flips it loses.
+		var f outFrame
 		select {
-		case f := <-s.out:
-			ctx, cancel := context.WithTimeout(s.ctx, writeTimeout)
-			err := s.ws.Write(ctx, f.messageType(), f.b)
-			cancel()
-			if err != nil {
-				// The socket is gone or wedged. Ending the connection here is
-				// what gets the read loop out and the reconnect started, and
-				// the error is carried with it because the read loop's own
-				// error will only say that something cancelled it.
-				s.fail(fmt.Errorf("relay: writing to the relay: %w", err))
+		case f = <-s.ka:
+		default:
+			select {
+			case f = <-s.ka:
+			case f = <-s.out:
+			case <-s.ctx.Done():
 				return
 			}
-		case <-s.ctx.Done():
+		}
+		ctx, cancel := context.WithTimeout(s.ctx, writeTimeout)
+		err := s.ws.Write(ctx, f.messageType(), f.b)
+		cancel()
+		// The credit returns whatever the write's outcome: on failure the
+		// socket is about to be torn down, and a blocked producer waking to
+		// find it gone is better than one parked on a token nothing will
+		// return.
+		f.release()
+		if err != nil {
+			// The socket is gone or wedged. Ending the connection here is
+			// what gets the read loop out and the reconnect started, and
+			// the error is carried with it because the read loop's own
+			// error will only say that something cancelled it.
+			s.fail(fmt.Errorf("relay: writing to the relay: %w", err))
 			return
 		}
 	}
@@ -571,11 +604,13 @@ func (t *Transport) runWriter(s *socket, done chan<- struct{}) {
 
 // runKeepalive queues a flue-ping every interval.
 //
-// It is a producer into the outbox rather than a second writer: one goroutine
-// owns the socket. The interval is well under the ~100 s at which Cloudflare
-// closes an idle WebSocket, and the edge answers from the Durable Object's
-// auto-response, so an idle terminal costs a matched string at the edge rather
-// than a woken — and billed — Durable Object.
+// It is a producer into the keepalive lane rather than a second writer: one
+// goroutine owns the socket. The lane is the ping's own (see socket.ka) so a
+// busy outbox can neither starve it nor blame it. The interval is well under
+// the ~100 s at which Cloudflare closes an idle WebSocket, and the edge
+// answers from the Durable Object's auto-response, so an idle terminal costs
+// a matched string at the edge rather than a woken — and billed — Durable
+// Object.
 func (t *Transport) runKeepalive(s *socket, done chan<- struct{}) {
 	defer close(done)
 	tick := time.NewTicker(t.keepalive)
@@ -592,7 +627,7 @@ func (t *Transport) runKeepalive(s *socket, done chan<- struct{}) {
 				s.fail(fmt.Errorf("%w for %s", errRelaySilent, silence.Round(time.Millisecond)))
 				return
 			}
-			if err := s.enqueue(outFrame{text: true, b: []byte(relaywire.Ping)}); err != nil {
+			if err := s.enqueueKeepalive(); err != nil {
 				return
 			}
 		case <-s.ctx.Done():
@@ -627,6 +662,12 @@ func backoffDelay(attempt int) time.Duration {
 type outFrame struct {
 	text bool
 	b    []byte
+
+	// credit is where this frame's token goes home to — the pool of the
+	// channel that queued it — or nil for the frames that hold no credit: the
+	// control channel's and the keepalives'. The writer returns it once the
+	// frame has been written, which is what lets that channel queue another.
+	credit chan struct{}
 }
 
 func (f outFrame) messageType() websocket.MessageType {
@@ -634,6 +675,15 @@ func (f outFrame) messageType() websocket.MessageType {
 		return websocket.MessageText
 	}
 	return websocket.MessageBinary
+}
+
+// release returns the frame's credit token, if it holds one. It can never
+// block: the pool is buffered to exactly the credit issued, and a token is
+// only ever returned once.
+func (f outFrame) release() {
+	if f.credit != nil {
+		f.credit <- struct{}{}
+	}
 }
 
 // socket is one live relay connection: the WebSocket, the outbox every producer
@@ -647,8 +697,14 @@ func (f outFrame) messageType() websocket.MessageType {
 // Noise state that made them readable was in this process's memory and this
 // socket's lifetime.
 type socket struct {
-	ws     *websocket.Conn
-	out    chan outFrame
+	ws  *websocket.Conn
+	out chan outFrame
+	// ka is the keepalive's own lane, drained before out. One slot is the
+	// point: a ping whose predecessor has not been written yet has nothing to
+	// add, and a lane the data path never touches is what keeps a saturated
+	// outbox from starving the ping — or blaming it, which is how the ping
+	// used to be the enqueue that failed the socket mid-transfer.
+	ka     chan outFrame
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -674,6 +730,7 @@ func newSocket(ctx context.Context, cancel context.CancelFunc, ws *websocket.Con
 	s := &socket{
 		ws:       ws,
 		out:      make(chan outFrame, outboxDepth),
+		ka:       make(chan outFrame, 1),
 		ctx:      ctx,
 		cancel:   cancel,
 		channels: map[uint32]*channel{},
@@ -687,10 +744,19 @@ func newSocket(ctx context.Context, cancel context.CancelFunc, ws *websocket.Con
 var (
 	errSocketClosed = errors.New("relay: socket closed")
 
-	// errSocketBacklogged is what a producer gets when the relay has stopped
-	// draining. The socket is torn down with it: a relay that is this far
-	// behind is not slow, it is gone, and every frame queued for it is stale.
+	// errSocketBacklogged is the last resort: a control message found the
+	// outbox full past the reserve that exists for it. Data frames cannot get
+	// here — credit bounds them below that line and their enqueue waits rather
+	// than fails — so a queue this full means the writer has genuinely stopped
+	// draining. The socket is torn down with it: a relay that far behind is
+	// not slow, it is gone, and every frame queued for it is stale.
 	errSocketBacklogged = errors.New("relay: the relay is not draining its socket")
+
+	// errChannelBacklogged is one channel's outbound falling too far behind:
+	// its credit did not return within its caller's deadline. It costs that
+	// channel alone — the daemon's connection machinery closes the one
+	// connection whose write failed, and the browser behind it reconnects.
+	errChannelBacklogged = errors.New("relay: the channel's outbound frames are not draining")
 
 	// errRelaySilent is a socket that is open on this end only.
 	errRelaySilent = errors.New("relay: nothing from the relay")
@@ -700,8 +766,16 @@ func (s *socket) markRead() { s.read.Store(time.Now().UnixNano()) }
 
 func (s *socket) lastRead() time.Time { return time.Unix(0, s.read.Load()) }
 
-// enqueue hands a frame to the writer without ever blocking, so no producer
-// ever waits on this socket.
+// enqueue hands a control frame to the writer without ever blocking — its
+// callers answer frames on the socket's one read loop, and a wait here would
+// be a wait imposed on every browser on this machine.
+//
+// It is the control path only. Data frames go through enqueueData, which
+// bounds them per channel; keepalives ride their own lane. What is left here
+// is channel-0 traffic, and the controlReserve slots above the credit total
+// exist for it — so a full queue on this path is not one busy session, it is
+// a writer that has stopped draining, and failing the socket over it is the
+// last resort it was always meant to be.
 func (s *socket) enqueue(f outFrame) error {
 	select {
 	case s.out <- f:
@@ -711,6 +785,55 @@ func (s *socket) enqueue(f outFrame) error {
 	default:
 		s.fail(errSocketBacklogged)
 		return errSocketBacklogged
+	}
+}
+
+// enqueueData queues one channel's frame, held to that channel's outbound
+// credit. Unlike the control path it may wait: its callers are each channel's
+// own write path — the daemon connection's writer goroutine, the handshake's
+// responder — so the wait lands on exactly the one browser that is ahead of
+// the socket, bounded by ctx (the daemon writes under its writeTimeout).
+// A channel whose credit does not come back in that time gets
+// errChannelBacklogged, which ends that connection and nothing else.
+func (s *socket) enqueueData(ctx context.Context, ch *channel, payload []byte) error {
+	f := channelFrame(ch.id, payload)
+	f.credit = ch.credit
+	select {
+	case <-ch.credit:
+	case <-ch.done:
+		return errChannelGone
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %w", errChannelBacklogged, ctx.Err())
+	case <-s.ctx.Done():
+		return errSocketClosed
+	}
+	// A token in hand nearly always means a slot: the outbox is sized to hold
+	// every channel's full credit. The wait below is reachable only through
+	// churn — frames of already-closed channels still draining ahead — and is
+	// bounded the same way the credit wait is.
+	select {
+	case s.out <- f:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %w", errChannelBacklogged, ctx.Err())
+	case <-s.ctx.Done():
+		return errSocketClosed
+	}
+}
+
+// enqueueKeepalive queues a flue-ping on the keepalive's own lane. A lane
+// already holding one means the writer has not sent the last ping yet, and a
+// second would add nothing — it is dropped, not failed, because the ping must
+// never be the frame that gets blamed for a wedged writer: writeTimeout and
+// the staleness check are what decide that socket's fate.
+func (s *socket) enqueueKeepalive() error {
+	select {
+	case s.ka <- outFrame{text: true, b: []byte(relaywire.Ping)}:
+		return nil
+	case <-s.ctx.Done():
+		return errSocketClosed
+	default:
+		return nil
 	}
 }
 

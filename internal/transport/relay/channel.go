@@ -92,6 +92,18 @@ type channel struct {
 	id    uint32
 	inbox chan []byte
 
+	// credit bounds this channel's share of the socket's shared outbox — the
+	// outbound mirror of the inbox above. It starts holding channelCredit
+	// tokens; queueing a frame takes one (socket.enqueueData) and the socket's
+	// writer returns it once the frame is written, so the channel can never
+	// hold more than its allowance of the queue every other browser shares.
+	credit chan struct{}
+
+	// done is closed with the inbox. The inbox's own close is what wakes this
+	// channel's readers; done is what wakes a writer parked on credit, which a
+	// closed chan of tokens could not do without racing the pending returns.
+	done chan struct{}
+
 	// mu guards closed, and with it the one thing a channel of channels needs
 	// guarding: close and send must not race, since sending on a closed channel
 	// is a panic. Everything else about the inbox is the channel's own
@@ -101,7 +113,16 @@ type channel struct {
 }
 
 func newChannel(id uint32) *channel {
-	return &channel{id: id, inbox: make(chan []byte, inboxDepth)}
+	ch := &channel{
+		id:     id,
+		inbox:  make(chan []byte, inboxDepth),
+		credit: make(chan struct{}, channelCredit),
+		done:   make(chan struct{}),
+	}
+	for range channelCredit {
+		ch.credit <- struct{}{}
+	}
+	return ch
 }
 
 // deliver queues one payload without ever blocking, reporting false when the
@@ -136,6 +157,7 @@ func (c *channel) close() {
 	}
 	c.closed = true
 	close(c.inbox)
+	close(c.done)
 }
 
 // --- the channel table, which belongs to one socket ---
@@ -311,7 +333,7 @@ func (t *Transport) serveChannel(s *socket, ch *channel, origin string) {
 
 	nch, peerStatic, err := t.handshake(s, ch)
 	if err != nil {
-		if errors.Is(err, errChannelGone) || errors.Is(err, errSocketClosed) || errors.Is(err, errSocketBacklogged) {
+		if errors.Is(err, errChannelGone) || errors.Is(err, errSocketClosed) {
 			// The browser left, or the socket did, mid-handshake. Ordinary, and
 			// there is nobody left to send a close to.
 			t.log.Debug("relay channel ended during its handshake", "channel", ch.id, "err", err)
@@ -374,7 +396,13 @@ func (t *Transport) handshake(s *socket, ch *channel) (*crypto.Channel, []byte, 
 			return nil, errHandshakeStalled
 		}
 	}
-	send := func(msg []byte) error { return s.enqueue(channelFrame(ch.id, msg)) }
+	// The responder's message takes the channel's own credit like any data
+	// frame, so the outbox accounting holds from the first byte. It can never
+	// actually wait — a channel mid-handshake has written nothing, so its
+	// credit is untouched — which is why the background context is honest:
+	// the waits that remain are the socket's end and the channel's, both of
+	// which enqueueData watches itself.
+	send := func(msg []byte) error { return s.enqueueData(context.Background(), ch, msg) }
 	// A nil socket context is not selected on here: a socket that ends closes
 	// every inbox on its way out, which is what wakes this recv.
 	return crypto.ResponderHandshake(t.identity, rand.Reader, recv, send)
@@ -521,19 +549,32 @@ func (c *channelConn) Read(ctx context.Context) (bool, []byte, error) {
 	return relaywire.DecodePlain(plain)
 }
 
-// Write seals one message and queues it for the socket's writer.
+// Write seals one message and queues it for the socket's writer, held to this
+// channel's outbound credit.
 //
-// ctx bounds nothing here, and nothing here needs it to: the frame is handed to
-// the single writer through a queue that never blocks its producers, and the
-// write itself happens on that goroutine under the socket's own deadline.
-func (c *channelConn) Write(_ context.Context, text bool, data []byte) error {
+// ctx is what bounds the wait for that credit. The caller is the daemon
+// connection's own writer goroutine, which writes under its writeTimeout — the
+// same deadline a loopback write gets — so a channel out of credit waits the
+// way a loopback socket's send buffer makes a slow client wait, and the wait
+// costs exactly one browser. A deadline that expires first means this channel
+// has not drained its allowance in all that time: the error ends this
+// connection through the daemon's ordinary teardown, the relay is told to
+// close this one channel, and every sibling on the socket carries on.
+func (c *channelConn) Write(ctx context.Context, text bool, data []byte) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	sealed, err := c.noise.Seal(relaywire.EncodePlain(text, data))
 	if err != nil {
 		return fmt.Errorf("relay: channel %d: %w", c.ch.id, err)
 	}
-	return c.s.enqueue(channelFrame(c.ch.id, sealed))
+	err = c.s.enqueueData(ctx, c.ch, sealed)
+	if errors.Is(err, errChannelBacklogged) && errors.Is(err, context.DeadlineExceeded) {
+		// The deadline case is the one worth a log line: this is the outbound
+		// mirror of "the client is not reading its frames", and the close that
+		// follows would otherwise look like an ordinary disconnect.
+		c.t.log.Warn("relay channel closed: its outbound frames are not draining", "channel", c.ch.id)
+	}
+	return err
 }
 
 // Close ends this browser's channel: the relay is asked to close its socket,
