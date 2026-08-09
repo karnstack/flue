@@ -168,7 +168,10 @@ open. Close it with the one credential the Worker does hold:
 
 ```
 machine-id  =  <slug> "-" <tag>
-slug        =  hostname slug as today (lowercase, 1..48)
+slug        =  hostname slug + "-" + 4 random hex, exactly as MintMachineID
+               builds ids today (the randomness is what keeps two machines
+               named "mac" distinct — the tag below is deterministic and
+               cannot do that job)
 tag         =  first 8 lowercase hex of HMAC-SHA256(DAEMON_SECRET, "flue-machine-id/" + slug)
 ```
 
@@ -179,10 +182,10 @@ online guesses through the Worker — each one a billed request the rate rule
 (below) throttles, to win nothing but the DO wake that any request got
 before.
 
-Two consequences, accepted: ids grow four characters (`mac-3f9a12cd`), and
-rotating the secret invalidates every id — which re-setup does anyway, since
-every machine re-joins. The 4-hex random suffix `MintMachineID` uses today is
-subsumed by the tag; the slug rule is unchanged.
+Two consequences, accepted: ids grow nine characters (`mac-a1b2-3f9a12cd`),
+and rotating the secret invalidates every id — which re-setup does anyway,
+since every machine re-joins. Today's id becomes the slug, verbatim; the tag
+is appended.
 
 ## Rate rule
 
