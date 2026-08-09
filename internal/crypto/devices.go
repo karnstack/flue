@@ -73,6 +73,23 @@ func (s *DeviceStore) save(devices []Device) error {
 		tmp.Close()
 		return err
 	}
+	// Flushed to the disk before the rename publishes it. A rename is atomic
+	// with respect to other processes, but not with respect to power loss: the
+	// directory entry can reach the disk before the data blocks it points at,
+	// which leaves a zero-length file where a complete one used to be.
+	//
+	// A zero-length devices.json is not an empty registry: load rejects it as
+	// unparseable, so every relayed device is refused as unpaired while the
+	// record of who was paired is unreadable.
+	//
+	// The directory entry itself is deliberately not fsynced, matching
+	// config.writeSecretAtomically. Losing the rename is the acceptable
+	// failure — the registry simply still holds what it held before this
+	// mutation.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
