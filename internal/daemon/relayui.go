@@ -57,9 +57,13 @@ type RelayUIStatus struct {
 	// the sentence the UI shows instead of a button.
 	CanDeploy       bool   `json:"can_deploy"`
 	CanDeployReason string `json:"can_deploy_reason,omitempty"`
-	// Version is this binary's; DeployedVersion is what the relay's
-	// /api/health reported, empty when unreachable or unstamped. The UI
-	// offers an update when the two differ.
+	// Version is this binary's; DeployedVersion is what the relay serves.
+	// Normally that is what its /api/health reported — empty when
+	// unreachable or unstamped — except right after a deploy this daemon
+	// performed, when it is the stamp the daemon shipped: the edge keeps
+	// serving the previous Worker for a while after the API accepts a new
+	// one, and a health read taken in that window would re-offer an update
+	// that just succeeded. The UI offers an update when the two differ.
 	Version         string `json:"version"`
 	DeployedVersion string `json:"deployed_version,omitempty"`
 	// HasToken says a Cloudflare token is stored (config/cloudflare.json), so

@@ -218,6 +218,140 @@ func TestRelayUIStatusReportsTheDeployedVersion(t *testing.T) {
 	}
 }
 
+// staleHealth is a relay edge mid-propagation: whatever was just deployed,
+// /api/health still answers with the previous deploy's stamp — which is what
+// a real relay does for seconds, occasionally longer, after every deploy.
+func staleHealth(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/health" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "version": "0.0.0-previous"})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// seedRelayAt writes the relay.json of a machine already joined to a relay
+// whose origin is the given server — the state the update card renders from.
+func seedRelayAt(t *testing.T, origin string) {
+	t.Helper()
+	if err := config.SaveRelay(config.Relay{
+		URL:       "wss://flue-relay.karn.workers.dev",
+		Secret:    "s",
+		Origin:    origin,
+		MachineID: "m-1",
+		Worker:    relayScriptName,
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+}
+
+// TestRelayUIStatusTrustsItsOwnDeployWhileTheEdgeCatchesUp is the repro that
+// earned the service its memory: deploy, watch every checkmark land, and the
+// card underneath still says "update the relay" — because Cloudflare's API
+// accepted the new Worker while the edge kept serving the old one, previous
+// stamp and all, and Status believed the edge. The user obliges and
+// redeploys identical bytes; time was the actual fix. After a successful
+// deploy the service's own memory answers instead.
+func TestRelayUIStatusTrustsItsOwnDeployWhileTheEdgeCatchesUp(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+	stale := staleHealth(t)
+	seedRelayAt(t, stale.URL)
+	svc := uiService(f, &relayRuntime{running: true})
+
+	// Before this process has deployed anything, the health read decides —
+	// its differing stamp is what puts the update card up at all.
+	if st := svc.Status(context.Background()); st.DeployedVersion != "0.0.0-previous" {
+		t.Fatalf("deployed version before deploying = %q, want the health read's 0.0.0-previous", st.DeployedVersion)
+	}
+
+	if _, err := svc.Update(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// The edge still answers the previous stamp; Status must not believe it.
+	if st := svc.Status(context.Background()); st.DeployedVersion != deployStamp() {
+		t.Fatalf("deployed version right after a successful deploy = %q, want this binary's %q", st.DeployedVersion, deployStamp())
+	}
+
+	// Provision remembers the same way: a first deploy's Status answers from
+	// memory too, without dialling the fresh workers.dev origin at all.
+	if _, err := svc.Provision(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if st := svc.Status(context.Background()); st.DeployedVersion != deployStamp() {
+		t.Fatalf("deployed version right after a provision = %q, want %q", st.DeployedVersion, deployStamp())
+	}
+}
+
+// TestRelayUIFailedUpdateLeavesTheHealthReadInCharge: a deploy the API
+// refused changed nothing at the edge, so it earns no memory — the card
+// keeps offering exactly what the health read supports.
+func TestRelayUIFailedUpdateLeavesTheHealthReadInCharge(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+	f.reject["/scripts/"+relayScriptName] = "computer says no"
+	stale := staleHealth(t)
+	seedRelayAt(t, stale.URL)
+	svc := uiService(f, &relayRuntime{running: true})
+
+	if _, err := svc.Update(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken}); err == nil {
+		t.Fatal("the rejected deploy reported success")
+	}
+	if st := svc.Status(context.Background()); st.DeployedVersion != "0.0.0-previous" {
+		t.Fatalf("deployed version after a failed deploy = %q, want the health read's 0.0.0-previous", st.DeployedVersion)
+	}
+}
+
+// TestRelayUIStaleShipMemoryLosesToTheHealthRead pins the two ways the
+// memory expires. A binary whose stamp changed no longer ships what the
+// memory says was shipped — in practice a rebuilt daemon, whose restart
+// drops the memory anyway; the guard states the invariant without leaning on
+// the restart. And an origin that moved on names a relay this process never
+// deployed to. Both must yield to the health read, so a genuinely newer
+// build still gets its update card.
+func TestRelayUIStaleShipMemoryLosesToTheHealthRead(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+	stale := staleHealth(t)
+	seedRelayAt(t, stale.URL)
+	svc := uiService(f, &relayRuntime{running: true})
+
+	if _, err := svc.Update(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// The rebuilt-binary shape: the memory holds a stamp this binary would
+	// not ship. (A test cannot rebuild itself, so it plants the mismatch.)
+	svc.shippedMu.Lock()
+	svc.shippedStamp = "dev-some-other-build"
+	svc.shippedMu.Unlock()
+	if st := svc.Status(context.Background()); st.DeployedVersion != "0.0.0-previous" {
+		t.Fatalf("deployed version under a stale stamp = %q, want the health read's 0.0.0-previous", st.DeployedVersion)
+	}
+
+	// The moved-origin shape, through the real path: deploy again (memory
+	// back in force), then repoint the address. The new origin answers no
+	// health read — port 1 refuses instantly — and the memory, keyed to the
+	// origin it shipped to, must not answer for it.
+	if _, err := svc.Update(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken}); err != nil {
+		t.Fatalf("second Update: %v", err)
+	}
+	if st := svc.Status(context.Background()); st.DeployedVersion != deployStamp() {
+		t.Fatalf("deployed version after re-deploying = %q, want %q", st.DeployedVersion, deployStamp())
+	}
+	if _, err := svc.SetAddress(context.Background(), "wss://127.0.0.1:1"); err != nil {
+		t.Fatalf("SetAddress: %v", err)
+	}
+	if st := svc.Status(context.Background()); st.DeployedVersion != "" {
+		t.Fatalf("deployed version after repointing = %q, want empty: neither memory nor a health read can speak for the new origin", st.DeployedVersion)
+	}
+}
+
 // twoAccounts mirrors oneAccount for the picker tests.
 func twoAccounts() []cloudflare.Account {
 	return []cloudflare.Account{

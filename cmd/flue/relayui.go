@@ -49,6 +49,21 @@ type relayUIService struct {
 	// log hears what the deploy did — worker names and outcomes, never a
 	// token and never the secret. Nil is quiet, which is what tests want.
 	log *slog.Logger
+
+	// shippedOrigin and shippedStamp remember the last deploy this process
+	// completed: where it shipped and what stamp it shipped. They exist for
+	// the minutes right after a deploy — Cloudflare's API accepts a new
+	// Worker before every edge serves it, and until propagation finishes the
+	// relay's /api/health still answers with the previous stamp. A Status
+	// that trusted only the health read would put the update card back under
+	// the checkmarks the deploy just earned, and taking that offer redeploys
+	// identical bytes. Their own mutex, not mu: Status must render during a
+	// deploy, not queue behind one. Lost on a daemon restart, deliberately —
+	// by the time a daemon comes back, propagation is long done and the
+	// health read is telling the truth again.
+	shippedMu     sync.Mutex
+	shippedOrigin string
+	shippedStamp  string
 }
 
 func (s *relayUIService) logf() *slog.Logger {
@@ -140,7 +155,17 @@ func (s *relayUIService) Status(ctx context.Context) daemon.RelayUIStatus {
 	if w, err := updateWorkerName("", cfg); err == nil {
 		st.Worker = w
 	}
-	st.DeployedVersion = deployedVersion(ctx, cfg.Origin)
+	// This process's own deploy outranks the health read: right after one,
+	// the edge can keep serving the previous Worker — previous stamp and
+	// all — for seconds, occasionally longer, and believing /api/health in
+	// that window turns a finished deploy into an update offer. The memory
+	// declines to answer whenever it has gone stale (see shippedVersion),
+	// and the health read decides as before.
+	if stamp, ok := s.shippedVersion(cfg.Origin); ok {
+		st.DeployedVersion = stamp
+	} else {
+		st.DeployedVersion = deployedVersion(ctx, cfg.Origin)
+	}
 	return st
 }
 
@@ -169,6 +194,31 @@ func deployedVersion(ctx context.Context, origin string) string {
 		return ""
 	}
 	return health.Version
+}
+
+// recordShipped is the deploy paths' success line: this process just put its
+// own bytes behind origin, whatever /api/health says for the next while. A
+// deploy that failed must never reach here — it changed nothing at the edge,
+// and the card has to keep offering what the health read supports.
+func (s *relayUIService) recordShipped(origin string) {
+	s.shippedMu.Lock()
+	defer s.shippedMu.Unlock()
+	s.shippedOrigin, s.shippedStamp = origin, deployStamp()
+}
+
+// shippedVersion answers Status from memory, but only while the memory still
+// speaks for the question being asked: the same origin, carrying the stamp
+// this binary would ship again. Anything else is stale and must lose to a
+// live health read — a relay.json repointed or re-joined elsewhere names a
+// deploy this process never performed, and a binary whose own stamp moved on
+// has a genuinely newer build whose update card must not be swallowed.
+func (s *relayUIService) shippedVersion(origin string) (string, bool) {
+	s.shippedMu.Lock()
+	defer s.shippedMu.Unlock()
+	if s.shippedStamp == "" || s.shippedOrigin != origin || s.shippedStamp != deployStamp() {
+		return "", false
+	}
+	return s.shippedStamp, true
 }
 
 // resolveToken decides what credential a deploy runs with: the request's
@@ -328,6 +378,10 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 	} else if started {
 		res.Steps = append(res.Steps, "daemon connecting to the relay")
 	}
+	// Remember what shipped and where: Status answers from this while the
+	// edge catches up, instead of trusting a health read that briefly still
+	// says the previous deploy.
+	s.recordShipped(res.Origin)
 	s.logf().Info("relay deployed from the UI", "worker", worker, "host", host, "restartNeeded", res.RestartNeeded)
 	return res, nil
 }
@@ -345,7 +399,10 @@ func joinCommand(host, secret string) string {
 // any existing pairing — the daemon serves exactly the origin it dials, so
 // every browser paired on the old one must pair again on the new address
 // (see runRelayAddress), and the second step line carries that truth to the
-// card.
+// card. The shipped-deploy memory keys on the origin, so a repoint sends
+// Status back to asking the relay itself: the Worker behind the new name
+// should be the same one, but that is the health read's fact to confirm,
+// not memory's to assume.
 func (s *relayUIService) SetAddress(ctx context.Context, address string) (daemon.RelayUIDeployResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -458,6 +515,9 @@ func (s *relayUIService) Update(ctx context.Context, req daemon.RelayUIDeployReq
 			steps = append(steps, "token stored for one-click updates")
 		}
 	}
+	// Same note as Provision's: the deploy succeeded, so Status may say so
+	// without waiting for the edge to agree.
+	s.recordShipped(cfg.Origin)
 	s.logf().Info("relay updated from the UI", "worker", worker)
 	return daemon.RelayUIDeployResult{Steps: steps, Origin: cfg.Origin}, nil
 }
