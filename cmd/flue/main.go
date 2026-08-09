@@ -175,10 +175,21 @@ func cmdServe(args []string) error {
 	// returns under its old id with its scrollback and a fresh shell in its
 	// directory. Failures are reported and skipped — revival is a courtesy,
 	// and the daemon always comes up.
-	for _, snap := range session.LoadAndClearSnapshots(stateDir) {
+	//
+	// A snapshot's file is cleared only once its session is actually back. A
+	// spawn can fail for reasons the next boot will not have — fd exhaustion,
+	// a $SHELL a package upgrade briefly removed — so a failure is recorded on
+	// the file rather than paid for with the session's scrollback and
+	// identity. The bookkeeping is what keeps that from becoming a boot-time
+	// wedge: LoadSnapshots ages out a snapshot that keeps failing (see
+	// maxReviveAttempts) instead of retrying it forever.
+	for _, snap := range session.LoadSnapshots(stateDir) {
 		if _, err := reg.Revive(snap); err != nil {
 			fmt.Fprintf(os.Stderr, "flue: could not revive session %s: %v\n", snap.ID, err)
+			session.RecordReviveFailure(stateDir, snap)
+			continue
 		}
+		session.ClearSnapshot(stateDir, snap.ID)
 	}
 	// Names and tags live in their own files beside the snapshots, written as
 	// they are edited rather than at shutdown. The snapshots above already carry
@@ -192,7 +203,10 @@ func cmdServe(args []string) error {
 	// ones that name nothing, which is what stops a machine that was killed
 	// rather than stopped from silting the directory up. (After a kill there are
 	// no snapshots at all, so nothing revives and the sweep is the whole of what
-	// this pass does.)
+	// this pass does.) A session whose snapshot was preserved above for a later
+	// boot loses its meta record to this sweep, and loses nothing with it: the
+	// snapshot carries the same fields, so the revival that eventually lands
+	// still comes back named.
 	reg.SetMetaDir(stateDir, logger)
 	reg.AdoptMetas(stateDir)
 	// Held rather than inlined into daemon.New because the banner below mints
