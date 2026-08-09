@@ -498,6 +498,55 @@ describe('SessionsRoute', () => {
       expect(screen.getByRole('status').textContent).toMatch(/reconnecting/i)
     })
 
+    it('shows a revoked machine as a final band, with no retry to press', async () => {
+      // The daemon says why before it hangs up, and the fleet answers by
+      // closing that machine's client — the consumer FlueClient.onRevoked's
+      // doc names. Without that, this tab would redial a daemon whose
+      // registry no longer holds its key every ten seconds forever, behind
+      // the unreachable band's promise of a reconnect.
+      const { fleet, attic, sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' })])
+      act(() => attic.sockets[0]!.open())
+
+      act(() =>
+        attic.sockets[0]!.emitControl({ type: 'revoked', reason: 'revoked from Blue Mesa' }),
+      )
+      act(() => attic.sockets[0]!.close())
+
+      // The band: which machine, the daemon's own words, and the way back.
+      expect(screen.getByText('Attic Pi')).toBeTruthy()
+      expect(screen.getByText(/revoked this device/)).toBeTruthy()
+      expect(screen.getByText(/revoked from Blue Mesa/)).toBeTruthy()
+      expect(screen.getByText(/Pair this device again/)).toBeTruthy()
+
+      // Not the unreachable treatment: no reconnect claim, and no Retry —
+      // every dial one offered could only fail the handshake.
+      expect(screen.queryByText(/is unreachable/)).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Retry Attic Pi' })).toBeNull()
+
+      // And the retries really stopped: the client is closed for good, so the
+      // socket the revocation ended is the last one this tab ever dialled.
+      expect(fleet.clientFor('attic-pi')!.status).toBe('closed')
+      expect(attic.sockets).toHaveLength(1)
+    })
+
+    it('reports a revoked local daemon instead of promising a reconnect', async () => {
+      const { sock, welcomeLocal } = await mountSessions()
+      welcomeLocal()
+      listed(sock, [info({ id: 's1' })])
+
+      act(() => sock.emitControl({ type: 'revoked', reason: 'revoked by another device' }))
+      act(() => sock.close())
+
+      // The live region announces the fact; the reconnect line would be a
+      // promise nothing is keeping.
+      expect(screen.getByRole('status').textContent).toMatch(/access was revoked/i)
+      expect(screen.getByRole('status').textContent).not.toMatch(/reconnecting/i)
+      // And the band names the ridden machine as its welcome named it.
+      expect(screen.getByText('mesa.local')).toBeTruthy()
+      expect(screen.getByText(/revoked by another device/)).toBeTruthy()
+    })
+
     it('has the live region on the page before it has anything to say', async () => {
       // Several screen readers announce only changes to a live region that was
       // already in the accessibility tree, so one that arrives together with

@@ -438,6 +438,26 @@ describe('DevicesRoute', () => {
     expect(notice()).toMatch(/reconnecting/i)
   })
 
+  it('says this device was revoked rather than promising a reconnect', async () => {
+    // The revoked device's own side of a revoke — not the revoker's, which
+    // `unknown_device` below covers. The daemon says why just before it hangs
+    // up; showing the generic reconnect line instead would promise a
+    // connection whose key the daemon has already deleted.
+    const { sock } = await mountDevices()
+    listed(sock, [device({ id: 'aa11bb22cc33', label: 'iPhone' })])
+
+    act(() => sock.emitControl({ type: 'revoked', reason: 'revoked by another device' }))
+    act(() => sock.close())
+
+    expect(notice()).toContain('access was revoked')
+    // The daemon's own words, handed on whole, and the way back named.
+    expect(notice()).toContain('revoked by another device')
+    expect(notice()).toContain('Pair it again')
+    expect(notice()).not.toMatch(/reconnecting/i)
+    // Every sending control stays shut: the connection is gone for good.
+    expect(pairButton().hasAttribute('disabled')).toBe(true)
+  })
+
   it('says so when the daemon refuses a revoke, and stays usable', async () => {
     // A row revoked from another tab a moment ago is answered `unknown_device`
     // rather than with a new list, so this is the one op whose failure leaves

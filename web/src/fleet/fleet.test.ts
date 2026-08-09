@@ -25,8 +25,8 @@ const ATTIC = { id: 'attic-pi', name: 'Attic Pi', pairedAt: 1_700_000_001_000 }
 /**
  * A FlueClient-shaped script. The FleetClient constructor takes built sources,
  * which is exactly so a test can hand it these instead of sockets: everything
- * the fleet consumes — connect, close, list, update, spawn, and the three
- * listener registrations — is recorded or replayable, and nothing else exists.
+ * the fleet consumes — connect, close, list, update, spawn, and the listener
+ * registrations — is recorded or replayable, and nothing else exists.
  */
 class FakeClient {
   connects = 0
@@ -41,6 +41,7 @@ class FakeClient {
   private statusCbs: Array<(s: ConnStatus) => void> = []
   private welcomeCbs: Array<(w: Welcome) => void> = []
   private errorCbs: Array<(e: ErrorMsg) => void> = []
+  private revokedCbs: Array<(reason: string) => void> = []
 
   onSessions(cb: (s: SessionInfo[]) => void) {
     return listen(this.sessionsCbs, cb)
@@ -53,6 +54,9 @@ class FakeClient {
   }
   onError(cb: (e: ErrorMsg) => void) {
     return listen(this.errorCbs, cb)
+  }
+  onRevoked(cb: (reason: string) => void) {
+    return listen(this.revokedCbs, cb)
   }
 
   connect() {
@@ -86,6 +90,9 @@ class FakeClient {
   }
   emitError(e: ErrorMsg) {
     for (const cb of [...this.errorCbs]) cb(e)
+  }
+  emitRevoked(reason: string) {
+    for (const cb of [...this.revokedCbs]) cb(reason)
   }
   open() {
     this.emitStatus('open')
@@ -227,6 +234,72 @@ describe('FleetClient', () => {
       { id: 'attic-pi', name: 'Attic Pi', status: 'unreachable' },
       { id: 'blue-mesa', name: 'Blue Mesa', status: 'online' },
     ])
+    h.fleet.close()
+  })
+
+  it('closes a revoked source and reports it revoked, reason attached', () => {
+    // The consumer FlueClient.onRevoked's doc names: the client keeps its
+    // usual recovery unless whoever owns it stops it, and the fleet owns
+    // every client. Left alone, a revoked device would redial a daemon whose
+    // registry no longer holds its key every ten seconds forever.
+    const h = harness([
+      ['attic-pi', 'Attic Pi'],
+      ['blue-mesa', 'Blue Mesa'],
+    ])
+    h.fleet.connect()
+    h.fake('attic-pi').open()
+    h.fake('attic-pi').emitSessions([info('s1')])
+
+    h.fake('attic-pi').emitRevoked('revoked from Blue Mesa')
+
+    expect(h.fake('attic-pi').closes).toBe(1)
+    // Its rows go the way an unreachable source's do — nothing from a machine
+    // this device can no longer speak for — and the other machine is untouched.
+    expect(h.last().sessions).toEqual([])
+    expect(h.last().machines).toEqual([
+      {
+        id: 'attic-pi',
+        name: 'Attic Pi',
+        status: 'revoked',
+        revokedReason: 'revoked from Blue Mesa',
+      },
+      { id: 'blue-mesa', name: 'Blue Mesa', status: 'connecting' },
+    ])
+    h.fleet.close()
+  })
+
+  it('holds the revoked verdict through the close it issued itself', () => {
+    // With a real client the close inside slotRevoked reports `closed`
+    // synchronously, and `closed` ordinarily maps to unreachable — which
+    // would repaint the verdict as an outage, Retry button and all. The fake
+    // emits the same report by hand.
+    const h = harness([['attic-pi', 'Attic Pi']])
+    h.fleet.connect()
+    h.fake('attic-pi').open()
+
+    h.fake('attic-pi').emitRevoked('revoked')
+    h.fake('attic-pi').emitStatus('closed')
+
+    expect(h.last().machines).toEqual([
+      { id: 'attic-pi', name: 'Attic Pi', status: 'revoked', revokedReason: 'revoked' },
+    ])
+    h.fleet.close()
+  })
+
+  it('a deliberate reconnect re-tests the verdict rather than remembering it', () => {
+    // Nothing in the app redials a revoked slot today — that is the point of
+    // the state — but a client someone reconnects by hand reports
+    // `connecting`, and a fleet that kept saying revoked over a live dial
+    // would be describing history.
+    const h = harness([['attic-pi', 'Attic Pi']])
+    h.fleet.connect()
+    h.fake('attic-pi').open()
+    h.fake('attic-pi').emitRevoked('revoked')
+
+    h.fake('attic-pi').emitStatus('connecting')
+    h.fake('attic-pi').open()
+
+    expect(h.last().machines).toEqual([{ id: 'attic-pi', name: 'Attic Pi', status: 'online' }])
     h.fleet.close()
   })
 

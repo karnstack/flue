@@ -84,6 +84,13 @@ interface Slot {
   client: FlueClient
   status: MachineStatus
   rows: SessionInfo[] | null
+  /**
+   * The daemon's reason when it revoked this device, null otherwise. Held
+   * beside `status` rather than folded into it because it is what the UI has
+   * to say, and because `slotStatus` reads it to keep the close this fleet
+   * issues from repainting the verdict as an ordinary outage.
+   */
+  revoked: string | null
   unsubs: Array<() => void>
 }
 
@@ -94,6 +101,7 @@ function toSlot(source: FleetSource): Slot {
     client: source.client,
     status: 'connecting',
     rows: null,
+    revoked: null,
     unsubs: [],
   }
 }
@@ -184,8 +192,12 @@ export class FleetClient {
       slot.unsubs = []
       // No stale cache across a close either: the next connect starts from
       // "not answered yet", not from whatever the last epoch was showing.
+      // The revocation verdict goes with the rest for the same reason — the
+      // next epoch dials again and re-learns it, which is also the honest
+      // answer for a device that was paired again in the meantime.
       slot.rows = null
       slot.status = 'connecting'
+      slot.revoked = null
       slot.client.close()
     }
   }
@@ -313,6 +325,7 @@ export class FleetClient {
         this.emit()
       }),
       slot.client.onError((err) => this.emitError(slot.id, err)),
+      slot.client.onRevoked((reason) => this.slotRevoked(slot, reason)),
     ]
     // Only the loopback daemon's welcome carries facts the fleet acts on —
     // its host name, its relay slot, the relay origin. A remote source's
@@ -323,6 +336,17 @@ export class FleetClient {
   }
 
   private slotStatus(slot: Slot, s: ConnStatus) {
+    if (slot.revoked !== null) {
+      // The `closed` this fleet's own slotRevoked issued reports itself here,
+      // and must not repaint the verdict as an ordinary outage: revoked is a
+      // final state, and `unreachable` would put a Retry on it that can only
+      // fail the handshake.
+      if (s === 'closed' || s === 'reconnecting') return
+      // Anything else means somebody deliberately reconnected this client —
+      // FlueClient.connect cleared its own copy for the same reason — so the
+      // verdict is re-tested rather than remembered.
+      slot.revoked = null
+    }
     const mapped = machineStatus(s)
     if (mapped === slot.status) return
     slot.status = mapped
@@ -333,6 +357,30 @@ export class FleetClient {
     // No stale cache: rows from a machine nobody can reach are a claim the
     // fleet cannot stand behind, and reconnection re-asks anyway.
     if (mapped === 'unreachable') slot.rows = null
+    this.emit()
+  }
+
+  /**
+   * The daemon on this slot revoked this device and is about to hang up.
+   *
+   * This is the consumer FlueClient.onRevoked's contract names: the client
+   * keeps its usual recovery unless whoever owns it stops it, and the fleet
+   * owns every client. Left running, a revoked device redials a daemon whose
+   * registry no longer holds its key every ten seconds for the life of the
+   * tab, each attempt failing as a bare close with nothing on screen to say
+   * why. So: close the client — which also stands down any armed retry — and
+   * report the slot as revoked, reason attached, for the screens to say so.
+   */
+  private slotRevoked(slot: Slot, reason: string) {
+    slot.revoked = reason
+    slot.status = 'revoked'
+    // No stale rows: same grounds as the unreachable case above, with less
+    // appeal — nothing from this machine is coming back without a re-pair.
+    slot.rows = null
+    // Ordered after the verdict is written down, because close reports
+    // `closed` synchronously and slotStatus reads `slot.revoked` to know
+    // that report is this fleet's own doing.
+    slot.client.close()
     this.emit()
   }
 
@@ -488,7 +536,14 @@ export class FleetClient {
   }
 
   private machines(): MachineState[] {
-    return this.slots.map((s) => ({ id: s.id, name: s.name, status: s.status }))
+    // The reason rides along only when there is one, so the three ordinary
+    // states keep the exact shape every consumer already compares against.
+    return this.slots.map((s) => ({
+      id: s.id,
+      name: s.name,
+      status: s.status,
+      ...(s.revoked !== null && { revokedReason: s.revoked }),
+    }))
   }
 }
 

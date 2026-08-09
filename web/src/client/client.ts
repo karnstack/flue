@@ -256,6 +256,16 @@ export class FlueClient {
    */
   private lastWelcome: Welcome | null = null
 
+  /**
+   * The reason the daemon gave when it revoked this device, or null while it
+   * has given none. Kept past the close that follows the frame — and past the
+   * `close()` the consumer answers it with — so a screen that mounts after
+   * the event can still say why this client is down. Cleared by `connect`,
+   * which is the deliberate act of re-testing the verdict; the automatic
+   * retry loop goes through `openSocket` and clears nothing.
+   */
+  private revokedReason: string | null = null
+
   constructor(
     private url: string,
     private factory: (url: string) => SocketLike = defaultFactory,
@@ -325,7 +335,10 @@ export class FlueClient {
    * a revoked device shows an ordinary blink and then reconnects forever
    * against a registry that no longer holds its key. What to do about it is
    * the consumer's: this client keeps its usual recovery, and a consumer that
-   * wants the retries to stop calls `close` from here.
+   * wants the retries to stop calls `close` from here. In this app that
+   * consumer is the fleet (FleetClient.slotRevoked), which owns every client;
+   * screens only render what it reports. `revoked` below is this event's
+   * counterpart for a consumer that mounts after it fired.
    */
   onRevoked(cb: (reason: string) => void) {
     return this.revokedListeners.add(cb)
@@ -384,6 +397,17 @@ export class FlueClient {
     return this.lastWelcome?.ver ?? null
   }
 
+  /**
+   * Why the daemon revoked this device, or null while it has not —
+   * `onRevoked`'s counterpart for a consumer that mounts after the event, as
+   * `status` is for `onStatus`. The event fires once, on a connection that is
+   * about to end; a screen navigated to afterwards would otherwise find a
+   * closed client and no way to say why.
+   */
+  get revoked(): string | null {
+    return this.revokedReason
+  }
+
   /** The offset of the next byte expected on `ref`, if it is still attached. */
   lastSeqFor(ref: number): number | undefined {
     return this.attachments.get(ref)?.lastSeq
@@ -406,6 +430,10 @@ export class FlueClient {
    */
   connect() {
     this.stopped = false
+    // Being asked to connect is being asked to re-test the revocation rather
+    // than remember it: the device may have been paired again since. Only
+    // here — the retry loop calls `openSocket` directly and never clears it.
+    this.revokedReason = null
     if (this.sock) return
     this.clearRetry()
     this.openSocket()
@@ -908,6 +936,10 @@ export class FlueClient {
         break
 
       case 'revoked':
+        // Stored before it is announced, as the welcome is, so a listener
+        // that reads `revoked` inside its callback sees the reason it is
+        // being told about.
+        this.revokedReason = msg.reason
         // Delivered here and nowhere else. The daemon writes this frame ahead
         // of the goodbye on the same queue, so the reason reaches consumers
         // before `onclose` announces the outage — anything deferred past this
