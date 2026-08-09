@@ -53,7 +53,7 @@ jobs:
 
       - name: Cache the pnpm store
         if: steps.token.outputs.present == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: pnpm-store-site-${{ runner.os }}-${{ hashFiles('site/pnpm-lock.yaml') }}
