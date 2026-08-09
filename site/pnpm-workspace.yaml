@@ -1,0 +1,9 @@
+# pnpm 11 refuses to finish an install that silently skipped a package's build
+# script, and it no longer reads the "pnpm" key in package.json — so without
+# this file every `pnpm install` and `pnpm build` exits 1 on a clean checkout.
+# esbuild and workerd only link a platform binary that already arrived as an
+# optional dependency; sharp is vite's image tooling.
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true

@@ -8,7 +8,7 @@
 # Both dist directories are gitignored on purpose and must stay that way — see
 # web/embed.go and relay/embed.go.
 
-.PHONY: all web relay build run run-release web-dev test test-go test-web test-relay lint clean site-dev site-deploy
+.PHONY: all web relay build run run-release web-dev test test-go test-web test-relay lint clean site-dev site-build site-deploy
 
 all: build
 
@@ -76,19 +76,29 @@ lint: web relay
 clean:
 	rm -rf bin web/dist relay/dist
 
-# The landing site (site/) has no build step; these targets exist for the
-# one moving part: install.sh's canonical source is scripts/install.sh (the
-# release infra owns it), and site/public/install.sh is a deploy-time copy,
-# gitignored, so the installer cannot drift between two committed copies.
+# The landing site (site/) is a TanStack Start app, prerendered to static
+# HTML at build time; wrangler serves dist/client and worker/index.ts only
+# folds www onto the apex. install.sh's canonical source is
+# scripts/install.sh (the release infra owns it), and site/public/install.sh
+# is a deploy-time copy, gitignored, so the installer cannot drift between
+# two committed copies.
+#
+# site-dev runs vite, not wrangler: the Worker has no behaviour worth
+# exercising in the loop, and vite gives HMR. Use `pnpm --dir site preview`
+# against a real build when the Worker itself is the thing under test.
 
 site-dev:
 	@if [ -f scripts/install.sh ]; then cp scripts/install.sh site/public/install.sh; fi
-	cd site && pnpm dlx wrangler@4 dev
+	cd site && pnpm install && pnpm dev
 
-site-deploy:
+site-build:
+	cd site && pnpm install && pnpm run lint && pnpm build
+
+site-deploy: site-build
 	@test -f scripts/install.sh || { \
 		echo "site-deploy: scripts/install.sh not found — the infra lane creates it;" >&2; \
 		echo "refusing to deploy flue.sh without the installer it advertises" >&2; \
 		exit 1; }
-	cp scripts/install.sh site/public/install.sh
-	cd site && pnpm dlx wrangler@4 deploy
+	@# After the build, so vite's clean of dist/ cannot take the copy with it.
+	cp scripts/install.sh site/dist/client/install.sh
+	cd site && pnpm exec wrangler deploy

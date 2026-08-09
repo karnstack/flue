@@ -1,0 +1,141 @@
+@import url('https://rsms.me/inter/inter.css');
+@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400..600&display=swap');
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+/* Theme is class-driven, not media-query driven: a pre-paint script in
+   __root.tsx puts `.dark` on <html> from the stored preference (or the OS
+   when unset), so the header toggle and the `d` shortcut can override the OS
+   without a reload. This is deliberately the opposite of web/src/styles.css,
+   where the app has no toggle and `dark:` resolves through the media query. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'InterVariable', ui-sans-serif, system-ui, sans-serif;
+  --font-sans--font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11', 'ss03';
+  --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+}
+
+/*
+ * Neutral is zinc and accent is teal, the same two families web/src/styles.css
+ * uses — the site and the app are one product and must not drift apart. Values
+ * are stated as oklch literals because the site has no access to the app's
+ * token file.
+ */
+:root {
+  color-scheme: light;
+  --radius: 0.625rem;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.141 0.005 285.823); /* zinc-950 */
+  --muted: oklch(0.967 0.001 286.375); /* zinc-100 */
+  --muted-foreground: oklch(0.552 0.016 285.938); /* zinc-500 */
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.141 0.005 285.823);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.141 0.005 285.823);
+  --accent: oklch(0.967 0.001 286.375);
+  --accent-foreground: oklch(0.21 0.006 285.885);
+  /* teal-600: teal-500 is flue's accent but fails 4.5:1 behind white text, so
+     the light theme steps one down and the dark theme steps one up. */
+  --primary: oklch(0.6 0.118 184.704);
+  --primary-foreground: oklch(1 0 0);
+  --border: oklch(0.141 0.005 285.823 / 10%);
+  --input: oklch(0.141 0.005 285.823 / 15%);
+  --ring: oklch(0.704 0.14 182.503); /* teal-500 */
+}
+
+.dark {
+  color-scheme: dark;
+
+  --background: oklch(0.141 0.005 285.823); /* zinc-950 */
+  --foreground: oklch(0.985 0 0);
+  --muted: oklch(0.21 0.006 285.885); /* zinc-900 */
+  --muted-foreground: oklch(0.705 0.015 286.067); /* zinc-400 */
+  --card: oklch(0.21 0.006 285.885); /* zinc-900 */
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.21 0.006 285.885);
+  --popover-foreground: oklch(0.985 0 0);
+  --accent: oklch(0.274 0.006 286.033); /* zinc-800 */
+  --accent-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.777 0.152 181.912); /* teal-400 */
+  --primary-foreground: oklch(0.141 0.005 285.823);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.704 0.14 182.503);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* Tailwind v4 ships no default border colour; without this every bare
+   `border-*` falls back to currentColor and draws a near-black hairline. */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-border);
+  }
+}
+
+/*
+ * The hero's backdrop: horizontal rules at roughly terminal row pitch, masked
+ * so they fade out before the copy below them. Decorative, and the only
+ * texture on the page.
+ */
+@utility backdrop-scan {
+  --line: oklch(0.141 0.005 285.823 / 5%);
+  background-image: repeating-linear-gradient(
+    to bottom,
+    var(--line) 0px,
+    var(--line) 1px,
+    transparent 1px,
+    transparent 5px
+  );
+  mask-image: radial-gradient(ellipse 100% 65% at 50% 0%, black, transparent 80%);
+
+  @variant dark {
+    --line: oklch(1 0 0 / 6%);
+  }
+}
+
+/* The blinking block cursor used in every drawn terminal. */
+@utility term-cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  background: currentColor;
+  vertical-align: text-bottom;
+  animation: term-blink 1.15s steps(1) infinite;
+
+  @variant motion-reduce {
+    animation: none;
+  }
+}
+
+@keyframes term-blink {
+  50% {
+    opacity: 0;
+  }
+}
