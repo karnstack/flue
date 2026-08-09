@@ -37,6 +37,16 @@ type Manager interface {
 	Status() (Status, error)
 }
 
+// Warner is optionally implemented by a Manager whose Enable can succeed
+// while still owing the user a fact. Warnings reports advisories from the
+// most recent Enable — true and unfortunate but not failures, like
+// loginctl enable-linger being refused in a container, where the service
+// works while logged in and dies at the last logout. Launchd never warns,
+// so it does not implement this; the CLI upgrades with a type assertion.
+type Warner interface {
+	Warnings() []string
+}
+
 // ErrUnsupported reports a platform with no login-service support. flue
 // ships darwin and linux; WSL is linux with, usually, no user manager —
 // which is ErrNoUserManager at Enable time, not this.

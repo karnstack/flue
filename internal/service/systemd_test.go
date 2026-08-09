@@ -32,13 +32,62 @@ func TestSystemdEnableWritesTheUnitAndEnablesNow(t *testing.T) {
 	// Probe, pick up the (possibly rewritten) unit, then the spec's exact
 	// command: systemctl --user enable --now flue. enable --now starts the
 	// service only if it is not already active, which is the convergence
-	// the spec asks for — a healthy daemon is not restarted.
-	if vs := strings.Join(r.verbs(), ","); vs != "is-system-running,daemon-reload,enable" {
-		t.Fatalf("verbs = %v, want [is-system-running daemon-reload enable]", r.verbs())
+	// the spec asks for — a healthy daemon is not restarted. Then lingering,
+	// so the daemon survives the last logout.
+	if vs := strings.Join(r.verbs(), ","); vs != "is-system-running,daemon-reload,enable,enable-linger" {
+		t.Fatalf("verbs = %v, want [is-system-running daemon-reload enable enable-linger]", r.verbs())
 	}
-	last := r.calls[len(r.calls)-1]
-	if strings.Join(last, " ") != "systemctl --user enable --now flue" {
-		t.Fatalf("call = %v, want systemctl --user enable --now flue", last)
+	enableCall := r.calls[len(r.calls)-2]
+	if strings.Join(enableCall, " ") != "systemctl --user enable --now flue" {
+		t.Fatalf("call = %v, want systemctl --user enable --now flue", enableCall)
+	}
+	lingerCall := r.calls[len(r.calls)-1]
+	if strings.Join(lingerCall, " ") != "loginctl enable-linger" {
+		t.Fatalf("call = %v, want loginctl enable-linger", lingerCall)
+	}
+	if warns := s.Warnings(); len(warns) != 0 {
+		t.Fatalf("Warnings after a clean Enable = %v, want none", warns)
+	}
+}
+
+// TestSystemdEnableWarnsWhenLingerIsRefused: some containers and hardened
+// distros refuse enable-linger. The unit still works while a login exists,
+// so Enable succeeds — but it must say what will happen at the last logout
+// and name the command that fixes it.
+func TestSystemdEnableWarnsWhenLingerIsRefused(t *testing.T) {
+	r := &fakeRunner{
+		out: map[string]string{
+			"is-system-running": "running\n",
+			"enable-linger":     "Could not enable linger: Access denied\n",
+		},
+		fail: map[string]error{"enable-linger": errFake("exit status 1")},
+	}
+	s, unit := newSystemdUnderTest(t, r)
+
+	if err := s.Enable(); err != nil {
+		t.Fatalf("Enable must not fail on a refused enable-linger: %v", err)
+	}
+	if _, err := os.Stat(unit); err != nil {
+		t.Fatalf("unit not on disk after Enable with linger refused: %v", err)
+	}
+	warns := s.Warnings()
+	if len(warns) != 1 {
+		t.Fatalf("Warnings = %v, want exactly one", warns)
+	}
+	for _, want := range []string{"loginctl enable-linger", "logout", "Access denied"} {
+		if !strings.Contains(warns[0], want) {
+			t.Errorf("warning %q is missing %q", warns[0], want)
+		}
+	}
+
+	// A later Enable where linger works clears the slate: Warnings reports
+	// the most recent Enable, not history.
+	delete(r.fail, "enable-linger")
+	if err := s.Enable(); err != nil {
+		t.Fatalf("second Enable: %v", err)
+	}
+	if warns := s.Warnings(); len(warns) != 0 {
+		t.Fatalf("Warnings after a clean re-Enable = %v, want none", warns)
 	}
 }
 
