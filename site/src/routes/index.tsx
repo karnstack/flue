@@ -3,12 +3,13 @@ import { createFileRoute } from '@tanstack/react-router'
 import { ArrowRight, Cloud, HardDrive, Lock, Plus, Smartphone } from 'lucide-react'
 
 import { CopyCommand } from '@/components/copy-command'
+import { LidFigure, ScatteredFigure, WaitingFigure } from '@/components/mock/figures'
 import { FleetWindow, PhoneFrame } from '@/components/mock/fleet'
 import { MockTerminal, ok, output, prompt } from '@/components/mock/terminal'
 import { SiteFooter } from '@/components/site-footer'
 import { SiteHeader } from '@/components/site-header'
 import { GithubMark } from '@/components/wordmark'
-import { BREW_CMD, DOCS, INSTALL_CMD, REPO_URL } from '@/lib/site'
+import { BREW_CMD, INSTALL_CMD, REPO_URL } from '@/lib/site'
 
 export const Route = createFileRoute('/')({
   component: Home,
@@ -37,16 +38,19 @@ const PROBLEMS = [
     term: 'You close the lid and the build dies.',
     detail:
       'A shell belongs to the window that opened it. Lose the window — a reboot, a dropped SSH, a closed tab — and you lose whatever was running in it, plus the twenty minutes it takes to get back to where you were.',
+    figure: LidFigure,
   },
   {
     term: 'The agent asked a question an hour ago.',
     detail:
       'Long jobs need answers at moments you are not at the desk. With no way in from the device in your pocket, the run just sits there waiting for someone to come back and press a key.',
+    figure: WaitingFigure,
   },
   {
     term: 'Four machines, and no single list.',
     detail:
       'A laptop, a desktop, a Pi, a VPS. Each one keeps its sessions to itself, so knowing what is running anywhere means logging into everywhere and reading four different answers.',
+    figure: ScatteredFigure,
   },
 ]
 
@@ -223,7 +227,8 @@ function Problem() {
         <dl className="mt-12 grid gap-x-8 gap-y-10 border-t border-dashed border-border pt-10 sm:grid-cols-3">
           {PROBLEMS.map((item) => (
             <div key={item.term}>
-              <dt className="text-lg font-medium text-pretty">{item.term}</dt>
+              <item.figure />
+              <dt className="mt-6 text-lg font-medium text-pretty">{item.term}</dt>
               <dd className="mt-2 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
                 {item.detail}
               </dd>
@@ -257,7 +262,7 @@ function How() {
               laptop.
             </p>
             <a
-              href={DOCS.development}
+              href="/docs/developing"
               className="mt-6 inline-flex items-center gap-1.5 text-base font-medium text-primary hover:underline sm:text-sm"
             >
               How it is built
@@ -300,7 +305,7 @@ function Remote() {
               gate — ready to try rather than ready to rely on.
             </p>
             <a
-              href={DOCS.relay}
+              href="/docs/relay"
               className="mt-6 inline-flex items-center gap-1.5 text-base font-medium text-primary hover:underline sm:text-sm"
             >
               What it deploys, and what it costs

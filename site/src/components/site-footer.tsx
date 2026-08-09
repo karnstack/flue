@@ -1,5 +1,5 @@
 import { GithubMark, Wordmark, XMark } from '@/components/wordmark'
-import { DOCS, REPO_URL, X_URL } from '@/lib/site'
+import { REPO_URL, X_URL } from '@/lib/site'
 
 export function SiteFooter() {
   return (
@@ -19,19 +19,19 @@ export function SiteFooter() {
         <div className="flex items-center gap-x-6 gap-y-3 max-sm:flex-wrap">
           <nav className="flex items-center gap-x-6" aria-label="Documentation">
             <a
-              href={DOCS.relay}
+              href="/docs/relay"
               className="text-base font-normal text-muted-foreground hover:text-foreground sm:text-sm"
             >
               Relay
             </a>
             <a
-              href={DOCS.faq}
+              href="/docs/faq"
               className="text-base font-normal text-muted-foreground hover:text-foreground sm:text-sm"
             >
               FAQ
             </a>
             <a
-              href={DOCS.development}
+              href="/docs/developing"
               className="text-base font-normal text-muted-foreground hover:text-foreground sm:text-sm"
             >
               Developing

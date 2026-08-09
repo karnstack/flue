@@ -10,6 +10,10 @@ export default defineConfig({
   resolve: {
     tsconfigPaths: true,
   },
+  // The docs pages import ../../docs/*.md, which lives above this package.
+  server: {
+    fs: { allow: ['..'] },
+  },
   plugins: [
     tanstackStart({
       prerender: {

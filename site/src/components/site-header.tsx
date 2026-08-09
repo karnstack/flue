@@ -4,10 +4,10 @@ import { Button } from '@/components/ui/button'
 import { REPO_URL } from '@/lib/site'
 
 const NAV = [
-  { href: '#problem', label: 'Why' },
-  { href: '#how', label: 'How it works' },
-  { href: '#remote', label: 'Remote' },
-  { href: '#trust', label: 'Trust' },
+  { href: '/#problem', label: 'Why' },
+  { href: '/#how', label: 'How it works' },
+  { href: '/#remote', label: 'Remote' },
+  { href: '/docs/faq', label: 'Docs' },
 ] as const
 
 export function SiteHeader() {

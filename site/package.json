@@ -5,7 +5,7 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "vite dev --port 3100",
-    "build": "vite build",
+    "build": "vite build && node scripts/sitemap.mjs",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "deploy": "wrangler deploy"
@@ -16,6 +16,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.23.0",
+    "marked": "^18.0.9",
     "radix-ui": "^1.6.1",
     "react": "19.2.7",
     "react-dom": "19.2.7",
