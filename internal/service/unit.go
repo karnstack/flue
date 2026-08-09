@@ -13,8 +13,9 @@ import (
 const LaunchdLabel = "sh.flue.daemon"
 
 // LaunchdPlist renders the launchd agent plist that runs `exe serve` at login.
-// exe is the resolved binary path (os.Executable, symlinks resolved), so a
-// brew-installed and a hand-built flue both point at themselves.
+// exe is the path os.Executable reports, symlinks left intact — for a brew
+// cask install that is the stable /opt/homebrew/bin/flue symlink, not the
+// version-pinned Caskroom target that `brew upgrade` deletes.
 func LaunchdPlist(exe string) []byte {
 	return []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -31,15 +32,25 @@ func (l *Launchd) serviceTarget() string {
 
 // Enable writes the plist and bootstraps it — the modern spelling, not
 // `launchctl load`. When the label is already bootstrapped, bootstrap
-// refuses; that is convergence, not failure, so Enable verifies the label is
-// loaded (print) and kickstarts it in case it is dead. kickstart without -k
-// never restarts a running service, which is what keeps a re-run of flue
-// enable from killing live sessions.
+// refuses; whether that is convergence depends on whether the plist just
+// changed. launchd reads a plist only at bootstrap, so a loaded job keeps
+// its old definition no matter what Enable writes to disk: when the render
+// differs from what was there (a new binary path after an upgrade), Enable
+// must bootout the stale job and bootstrap the fresh plist — restarting the
+// daemon on purpose, because the old job would exec a path that may no
+// longer exist. When the plist is byte-identical, the loaded job already
+// matches, so Enable only verifies the label is loaded (print) and
+// kickstarts it in case it is dead. kickstart without -k never restarts a
+// running service, which is what keeps a no-op re-run of flue enable from
+// killing live sessions.
 func (l *Launchd) Enable() error {
 	if err := os.MkdirAll(filepath.Dir(l.unitPath()), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(l.unitPath(), LaunchdPlist(l.exe), 0o644); err != nil {
+	rendered := LaunchdPlist(l.exe)
+	prev, readErr := os.ReadFile(l.unitPath())
+	changed := readErr != nil || !bytes.Equal(prev, rendered)
+	if err := os.WriteFile(l.unitPath(), rendered, 0o644); err != nil {
 		return err
 	}
 	out, err := l.run.Run("launchctl", "bootstrap", l.domainTarget(), l.unitPath())
@@ -47,7 +58,18 @@ func (l *Launchd) Enable() error {
 		return nil
 	}
 	if _, perr := l.run.Run("launchctl", "print", l.serviceTarget()); perr == nil {
-		_, _ = l.run.Run("launchctl", "kickstart", l.serviceTarget())
+		if !changed {
+			_, _ = l.run.Run("launchctl", "kickstart", l.serviceTarget())
+			return nil
+		}
+		// The loaded job predates the plist on disk. Bootout errors are
+		// tolerated — if the label somehow unloaded itself between print and
+		// here, the re-bootstrap is the call that matters and its error is
+		// the one worth reporting.
+		_, _ = l.run.Run("launchctl", "bootout", l.serviceTarget())
+		if bout, berr := l.run.Run("launchctl", "bootstrap", l.domainTarget(), l.unitPath()); berr != nil {
+			return fmt.Errorf("launchctl bootstrap after bootout: %v: %s", berr, bout)
+		}
 		return nil
 	}
 	return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
