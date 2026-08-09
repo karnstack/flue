@@ -9,7 +9,7 @@ import (
 
 // metaSuffix names a metadata file. It shares a directory with the snapshots,
 // so it deliberately ends in ".json" too — anything reading that directory by
-// suffix has to distinguish the two, and LoadAndClearSnapshots does.
+// suffix has to distinguish the two, and LoadSnapshots does.
 const metaSuffix = ".meta.json"
 
 // Meta is what a human decided about a session, kept apart from everything the
@@ -78,10 +78,11 @@ func SaveMeta(dir, id string, m Meta) error {
 
 // LoadMetas reads every metadata file in dir, keyed by session id.
 //
-// Reading is not consuming — the opposite of LoadAndClearSnapshots, and the
-// distinction is the point of the two files. A snapshot belongs to one daemon
-// start; a name belongs to the session for as long as it exists, so it stays on
-// disk until the session is reaped or is found to be gone.
+// Reading is not consuming — snapshots leave disk too, through ClearSnapshot
+// once their sessions are back, and the distinction is the point of the two
+// files. A snapshot belongs to one revival; a name belongs to the session for
+// as long as it exists, so it stays on disk until the session is reaped or is
+// found to be gone.
 //
 // A file that does not parse is deleted and skipped, on the same reasoning that
 // governs a corrupt snapshot: corrupt state must never wedge a start, and a

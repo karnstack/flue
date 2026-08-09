@@ -140,7 +140,14 @@ func TestSaveSnapshotsModes(t *testing.T) {
 	}
 }
 
-func TestLoadAndClearConsumesAndSkipsCorrupt(t *testing.T) {
+// TestLoadSnapshotsSweepsCorruptAndKeepsReadable pins both halves of the
+// load-time contract. A file that does not parse, or parses to no id, is
+// swept — corrupt state never wedges a startup, and never comes back to fail
+// again. A readable snapshot is returned and its file left on disk: loading
+// is no longer consuming, because the caller has not yet said whether the
+// session actually came back, and a revival that fails to spawn must find
+// the file still there. Clearing is ClearSnapshot's job, on that word.
+func TestLoadSnapshotsSweepsCorruptAndKeepsReadable(t *testing.T) {
 	dir := t.TempDir()
 	if err := SaveSnapshots(dir, []Snapshot{{V: 1, ID: "cafebabe00000004", Ring: []byte("kept")}}); err != nil {
 		t.Fatalf("SaveSnapshots: %v", err)
@@ -148,8 +155,11 @@ func TestLoadAndClearConsumesAndSkipsCorrupt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "broken.json"), []byte("not json"), 0o600); err != nil {
 		t.Fatalf("write corrupt: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "idless.json"), []byte(`{"v":1}`), 0o600); err != nil {
+		t.Fatalf("write idless: %v", err)
+	}
 
-	snaps := LoadAndClearSnapshots(dir)
+	snaps := LoadSnapshots(dir)
 	if len(snaps) != 1 || snaps[0].ID != "cafebabe00000004" {
 		t.Fatalf("loaded %+v, want just the good snapshot", snaps)
 	}
@@ -161,12 +171,142 @@ func TestLoadAndClearConsumesAndSkipsCorrupt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readdir: %v", err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("%d files survive a load, want none — snapshots are consumed", len(entries))
+	if len(entries) != 1 || entries[0].Name() != "cafebabe00000004.json" {
+		t.Fatalf("dir holds %v, want only the good snapshot — corrupt swept, readable kept", entries)
 	}
 
-	if got := LoadAndClearSnapshots(filepath.Join(dir, "never-created")); got != nil {
+	// A second load finds the same snapshot again: nothing was consumed, so a
+	// boot that dies between load and revive costs the session nothing.
+	again := LoadSnapshots(dir)
+	if len(again) != 1 || again[0].ID != "cafebabe00000004" || string(again[0].Ring) != "kept" {
+		t.Fatalf("reloaded %+v, want the same snapshot back intact", again)
+	}
+
+	if got := LoadSnapshots(filepath.Join(dir, "never-created")); got != nil {
 		t.Fatalf("a missing dir loaded %+v, want nothing", got)
+	}
+}
+
+// TestClearSnapshotRemovesOnlyItsFile pins the success half of the contract:
+// a revived snapshot's file is cleared, and nothing else — not another
+// session's snapshot, and not the meta file that shares the id.
+func TestClearSnapshotRemovesOnlyItsFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveSnapshots(dir, []Snapshot{
+		{V: 1, ID: "cafebabe0000000a"},
+		{V: 1, ID: "cafebabe0000000b"},
+	}); err != nil {
+		t.Fatalf("SaveSnapshots: %v", err)
+	}
+	if err := SaveMeta(dir, "cafebabe0000000a", Meta{V: 1, Name: "named"}); err != nil {
+		t.Fatalf("SaveMeta: %v", err)
+	}
+
+	ClearSnapshot(dir, "cafebabe0000000a")
+	ClearSnapshot(dir, "cafebabe0000000a") // idempotent: cleanup paths call it freely
+	ClearSnapshot("", "cafebabe0000000b")  // refused, not joined into the working directory
+	ClearSnapshot(dir, "")
+
+	if _, err := os.Stat(filepath.Join(dir, "cafebabe0000000a.json")); !os.IsNotExist(err) {
+		t.Errorf("the cleared snapshot survives (stat err %v), want it gone", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cafebabe0000000b.json")); err != nil {
+		t.Errorf("clearing one snapshot touched another: %v", err)
+	}
+	if _, ok := LoadMetas(dir)["cafebabe0000000a"]; !ok {
+		t.Error("clearing the snapshot ate the meta file beside it")
+	}
+}
+
+// TestReviveFailurePreservesTheSnapshot is issue #18's scenario end to end:
+// a spawn failure at revival — here a $SHELL pointing at a binary that does
+// not exist, the shape a package upgrade leaves behind — must not cost the
+// session its identity or scrollback. The failure is recorded on the file,
+// the next boot finds the snapshot whole, and once the cause has cleared the
+// revival lands and the file is cleared the ordinary way.
+func TestReviveFailurePreservesTheSnapshot(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sessions")
+	if err := SaveSnapshots(dir, []Snapshot{{
+		V: 1, ID: "cafebabe0000000c", Name: "deploy",
+		Ring: []byte("precious scrollback"), Cwd: t.TempDir(),
+	}}); err != nil {
+		t.Fatalf("SaveSnapshots: %v", err)
+	}
+
+	// loginShell trusts a non-empty $SHELL as long as it is absolute, so this
+	// is exactly the dangling-shell failure: pty start fails at exec.
+	t.Setenv("SHELL", "/no/such/shell/anywhere")
+
+	r := NewRegistry(nil)
+	snaps := LoadSnapshots(dir)
+	if len(snaps) != 1 {
+		t.Fatalf("loaded %d snapshots, want the saved one", len(snaps))
+	}
+	if _, err := r.Revive(snaps[0]); err == nil {
+		t.Fatal("Revive succeeded under a nonexistent $SHELL; the failure path went unexercised")
+	}
+	RecordReviveFailure(dir, snaps[0])
+
+	// The failed boot is over. The snapshot survived it, data intact, with
+	// the one failure on the books.
+	again := LoadSnapshots(dir)
+	if len(again) != 1 || again[0].ID != "cafebabe0000000c" {
+		t.Fatalf("after a failed revive the load found %+v, want the snapshot preserved", again)
+	}
+	if string(again[0].Ring) != "precious scrollback" || again[0].Name != "deploy" {
+		t.Fatalf("preserved snapshot = %+v, want its ring and name untouched", again[0])
+	}
+	if again[0].Attempts != 1 {
+		t.Fatalf("Attempts = %d after one failure, want 1", again[0].Attempts)
+	}
+
+	// The cause clears — the shell is back — and the next boot revives and
+	// clears the file, the success half of the contract.
+	t.Setenv("SHELL", "/bin/sh")
+	s, err := r.Revive(again[0])
+	if err != nil {
+		t.Fatalf("Revive after the cause cleared: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if s.Info().Name != "deploy" {
+		t.Errorf("revived name = %q, want the snapshot's after a preserved retry", s.Info().Name)
+	}
+	ClearSnapshot(dir, again[0].ID)
+	if left := LoadSnapshots(dir); len(left) != 0 {
+		t.Fatalf("after a successful revive and clear, %+v remains, want nothing", left)
+	}
+}
+
+// TestRepeatedReviveFailuresAgeTheSnapshotOut pins the crash-loop guard: a
+// snapshot that fails maxReviveAttempts boots in a row is swept by the next
+// load instead of being retried forever, so preserving snapshots on failure
+// cannot turn into a boot that relives the same failure indefinitely or a
+// directory that never shrinks.
+func TestRepeatedReviveFailuresAgeTheSnapshotOut(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveSnapshots(dir, []Snapshot{{V: 1, ID: "cafebabe0000000d", Ring: []byte("doomed")}}); err != nil {
+		t.Fatalf("SaveSnapshots: %v", err)
+	}
+
+	for boot := 1; boot <= maxReviveAttempts; boot++ {
+		snaps := LoadSnapshots(dir)
+		if len(snaps) != 1 {
+			t.Fatalf("boot %d: loaded %d snapshots, want the failing one back for try %d of %d",
+				boot, len(snaps), boot, maxReviveAttempts)
+		}
+		RecordReviveFailure(dir, snaps[0])
+	}
+
+	if snaps := LoadSnapshots(dir); len(snaps) != 0 {
+		t.Fatalf("after %d failures the load returned %+v, want the snapshot aged out",
+			maxReviveAttempts, snaps)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("%d files survive the age-out sweep, want none", len(entries))
 	}
 }
 
@@ -183,10 +323,15 @@ func TestSnapshotThenReviveRoundTrip(t *testing.T) {
 	}
 
 	second := NewRegistry(nil)
-	for _, snap := range LoadAndClearSnapshots(dir) {
+	for _, snap := range LoadSnapshots(dir) {
 		if _, err := second.Revive(snap); err != nil {
 			t.Fatalf("Revive: %v", err)
 		}
+		ClearSnapshot(dir, snap.ID)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("after a successful revive %d files remain (err %v), want the snapshot cleared",
+			len(entries), err)
 	}
 
 	revived, ok := second.Get(id)
@@ -231,7 +376,7 @@ func TestSnapshotCarriesMetadataAcrossARestart(t *testing.T) {
 
 	later := epoch.Add(time.Hour)
 	second := NewRegistry(func() time.Time { return later })
-	snaps := LoadAndClearSnapshots(dir)
+	snaps := LoadSnapshots(dir)
 	if len(snaps) != 1 {
 		t.Fatalf("loaded %d snapshots, want the one running session", len(snaps))
 	}

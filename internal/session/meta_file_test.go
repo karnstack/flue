@@ -273,12 +273,13 @@ func TestReapDeletesTheMetaFile(t *testing.T) {
 	}
 }
 
-// TestLoadAndClearSnapshotsLeavesMetaFilesAlone is a regression test for the
-// hazard of sharing a directory: snapshots are consumed on load and metadata is
-// not, and ".meta.json" ends in ".json". A loader that filtered on the suffix
+// TestLoadSnapshotsLeavesMetaFilesAlone is a regression test for the hazard
+// of sharing a directory: ".meta.json" ends in ".json", and a meta file is
+// valid JSON that parses to a Snapshot with no id — exactly the shape
+// LoadSnapshots sweeps as corrupt. A loader that filtered on the suffix
 // alone would delete every name and tag on the machine at the next daemon
 // start, and the daemon would come up looking like it had worked.
-func TestLoadAndClearSnapshotsLeavesMetaFilesAlone(t *testing.T) {
+func TestLoadSnapshotsLeavesMetaFilesAlone(t *testing.T) {
 	dir := t.TempDir()
 	const id = "cafebabe00000008"
 	if err := SaveSnapshots(dir, []Snapshot{{V: 1, ID: id, Ring: []byte("scrollback")}}); err != nil {
@@ -288,20 +289,25 @@ func TestLoadAndClearSnapshotsLeavesMetaFilesAlone(t *testing.T) {
 		t.Fatalf("SaveMeta: %v", err)
 	}
 
-	snaps := LoadAndClearSnapshots(dir)
+	snaps := LoadSnapshots(dir)
 	if len(snaps) != 1 || snaps[0].ID != id {
 		t.Fatalf("loaded %+v, want the one snapshot — the meta file must not read as one", snaps)
 	}
 	if string(snaps[0].Ring) != "scrollback" {
 		t.Errorf("ring = %q, want the saved bytes", snaps[0].Ring)
 	}
+
+	// Clearing after a revival lands is just as suffix-blind a moment: the
+	// snapshot's file goes, and the meta file beside it — same id, longer
+	// suffix — stays.
+	ClearSnapshot(dir, id)
 	if _, err := os.Stat(filepath.Join(dir, id+".json")); !os.IsNotExist(err) {
-		t.Errorf("the snapshot file survives its load (stat err %v), want it consumed", err)
+		t.Errorf("the snapshot file survives its clear (stat err %v), want it gone", err)
 	}
 
 	got, ok := LoadMetas(dir)[id]
 	if !ok {
-		t.Fatal("the snapshot load ate the meta file")
+		t.Fatal("the snapshot load-and-clear ate the meta file")
 	}
 	if got.Name != "named" || !got.Pinned || !slices.Equal(got.Tags, []string{"prod"}) {
 		t.Errorf("meta = %+v, want it whole", got)

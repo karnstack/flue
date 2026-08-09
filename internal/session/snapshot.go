@@ -50,6 +50,14 @@ type Snapshot struct {
 	// them. It is an id, never a command; the command is assembled at revival,
 	// so the wording lives in one place.
 	ClaudeSession string `json:"claudeSession,omitempty"`
+	// Attempts counts the boots that have already tried and failed to revive
+	// this snapshot. Every snapshot a shutdown writes carries zero;
+	// RecordReviveFailure raises it, and LoadSnapshots sweeps the file once it
+	// reaches maxReviveAttempts — see both for why the count exists at all.
+	// omitempty keeps the ordinary snapshot, the one that revives on its first
+	// try and is cleared, byte-compatible with what earlier daemons wrote and
+	// read.
+	Attempts int `json:"attempts,omitempty"`
 }
 
 // reviveMarker separates the restored scrollback from the fresh shell, so
@@ -214,20 +222,42 @@ func writeSnapshot(dir string, snap Snapshot) error {
 	return os.Rename(tmpPath, filepath.Join(dir, snap.ID+".json"))
 }
 
-// LoadAndClearSnapshots reads every snapshot in dir, deleting each file as
-// it is read: a snapshot belongs to exactly one daemon start, and scrollback
-// must not accumulate on disk. A file that does not parse is deleted and
-// skipped — corrupt state never wedges startup. A missing directory is
-// simply no snapshots.
+// maxReviveAttempts is how many boots may try to revive one snapshot before
+// LoadSnapshots sweeps it. It is the guard against a crash-loop-shaped
+// leak: a snapshot whose revival reliably fails — a shell that is simply
+// gone, a container with no /dev/ptmx — would otherwise be retried and
+// re-logged by every boot forever, its scrollback sitting on disk the whole
+// time. Three boots is enough for the transient causes to clear (fd
+// pressure at a crowded startup) and for the fixable ones to be fixed (a
+// $SHELL a package upgrade removed and a later upgrade restored); a fourth
+// boot still failing is a snapshot that is not coming back, and it ages out.
+const maxReviveAttempts = 3
+
+// LoadSnapshots reads every snapshot in dir. It sweeps what nothing can use
+// and leaves the rest on disk: a snapshot file is cleared by ClearSnapshot,
+// on the caller's word that its session actually came back — never merely
+// for having been read. (This function's predecessor, LoadAndClearSnapshots,
+// deleted each file as it was read, which meant a spawn failure at the
+// caller — a dangling $SHELL, /dev/ptmx exhaustion — permanently destroyed
+// the very session it was about to revive.)
+//
+// Two kinds of file are swept here. One that does not parse, or parses to
+// no id, is the old guarantee: corrupt state never wedges a startup, and a
+// record nothing can read is not worth keeping around to fail again. One
+// whose Attempts has reached maxReviveAttempts is the new one — see the
+// constant for why sweeping it is what keeps preserving the others safe. A
+// file that cannot be read at all is skipped in place rather than swept:
+// nothing about it has been judged, and an unreadable file is the one this
+// function has no license to destroy. A missing directory is simply no
+// snapshots.
 //
 // Metadata files share this directory and their names end in ".json" too, so
-// the suffix alone does not identify a snapshot. They are skipped explicitly:
-// this function deletes what it reads, and metadata is the one thing here that
-// must outlive the daemon that reads it. Without the check, every name and tag
-// on the machine would be consumed by the next start — silently, since a
-// snapshot loader has no reason to complain about a file it merely failed to
-// parse.
-func LoadAndClearSnapshots(dir string) []Snapshot {
+// the suffix alone does not identify a snapshot. They are skipped explicitly,
+// and the check is still load-bearing: a metadata file is valid JSON with no
+// snapshot id, so without it every name and tag on the machine would be swept
+// as corrupt by the next start — silently, since a snapshot loader has no
+// reason to complain about a file it merely failed to parse.
+func LoadSnapshots(dir string) []Snapshot {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -242,15 +272,52 @@ func LoadAndClearSnapshots(dir string) []Snapshot {
 		}
 		path := filepath.Join(dir, e.Name())
 		b, err := os.ReadFile(path)
-		_ = os.Remove(path)
 		if err != nil {
 			continue
 		}
 		var snap Snapshot
 		if json.Unmarshal(b, &snap) != nil || snap.ID == "" {
+			_ = os.Remove(path)
+			continue
+		}
+		if snap.Attempts >= maxReviveAttempts {
+			_ = os.Remove(path)
 			continue
 		}
 		out = append(out, snap)
 	}
 	return out
+}
+
+// ClearSnapshot removes one snapshot's file, and is the only way a healthy
+// snapshot leaves disk: its session is back, so the file has nothing left to
+// say, and scrollback must not accumulate. Same guards as DeleteMeta, for
+// the same reasons — idempotent, because the callers are cleanup paths, and
+// refusing an empty dir or id rather than joining a relative path into
+// whatever the working directory happens to hold.
+func ClearSnapshot(dir, id string) {
+	if dir == "" || id == "" {
+		return
+	}
+	_ = os.Remove(filepath.Join(dir, id+".json"))
+}
+
+// RecordReviveFailure charges one failed revival against a snapshot's file,
+// leaving everything else in it intact. That is the whole point of surviving
+// the failure: the identity, name, tags and scrollback are still on disk
+// when the cause has cleared, and a later boot's LoadSnapshots hands the
+// snapshot back for another try — until the count reaches maxReviveAttempts
+// and the load sweeps it instead.
+//
+// The write is best-effort, and a failure leaves the file exactly as it was:
+// retried on every boot, never aging out. That corner errs deliberately on
+// the side of the user's data — the boot still comes up, the retry costs a
+// log line, and a directory this daemon cannot write to is not one it can
+// bloat.
+func RecordReviveFailure(dir string, snap Snapshot) {
+	if dir == "" || snap.ID == "" {
+		return
+	}
+	snap.Attempts++
+	_ = writeSnapshot(dir, snap)
 }
