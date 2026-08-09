@@ -1883,6 +1883,44 @@ describe('FlueClient control messages', () => {
     expect(c.status).toBe('closed')
   })
 
+  it('keeps the reason for a consumer that mounts after the revocation', () => {
+    // `revoked` is to onRevoked what `status` is to onStatus: the event fires
+    // once, on a connection that is about to end, and a screen navigated to
+    // afterwards still has to be able to say why the client is down.
+    vi.useFakeTimers()
+    const { c, sock } = connected()
+    expect(c.revoked).toBeNull()
+
+    sock.emitControl({ type: 'revoked', reason: 'revoked by another device' })
+    expect(c.revoked).toBe('revoked by another device')
+
+    // Past the close that follows the frame, and past the consumer's own
+    // close — which is exactly when a late-mounting screen would read it.
+    sock.close()
+    c.close()
+    expect(c.revoked).toBe('revoked by another device')
+  })
+
+  it('clears the verdict on a fresh connect, never from the retry loop', async () => {
+    // The automatic redial is not a decision to re-test anything — it is the
+    // recovery the onRevoked doc says keeps going until a consumer stops it.
+    // `connect` is that decision, made by a consumer, and the device may have
+    // been paired again since.
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const { c, sock, sockets } = connected()
+    sock.emitControl({ type: 'revoked', reason: 'revoked' })
+    sock.close()
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(sockets.length).toBeGreaterThan(1)
+    expect(c.revoked).toBe('revoked')
+
+    c.close()
+    c.connect()
+    expect(c.revoked).toBeNull()
+  })
+
   it('delivers a dimension change for a ref it knows', () => {
     const { c, sock } = connected()
     const seen: SizeChanged[] = []

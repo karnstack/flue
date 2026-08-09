@@ -37,6 +37,9 @@ class StubRide {
   onError() {
     return () => {}
   }
+  onRevoked() {
+    return () => {}
+  }
   connect() {
     this.connects++
     for (const cb of [...this.statusCbs]) cb('open')

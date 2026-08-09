@@ -110,6 +110,11 @@ function localNotice(machines: MachineState[] | null): string | null {
   if (local === undefined) return null
   if (local.status === 'connecting') return 'Connecting to the flue daemon…'
   if (local.status === 'unreachable') return 'Lost the flue daemon. Reconnecting…'
+  // Not the reconnect line, which would be a promise nothing is keeping: the
+  // fleet stopped the redialling the moment the daemon said why. The band
+  // below carries the reason and the way back; this line is what the live
+  // region announces.
+  if (local.status === 'revoked') return "This device's access was revoked."
   return null
 }
 
@@ -403,6 +408,7 @@ export function SessionsRoute() {
   const online = machines?.filter((m) => m.status === 'online') ?? []
   const connecting = machines?.filter((m) => m.status === 'connecting') ?? []
   const unreachable = machines?.filter((m) => m.status === 'unreachable') ?? []
+  const revoked = machines?.filter((m) => m.status === 'revoked') ?? []
 
   /**
    * Where the primary button spawns: the machine this tab rides when it is
@@ -713,6 +719,8 @@ export function SessionsRoute() {
         <UnreachableBand machines={unreachable} onRetry={retry} />
       )}
 
+      {view.grouping !== 'machine' && revoked.length > 0 && <RevokedBand machines={revoked} />}
+
       {showTable && (
         <SessionTable
           groups={groups}
@@ -732,6 +740,9 @@ export function SessionsRoute() {
 
       {view.grouping === 'machine' &&
         unreachable.map((m) => <UnreachableBand key={m.id} machines={[m]} onRetry={retry} />)}
+
+      {view.grouping === 'machine' &&
+        revoked.map((m) => <RevokedBand key={m.id} machines={[m]} />)}
 
       <RenameDialog
         open={renaming !== null}
@@ -839,6 +850,35 @@ function UnreachableBand({
             >
               Retry
             </Button>
+          </p>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * A machine that revoked this device, in the unreachable band's own clothes —
+ * the same muted band where its rows would have been — because to the reader
+ * it is the same kind of fact: nothing from there is current. What it must
+ * not share is the Retry, or the reconnect promise behind it: the daemon
+ * deleted this device's key, the fleet stopped the redialling the moment the
+ * daemon said why, and every dial a button offered would fail the handshake
+ * as a bare close. The reason is the daemon's own words, handed on whole the
+ * way the Devices screen hands on a refusal, and the way back is named
+ * instead of a button: pairing again, which can only start from a device
+ * that machine still trusts.
+ */
+function RevokedBand({ machines }: { machines: MachineState[] }) {
+  return (
+    <div className="flex flex-col gap-y-1 rounded-md bg-row-hover px-3 py-2">
+      {machines.map((m) => {
+        const name = m.name || m.id
+        return (
+          <p key={m.id} className="text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
+            <span className="font-medium text-zinc-950 dark:text-white">{name}</span> revoked this
+            device&rsquo;s access{m.revokedReason ? <> — {m.revokedReason}</> : null}. Pair this
+            device again from that machine&rsquo;s Devices screen to get back in.
           </p>
         )
       })}

@@ -29,6 +29,20 @@ function connectionNotice(status: ConnStatus): string | null {
 }
 
 /**
+ * What to say when the daemon revoked this very device — which is a thing
+ * this screen can watch happen from the other side: someone on another
+ * paired browser presses Revoke on the row that is us. The fleet has already
+ * stopped the reconnect loop by the time this renders, so the reconnect line
+ * above would be a promise nothing is keeping; this one hands on the
+ * daemon's reason whole, the way REFUSALS hands on a refusal, and names the
+ * only way back.
+ */
+function revokedNotice(reason: string): string {
+  const why = reason ? ` — ${reason}` : ''
+  return `This device's access was revoked${why}. Pair it again from a device that still has access.`
+}
+
+/**
  * The errors the daemon answers this screen's three operations with, in this
  * screen's own words.
  *
@@ -415,6 +429,10 @@ export function DevicesRoute() {
   // Seeded from the client, because onStatus reports only changes: a screen
   // reached by navigating mounts into a connection that is already up.
   const [status, setStatus] = useState<ConnStatus>(() => client.status)
+  // Seeded for the same reason: `revoked` fires once, on a connection that is
+  // about to end, and a reader may only navigate here afterwards to find out
+  // why every control on this screen is shut.
+  const [revoked, setRevoked] = useState<string | null>(() => client.revoked)
   // Seeded for the same reason: the welcome that said what the relay is doing
   // usually landed before this screen was navigated to.
   const [relay, setRelay] = useState<RelayInfo>(() => client.relay)
@@ -495,6 +513,10 @@ export function DevicesRoute() {
       client.onStatus((s) => {
         setStatus(s)
         setNotice(null)
+        // A deliberate reconnect re-tests the revocation rather than
+        // remembering it, exactly as the client clears its own copy on
+        // connect — these are the two states only a fresh dial reaches.
+        if (s === 'connecting' || s === 'open') setRevoked(null)
         // The window is deliberately left up across an outage. Pairing mode
         // lives on the daemon and ends on its own deadline, and the second
         // device redeems the token over its own request — so a blink here
@@ -502,6 +524,12 @@ export function DevicesRoute() {
         // that still works. If the daemon is what went away, the countdown
         // clears the card within two minutes anyway.
       }),
+
+      // This device being cut off, watched from the row that did it or not
+      // watched at all: either way the daemon says why before it hangs up,
+      // and this screen is where the words belong — it is the one about
+      // pairing. The fleet already stopped the retries; this only renders.
+      client.onRevoked((reason) => setRevoked(reason)),
 
       client.onError((e) => {
         // One client serves the whole tab, so this sees every error. An error
@@ -576,7 +604,11 @@ export function DevicesRoute() {
     client.revokeDevice(id)
   }
 
-  const message = notice ?? connectionNotice(status)
+  // The revocation outranks everything else this line could say: it is final
+  // where the others are transient, and it explains every shut control at
+  // once. Under it the connection line has nothing to add — the status is
+  // `closed`, for which connectionNotice says nothing anyway.
+  const message = revoked !== null ? revokedNotice(revoked) : (notice ?? connectionNotice(status))
 
   return (
     /*

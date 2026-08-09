@@ -446,6 +446,40 @@ describe('Terminal', () => {
     vi.useRealTimers()
   })
 
+  it('says the device was revoked, reason and all, and holds it', () => {
+    // The daemon says why before it hangs up. In the app the fleet closes
+    // the client on the same event, so no reconnect is coming — a pill left
+    // on "live" over a socket that is gone for good would be a frozen screen
+    // with nothing to explain it.
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+    expect(screen.queryByRole('status')).toBeNull()
+
+    act(() => sock.emitControl({ type: 'revoked', reason: 'revoked by another device' }))
+    act(() => sock.close())
+
+    const pill = screen.getByRole('status')
+    expect(pill.textContent).toContain('This device was revoked')
+    expect(pill.textContent).toContain('revoked by another device')
+    // And not walked back by the close that follows the frame.
+    expect(pill.textContent).not.toContain('Reconnecting')
+  })
+
+  it('mounts straight into the revoked pill when the event beat it', () => {
+    // A view navigated to after the revocation: the event fired against a
+    // client the fleet has already closed, so the seed has to come from the
+    // client's kept reason rather than from a frame nobody will resend.
+    const { sock, em, show } = mountTerminal(() => null)
+    act(() => sock.emitControl({ type: 'revoked', reason: 'revoked by another device' }))
+    act(() => sock.close())
+
+    act(() => show(<Terminal sessionId="s1" createEmulator={em.create} />))
+
+    const pill = screen.getByRole('status')
+    expect(pill.textContent).toContain('This device was revoked')
+    expect(pill.textContent).toContain('revoked by another device')
+  })
+
   it('puts the keyboard into the terminal without waiting for a click', () => {
     // A session *is* the tab. Having to click a full-bleed black rectangle
     // before it accepts a keystroke is the kind of thing that reads as broken.

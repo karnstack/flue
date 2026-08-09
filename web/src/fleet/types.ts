@@ -11,13 +11,19 @@
 import type { SessionInfo } from '@/client/protocol'
 
 /**
- * The three words the UI gets about a machine, folded down from FlueClient's
- * four connection states. `connecting` is the hopeful start — nothing proven
+ * The words the UI gets about a machine, folded down from FlueClient's four
+ * connection states. `connecting` is the hopeful start — nothing proven
  * either way; `online` is a connection that opened; and `reconnecting` and
  * `closed` both land on `unreachable`, because from a list's point of view
  * they are the same fact: no rows from there are current.
+ *
+ * `revoked` is the one word that does not come from a connection state: the
+ * machine said so in as many words before it hung up, the fleet stopped the
+ * redialling (FleetClient.slotRevoked), and unlike `unreachable` there is no
+ * retry worth offering — the daemon deleted this device's key, so every dial
+ * can only fail the handshake. Pairing again is the way back.
  */
-export type MachineStatus = 'connecting' | 'online' | 'unreachable'
+export type MachineStatus = 'connecting' | 'online' | 'unreachable' | 'revoked'
 
 /**
  * One session, stamped with the machine it runs on.
@@ -55,6 +61,12 @@ export interface MachineState {
   id: string
   name: string
   status: MachineStatus
+  /**
+   * The daemon's own words for why it revoked this device, present exactly
+   * when `status` is `revoked`. Optional rather than nullable-everywhere so
+   * the three ordinary states stay the shape they always were.
+   */
+  revokedReason?: string
 }
 
 /**

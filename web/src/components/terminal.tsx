@@ -25,7 +25,7 @@ import { cn } from '@/lib/utils'
 import { trackVisualViewport, zoomedIn } from '@/lib/viewport'
 
 /** What the view is showing, which is not the same as what the socket is doing. */
-type Phase = 'connecting' | 'live' | 'reconnecting' | 'exited' | 'gone'
+type Phase = 'connecting' | 'live' | 'reconnecting' | 'exited' | 'gone' | 'revoked'
 
 export interface TerminalProps {
   /**
@@ -129,10 +129,18 @@ export function Terminal({
   const surfaceRef = useRef<HTMLDivElement>(null)
   // Seeded from the client rather than assumed, because onStatus reports only
   // changes: a view mounted into a connection that is already up would
-  // otherwise sit at "Connecting" until something else went wrong.
-  const [phase, setPhase] = useState<Phase>(() =>
-    client.status === 'reconnecting' ? 'reconnecting' : 'connecting',
-  )
+  // otherwise sit at "Connecting" until something else went wrong. The
+  // revoked check first, for the same reason it exists on the client: the
+  // event fired before this view mounted, the fleet closed the client on it,
+  // and a pill promising "Connecting…" over a client nothing will ever dial
+  // again would wait forever.
+  const [phase, setPhase] = useState<Phase>(() => {
+    if (client.revoked !== null) return 'revoked'
+    return client.status === 'reconnecting' ? 'reconnecting' : 'connecting'
+  })
+  // The daemon's reason, for the pill's second line. Seeded alongside the
+  // phase and replaced by the event so both mount orders read the same.
+  const [revokedWhy, setRevokedWhy] = useState<string | null>(() => client.revoked)
   const [mode, setMode] = useState<KeyboardMode>('tab')
   // Coarse pointer once per mount: whether this device's primary pointer is a
   // finger decides the key bar's existence, and a pointer does not change
@@ -653,6 +661,20 @@ export function Terminal({
       }),
     )
 
+    offs.push(
+      client.onRevoked((reason) => {
+        // Final like `gone`, and for a stronger reason: the fleet closes this
+        // client on the same event, so no reconnect is coming to walk the
+        // pill back — without this the view would freeze on "live" over a
+        // socket that is gone for good. The session itself may well go on
+        // without us; what ended is this device's standing to watch it.
+        if (over) return
+        over = true
+        setRevokedWhy(reason)
+        setPhase('revoked')
+      }),
+    )
+
     const keys = createKeyboardModes(pane, setMode)
 
     const onKey = (e: KeyboardEvent) => {
@@ -906,6 +928,14 @@ export function Terminal({
                 <kbd className="font-mono">{TERMINAL_SHORTCUT_HINT}</kbd> for focus mode
               </span>
             )}
+            {phase === 'revoked' && revokedWhy !== null && revokedWhy !== '' && (
+              // The daemon's reason, in the slot the connecting hint uses:
+              // the one line of detail a pill has room for, and the last
+              // thing this connection was told.
+              <span className="mt-0.5 block pl-3.5 text-xs/5 font-normal text-(--chip-dim)">
+                {revokedWhy}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -921,4 +951,5 @@ const NOTICE: Record<Exclude<Phase, 'live'>, string> = {
   reconnecting: 'Reconnecting…',
   exited: 'Process exited',
   gone: 'This session is gone',
+  revoked: 'This device was revoked',
 }
