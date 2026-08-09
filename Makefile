@@ -92,7 +92,9 @@ site-dev:
 	cd site && pnpm install && pnpm dev
 
 site-build:
-	cd site && pnpm install && pnpm run lint && pnpm build
+	@# Build before lint: tsc needs routeTree.gen.ts, which only the router's
+	@# vite plugin writes — a fresh checkout has no copy for lint to lean on.
+	cd site && pnpm install && pnpm build && pnpm run lint
 
 site-deploy: site-build
 	@test -f scripts/install.sh || { \
