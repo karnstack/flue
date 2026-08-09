@@ -1259,7 +1259,7 @@ func TestStatusReportsAConfiguredRelayWithoutItsSecret(t *testing.T) {
 		URL:         "wss://flue-relay.example",
 		Secret:      secret,
 		Origin:      "https://flue-relay.example",
-		MachineID:   "karns-macbook-pro-a1b2",
+		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
 		MachineName: "Karn's MacBook Pro",
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
@@ -1304,7 +1304,7 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 		URL:         "ws" + strings.TrimPrefix(ts.URL, "http"),
 		Secret:      secret,
 		Origin:      "https://r.example",
-		MachineID:   "karns-macbook-pro-a1b2",
+		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
 		MachineName: "Karn's MacBook Pro",
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
@@ -1330,7 +1330,7 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 	}
 	// The machine id from relay.json rides the dial path — it is how the
 	// Worker knows which machine's hub this socket is.
-	if got, want := path.Load().(string), "/daemon/karns-macbook-pro-a1b2"; got != want {
+	if got, want := path.Load().(string), "/daemon/karns-macbook-pro-a1b2-0f9a12cd"; got != want {
 		t.Errorf("dial path = %q, want %q", got, want)
 	}
 }

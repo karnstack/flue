@@ -206,30 +206,49 @@ func TestLoadRelayKeepsAnIncompleteFile(t *testing.T) {
 }
 
 // TestMintMachineID pins the id format machines join the relay under:
-// `<hostname sanitized, truncated to 24>-<4 lowercase hex>`. The hostname part
-// is what makes an id readable in a machine list; the random suffix is what
-// keeps two machines with the same hostname from silently replacing each other
-// on the relay.
+// `<hostname sanitized, truncated to 24>-<4 lowercase hex>-<8 hex tag>`. The
+// hostname part is what makes an id readable in a machine list; the random
+// hex is what keeps two machines with the same hostname from silently
+// replacing each other on the relay; the tag is what makes the id verifiable
+// by the Worker (MachineIDTag — its exact arithmetic is pinned cross-language
+// by testdata/relay/machine-ids.json, so this test is about composition).
 func TestMintMachineID(t *testing.T) {
+	const secret = "test-secret"
+
 	// The exact slug, pinned: lowercased, the apostrophe dropped, spaces and
-	// dots folded to dashes, and the injected randomness hex-encoded on the end.
+	// dots folded to dashes, the injected randomness hex-encoded, and the MAC
+	// tag over everything before it appended.
 	fixed := bytes.NewReader([]byte{0xa1, 0xb2})
-	if got, want := MintMachineID("Karn's MacBook Pro.local", fixed), "karns-macbook-pro-local-a1b2"; got != want {
+	slug := "karns-macbook-pro-local-a1b2"
+	if got, want := MintMachineID("Karn's MacBook Pro.local", secret, fixed), slug+"-"+MachineIDTag(secret, slug); got != want {
 		t.Fatalf("MintMachineID = %q, want %q", got, want)
 	}
 
 	// The hostname part is truncated to 24 characters so the id stays readable
 	// and comfortably inside the relay's 63-character limit, whatever a fleet's
 	// naming convention produces.
-	long := MintMachineID(strings.Repeat("a", 40), bytes.NewReader([]byte{0, 0}))
-	if want := strings.Repeat("a", 24) + "-0000"; long != want {
+	long := MintMachineID(strings.Repeat("a", 40), secret, bytes.NewReader([]byte{0, 0}))
+	longSlug := strings.Repeat("a", 24) + "-0000"
+	if want := longSlug + "-" + MachineIDTag(secret, longSlug); long != want {
 		t.Fatalf("MintMachineID(40×a) = %q, want %q", long, want)
+	}
+
+	// The tag depends on the secret: the same hostname and randomness under
+	// another secret is another id, which is exactly why re-setup (a fresh
+	// secret) abandons every old slot.
+	other := MintMachineID("Karn's MacBook Pro.local", "another-secret", bytes.NewReader([]byte{0xa1, 0xb2}))
+	if other == slug+"-"+MachineIDTag(secret, slug) {
+		t.Fatalf("MintMachineID under a different secret minted the same id %q", other)
+	}
+	if !strings.HasPrefix(other, slug+"-") {
+		t.Fatalf("MintMachineID under a different secret = %q, want the same slug %q with a different tag", other, slug)
 	}
 
 	// Every mint matches the relay's id grammar (relay/src/index.ts), whatever
 	// the hostname looked like — including ones that sanitize to nothing at
-	// all, which still have to produce a diallable id rather than a bare "-hex".
-	idRe := regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	// all, which still have to produce a diallable id rather than a bare "-hex"
+	// — and its tag always verifies against the secret it was minted under.
+	idRe := regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,53}-[0-9a-f]{8}$`)
 	for _, hostname := range []string{
 		"Karn's MacBook Pro.local",
 		"plain",
@@ -242,13 +261,40 @@ func TestMintMachineID(t *testing.T) {
 		"名前",
 		strings.Repeat("é", 30),
 	} {
-		got := MintMachineID(hostname, bytes.NewReader([]byte{0xff, 0x00}))
+		got := MintMachineID(hostname, secret, bytes.NewReader([]byte{0xff, 0x00}))
 		if !idRe.MatchString(got) {
 			t.Errorf("MintMachineID(%q) = %q, which is not a valid machine id", hostname, got)
 		}
-		if !strings.HasSuffix(got, "-ff00") {
-			t.Errorf("MintMachineID(%q) = %q, want the -ff00 suffix from the injected randomness", hostname, got)
+		if len(got) < 14 { // 1 slug char + "-ff00" + "-" + 8 tag chars
+			t.Errorf("MintMachineID(%q) = %q, impossibly short", hostname, got)
+			continue
 		}
+		mintedSlug := got[:len(got)-9]
+		if !strings.HasSuffix(mintedSlug, "-ff00") {
+			t.Errorf("MintMachineID(%q) = %q, want the -ff00 slug suffix from the injected randomness", hostname, got)
+		}
+		if want := mintedSlug + "-" + MachineIDTag(secret, mintedSlug); got != want {
+			t.Errorf("MintMachineID(%q) = %q, want %q — the tag must be the MAC of the slug before it", hostname, got, want)
+		}
+	}
+}
+
+// TestMachineIDTag pins the tag's shape and its inputs: 8 lowercase hex,
+// deterministic, and sensitive to both the secret and the slug. The exact
+// values are pinned cross-language by testdata/relay/machine-ids.json.
+func TestMachineIDTag(t *testing.T) {
+	tag := MachineIDTag("test-secret", "karns-macbook-pro-a1b2")
+	if !regexp.MustCompile(`^[0-9a-f]{8}$`).MatchString(tag) {
+		t.Fatalf("MachineIDTag = %q, want 8 lowercase hex characters", tag)
+	}
+	if again := MachineIDTag("test-secret", "karns-macbook-pro-a1b2"); again != tag {
+		t.Fatalf("MachineIDTag is not deterministic: %q then %q", tag, again)
+	}
+	if MachineIDTag("other-secret", "karns-macbook-pro-a1b2") == tag {
+		t.Fatal("MachineIDTag ignores the secret")
+	}
+	if MachineIDTag("test-secret", "karns-macbook-pro-b3d4") == tag {
+		t.Fatal("MachineIDTag ignores the slug")
 	}
 }
 

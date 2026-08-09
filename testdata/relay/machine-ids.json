@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "name": "ordinary",
+      "secret": "test-secret",
+      "slug": "karns-macbook-pro-a1b2",
+      "tag": "8ac6565b",
+      "id": "karns-macbook-pro-a1b2-8ac6565b"
+    },
+    {
+      "name": "hostname-fallback",
+      "secret": "test-secret",
+      "slug": "machine-ff00",
+      "tag": "282e38e4",
+      "id": "machine-ff00-282e38e4"
+    },
+    {
+      "name": "single-char-host",
+      "secret": "test-secret",
+      "slug": "a-0000",
+      "tag": "34733cbe",
+      "id": "a-0000-34733cbe"
+    },
+    {
+      "name": "truncated-24",
+      "secret": "test-secret",
+      "slug": "aaaaaaaaaaaaaaaaaaaaaaaa-ffff",
+      "tag": "435da8bc",
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaa-ffff-435da8bc"
+    },
+    {
+      "name": "digit-led",
+      "secret": "test-secret",
+      "slug": "0g-b2c3",
+      "tag": "a1bee1d8",
+      "id": "0g-b2c3-a1bee1d8"
+    },
+    {
+      "name": "inner-double-dash",
+      "secret": "test-secret",
+      "slug": "a--b-1a2b",
+      "tag": "2ea84b7b",
+      "id": "a--b-1a2b-2ea84b7b"
+    },
+    {
+      "name": "hex-shaped-slug",
+      "secret": "test-secret",
+      "slug": "deadbeef-cafe",
+      "tag": "abafc2d8",
+      "id": "deadbeef-cafe-abafc2d8"
+    },
+    {
+      "name": "same-slug-other-secret",
+      "secret": "wqLmxN2NKlWNy2qk_tt1kaB4-JJqMRC0lYAllcnrRlk",
+      "slug": "karns-macbook-pro-a1b2",
+      "tag": "65bd6458",
+      "id": "karns-macbook-pro-a1b2-65bd6458"
+    }
+  ]
+}

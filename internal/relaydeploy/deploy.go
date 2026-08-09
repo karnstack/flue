@@ -52,6 +52,20 @@ const (
 	// deployed relay is older than the binary looking at it.
 	VersionVar = "FLUE_VERSION"
 
+	// RateLimitBinding is the Cloudflare rate-limiting binding the Worker
+	// checks on its credential-less routes (/client/*, POST /api/pair/*),
+	// keyed by connecting IP (relay/src/index.ts, allowRate). The numbers are
+	// the spec's "order of 100/min per IP" (spec/fleet-trust.md, "Rate
+	// rule"): 300 requests per 60 s per IP per Cloudflare location is far
+	// past a fleet of tabs — even a whole office reconnecting through one NAT
+	// — while a quota-burning flood, or the 2^32 id-tag guessing walk, needs
+	// a botnet's worth of addresses to get anywhere. All three values have
+	// twins in relay/wrangler.jsonc (`ratelimits`); edit both or neither.
+	RateLimitBinding     = "CLIENT_RATE"
+	rateLimitNamespaceID = "1001"
+	rateLimitRequests    = 300
+	rateLimitPeriodSecs  = 60
+
 	// StepTimeout bounds one ordinary API call; DeployTimeout bounds the
 	// deploy itself, which uploads the whole web bundle over whatever link the
 	// user has. Each step gets its own deadline rather than the whole flow
@@ -162,6 +176,15 @@ func Deploy(in Input) error {
 			// binding that call is on undefined.
 			AssetsBinding: AssetsBinding,
 			PlainTextVars: map[string]string{VersionVar: in.Version},
+			// The Worker reads this binding optionally (fail-open), so a
+			// deploy from an older flue that never sent it leaves a working
+			// relay — just one without the per-IP bound this one carries.
+			RateLimits: []cloudflare.RateLimit{{
+				Name:        RateLimitBinding,
+				NamespaceID: rateLimitNamespaceID,
+				Limit:       rateLimitRequests,
+				Period:      rateLimitPeriodSecs,
+			}},
 			// A self-hosted relay has no operator but its user; Workers Logs
 			// is the only way they will ever see why it did something.
 			Observability: true,

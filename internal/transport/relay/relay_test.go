@@ -111,8 +111,10 @@ func (s *syncBuffer) String() string {
 
 // testMachineID is the id every transport in this file dials as. Distinctive
 // on purpose: the dial-path assertion is only worth something if a match could
-// not be a coincidence.
-const testMachineID = "karns-macbook-pro-a1b2"
+// not be a coincidence. Tag-shaped (slug, then 8 hex) because New holds ids
+// to the minted grammar; the tag need not *verify* here — that is the
+// Worker's check, and this file's relay is a fake.
+const testMachineID = "karns-macbook-pro-a1b2-0f9a12cd"
 
 // newTestTransport builds an adapter pointed at r. The identity and the device
 // store are the zero values: this task never runs a handshake, and a test that
@@ -166,7 +168,7 @@ func runTransport(t *testing.T, tr *Transport) func() {
 
 func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 	t.Parallel()
-	full := Config{URL: "wss://relay.example", Secret: "s3cr3t", Origin: "https://relay.example", MachineID: "karns-mbp-a1b2"}
+	full := Config{URL: "wss://relay.example", Secret: "s3cr3t", Origin: "https://relay.example", MachineID: "karns-mbp-a1b2-0f9a12cd"}
 
 	// Origin is the one worth stating a reason for. It is what every announced
 	// open and every forwarded pair is checked against, so an empty one does
@@ -190,8 +192,9 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 		{"no machine id", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin}},
 		{"nothing at all", Config{}},
 		{"a machine id with a capital", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "My-Mac"}},
-		{"a machine id led by a dash", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "-a1b2"}},
-		{"a machine id past 63 characters", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: strings.Repeat("a", 64)}},
+		{"a machine id led by a dash", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "-a1b2-0f9a12cd"}},
+		{"a machine id without a MAC tag — the pre-tag mint", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "karns-mbp-a1b2"}},
+		{"a machine id past 63 characters", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: strings.Repeat("a", 55) + "-0f9a12cd"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

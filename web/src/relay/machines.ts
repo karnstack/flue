@@ -19,10 +19,14 @@
 import { deletePinnedDaemonKeyFor } from '@/crypto/keys'
 
 /**
- * The machine-id grammar, exactly as the relay routes by it
- * (relay/src/index.ts, MACHINE_ID): a hostname-shaped slug of 1–63 characters,
- * no capitals. An id outside it never reaches a URL from here — the Worker
- * answers 404 for it, and a record carrying one is treated as corrupt.
+ * The machine-id shape: a hostname-shaped slug of 1–63 characters, no
+ * capitals. Deliberately the superset of the grammar the relay routes by —
+ * relay/src/index.ts, MACHINE_ID, which additionally requires the trailing
+ * 8-hex MAC tag every minted id ends in. The browser receives ids from
+ * pairing links and never mints or verifies one (it holds no secret to
+ * verify with), so what this expression is for is narrower: an id outside it
+ * never reaches a URL from here — the Worker answers 404 for it, and a
+ * record carrying one is treated as corrupt.
  */
 export const MACHINE_ID = /^[a-z0-9][a-z0-9-]{0,62}$/
 

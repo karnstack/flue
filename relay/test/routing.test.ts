@@ -1,14 +1,22 @@
 import { SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 
-import { authorizeDaemon, machineIdFrom, type Env } from '../src/index'
-import { controlFrame, decoder, Leg } from './harness'
+import { authorizeDaemon, machineIdFrom, verifyMachineId, type Env } from '../src/index'
+import { controlFrame, decoder, Leg, machineId, TEST_SECRET } from './harness'
 
 const BASE = 'https://relay.example'
 
-/** The two machines this suite talks about: alpha gets a daemon, beta never does. */
-const ALPHA = 'alpha-1a2b'
-const BETA = 'beta-9f8e'
+/** The two machines this suite talks about: alpha gets a daemon, beta never
+ * does. Minted through the shared helper, so their tags verify under the
+ * pool's DAEMON_SECRET — the router checks the MAC before any hub wakes. */
+const ALPHA = await machineId('alpha-1a2b')
+const BETA = await machineId('beta-9f8e')
+
+/** id with its MAC tag's last character flipped: grammar-valid, unroutable. */
+function tagFlipped(id: string): string {
+  const last = id.slice(-1) === '0' ? '1' : '0'
+  return id.slice(0, -1) + last
+}
 
 function open(path: string, headers: Record<string, string> = {}): Promise<Response> {
   return SELF.fetch(`${BASE}${path}`, { headers: { Upgrade: 'websocket', ...headers } })
@@ -39,8 +47,8 @@ async function daemonLeg(machine: string): Promise<Leg> {
 
 describe('machineIdFrom', () => {
   it('reads the id out of <prefix>/<id>', () => {
-    expect(machineIdFrom('/daemon/alpha-1a2b', '/daemon')).toBe('alpha-1a2b')
-    expect(machineIdFrom('/api/pair/x0', '/api/pair')).toBe('x0')
+    expect(machineIdFrom('/daemon/alpha-1a2b-0123abcd', '/daemon')).toBe('alpha-1a2b-0123abcd')
+    expect(machineIdFrom('/api/pair/x0-01234567', '/api/pair')).toBe('x0-01234567')
   })
 
   it('refuses the bare prefix and the empty id', () => {
@@ -49,20 +57,49 @@ describe('machineIdFrom', () => {
   })
 
   it('refuses uppercase — ids are minted lowercase, never case-folded here', () => {
-    expect(machineIdFrom('/daemon/ALPHA-1A2B', '/daemon')).toBeNull()
+    expect(machineIdFrom('/daemon/ALPHA-1A2B-0123ABCD', '/daemon')).toBeNull()
   })
 
-  it('takes 63 characters and refuses 65: the hostname bound', () => {
-    expect(machineIdFrom(`/daemon/${'a'.repeat(63)}`, '/daemon')).toBe('a'.repeat(63))
-    expect(machineIdFrom(`/daemon/${'a'.repeat(65)}`, '/daemon')).toBeNull()
+  it('refuses an id without a MAC tag: the pre-tag mint is not grandfathered', () => {
+    expect(machineIdFrom('/daemon/alpha-1a2b', '/daemon')).toBeNull()
+  })
+
+  it('refuses a tag that is not exactly 8 hex', () => {
+    expect(machineIdFrom('/daemon/alpha-1a2b-0123abc', '/daemon')).toBeNull()
+    expect(machineIdFrom('/daemon/alpha-1a2b-0123abcde', '/daemon')).toBeNull()
+    expect(machineIdFrom('/daemon/alpha-1a2b-0123abcg', '/daemon')).toBeNull()
+  })
+
+  it('takes 63 characters and refuses 64: the hostname bound, tag included', () => {
+    const max = `${'a'.repeat(54)}-01234567`
+    expect(machineIdFrom(`/daemon/${max}`, '/daemon')).toBe(max)
+    expect(machineIdFrom(`/daemon/a${max}`, '/daemon')).toBeNull()
   })
 
   it('refuses a trailing slash', () => {
-    expect(machineIdFrom('/daemon/alpha-1a2b/', '/daemon')).toBeNull()
+    expect(machineIdFrom('/daemon/alpha-1a2b-0123abcd/', '/daemon')).toBeNull()
   })
 
   it('refuses an embedded slash: one segment, not a subtree', () => {
     expect(machineIdFrom('/daemon/a/b', '/daemon')).toBeNull()
+  })
+})
+
+describe('verifyMachineId', () => {
+  it('accepts an id whose tag the secret minted', async () => {
+    expect(await verifyMachineId(ALPHA, TEST_SECRET)).toBe(true)
+  })
+
+  it('refuses the same id with one tag character flipped', async () => {
+    expect(await verifyMachineId(tagFlipped(ALPHA), TEST_SECRET)).toBe(false)
+  })
+
+  it('refuses a valid id under a different secret: rotation invalidates every id', async () => {
+    expect(await verifyMachineId(ALPHA, 'rotated-away')).toBe(false)
+  })
+
+  it('fails closed on an empty secret, like authorizeDaemon', async () => {
+    expect(await verifyMachineId(ALPHA, '')).toBe(false)
   })
 })
 
@@ -75,6 +112,39 @@ describe('the relay Worker routes by machine id', () => {
 
   it('404s an id the grammar refuses: /daemon/UPPER', async () => {
     const res = await open('/daemon/UPPER')
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'no such machine' })
+  })
+
+  it('404s a grammar-valid id whose MAC tag does not verify: /client', async () => {
+    // The same 404, the same body, as an id whose shape does not parse: a
+    // forged id and a malformed one are indistinguishable from outside, and
+    // neither wakes a Durable Object (spec/fleet-trust.md).
+    const res = await open(`/client/${tagFlipped(ALPHA)}`)
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'no such machine' })
+  })
+
+  it('404s a bad MAC tag on POST /api/pair', async () => {
+    const res = await SELF.fetch(`${BASE}/api/pair/${tagFlipped(ALPHA)}`, {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'no such machine' })
+  })
+
+  it('answers a secretless probe of /daemon 401 whatever the tag: bearer before MAC', async () => {
+    // If the tag were checked first, 404-versus-401 would hand the one
+    // unthrottled route a free tag oracle. Both probes read the same.
+    expect((await open(`/daemon/${ALPHA}`)).status).toBe(401)
+    expect((await open(`/daemon/${tagFlipped(ALPHA)}`)).status).toBe(401)
+  })
+
+  it('404s an authorized daemon dial whose tag does not verify: a stale id after rotation', async () => {
+    const res = await open(`/daemon/${tagFlipped(ALPHA)}`, {
+      Authorization: 'Bearer test-secret',
+    })
     expect(res.status).toBe(404)
     expect(await res.json()).toEqual({ error: 'no such machine' })
   })
@@ -117,13 +187,16 @@ describe('the relay Worker routes by machine id', () => {
   it('answers a client whose machine has no daemon from that hub: 503 offline', async () => {
     // The 503 is the hub's own refusal (src/hub.ts, offline), so the id
     // picked an object and the object ran. An asset answer would be a 200.
-    const res = await open('/client/lonely-0a0a')
+    const res = await open(`/client/${await machineId('lonely-0a0a')}`)
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ error: 'daemon offline' })
   })
 
   it('parks no pairing for a machine with no daemon: 503 offline', async () => {
-    const res = await SELF.fetch(`${BASE}/api/pair/lonely-0b0b`, { method: 'POST', body: '{}' })
+    const res = await SELF.fetch(`${BASE}/api/pair/${await machineId('lonely-0b0b')}`, {
+      method: 'POST',
+      body: '{}',
+    })
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ error: 'daemon offline' })
   })
@@ -188,9 +261,10 @@ describe('the relay Worker routes by machine id', () => {
     // claim made of the Worker path: the re-wrap in toHub (a new Request on
     // the bare prefix) must hand the hub the exact body that was POSTed.
     // Key order, inner whitespace and characters a re-encoder would escape.
-    const daemon = await daemonLeg('pairful-3c4d')
+    const pairful = await machineId('pairful-3c4d')
+    const daemon = await daemonLeg(pairful)
     const body = '{"z":  1,\n  "a": "<&>é", "token":"t"}'
-    const res = SELF.fetch(`${BASE}/api/pair/pairful-3c4d`, { method: 'POST', body })
+    const res = SELF.fetch(`${BASE}/api/pair/${pairful}`, { method: 'POST', body })
     const payload = await daemon.nextControlBytes()
     expect(decoder.decode(payload)).toBe(`{"type":"pair","id":1,"origin":"${BASE}","body":${body}}`)
     daemon.ws.send(controlFrame({ type: 'pairResult', id: 1, status: 200, body: { ok: true } }))
