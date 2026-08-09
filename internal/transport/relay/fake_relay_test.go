@@ -54,6 +54,14 @@ type fakeRelay struct {
 	// edge is not there to answer them, and nothing ever comes back.
 	deaf bool
 
+	// reliable makes the pump block on a full msgs queue instead of dropping.
+	// Two things at once, both load-bearing for the outbound backpressure
+	// test: every frame the daemon sends is observable in order, and a test
+	// that stops reading msgs stalls the pump — and with it, once TCP fills,
+	// the daemon's writer — which is how "the relay is draining slower than a
+	// session produces" is staged deterministically.
+	reliable bool
+
 	mu sync.Mutex
 	// upgrades counts upgrade requests, including the ones refused for a bad
 	// token: it is what "the adapter retried" is measured in, and when each
@@ -133,12 +141,16 @@ func (r *fakeRelay) serveDaemon(w http.ResponseWriter, req *http.Request) {
 	// not return until the socket is finished with; this is the backstop for
 	// however it ends.
 	defer ws.CloseNow()
+	// The deployed Worker takes frames up to a megabyte; the library's 32 KiB
+	// default would close the socket over any test that streams real output.
+	ws.SetReadLimit(readLimit)
 
 	c := &relayConn{
-		ws:   ws,
-		msgs: make(chan relayMsg, 64),
-		done: make(chan struct{}),
-		deaf: r.deaf,
+		ws:       ws,
+		msgs:     make(chan relayMsg, 64),
+		done:     make(chan struct{}),
+		deaf:     r.deaf,
+		reliable: r.reliable,
 	}
 	r.mu.Lock()
 	r.live = append(r.live, c)
@@ -269,10 +281,11 @@ type relayMsg struct {
 // it. Everything read is queued for the test; a flue-ping is also answered
 // where the edge would answer it.
 type relayConn struct {
-	ws   *websocket.Conn
-	msgs chan relayMsg
-	done chan struct{}
-	deaf bool
+	ws       *websocket.Conn
+	msgs     chan relayMsg
+	done     chan struct{}
+	deaf     bool
+	reliable bool
 
 	// status is the close code the daemon left with, readable once done is
 	// closed. It is how a test asserts that a protocol error closed the socket
@@ -298,6 +311,17 @@ func (c *relayConn) pump() {
 			wctx, cancel := context.WithTimeout(ctx, waitFor)
 			_ = c.ws.Write(wctx, websocket.MessageText, []byte(relaywire.Pong))
 			cancel()
+		}
+		if c.reliable {
+			// Block rather than drop, so the test sees every frame — and so a
+			// test that stops reading stalls this pump on purpose. done is the
+			// way out for a pump parked here when the test ends: kill closes it.
+			select {
+			case c.msgs <- m:
+			case <-c.done:
+				return
+			}
+			continue
 		}
 		select {
 		case c.msgs <- m:
@@ -408,8 +432,14 @@ func (c *relayConn) sendRaw(t *testing.T, typ websocket.MessageType, b []byte) {
 }
 
 // kill drops the socket without a close handshake, the way a relay that
-// restarts or an edge that times a connection out drops it.
-func (c *relayConn) kill() { _ = c.ws.CloseNow() }
+// restarts or an edge that times a connection out drops it. It also settles
+// done, which is what frees a reliable pump parked on a msgs queue nobody is
+// reading any more — without it, the killAll in the fixture's cleanup would
+// leave the handler blocked and httptest's Close waiting on it forever.
+func (c *relayConn) kill() {
+	_ = c.ws.CloseNow()
+	c.finish(websocket.StatusCode(-1))
+}
 
 // waitClosed blocks until the daemon's end of this socket is gone and returns
 // the close code it left, if any.
