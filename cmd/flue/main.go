@@ -1597,6 +1597,21 @@ func relayProblems(rc config.Relay) []string {
 		// by `flue relay setup` on a machine that has it, or re-run setup
 		// itself, which mints a fresh fleet key with the fresh secret.
 		problems = append(problems, "no fleet key")
+	} else if _, err := fleet.Parse(rc.FleetSeed); err != nil {
+		// A seed that is present and unusable, which a hand-edited file or a
+		// half-pasted join line produces. It is listed separately from "no
+		// fleet key" because it reads differently to whoever is looking: the
+		// file *looks* configured.
+		//
+		// This is also the line that answers "can this process sign", which
+		// used to be a different question from "what does the file say". It
+		// no longer is: the daemon reads its fleet key from this same file at
+		// the moment it signs (cmd/flue.fleetOnDisk), so a file this function
+		// accepts is a process that can sign, and one it refuses here is a
+		// process that mints nothing — no device certificate at a pairing, no
+		// `f=` in the link the browser scans, and no way to repair either
+		// afterwards.
+		problems = append(problems, "a fleet key this daemon cannot use")
 	}
 	return problems
 }

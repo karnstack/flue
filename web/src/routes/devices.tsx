@@ -77,15 +77,36 @@ const UNREACHABLE =
   "Remote devices can't reach 127.0.0.1. Run flue relay setup to give this daemon an address, then pair."
 
 /**
- * The id tying the sentence above to the button it explains.
+ * Why the Pair button is shut when this daemon could not sign what a pairing
+ * has to write.
+ *
+ * The QR carries the fleet key the browser pins, and the ceremony mints the
+ * certificate that browser presents to every other machine. Both are written
+ * exactly once, by that one ceremony, and a daemon holding no fleet key writes
+ * neither — so the device works here and nowhere else for as long as the
+ * pairing lasts, and no reload, reconnect or later fix repairs it short of
+ * pairing again. That is worth refusing rather than warning about, which is
+ * what the gate beside it already concluded about a QR nobody can reach.
+ *
+ * Very nearly unreachable, and deliberately kept: the daemon reads its fleet
+ * key from relay.json at the moment it signs, so a machine whose relay is live
+ * has one. What is left is a relay.json missing a fleet key or a machine id —
+ * a file from before fleet trust, or one edited by hand.
+ */
+const FLEET_BLIND =
+  'This daemon holds no fleet key, so a device paired now would reach this machine and nothing else — permanently, because pairing is where both of those records are written. Run flue relay status to see what its relay.json is missing.'
+
+/**
+ * The ids tying the sentences above to the button they explain.
  *
  * `aria-describedby` rather than trusting proximity: the Pair button and its
  * explanation are on opposite sides of a flex row, so a reader who lands on the
  * shut button by keyboard hears "Pair device, dimmed" and nothing else unless
- * the two are linked. One id, because only one of these headers is ever on
- * screen.
+ * the two are linked. One id each, because only one of these paragraphs is
+ * ever on screen.
  */
 const UNREACHABLE_ID = 'pair-unreachable'
+const FLEET_BLIND_ID = 'pair-fleet-blind'
 
 /** Whole seconds as m:ss, for the pairing window's deadline. */
 function remaining(secs: number): string {
@@ -588,6 +609,14 @@ export function DevicesRoute() {
    */
   const reachable = relay.status === 'connected' || isRelayOrigin()
 
+  /**
+   * Whether this daemon can sign what a pairing writes: the fleet key the QR
+   * carries and the certificate the ceremony mints. Absent on the welcome —
+   * an older daemon at the other end of a relay tab — is not a refusal, only a
+   * daemon that did not say; see `noFleetKey` in client/protocol.ts.
+   */
+  const fleetBlind = relay.noFleetKey === true
+
   function pair() {
     setNotice(null)
     client.startPairing()
@@ -643,12 +672,16 @@ export function DevicesRoute() {
             icon button that are both 32px.
           */
           <Button
-            disabled={!connected || !reachable}
+            disabled={!connected || !reachable || fleetBlind}
             // Only when that is the reason it is shut. A button held shut by a
             // socket that is down is already explained by the live region
             // below, and pointing at a paragraph that is not on the page names
-            // nothing.
-            aria-describedby={!reachable ? UNREACHABLE_ID : undefined}
+            // nothing. Unreachable wins where both hold: it is the likelier
+            // fault and the one whose fix produces the other's, and only one of
+            // these paragraphs is ever rendered.
+            aria-describedby={
+              !reachable ? UNREACHABLE_ID : fleetBlind ? FLEET_BLIND_ID : undefined
+            }
             onClick={pair}
           >
             <QrCodeIcon data-icon="inline-start" aria-hidden="true" />
@@ -692,6 +725,21 @@ export function DevicesRoute() {
               page load would tear down the tab's one socket, and this daemon
               is what that socket is to.
             */}
+            <Link to="/remote" className={TEXT_LINK}>
+              Set up remote access
+            </Link>
+          </p>
+        )}
+        {/*
+          The second gate, on the same terms as the first and never beside it:
+          a daemon nothing can reach is not also asked whether it could sign.
+        */}
+        {reachable && fleetBlind && (
+          <p
+            id={FLEET_BLIND_ID}
+            className="mt-3 max-w-[65ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400"
+          >
+            {FLEET_BLIND}{' '}
             <Link to="/remote" className={TEXT_LINK}>
               Set up remote access
             </Link>

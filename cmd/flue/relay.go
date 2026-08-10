@@ -700,14 +700,24 @@ func runRelayStatus(w io.Writer) error {
 // gap between the two numbers is worth seeing — it is a rotated fleet key, or
 // a relay that is not the one this machine thinks it is.
 func directoryLine(rc config.Relay) string {
+	// The two ways this machine holds no usable fleet key, and the same
+	// consequence under both — said out loud, because it is invisible from
+	// everywhere else and permanent for every device paired while it lasts.
+	// The daemon signs with this file, read when it signs (fleetOnDisk), so
+	// what is unusable here is unusable in the running daemon too.
+	const cannotSign = "\n          this daemon signs nothing for a fleet: a browser paired here" +
+		"\n          pins no fleet key and gets no certificate, and no reload or" +
+		"\n          reconnect repairs that — it must pair again once this is fixed"
 	if rc.FleetSeed == "" {
 		// relayLine already names this as the fault that stops the daemon
 		// dialling at all; there is nothing this line could verify.
-		return "fleet:    unknown (this relay.json carries no fleet key)"
+		return "fleet:    unknown (this relay.json carries no fleet key)" + cannotSign +
+			"\n          fix: re-run `flue relay setup`, or `flue relay join --fleet ...` from a machine that has the key"
 	}
 	key, err := fleet.Parse(rc.FleetSeed)
 	if err != nil {
-		return "fleet:    unknown (the fleet key in relay.json cannot be parsed)"
+		return "fleet:    unknown (the fleet key in relay.json cannot be parsed)" + cannotSign +
+			"\n          fix: re-run `flue relay join --fleet ...` with the line from a machine still on this relay"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), relayStepTimeout)
 	defer cancel()

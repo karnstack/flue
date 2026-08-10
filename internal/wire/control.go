@@ -240,6 +240,22 @@ type RelayInfo struct {
 	// MachineName is the machine's human label, free text from the same file.
 	// For lists and titles, never for URLs — that is what MachineID is for.
 	MachineName string `json:"machineName,omitempty"`
+	// NoFleetKey says this daemon is on a relay and cannot sign for its fleet:
+	// relay.json carries no fleet key, or one this daemon cannot parse, or no
+	// machine id for a certificate to name. A device paired while it is true
+	// gets no fleet key pinned and no certificate minted — it reaches this
+	// machine and nothing else, for the life of the pairing, because both of
+	// those records are written exactly once by the ceremony. So the screen
+	// that draws the QR refuses to draw one (routes/devices.tsx), the way it
+	// already refuses a QR that could only name loopback.
+	//
+	// Stated as the fault rather than as a capability, deliberately: absent
+	// means "this daemon said nothing about it", which is what an older build
+	// on the other end of a relay-served tab says, and that must not read as a
+	// refusal. It is also the reason this is a field on the welcome rather than
+	// something the client infers — whether a *process* can sign is not
+	// visible from any file the browser can see.
+	NoFleetKey bool `json:"noFleetKey,omitempty"`
 }
 
 type Sessions struct {

@@ -1591,6 +1591,13 @@ func TestStatusReportsAnIncompleteRelayConfig(t *testing.T) {
 		// `flue status`, `flue relay status` and /api/relay/info all called it
 		// configured and fine.
 		{"no fleet key", config.Relay{URL: "wss://r.example", Secret: secret, Origin: "https://r.example", MachineID: "m-0001"}, "no fleet key"},
+		// A seed that is present and unusable — a hand-edited file, a
+		// half-pasted join line. It reads differently from the case above,
+		// because the file looks configured, and it is the line that answers
+		// "can this process sign": the daemon parses this same value at the
+		// moment it mints a device certificate, so a seed named here is a
+		// daemon that will pair devices onto no fleet at all.
+		{"unusable fleet key", config.Relay{URL: "wss://r.example", Secret: secret, Origin: "https://r.example", MachineID: "m-0001", FleetSeed: "not-a-seed"}, "a fleet key this daemon cannot use"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())

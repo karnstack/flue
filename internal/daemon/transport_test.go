@@ -525,6 +525,63 @@ func TestWelcomeBackFillsNothingWithoutAPlaceOnTheRelay(t *testing.T) {
 	}
 }
 
+// TestWelcomeSaysWhenThisDaemonCannotSignForItsFleet: the backstop behind the
+// Devices screen's second gate.
+//
+// A daemon on a relay that holds no fleet key can still draw a pairing QR, and
+// a device that completes that ceremony pins no fleet key and is minted no
+// certificate — it reaches this machine and nothing else, for the life of the
+// pairing, silently. The welcome carries the fact so the screen can refuse
+// instead, the way it refuses a QR that could only name loopback.
+func TestWelcomeSaysWhenThisDaemonCannotSignForItsFleet(t *testing.T) {
+	dir := t.TempDir()
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	var live FleetIdentity
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
+		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: func() FleetIdentity { return live }})
+	t.Cleanup(srv.Shutdown)
+	srv.SetRelayStatus(RelayConnected, "https://flue-relay.example")
+
+	welcome := func() wire.Welcome {
+		t.Helper()
+		p := newPipeConn()
+		go srv.ServeConn(context.Background(), p, ConnMeta{Peer: "test"})
+		t.Cleanup(func() { _ = p.Close() })
+		w, ok := expectControl(t, p).(wire.Welcome)
+		if !ok {
+			t.Fatal("first frame was not a welcome")
+		}
+		return w
+	}
+
+	w := welcome()
+	if w.Relay == nil || !w.Relay.NoFleetKey {
+		t.Fatalf("relay = %+v; a daemon on a relay with no fleet key must say so", w.Relay)
+	}
+
+	// A fleet key and no place on the relay is the same answer: `pairedOn` is
+	// what makes a certificate attributable, and one naming the empty machine
+	// is one no reader can line up against the machine certs beside it.
+	live = FleetIdentity{Key: fk}
+	if w := welcome(); w.Relay == nil || !w.Relay.NoFleetKey {
+		t.Fatalf("relay = %+v; a daemon with no machine id mints no cert and must say so", w.Relay)
+	}
+
+	// And a machine that can sign says nothing at all — the field is the
+	// fault, not the capability, so silence is what an older daemon says too.
+	live = FleetIdentity{Key: fk, MachineID: "karns-mbp-a1b2-0f9a12cd"}
+	if w := welcome(); w.Relay == nil || w.Relay.NoFleetKey {
+		t.Fatalf("relay = %+v; a daemon that can sign must not report the fault", w.Relay)
+	}
+}
+
 func TestServeConnRegistersTheDevice(t *testing.T) {
 	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test", Identity{})
 	p := newPipeConn()

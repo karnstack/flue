@@ -1204,6 +1204,10 @@ func (s *Server) relayMachine() (m struct{ id, name string }) {
 // and "present but off" is a third shape neither the Go encoder nor the client
 // has a meaning for.
 func (s *Server) relayInfo() *wire.RelayInfo {
+	// Read before the lock, because it reads relay.json and no lock here has
+	// any business being held across a file read.
+	blind := !s.canSignForTheFleet()
+
 	s.relayMu.RLock()
 	defer s.relayMu.RUnlock()
 	if s.relayStatus == "" || s.relayStatus == RelayOff {
@@ -1214,7 +1218,24 @@ func (s *Server) relayInfo() *wire.RelayInfo {
 		Origin:      s.relayOrigin,
 		MachineID:   s.relayMachineID,
 		MachineName: s.relayMachineName,
+		NoFleetKey:  blind,
 	}
+}
+
+// canSignForTheFleet reports whether a pairing performed right now would give
+// the device what a fleet membership is made of: the fleet key in the link it
+// scans, and a certificate minted at the ceremony.
+//
+// Both need the same two things — a usable fleet key and a machine id to name
+// — so this is one question rather than two, and it is asked of the same live
+// source the ceremony will ask (Identity.Fleet). After the read went live this
+// should be false only for a machine whose relay.json is genuinely incomplete;
+// it is reported anyway, because the consequence of pairing while it is true is
+// silent and permanent, and "nearly unreachable" is not a reason to leave a
+// trapdoor unmarked.
+func (s *Server) canSignForTheFleet() bool {
+	fi := s.fleetIdentity()
+	return fi.Key.Valid() && fi.MachineID != ""
 }
 
 // pairingOrigin is the origin a pairing URL should name, given the origin the
