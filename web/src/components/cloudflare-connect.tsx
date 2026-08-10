@@ -228,6 +228,7 @@ function DeployFlow({
   storedToken,
   accountName,
   onDone,
+  reloadAfter,
 }: {
   endpoint: string
   /** The verb on the button: "Deploy" or "Update relay". */
@@ -240,6 +241,11 @@ function DeployFlow({
   accountName?: string
   /** Called once the deploy has landed, for a caller with something to close. */
   onDone?: () => void
+  /**
+   * Whether the tab that ran this deploy has to be reloaded before it can use
+   * the relay it just created. True for the setup flow; see ReloadAfterDeploy.
+   */
+  reloadAfter?: boolean
 }) {
   const [phase, setPhase] = useState<Phase>('form')
   const [token, setToken] = useState('')
@@ -306,6 +312,7 @@ function DeployFlow({
             <Copyable text={result.join_command} />
           </div>
         )}
+        {reloadAfter && <ReloadAfterDeploy />}
       </div>
     )
   }
@@ -399,6 +406,49 @@ function DeployFlow({
 }
 
 /**
+ * The one thing a successful first deploy cannot do for the tab that ran it.
+ *
+ * This page was served before the relay existed, and three separate facts about
+ * it were settled at that moment and cannot be revised from here:
+ *
+ *   - **The Content-Security-Policy.** The daemon builds it from relay.json
+ *     when it serves the document (internal/daemon/server.go, `LocalCSPFor`),
+ *     so a page served without a relay carries a policy naming none — and the
+ *     browser will block `wss://<relay>/client/<id>` and the directory read
+ *     whatever the app tries. A header cannot be changed after the fact, by
+ *     anything.
+ *   - **The relay origin.** A loopback tab learns it from the welcome, and
+ *     `relayInfo()` reports nothing while the leg is off. Nothing broadcasts a
+ *     change of relay status, so the tab's fleet would go on believing the last
+ *     thing it was told for as long as it stayed open.
+ *   - **This browser's fleet identity.** It enrols once per load
+ *     (fleet/enrol.ts), and a tab loaded before the relay was answered 409:
+ *     this machine held no fleet key to certify anything with. It does now.
+ *
+ * So the honest thing is to say so and offer the one act that fixes all three
+ * at once. It is a button rather than an automatic reload because the steps
+ * above it are the reader's only account of what was just done to their
+ * Cloudflare account, and a page that navigated away from its own receipt is
+ * the thing every other flow on this card is careful not to do.
+ */
+function ReloadAfterDeploy() {
+  return (
+    <div className="flex flex-col gap-y-1.5">
+      <p className={NOTE}>
+        This page was loaded before the relay existed, so it cannot use it yet — what a page may
+        connect to is fixed when it is served. Reload to pick up the relay: the sessions on every
+        machine you join will be on this browser’s own list.
+      </p>
+      <div>
+        <Button size="sm" onClick={() => location.reload()}>
+          Reload flue
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/**
  * The integration card for a daemon with no relay: what a deploy will create,
  * spelled out before any credential is asked for, then the form. The CLI
  * command stays at the bottom — same deploy, other door.
@@ -439,6 +489,11 @@ export function CloudflareConnectCard({
             defaultWorker={info?.worker || 'flue-relay'}
             storedToken={info?.has_token}
             accountName={info?.account_name}
+            // This card is the one that renders on a tab with no relay behind
+            // it, which is exactly the tab that has to be reloaded before it
+            // can use the one it just deployed. The update flow does not: that
+            // tab was served with the relay already named.
+            reloadAfter
           />
         )}
         <div className="flex flex-col gap-y-1.5">
