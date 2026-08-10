@@ -83,8 +83,11 @@ sockets a relay origin has no use for, enables the `workers.dev` subdomain, sets
 nowhere, mints this machine an id and a display name, and writes `relay.json`
 (mode 0600) into flue's config directory,
 `$XDG_CONFIG_HOME/flue` or `~/.config/flue`. The API token is never stored:
-its whole life is that one command, and you can delete it afterwards. Restart
-the daemon to pick the relay up.
+its whole life is that one command, and you can delete it afterwards. Nothing
+needs restarting: setup tells the daemon that is already running, which starts
+dialling the new relay in place, and the daemon reads the fleet key it signs
+with out of `relay.json` at the moment it signs. Pair a phone in the next
+breath and it gets a certificate for the whole fleet.
 
 Setup ends by printing the line every other machine joins with:
 
@@ -92,7 +95,8 @@ Setup ends by printing the line every other machine joins with:
 flue relay join wss://flue-relay.<sub>.workers.dev --secret <...> --fleet <...>
 ```
 
-Run it there and restart that daemon. That is the whole of adding a machine.
+Run it there. That is the whole of adding a machine — no restart on either
+end.
 Join never touches the Cloudflare API — the Worker already exists — so
 everything it does is local: check the address, take the two credentials off
 the line, mint this machine a fresh id (`<hostname>-<4 hex>-<8 hex tag>`, its
@@ -110,8 +114,12 @@ down, never a path, and never anything the Worker routes on.
 Join also mints this machine's own **machine certificate** — its id, its name
 and its Noise static key, signed under the fleet key — and stores it. That is
 what a browser reads out of the directory to reach a machine it never paired
-with, so a machine that joined and was never restarted is a machine the fleet
-cannot see; the restart is not optional.
+with, and it is published by the relay leg join starts: the command knocks on
+the running daemon's loopback door on its way out (`POST /api/relay/reload`,
+the session token in a header), and the daemon replaces its relay leg with one
+built from the file that was just written. A daemon that could not be told —
+one that is wedged, or an older build — is the only case that still wants a
+restart, and the command says so there and nowhere else.
 
 Run it from a **release binary** (`make build`, or an installed flue). The
 Worker and the web app are both compiled into that binary, and a dev build
@@ -329,15 +337,15 @@ of it, which is `flue relay reset`'s job and a fleet-wide act):
   are unsure. (It is the same residual risk `flue relay reset` names, arriving
   from the other end.)
 
-**The CLI needs a restart; the screen does not.** `flue relay leave` runs in
-your shell, not in the daemon, and the daemon's transport holds the secret it
-read at startup — so a daemon that is already up keeps its relay socket, and
-every device on the other end keeps reaching this machine, until it restarts
-(`flue disable && flue enable`, or restart `flue serve`). The command says so
-rather than letting it be discovered. The Remote screen's Disconnect runs
-*inside* the daemon: it cancels the relay's context, which ends both legs, and
-clears the relay out of everything the daemon says about itself — so it is
-finished when the card says it is.
+**Both surfaces finish the job.** The Remote screen's Disconnect runs *inside*
+the daemon: it cancels the relay's context, which ends both legs, and clears
+the relay out of everything the daemon says about itself — so it is finished
+when the card says it is. `flue relay leave` runs in your shell, deletes the
+file, and then tells the daemon, which stops the leg for the same reason: a
+command that reported "you have left the relay" while the socket was still
+carrying browsers would be making the one claim this feature cannot get wrong.
+A daemon the command could not reach is the exception, and the only place a
+restart is still named.
 
 ### One account, several relays
 
@@ -793,9 +801,11 @@ a dev build carries no Worker to deploy.
 - [ ] `flue relay setup` against a real Cloudflare account, with a token made
       from the "Edit Cloudflare Workers" template. Every ✓ line appears; the
       token is nowhere in the output.
-- [ ] Restart the daemon (`flue disable && flue enable`, or restart
-      `flue serve`). `flue status` reports the relay; the daemon's log says it
-      connected.
+- [ ] **Without restarting anything**: `flue status` reports the relay and the
+      daemon's log says it connected — setup told the daemon that was already
+      running. Pair a phone right now, before touching the daemon, and check
+      the QR link carries an `&f=`: that is the fleet key, and a pairing made
+      without it is a device that reaches this machine and no other, for good.
 - [ ] Open the printed `https://flue-relay.<sub>.workers.dev` in a browser on
       the **same** machine. The web app loads (that is the assets binding) and
       the SPA fallback working.
@@ -806,8 +816,8 @@ a dev build carries no Worker to deploy.
 - [ ] Kill the daemon (`kill -9`), watch the phone report the drop, restart the
       daemon, and watch the session come back without re-pairing.
 - [ ] `flue relay join` on a second machine, with the exact line setup printed.
-      Restart its daemon: both daemons' logs say connected, to the same host,
-      each under its own machine id.
+      Without restarting it: both daemons' logs say connected, to the same
+      host, each under its own machine id.
 - [ ] Pair the phone with the second machine too, its own QR, one more scan.
       Opening the relay URL now lands on the machine picker; both machines are
       listed, and switching between them lands in each machine's own sessions.
