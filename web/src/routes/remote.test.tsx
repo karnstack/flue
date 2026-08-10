@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { FlueClientProvider } from '@/client/provider'
 import type { RelayInfo } from '@/client/protocol'
+import { DIRECTORY_WARN_AT, MAX_ENTRIES } from '@/relay/directory'
 import { renderWithRouter } from '@/testing/render'
 import { fakeClient, type FakeSocket } from '@/testing/socket'
 import { RemoteRoute } from './remote'
@@ -247,6 +248,61 @@ describe('RemoteRoute', () => {
         await mountRemote({ relay: RELAY_UP })
         expect(await screen.findByText(/2 entries in the directory were signed by something else/))
           .toBeTruthy()
+      },
+    )
+  })
+
+  it('warns before the directory fills, and names the way out', async () => {
+    // The cap has no gentle failure: at 512 the relay refuses every new blob
+    // before storing it and therefore before pushing it, so a revoke made
+    // past that point reaches nobody, and nothing frees an entry short of a
+    // reset. A screen that only reported the counts would leave a 507 in a
+    // daemon log as the operator's first signal.
+    await withRelayInfo(
+      {
+        configured: true,
+        can_deploy: true,
+        version: 'v',
+        directory: {
+          connected: true,
+          entries: DIRECTORY_WARN_AT,
+          verified: DIRECTORY_WARN_AT,
+          machines: 2,
+          devices: 400,
+          revocations: 58,
+        },
+      },
+      async () => {
+        await mountRemote({ relay: RELAY_UP })
+        expect(
+          await screen.findByText(
+            new RegExp(`${DIRECTORY_WARN_AT} of ${MAX_ENTRIES} entries full`),
+          ),
+        ).toBeTruthy()
+        expect(screen.getByText(/flue relay reset/)).toBeTruthy()
+      },
+    )
+  })
+
+  it('says nothing about capacity while there is room to spare', async () => {
+    await withRelayInfo(
+      {
+        configured: true,
+        can_deploy: true,
+        version: 'v',
+        directory: {
+          connected: true,
+          entries: DIRECTORY_WARN_AT - 1,
+          verified: DIRECTORY_WARN_AT - 1,
+          machines: 2,
+          devices: 400,
+          revocations: 57,
+        },
+      },
+      async () => {
+        await mountRemote({ relay: RELAY_UP })
+        expect(await screen.findByText(/2 machines, 400 devices, 57 revocations/)).toBeTruthy()
+        expect(screen.queryByText(/flue relay reset/)).toBeNull()
       },
     )
   })

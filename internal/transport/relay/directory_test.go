@@ -562,7 +562,7 @@ func TestDirectoryDropsEntriesPastTheCeiling(t *testing.T) {
 	f := newDirFixture(t)
 	// One real revocation, then far more filler than the ceiling allows. The
 	// filler is stored first, so the real one falls past the cut.
-	for i := 0; i < maxDirectoryEntries+8; i++ {
+	for i := 0; i < MaxDirectoryEntries+8; i++ {
 		f.fd.store([]byte{byte(i), byte(i >> 8), 'f', 'i', 'l', 'l'})
 	}
 	dead := someKey(t, 0xA1)

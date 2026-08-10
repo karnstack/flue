@@ -25,6 +25,7 @@ import (
 	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/fleet"
+	"github.com/karnstack/flue/internal/transport/relay"
 	relaybundle "github.com/karnstack/flue/relay"
 	"github.com/karnstack/flue/web"
 )
@@ -1359,6 +1360,67 @@ func TestRunRelayStatusSaysWhenThisMachineIsMissing(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "this machine is not in the directory") {
 		t.Errorf("status does not report the missing machine certificate:\n%s", out.String())
+	}
+}
+
+// TestRunRelayStatusWarnsBeforeTheDirectoryFills: the cap has no gentle
+// failure — at 512 the relay refuses every new blob before storing it and
+// therefore before pushing it, so a revocation made past that point reaches
+// nobody — and nothing frees an entry short of `flue relay reset`. Without a
+// line here the first signal an operator gets is a 507 in a daemon log, after
+// a revoke they believed had crossed the fleet.
+func TestRunRelayStatusWarnsBeforeTheDirectoryFills(t *testing.T) {
+	// A relay holding n entries, none of which need to verify: the warning is
+	// about how full the relay is, which is its own claim about itself.
+	crowded := func(t *testing.T, n int) string {
+		t.Helper()
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			entries := make([]map[string]any, 0, n)
+			for i := range n {
+				entries = append(entries, map[string]any{"key": "k", "blob": []byte(fmt.Sprintf("blob-%d", i))})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"v": 1, "entries": entries})
+		}))
+		t.Cleanup(ts.Close)
+		return "ws" + strings.TrimPrefix(ts.URL, "http")
+	}
+
+	for _, tc := range []struct {
+		name    string
+		entries int
+		want    string
+		absent  string
+	}{
+		{name: "room to spare", entries: relay.DirectoryWarnAt - 1, absent: "flue relay reset"},
+		{name: "filling up", entries: relay.DirectoryWarnAt, want: "entries full"},
+		{name: "full", entries: relay.MaxDirectoryEntries, want: "the directory is full"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			if err := config.SaveRelay(config.Relay{
+				URL:       crowded(t, tc.entries),
+				Secret:    "s",
+				FleetSeed: testFleetSeed,
+				MachineID: "karns-macbook-pro-a1b2-0f9a12cd",
+			}); err != nil {
+				t.Fatalf("SaveRelay: %v", err)
+			}
+			var out bytes.Buffer
+			if err := runRelayStatus(&out); err != nil {
+				t.Fatalf("runRelayStatus: %v", err)
+			}
+			got := out.String()
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("status does not say %q:\n%s", tc.want, got)
+			}
+			if tc.want != "" && !strings.Contains(got, "flue relay reset") {
+				t.Errorf("status warns about the cap without naming the way out:\n%s", got)
+			}
+			if tc.absent != "" && strings.Contains(got, tc.absent) {
+				t.Errorf("status warns about a directory with room to spare:\n%s", got)
+			}
+		})
 	}
 }
 

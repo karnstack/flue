@@ -44,12 +44,31 @@ import { keyHex, sameKey, verifyCert, type Cert } from '@/crypto/cert'
 const MAX_BLOB_BYTES = 4096
 
 /**
- * How many entries one answer may carry, mirroring `MAX_ENTRIES`. The Worker
- * refuses to store a 513th — it answers 507 rather than evicting, because
- * evicting could drop a revocation — so a longer answer is not a bigger fleet,
- * it is a relay that has stopped speaking this protocol. The rest go unread.
+ * How many entries one answer may carry, mirroring `MAX_ENTRIES` in
+ * relay/src/directory.ts and `MaxDirectoryEntries` in the daemon's leg. The
+ * Worker refuses to store a 513th — it answers 507 rather than evicting,
+ * because evicting could drop a revocation — so a longer answer is not a bigger
+ * fleet, it is a relay that has stopped speaking this protocol. The rest go
+ * unread.
+ *
+ * Exported because it is also the number the Remote screen measures a fleet
+ * against (routes/remote.tsx, FleetLine): the cap has no gentle failure, so the
+ * screen warns before it, and a second copy of 512 over there could drift from
+ * the one this reader enforces.
  */
-const MAX_ENTRIES = 512
+export const MAX_ENTRIES = 512
+
+/**
+ * Where a status surface starts saying the directory is filling up: 90% of the
+ * cap, the same threshold `flue relay status` uses (internal/transport/relay,
+ * DirectoryWarnAt).
+ *
+ * At the cap the relay refuses every new blob, and refuses it before storing
+ * and therefore before pushing — so a revocation made past that point reaches
+ * nobody — and nothing frees an entry short of `flue relay reset`. Warning late
+ * is the same as not warning.
+ */
+export const DIRECTORY_WARN_AT = Math.floor((MAX_ENTRIES * 9) / 10)
 
 /**
  * The ceiling on the document itself, in characters.

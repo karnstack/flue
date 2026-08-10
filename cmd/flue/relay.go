@@ -25,6 +25,7 @@ import (
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaydeploy"
+	"github.com/karnstack/flue/internal/transport/relay"
 	relaybundle "github.com/karnstack/flue/relay"
 	"github.com/karnstack/flue/web"
 )
@@ -628,10 +629,35 @@ func directoryLine(rc config.Relay) string {
 		line += fmt.Sprintf("\n          %s signed by something else; this relay may belong to another fleet",
 			plural(counts.Entries-counts.Verified, "entry is", "entries are"))
 	}
+	line += capacityLine(counts.Entries)
 	if counts.MachineListed {
 		return line
 	}
 	return line + "\n          this machine is not in the directory: other devices will not discover it"
+}
+
+// capacityLine is the warning that the directory is filling up, or the flatter
+// statement that it is already full. Empty for a fleet with room, because a
+// status report that says "everything is fine" in three ways is one nobody
+// reads.
+//
+// It is here because the cap fails hard and silently. At MaxDirectoryEntries
+// the relay refuses every new blob — before storing it and therefore before
+// pushing it, so a revocation made past that point reaches nobody — and no
+// deploy, update or re-setup frees an entry. Without this line the first thing
+// an operator sees is a 507 in a daemon log after a revoke they believed had
+// crossed the fleet.
+func capacityLine(entries int) string {
+	switch {
+	case entries >= relay.MaxDirectoryEntries:
+		return fmt.Sprintf("\n          the directory is full (%d of %d): nothing new is distributed, not even a revocation. `flue relay reset` empties it and the fleet republishes",
+			entries, relay.MaxDirectoryEntries)
+	case entries >= relay.DirectoryWarnAt:
+		return fmt.Sprintf("\n          the directory is %d of %d entries full; at %d nothing new is distributed, not even a revocation. `flue relay reset` empties it and the fleet republishes",
+			entries, relay.MaxDirectoryEntries, relay.MaxDirectoryEntries)
+	default:
+		return ""
+	}
 }
 
 // plural is the one-or-many spelling of a count. The status report is prose a

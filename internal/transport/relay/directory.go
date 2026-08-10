@@ -73,16 +73,32 @@ const (
 	// megabyte it feels like sending.
 	maxBlobBytes = 4096
 
-	// maxDirectoryEntries is how many entries one GET may carry, mirroring
+	// MaxDirectoryEntries is how many entries one GET may carry, mirroring
 	// MAX_ENTRIES in relay/src/directory.ts. Entries past it are dropped
 	// unread: the Worker refuses to store a 513th (it answers 507 rather than
 	// evicting, because evicting could drop a revocation), so a longer answer
 	// is not a bigger fleet, it is a relay that has stopped speaking this
 	// protocol.
-	maxDirectoryEntries = 512
+	//
+	// Exported because it is also the number the status surfaces measure a
+	// fleet against — `flue relay status` warns as the directory approaches it
+	// (cmd/flue, directoryLine), and a second copy of 512 in that file would be
+	// a number that could drift from the one the reader actually enforces.
+	MaxDirectoryEntries = 512
+
+	// DirectoryWarnAt is where a status surface starts saying the directory is
+	// filling up: 90% of the cap.
+	//
+	// It exists because the cap has no gentle failure. At 512 the relay refuses
+	// every new blob — and refuses it before storing and before pushing, so a
+	// revocation made past that point reaches nobody at all — and nothing frees
+	// an entry short of `flue relay reset`. Without a warning the first signal
+	// an operator gets is a 507 in a daemon log *after* a revoke they believed
+	// had crossed the fleet, which is precisely the moment it is worth least.
+	DirectoryWarnAt = MaxDirectoryEntries * 9 / 10
 
 	// maxDirectorySnapshot bounds the GET's body before anything parses it.
-	// The worst honest case is maxDirectoryEntries × maxBlobBytes of base64
+	// The worst honest case is MaxDirectoryEntries × maxBlobBytes of base64
 	// (four bytes per three) plus the JSON around it — about 2.8 MiB — and
 	// this is that with room to spare. Without it, `GET /directory` is an
 	// unbounded read from a machine on the internet.
@@ -505,9 +521,9 @@ func (d *Directory) ingestSnapshot(ctx context.Context) {
 	// truth costs nothing but freshness, which is the availability a relay has
 	// always been able to take away.
 	for i, e := range doc.Entries {
-		if i >= maxDirectoryEntries {
+		if i >= MaxDirectoryEntries {
 			d.log.Warn("the fleet directory served more entries than it can hold; the rest are ignored",
-				"entries", len(doc.Entries), "ceiling", maxDirectoryEntries)
+				"entries", len(doc.Entries), "ceiling", MaxDirectoryEntries)
 			break
 		}
 		if kind, ok := d.ingest(e.Blob, "snapshot"); ok {
@@ -627,7 +643,7 @@ func (d *Directory) alreadySeen(digest [32]byte) (string, bool) {
 func (d *Directory) remember(digest [32]byte, kind string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if len(d.seenKind) >= maxDirectoryEntries {
+	if len(d.seenKind) >= MaxDirectoryEntries {
 		// The directory cannot hold more than this, so a process that has seen
 		// this many distinct blobs is either very long-lived across a fleet's
 		// whole history or is being fed by a relay that is not obeying its own

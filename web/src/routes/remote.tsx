@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useRelayTransport } from '@/hooks/use-relay-transport'
 import { cn } from '@/lib/utils'
+import { DIRECTORY_WARN_AT, MAX_ENTRIES } from '@/relay/directory'
 
 /**
  * The commands this screen hands over, spelled exactly as the CLI spells them
@@ -360,14 +361,44 @@ function FleetLine({ directory }: { directory?: DirectoryCounts }) {
   }
   const unsigned = directory.entries - directory.verified
   return (
+    <>
+      <p className={cn(NOTE, 'max-w-[65ch]')}>
+        Fleet: {count(directory.machines, 'machine')}, {count(directory.devices, 'device')},{' '}
+        {count(directory.revocations, 'revocation')} — everything this machine's fleet key could
+        check.
+        {unsigned > 0 &&
+          ` ${count(unsigned, 'entry', 'entries')} in the directory ${
+            unsigned === 1 ? 'was' : 'were'
+          } signed by something else; this relay may belong to another fleet.`}
+      </p>
+      <FleetCapacity entries={directory.entries} />
+    </>
+  )
+}
+
+/**
+ * How close the directory is to the one limit it has no gentle failure for.
+ *
+ * Nothing above 10% of headroom, because a screen that reports health three
+ * ways is one nobody reads. Past that it is worth the room: at the cap the
+ * relay refuses every new blob *before* storing it and therefore before
+ * pushing it, so a device paired after that point reaches only the machine
+ * that paired it, and a revocation made after it reaches nobody at all. No
+ * deploy or update frees an entry — `flue relay reset` is the only thing that
+ * does, and the fleet republishes into the empty directory by itself.
+ */
+function FleetCapacity({ entries }: { entries: number }) {
+  if (entries < DIRECTORY_WARN_AT) return null
+  const full = entries >= MAX_ENTRIES
+  return (
     <p className={cn(NOTE, 'max-w-[65ch]')}>
-      Fleet: {count(directory.machines, 'machine')}, {count(directory.devices, 'device')},{' '}
-      {count(directory.revocations, 'revocation')} — everything this machine's fleet key could
-      check.
-      {unsigned > 0 &&
-        ` ${count(unsigned, 'entry', 'entries')} in the directory ${
-          unsigned === 1 ? 'was' : 'were'
-        } signed by something else; this relay may belong to another fleet.`}
+      {full
+        ? `The fleet directory is full (${entries} of ${MAX_ENTRIES} entries). `
+        : `The fleet directory is ${entries} of ${MAX_ENTRIES} entries full. `}
+      {full ? 'Nothing new is being distributed' : `At ${MAX_ENTRIES} nothing new is distributed`} —
+      a device paired from here reaches only this machine, and a revoke reaches nobody. Run{' '}
+      <code className="font-mono">flue relay reset</code> to empty it; every machine republishes
+      what it holds.
     </p>
   )
 }
