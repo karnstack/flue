@@ -606,17 +606,27 @@ func (c *conn) handleControl(msg any) {
 		}
 		token, expires := c.srv.pairing.start(time.Now())
 		c.srv.logger().Info("pairing started", "peer", c.peer, "expiresAt", expires.Unix())
-		// Two parameters, and they are not the same kind of thing. `t` is the
-		// single-use credential; `k` is the daemon's static public key, and it
-		// is here because this URL is what the QR encodes — a screen the user
-		// physically controls, read by a camera, which is the only leg of the
-		// ceremony no intermediary can sit in. The device pins the key it reads
-		// there and then requires the answer to its POST to match it. Learning
-		// the key from that answer instead would be trust-on-first-use over
-		// precisely the channel the pinned key exists to protect.
+		// Three parameters at most, and they are not the same kind of thing.
+		// `t` is the single-use credential; `k` is the daemon's static public
+		// key; `f` is the fleet public key, when this daemon has one. The last
+		// two are here because this URL is what the QR encodes — a screen the
+		// user physically controls, read by a camera, which is the only leg of
+		// the ceremony no intermediary can sit in. The device pins `k` and then
+		// requires the answer to its POST to match it; it pins `f` and from
+		// then on accepts any machine whose certificate verifies under it
+		// (spec/fleet-trust.md). Learning either key from that answer instead
+		// would be trust-on-first-use over precisely the channel the pinned
+		// keys exist to protect.
 		//
-		// Both are unpadded URL-safe base64 so they can be spliced in raw with
-		// no escaping; see pairingState.start and Server.daemonPubParam.
+		// All three are unpadded URL-safe base64 so they can be spliced in raw
+		// with no escaping; see pairingState.start, Server.daemonPubParam and
+		// Server.fleetPubParam.
+		//
+		// `f` is omitted rather than sent empty on a daemon with no fleet key:
+		// the pairing page reads a present-but-unusable value as a link that
+		// has been tampered with, and a relay from before the fleet key is not
+		// that — it is a browser that pairs with this machine and learns of no
+		// others.
 		//
 		// DaemonPub stays on the message as well. It is the same key in the
 		// encoding the rest of the wire uses, read by a browser that is already
@@ -626,9 +636,13 @@ func (c *conn) handleControl(msg any) {
 		// pairingOrigin decides: a live relay's origin when there is one, and
 		// c.origin otherwise. A QR is read by a phone, and a phone cannot open
 		// the loopback address this connection arrived on.
+		pairURL := c.srv.pairingOrigin(c.origin) + PairPagePath + "?t=" + token + "&k=" + c.srv.daemonPubParam()
+		if fleetPub := c.srv.fleetPubParam(); fleetPub != "" {
+			pairURL += "&f=" + fleetPub
+		}
 		_ = c.sendControl(wire.Pairing{
 			Token:     token,
-			URL:       c.srv.pairingOrigin(c.origin) + PairPagePath + "?t=" + token + "&k=" + c.srv.daemonPubParam(),
+			URL:       pairURL,
 			DaemonPub: c.srv.daemonPub(),
 			ExpiresAt: expires.Unix(),
 		})

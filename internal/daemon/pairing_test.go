@@ -1024,6 +1024,88 @@ func TestPairStartURLCarriesTheDaemonKey(t *testing.T) {
 	if want := base64.StdEncoding.EncodeToString(raw); got.DaemonPub != want {
 		t.Errorf("daemonPub = %q, want the key from the URL %q", got.DaemonPub, want)
 	}
+
+	// A daemon with no fleet key says so by omission. An `f=` that was present
+	// and empty would read to the pairing page as a link something rewrote,
+	// which is not what a relay from before the fleet key is.
+	if q.Has("f") {
+		t.Errorf("f = %q on a daemon with no fleet key; the parameter should be absent", q.Get("f"))
+	}
+}
+
+// TestPairStartURLCarriesTheFleetKey: the QR is where the browser learns the
+// second key it pins.
+//
+// `k` anchors this browser to this machine; `f` anchors it to the fleet, and
+// from that pin the browser accepts any machine whose machine certificate
+// verifies under it (spec/fleet-trust.md, "What changes in the handshake").
+// That is a fleet-wide trust decision, so it has to arrive by the one leg of
+// the ceremony no intermediary can sit in — the same leg, and the same
+// encoding, as `k`. What must never travel here is the seed: a browser
+// holding it could mint certificates for the fleet.
+func TestPairStartURLCarriesTheFleetKey(t *testing.T) {
+	ts, srv, fk := newFleetPairHTTPServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.PairStart{})
+
+	var got wire.Pairing
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		p, ok := msg.(wire.Pairing)
+		if ok {
+			got = p
+		}
+		return ok
+	})
+
+	u, err := url.Parse(got.URL)
+	if err != nil {
+		t.Fatalf("pairing url %q does not parse: %v", got.URL, err)
+	}
+	f := u.Query().Get("f")
+	if f == "" {
+		t.Fatalf("pairing url %q carries no f=; the device cannot learn the fleet", got.URL)
+	}
+	if strings.ContainsAny(f, "+/=") {
+		t.Errorf("f = %q carries characters that are not URL-safe", f)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(f)
+	if err != nil {
+		t.Fatalf("f = %q is not unpadded URL-safe base64: %v", f, err)
+	}
+	if !bytes.Equal(raw, fk.Public()) {
+		t.Errorf("f decodes to %x, want the fleet public key %x", raw, fk.Public())
+	}
+	// The public half and nothing else. The seed is the credential that signs
+	// for the whole fleet, and no URL a phone opens may ever carry it.
+	if strings.Contains(got.URL, fk.Seed()) {
+		t.Fatal("the pairing url carries the fleet seed; it must carry the public key alone")
+	}
+	if !bytes.Equal(raw, srv.identity.Fleet.Public()) {
+		t.Error("f is not this daemon's own fleet public key")
+	}
+}
+
+// newFleetPairHTTPServer is newPairServer with a fleet key and a place on the
+// relay — what a machine that has run `flue relay join` looks like.
+func newFleetPairHTTPServer(t *testing.T) (*httptest.Server, *Server, fleet.Key) {
+	t.Helper()
+	dir := t.TempDir()
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	srv := New(session.NewRegistry(time.Now), nil, http.NotFoundHandler(), "test",
+		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: fk})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	srv.SetAuth(local.NewAuth(tok, portOf(t, ts)))
+	srv.SetRelayMachine("karns-mbp-a1b2-0f9a12cd", "Karn's MacBook Pro")
+	return ts, srv, fk
 }
 
 func TestPairCancelInvalidatesTheToken(t *testing.T) {

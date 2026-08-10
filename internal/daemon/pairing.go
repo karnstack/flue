@@ -244,6 +244,35 @@ func (s *Server) daemonPubParam() string {
 	return base64.RawURLEncoding.EncodeToString(s.identity.Key.Public)
 }
 
+// fleetPubParam is the fleet *public* key as the pairing URL carries it, and
+// the empty string on a daemon that holds no fleet key.
+//
+// It rides the QR beside `k` and for the same reason, one level up: `k`
+// anchors this browser to this machine, and this anchors it to the whole
+// fleet (spec/fleet-trust.md, "What changes in the handshake"). A device that
+// pins it accepts any machine whose machine certificate verifies under it and
+// pins that certificate's `noise` key for the IK handshake — which is what
+// turns "pair once per machine" into "pair once". So it has to arrive by the
+// one leg of the ceremony an intermediary cannot sit in, exactly as the
+// daemon's own key does; a fleet key learned from the relay's answer would be
+// a browser trusting whoever served it a machine list.
+//
+// The public half only, and never the seed: the seed is in the join line and
+// in relay.json, and a browser that held it could mint certificates for the
+// fleet. Same encoding as `k` — unpadded URL-safe base64, spliced raw.
+//
+// Empty is a real answer, not a fault. A daemon whose relay.json predates the
+// fleet key, or one deployed from the Remote screen in a process that booted
+// without one (Identity is fixed at construction), pairs exactly as it always
+// did: the browser pins this machine and learns of no others.
+func (s *Server) fleetPubParam() string {
+	pub := s.identity.Fleet.Public()
+	if len(pub) == 0 {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(pub)
+}
+
 // PairOutcome is the transport-neutral answer to a pairing attempt: the HTTP
 // status and the JSON body the request should be answered with.
 //
