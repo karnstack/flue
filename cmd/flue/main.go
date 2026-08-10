@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -412,7 +413,17 @@ func fleetOnDisk(log *slog.Logger) daemon.FleetSource {
 // It reports whether a transport was actually started — false for the
 // ordinary no-relay.json case and for every logged failure — so the caller's
 // bookkeeping (relayRuntime) knows whether a later deploy may start one.
-func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identity) bool {
+//
+// The second return is how a caller waits for the leg it started to be gone:
+// it blocks until both goroutines below have returned, and it is nil whenever
+// started is false. Cancelling the context alone is not enough for anyone who
+// means to start *another* leg — Transport.Run reports the relay off from a
+// deferred call on a goroutine of its own, and that line, landing a moment
+// after a replacement leg has said "connecting", would leave every welcome
+// announcing a relay this daemon is in fact dialling and every pairing URL
+// naming loopback. relayRuntime.restart is the caller that needs it, and the
+// reason it exists.
+func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identity) (bool, func()) {
 	// The same sink and format the daemon's own default logger uses, which
 	// launchd and systemd already capture.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -422,10 +433,10 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 		// Configured and unreadable is worth a line: "no relay" is the ordinary
 		// state, but this is a file somebody wrote and this daemon cannot use.
 		logger.Warn("relay not started", "err", err)
-		return false
+		return false, nil
 	}
 	if !ok {
-		return false
+		return false, nil
 	}
 
 	// The public half only: signing stays with the daemon (pairing,
@@ -457,7 +468,7 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 		fleetKey, err = fleet.Parse(rc.FleetSeed)
 		if err != nil {
 			logger.Warn("relay not started", "err", err)
-			return false
+			return false, nil
 		}
 	}
 	cfg := relay.Config{
@@ -471,8 +482,10 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
 	if err != nil {
 		logger.Warn("relay not started", "err", err)
-		return false
+		return false, nil
 	}
+	// Both legs are joined, so a caller can wait for this start to be undone.
+	var legs sync.WaitGroup
 	// The directory leg, beside the hub leg and independent of it: one keeps
 	// this machine's browsers connected, the other keeps this machine's idea
 	// of who the fleet trusts up to date (spec/fleet-trust.md, "The fleet
@@ -497,7 +510,9 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 			c := dir.Counts()
 			return daemon.DirectoryCounts(c)
 		})
+		legs.Add(1)
 		go func() {
+			defer legs.Done()
 			if err := dir.Run(ctx); err != nil {
 				logger.Warn("fleet directory stopped", "err", err)
 			}
@@ -525,12 +540,14 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 	// dropped: welcomes would announce a dead relay and pairing URLs would go
 	// back to naming loopback while the relay was carrying traffic.
 	srv.SetRelayStatus(daemon.RelayConnecting, "")
+	legs.Add(1)
 	go func() {
+		defer legs.Done()
 		if err := t.Run(ctx); err != nil {
 			logger.Warn("relay stopped", "err", err)
 		}
 	}()
-	return true
+	return true, legs.Wait
 }
 
 // newRelayRuntime is the relay leg's start/stop bookkeeping for one daemon
@@ -542,10 +559,17 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 // nothing else, while cancelling the daemon's still takes them with it. The
 // teardown pairs the cancel with forgetRelay, so a stopped leg cannot leave the
 // daemon still announcing the relay it is no longer dialling.
+//
+// The teardown also *waits* for the legs it cancelled, which is what makes
+// relayRuntime.restart honest rather than hopeful: the old leg has stopped
+// speaking for this daemon before the new one starts. The wait is bounded, so a
+// leg that somehow ignored its context costs a deploy a second rather than
+// hanging the request that asked for it.
 func newRelayRuntime(ctx context.Context, srv *daemon.Server, identity daemon.Identity) *relayRuntime {
 	return &relayRuntime{start: func() (bool, func()) {
 		relayCtx, cancel := context.WithCancel(ctx)
-		if !startRelay(relayCtx, srv, identity) {
+		started, wait := startRelay(relayCtx, srv, identity)
+		if !started {
 			// Nothing was started, so there is nothing to stop — and the
 			// context is released here rather than leaked for the life of the
 			// daemon.
@@ -554,9 +578,33 @@ func newRelayRuntime(ctx context.Context, srv *daemon.Server, identity daemon.Id
 		}
 		return true, func() {
 			cancel()
+			awaitLegs(wait, legStopTimeout)
 			forgetRelay(srv)
 		}
 	}}
+}
+
+// legStopTimeout bounds how long a stop waits for the legs it cancelled.
+// Both return on a cancelled context by construction, so this is the backstop
+// for a bug rather than a budget for ordinary work; past it the stop proceeds
+// and the worst case is the stale status line forgetRelay describes.
+const legStopTimeout = 5 * time.Second
+
+func awaitLegs(wait func(), within time.Duration) {
+	if wait == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wait()
+	}()
+	timer := time.NewTimer(within)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
 }
 
 // forgetRelay takes the relay out of everything the daemon says about itself,

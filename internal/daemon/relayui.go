@@ -45,6 +45,15 @@ const (
 	// call — the Worker is not this endpoint's to undeploy — and a POST
 	// because it is the most destructive local mutation the screen has.
 	RelayLeavePath = "/api/relay/leave"
+	// RelayReloadPath makes the daemon's relay leg match the relay.json on
+	// disk. It is the one endpoint here that no screen calls: it exists for
+	// the flue CLI, which rewrites that file from a process of its own —
+	// `flue relay setup`, `join`, `address`, `leave` — and until now could
+	// only tell the user to restart their daemon afterwards. Loopback and the
+	// session token are the boundary, as everywhere else on this surface, and
+	// the request carries nothing: which relay to dial is not a parameter, it
+	// is whatever the file says.
+	RelayReloadPath = "/api/relay/reload"
 )
 
 // maxRelayUIBodyBytes bounds a deploy request: a token, an account id, a
@@ -187,10 +196,6 @@ type RelayUIDeployResult struct {
 	// from Status — RelayJoinPath rebuilds it, behind a click, for the same
 	// reason.
 	JoinCommand string `json:"join_command,omitempty"`
-	// RestartNeeded is true when a relay transport was already running in
-	// this daemon: the new relay.json takes effect on the next restart, and
-	// the UI must say so instead of pretending.
-	RestartNeeded bool `json:"restart_needed,omitempty"`
 }
 
 // RelayUI is the service behind the endpoints. Implementations own every
@@ -213,6 +218,10 @@ type RelayUI interface {
 	// socket up would make that a lie. Deploying is not its business — the
 	// Worker stays where it is, and the steps say so.
 	Leave(ctx context.Context) (RelayUIDeployResult, error)
+	// Reload brings the relay leg into line with the relay.json on disk,
+	// whatever wrote it. It changes no file itself, which is what makes it
+	// safe for the CLI to call after writing one.
+	Reload(ctx context.Context) (RelayUIDeployResult, error)
 }
 
 // ErrRelayUIBadRequest marks a service failure the caller caused — a missing
@@ -326,6 +335,32 @@ func (s *Server) handleRelayLeave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := ui.Leave(r.Context())
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrRelayUIBadRequest) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	writeJSON(w, res)
+}
+
+// handleRelayReload answers POST RelayReloadPath: no body, no parameters, and
+// the same method guard as every other mutation here. It mutates a socket
+// rather than a file, which is the one thing the CLI cannot do for itself.
+func (s *Server) handleRelayReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ui := s.currentRelayUI()
+	if ui == nil {
+		http.NotFound(w, r)
+		return
+	}
+	res, err := ui.Reload(r.Context())
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, ErrRelayUIBadRequest) {

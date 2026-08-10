@@ -1676,8 +1676,9 @@ func TestRunRelayLeaveDeletesTheRelayConfig(t *testing.T) {
 // them: that leaving undeployed the Worker (it does not — this command makes no
 // API call at all), that rejoining is a matter of running the command again (it
 // needs the join line, from a machine that still has one), that the machine
-// comes back as itself (a rejoin mints a new id), and that a daemon that is
-// already running notices (it does not, until it restarts).
+// comes back as itself (a rejoin mints a new id), and what became of the
+// running daemon's socket — which this command now settles rather than warns
+// about, by telling the daemon (there is none in this test, and it says so).
 func TestRunRelayLeaveTellsTheTruthAboutTheBlastRadius(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	leaveRelay(t)
@@ -1694,9 +1695,10 @@ func TestRunRelayLeaveTellsTheTruthAboutTheBlastRadius(t *testing.T) {
 		// The way back, and that it is not this command in reverse.
 		"flue relay join",
 		"new id",
-		// A running daemon keeps the socket until it restarts — stated
-		// rather than left to be discovered by a device that still connects.
-		"flue disable && flue enable",
+		// What happened to the socket, stated rather than left to be
+		// discovered by a device that still connects. With a daemon running
+		// this is the leg being stopped; with none, that there is none.
+		"no daemon is running",
 		// The directory keeps this machine's certificate and this machine
 		// stops re-publishing what it holds.
 		"fleet directory",

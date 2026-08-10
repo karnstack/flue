@@ -3312,6 +3312,9 @@ type stubRelayUI struct {
 	// left counts the leaves, for the one endpoint whose whole subject is that
 	// it happened exactly as often as it was asked for.
 	left int
+	// reloaded counts the same thing for the endpoint the CLI knocks on after
+	// it has rewritten relay.json.
+	reloaded int
 }
 
 func (s *stubRelayUI) Status(context.Context) RelayUIStatus { return RelayUIStatus{} }
@@ -3333,6 +3336,10 @@ func (s *stubRelayUI) SetAddress(context.Context, string) (RelayUIDeployResult, 
 func (s *stubRelayUI) Leave(context.Context) (RelayUIDeployResult, error) {
 	s.left++
 	return RelayUIDeployResult{Steps: []string{"left wss://r — relay.json deleted"}}, nil
+}
+func (s *stubRelayUI) Reload(context.Context) (RelayUIDeployResult, error) {
+	s.reloaded++
+	return RelayUIDeployResult{Steps: []string{"the running daemon picked up the new configuration"}}, nil
 }
 
 // TestRelayUIJoinEndpoint: an authenticated GET gets the line back, and a

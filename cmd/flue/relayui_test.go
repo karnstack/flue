@@ -6,15 +6,20 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/fleet"
+	"github.com/karnstack/flue/internal/session"
+	"github.com/karnstack/flue/internal/transport/local"
 )
 
 // The service behind the Remote screen is the same deploy the CLI performs,
@@ -24,6 +29,33 @@ import (
 
 func uiService(f *fakeCloudflare, rt *relayRuntime) *relayUIService {
 	return &relayUIService{runtime: rt, base: f.srv.URL}
+}
+
+// serveWithRelayUI is a real daemon on loopback with a relay service behind
+// its /api/relay endpoints — the daemon a CLI command in another process finds
+// through the runtime record and talks to over the loopback token. A nil
+// service leaves those endpoints 404, which is what a build from before them
+// looks like from the outside.
+func serveWithRelayUI(t *testing.T, token string, ui daemon.RelayUI) int {
+	t.Helper()
+	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth(token, 0), uiHandler(), version, daemon.Identity{})
+	if ui != nil {
+		srv.SetRelayUI(ui)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	t.Cleanup(srv.Shutdown)
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("parse %q: %v", ts.URL, err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("port of %q: %v", ts.URL, err)
+	}
+	// The Host allowlist is port-specific and the port is only known now.
+	srv.SetAuth(local.NewAuth(token, port))
+	return port
 }
 
 // alwaysStarts is a transport that comes up and can be taken down again, for
@@ -55,8 +87,12 @@ func TestRelayUIProvisionDeploysAndStartsTheTransport(t *testing.T) {
 	if started != 1 || !rt.running {
 		t.Fatalf("transport starts = %d, running = %v; want exactly one start", started, rt.running)
 	}
-	if res.RestartNeeded {
-		t.Fatal("a first deploy demanded a restart")
+	// Nothing on a deploy result may send the user to a terminal to restart
+	// their daemon: the leg is replaced in this process and the fleet key is
+	// read from the file at every signature. This is pinned as a string search
+	// because the old warning was a step line, not a flag.
+	if strings.Contains(joined, "restart") {
+		t.Errorf("a deploy still asks for a restart:\n%s", joined)
 	}
 
 	cfg, ok, err := config.LoadRelay()
@@ -146,18 +182,105 @@ func TestRelayUIProvisionAsksWhichAccountAndDeploysNothing(t *testing.T) {
 	}
 }
 
-func TestRelayUIProvisionOnARunningTransportSaysRestart(t *testing.T) {
+// TestRelayUIProvisionReplacesALiveTransport: a second deploy used to be the
+// end of the road for this process. The leg was dialling the relay.json that
+// existed when it started, the deploy had just replaced that file — new
+// secret, new machine id, new fleet key — and the only answer the screen had
+// was "restart the daemon", with a window in between where a phone paired here
+// got a phone that could never roam.
+//
+// So the leg is replaced instead, and in the one order that is safe: the old
+// one is stopped and waited for before the new one dials, because two legs on
+// one relay is a Durable Object closing the working socket in favour of the
+// newcomer (relay/src/hub.ts).
+func TestRelayUIProvisionReplacesALiveTransport(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	f := newFakeCloudflare(t, oneAccount(), "karn")
-	rt := &relayRuntime{running: true, start: func() (bool, func()) { t.Fatal("a second transport was started"); return false, nil }}
+
+	var order []string
+	rt := &relayRuntime{
+		running: true,
+		stop:    func() { order = append(order, "stop") },
+		start: func() (bool, func()) {
+			order = append(order, "start")
+			return true, func() {}
+		},
+	}
 	svc := uiService(f, rt)
 
 	res, err := svc.Provision(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken})
 	if err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
-	if !res.RestartNeeded {
-		t.Fatal("re-deploying under a live transport did not ask for a restart")
+	if len(order) != 2 || order[0] != "stop" || order[1] != "start" {
+		t.Fatalf("leg lifecycle = %v, want the old leg stopped and then a new one started", order)
+	}
+	if !rt.running {
+		t.Fatal("no leg is running after a deploy")
+	}
+	joined := strings.Join(res.Steps, "\n")
+	if strings.Contains(joined, "restart") {
+		t.Errorf("re-deploying still asks for a restart:\n%s", joined)
+	}
+	if !strings.Contains(joined, "daemon connecting to the relay") {
+		t.Errorf("steps do not say the daemon is dialling the new relay:\n%s", joined)
+	}
+}
+
+// TestRelayUIReloadFollowsRelayJSON is the hook the CLI knocks on: `flue relay
+// setup` in a terminal writes relay.json from a process of its own, and the
+// daemon that has been running since login has to end up dialling it without
+// anybody restarting anything.
+func TestRelayUIReloadFollowsRelayJSON(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+
+	// A daemon with no relay at all: reload has nothing to dial and says so.
+	rt := &relayRuntime{start: alwaysStarts}
+	svc := uiService(f, rt)
+	res, err := svc.Reload(context.Background())
+	if err != nil {
+		t.Fatalf("Reload with no relay.json: %v", err)
+	}
+	if rt.running {
+		t.Fatal("reload started a leg with no relay.json to dial")
+	}
+	if !strings.Contains(strings.Join(res.Steps, "\n"), "no relay is configured") {
+		t.Errorf("steps = %v, want the no-relay answer", res.Steps)
+	}
+
+	// The other terminal writes one.
+	var out strings.Builder
+	if err := runRelaySetup(&out, strings.NewReader(setupToken+"\n"), f.client(), nil); err != nil {
+		t.Fatalf("runRelaySetup: %v", err)
+	}
+	cfg, _, _ := config.LoadRelay()
+
+	res, err = svc.Reload(context.Background())
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if !rt.running {
+		t.Fatal("the daemon did not start dialling the relay the CLI just configured")
+	}
+	if !strings.Contains(strings.Join(res.Steps, "\n"), cfg.URL) {
+		t.Errorf("steps = %v, want the relay it is now dialling (%s)", res.Steps, cfg.URL)
+	}
+
+	// And `flue relay leave` from a terminal: the file is gone, so the leg goes
+	// with it rather than the user being told to restart.
+	if err := config.DeleteRelay(); err != nil {
+		t.Fatalf("DeleteRelay: %v", err)
+	}
+	res, err = svc.Reload(context.Background())
+	if err != nil {
+		t.Fatalf("Reload after leave: %v", err)
+	}
+	if rt.running {
+		t.Fatal("the relay leg outlived the relay.json that configured it")
+	}
+	if !strings.Contains(strings.Join(res.Steps, "\n"), "relay leg stopped") {
+		t.Errorf("steps = %v, want the stopped leg said out loud", res.Steps)
 	}
 }
 
@@ -565,13 +688,33 @@ func TestRelayAddressRepointsWithoutReminting(t *testing.T) {
 	}
 
 	// The service spelling, and its refusals.
-	svc := &relayUIService{runtime: &relayRuntime{running: true}}
+	var order []string
+	svc := &relayUIService{runtime: &relayRuntime{
+		running: true,
+		stop:    func() { order = append(order, "stop") },
+		start: func() (bool, func()) {
+			order = append(order, "start")
+			return true, func() {}
+		},
+	}}
 	res, err := svc.SetAddress(context.Background(), "https://relay2.example.com")
 	if err != nil {
 		t.Fatalf("SetAddress: %v", err)
 	}
-	if !res.RestartNeeded {
-		t.Fatal("a live transport dials the old address; the result must say restart")
+	// The leg was dialling the old name. It dials the new one now, in this
+	// process — the address is the one thing a repoint can actually fix
+	// without help.
+	if len(order) != 2 || order[0] != "stop" || order[1] != "start" {
+		t.Fatalf("leg lifecycle = %v, want the old address dropped and the new one dialled", order)
+	}
+	joined := strings.Join(res.Steps, "\n")
+	if strings.Contains(joined, "restart") {
+		t.Errorf("a repoint still asks for a restart:\n%s", joined)
+	}
+	// What no restart fixes, and what the card must keep saying: a pairing
+	// lives in a browser, keyed to the origin it was made on.
+	if !strings.Contains(joined, "pair again") {
+		t.Errorf("steps do not carry the pairing consequence:\n%s", joined)
 	}
 	cfg, _, _ = config.LoadRelay()
 	if cfg.URL != "wss://relay2.example.com" {
@@ -579,5 +722,81 @@ func TestRelayAddressRepointsWithoutReminting(t *testing.T) {
 	}
 	if _, err := svc.SetAddress(context.Background(), "ftp://nope"); err == nil {
 		t.Fatal("a non-wss address was accepted")
+	}
+}
+
+// TestRelayJoinFromTheCLIRestartsARunningDaemonsLeg is the two processes, in
+// one test: a daemon serving on loopback, and `flue relay join` run beside it
+// the way a user runs it — in a terminal, from a binary that shares nothing
+// with the daemon but the config directory.
+//
+// The daemon's leg has to end up dialling the relay that join just wrote. It
+// used to end up dialling whatever it had at startup, with "restart the
+// daemon" printed as the way out, and every browser paired in between reaching
+// a machine that could not roam.
+func TestRelayJoinFromTheCLIRestartsARunningDaemonsLeg(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	token, err := config.LoadOrCreateToken()
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	legs := 0
+	rt := &relayRuntime{start: func() (bool, func()) { legs++; return true, func() {} }}
+	port := serveWithRelayUI(t, token, &relayUIService{runtime: rt})
+	if err := daemon.WriteRuntime(port); err != nil {
+		t.Fatalf("WriteRuntime: %v", err)
+	}
+
+	var out strings.Builder
+	err = runRelayJoin(&out, []string{
+		"wss://relay.example.com",
+		"--secret", "s3cr3t-daemon-secret",
+		"--fleet", testFleetSeed,
+	})
+	if err != nil {
+		t.Fatalf("runRelayJoin: %v", err)
+	}
+	if legs != 1 || !rt.running {
+		t.Fatalf("relay legs started = %d, running = %v; the daemon never picked up the join", legs, rt.running)
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "wss://relay.example.com") {
+		t.Errorf("join does not report the daemon dialling the new relay:\n%s", printed)
+	}
+	if strings.Contains(printed, "flue disable && flue enable") {
+		t.Errorf("join still tells the user to restart a daemon it just reconfigured:\n%s", printed)
+	}
+}
+
+// TestRelayJoinKeepsTheRestartNoteForADaemonItCannotTell: the honest
+// remainder. A daemon that is running and does not answer this endpoint —
+// an older build, or one wedged — is the one case where a restart really is
+// the way to make it dial the new relay, and the only case that may say so.
+func TestRelayJoinKeepsTheRestartNoteForADaemonItCannotTell(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	token, err := config.LoadOrCreateToken()
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	// A daemon with no relay service wired: the endpoint 404s, exactly as a
+	// build from before it existed would.
+	port := serveWithRelayUI(t, token, nil)
+	if err := daemon.WriteRuntime(port); err != nil {
+		t.Fatalf("WriteRuntime: %v", err)
+	}
+
+	var out strings.Builder
+	if err := runRelayJoin(&out, []string{
+		"wss://relay.example.com",
+		"--secret", "s3cr3t-daemon-secret",
+		"--fleet", testFleetSeed,
+	}); err != nil {
+		t.Fatalf("runRelayJoin: %v", err)
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "could not be told") || !strings.Contains(printed, "flue disable && flue enable") {
+		t.Errorf("a daemon that could not be told was not reported, so nothing tells the user to restart it:\n%s", printed)
 	}
 }

@@ -448,6 +448,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle(RelayJoinPath, s.withAuth(http.HandlerFunc(s.handleRelayJoin)))
 	mux.Handle(RelayAddressPath, s.withAuth(http.HandlerFunc(s.handleRelayAddress)))
 	mux.Handle(RelayLeavePath, s.withAuth(http.HandlerFunc(s.handleRelayLeave)))
+	mux.Handle(RelayReloadPath, s.withAuth(http.HandlerFunc(s.handleRelayReload)))
 	mux.Handle(ReleasePath, s.withAuth(http.HandlerFunc(s.handleRelease)))
 	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
 	// never the app shell.
@@ -501,7 +502,8 @@ func methodPolicy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		postable := r.URL.Path == MintPath || r.URL.Path == PairPath ||
 			r.URL.Path == RelayDeployPath || r.URL.Path == RelayUpdatePath ||
-			r.URL.Path == RelayAddressPath || r.URL.Path == RelayLeavePath
+			r.URL.Path == RelayAddressPath || r.URL.Path == RelayLeavePath ||
+			r.URL.Path == RelayReloadPath
 		allowed := r.Method == http.MethodGet || r.Method == http.MethodHead ||
 			(postable && r.Method == http.MethodPost)
 		if !allowed {
