@@ -169,7 +169,9 @@ export function SessionsRoute() {
   /**
    * What the fleet could not build for this browser: machines it has no
    * certificate for, and whether it pinned a fleet key at all. Null until an
-   * expansion has run, which is every tab before its welcome names a relay.
+   * expansion has run, which is every tab before its welcome names a relay —
+   * and null again the moment its machine says it is on none, because there is
+   * then no fleet for any of it to be a fact about (FleetClient.gaps).
    *
    * Read off the fleet on each delivery rather than carried in the payload,
    * because it changes once per expansion and the payload is delivered several
@@ -868,6 +870,15 @@ function PlacedBulkBar(props: {
  * Silent when there is nothing to say, which is now the ordinary case
  * everywhere — including on loopback, where enrolment is what closes the last
  * two gaps. A band reading "everything is fine" is a band nobody reads.
+ *
+ * And silent before any of that on a machine with no relay, which is what a
+ * fresh install is and the first screen anybody ever opens. Every sentence
+ * below is addressed to a reader who is on a fleet: there are no others to be
+ * missing from a list, and nothing anywhere to pair against, so all three would
+ * be false at once. The fleet is what makes that hold rather than a fourth
+ * branch here — it hands over no gaps at all while this tab knows no relay
+ * (fleet/fleet.ts, FleetClient.gaps) — and the invitation to set up remote
+ * access is the Remote screen's to make, on the screen that can carry it out.
  */
 function FleetGapBand({ gaps }: { gaps: FleetGaps }) {
   if (!gaps.fleetKey && gaps.pinned === 0) {

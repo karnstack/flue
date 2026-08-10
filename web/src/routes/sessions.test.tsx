@@ -561,6 +561,62 @@ describe('SessionsRoute', () => {
       expect(screen.queryByText(/pair there/)).toBeNull()
     })
 
+    it('says nothing at all about a fleet on a machine with no relay', async () => {
+      // The state a fresh install is in, and the first screen anybody sees:
+      // one machine, no relay.json, no fleet. Every sentence the band has is
+      // false here — there are no others to be missing, and nothing to pair
+      // against — so the honest band is no band. Setting up remote access is
+      // the Remote screen's offer to make, not this one's.
+      vi.stubGlobal('indexedDB', new IDBFactory())
+      localStorage.clear()
+      const { sock } = await mountSessions({ solo: true })
+      listed(sock, [info({ id: 's1' })])
+
+      act(() =>
+        sock.emitControl({ type: 'welcome', daemonId: 'd1', host: 'mesa.local', ver: '0.1.0' }),
+      )
+      // Long enough for an expansion to have run and reported, had this tab had
+      // anything to expand into.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      expect(screen.queryByText(/no key for the fleet/)).toBeNull()
+      expect(screen.queryByText(/this fleet/)).toBeNull()
+      // And the machine itself is on screen, working, which is the whole of
+      // what that state is.
+      expect(screen.getByRole('link', { name: 'Open zsh' })).toBeTruthy()
+    })
+
+    it('takes the band down when its machine leaves the relay', async () => {
+      // The way the wrong advice actually reached a reader: the band is right
+      // while the machine is on a relay, and the machine then leaves — `flue
+      // relay leave`, or a relay.json deleted by hand — and the daemon comes
+      // back naming no relay. The snapshot the band spoke from used to outlive
+      // the fleet it described, so a tab left open kept telling its reader to
+      // go and repair a fleet that no longer existed.
+      vi.stubGlobal('indexedDB', new IDBFactory())
+      localStorage.clear()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' })])
+      act(() =>
+        sock.emitControl({
+          type: 'welcome',
+          daemonId: 'd1',
+          host: 'mesa.local',
+          ver: '0.1.0',
+          relay: { status: 'connected', origin: 'https://relay.example' },
+        }),
+      )
+      await waitFor(() => expect(screen.getByText(/holds\s+no key for the fleet/)).toBeTruthy())
+
+      act(() =>
+        sock.emitControl({ type: 'welcome', daemonId: 'd1', host: 'mesa.local', ver: '0.1.0' }),
+      )
+
+      await waitFor(() => expect(screen.queryByText(/no key for the fleet/)).toBeNull())
+    })
+
     it('reports a lost local daemon rather than showing an empty screen', async () => {
       const { sock } = await mountSessions()
       listed(sock, [info({ id: 's1' })])
