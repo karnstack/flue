@@ -8,7 +8,7 @@
 # Both dist directories are gitignored on purpose and must stay that way — see
 # web/embed.go and relay/embed.go.
 
-.PHONY: all web relay build run run-release web-dev test test-go test-web test-relay lint clean site-dev site-build site-deploy
+.PHONY: all web relay build build-e2e run run-release web-dev test test-go test-web test-relay e2e lint clean site-dev site-build site-deploy
 
 all: build
 
@@ -65,11 +65,33 @@ test-web:
 test-relay: relay
 	cd relay && pnpm test
 
+# The end-to-end suite: the real relay Worker under `wrangler dev`, two real
+# daemons, and the browser's own modules driving them (web/e2e). It is not part
+# of `make test` and not in CI — it wants workerd, three free ports and openssl,
+# and a gate that is occasionally red for none of those reasons is worse than no
+# gate. Run it when the fleet, the relay or the pairing path changed.
+#
+# `bin/flue-e2e` is the same binary as `bin/flue` plus cmd/flue/e2etrust.go,
+# which is behind `-tags e2e` and adds one root certificate authority — the one
+# the harness mints for its own relay — because `flue relay join` refuses a
+# ws:// address and macOS ignores SSL_CERT_FILE. No release build carries it.
+build-e2e: web relay
+	mkdir -p bin
+	go build -tags e2e -o bin/flue-e2e ./cmd/flue
+
+e2e: build-e2e
+	cd web && pnpm install --frozen-lockfile && pnpm run e2e
+
 lint: web relay
 	go vet ./...
 	# The dev-tagged build (make run) has no CI job of its own; vetting it
 	# here is what keeps web/dev.go from drifting out of compilability.
 	go vet -tags dev ./...
+	# And the e2e-tagged one, for the same reason and a stronger one: `make
+	# e2e` is not in CI at all, so without this line cmd/flue/e2etrust.go
+	# could stop compiling and nothing would say so until somebody reached
+	# for the suite — which is exactly when they least want to debug it.
+	go vet -tags e2e ./...
 	cd web && pnpm lint
 	cd relay && pnpm lint
 

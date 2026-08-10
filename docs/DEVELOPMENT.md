@@ -69,10 +69,16 @@ make test-go     # builds web/dist and relay/dist first; //go:embed needs both
 make test-web
 make test-relay
 make lint        # go vet (with and without the dev tag) + typecheck each package
+make e2e         # the end-to-end suite; not part of make test, not in CI
 ```
 
 A bare `go build ./cmd/flue` or `go test ./...` fails until `web/dist` and
 `relay/dist` exist. `make build` sequences all of it.
+
+`make e2e` is described under [the end-to-end suite](#4-the-end-to-end-suite-two-daemons-and-a-real-worker)
+below. It is deliberately out of `make test` and out of CI: it starts
+workerd and two daemons, and a gate that goes red because a port was busy
+teaches people to ignore gates.
 
 ## Working on the relay
 
@@ -183,6 +189,52 @@ The `--worker` name is the whole separation between dev and prod relays:
 one account can hold both `flue-relay` (the default an installed flue
 deploys) and `flue-relay-dev`, each with its own workers.dev hostname,
 secret and hubs. Breaking the dev one cannot touch the real one.
+
+### 4. The end-to-end suite (two daemons and a real Worker)
+
+```sh
+make e2e        # ~30 s cold, ~8 s warm; no account, no cost, no cleanup
+```
+
+The tier the other three cannot be: two real flue daemons, each with its own
+config directory and port, joined to the real relay Worker running under
+workerd, driven by the browser's own modules — `fleet/enrol.ts`,
+`relay/directory.ts`, `crypto/cert.ts`, `relay/socket.ts`, `fleet/fleet.ts`
+— imported from `web/src` and called the way the app calls them. It lives in
+[`web/e2e`](../web/e2e); the header comment on `fleet.e2e.ts` says what each
+assertion is for.
+
+It exists because every unit suite in this repo stubs the seam between two
+components, and the last several bugs all lived in a seam: a fleet key read
+at boot on one side and live on the other, a directory route no browser could
+reach, a loopback tab with no fleet identity, a certificate published where a
+commit message said it no longer was. Each component was right about itself
+and wrong about its neighbour.
+
+What it drives, in order: a daemon serving with no relay; that daemon joining
+one while it is already running; a browser pairing over the relay's origin; a
+second machine joining with nothing else done; and then each machine's own tab
+listing the other's sessions, input reaching a shell on the far machine, and a
+revoke on one machine killing the device on the other.
+
+Three things it needs, and how it fails if they are missing:
+
+- **`openssl` on `PATH`** — it mints a throwaway certificate for the local
+  relay, because `flue relay join` refuses anything but `wss://`/`https://`
+  and that refusal is worth keeping. macOS's LibreSSL and Ubuntu's OpenSSL
+  both do.
+- **Ports 8788, 7791 and 7792 free** — checked up front, so a busy port is
+  the first line of the failure rather than a timeout twenty seconds in.
+- **`bin/flue-e2e`** — `make e2e` builds it. It is the ordinary binary plus
+  `cmd/flue/e2etrust.go`, which is behind `-tags e2e` and adds exactly one
+  root certificate authority, the one the harness just minted. No release
+  build carries it; `.goreleaser.yaml` sets no tags.
+
+There is no browser in it, and two facts are browser-enforced: CORS and CSP.
+Those are asserted as the headers a browser would decide from — the relay's
+absent `Access-Control-Allow-Origin` on `GET /directory`, the daemon's
+`connect-src` — against live servers rather than fixtures. That pins the input
+to the decision and not the decision.
 
 ## How users update a deployed relay
 
