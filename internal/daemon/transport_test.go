@@ -150,7 +150,7 @@ func TestServeConnClosesTheTransportOnTheWayOutOfAPanic(t *testing.T) {
 // true once the relay arrives.
 func TestServeConnStampsTheDeviceLastSeen(t *testing.T) {
 	store := crypto.NewDeviceStore(t.TempDir())
-	dev, err := store.Add("phone", bytes.Repeat([]byte{0x2a}, 32))
+	dev, err := store.Add("phone", bytes.Repeat([]byte{0x2a}, 32), nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestServeConnStampsTheDeviceLastSeen(t *testing.T) {
 // being served a shell indefinitely.
 func TestServeConnRefusesADeviceTheRegistryNoLongerHolds(t *testing.T) {
 	store := crypto.NewDeviceStore(t.TempDir())
-	dev, err := store.Add("phone", bytes.Repeat([]byte{0x2a}, 32))
+	dev, err := store.Add("phone", bytes.Repeat([]byte{0x2a}, 32), nil)
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}

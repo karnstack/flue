@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/karnstack/flue/internal/crypto"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaywire"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
@@ -567,6 +569,93 @@ func TestPairDeviceRegistersTheDevice(t *testing.T) {
 	// The token is spent, exactly as it is over HTTP.
 	if again := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(deviceKey(0x3b)), "laptop"), "relay"); again.Status != http.StatusForbidden {
 		t.Errorf("replayed PairDevice = %d, want 403", again.Status)
+	}
+}
+
+// newFleetPairServer is newPairServer with a fleet key, and with or without
+// a place on the relay: machineID is what SetRelayMachine records, and "" is
+// the daemon that never got one.
+func newFleetPairServer(t *testing.T, machineID string) (*Server, fleet.Key) {
+	t.Helper()
+	dir := t.TempDir()
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	srv := New(session.NewRegistry(time.Now), nil, http.NotFoundHandler(), "test",
+		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: fk})
+	t.Cleanup(srv.Shutdown)
+	if machineID != "" {
+		srv.SetRelayMachine(machineID, "Karn's MacBook Pro")
+	}
+	return srv, fk
+}
+
+// TestPairMintsAFleetDeviceCert is the ceremony's half of the fleet key
+// (spec/fleet-trust.md): the machine that ran the pairing signs {device key,
+// name, its own machine id, now} at the moment the ceremony completes, and
+// the registry entry carries the blob. That cert is what admits this device
+// to every sibling machine without a second ceremony, and what the directory
+// stage will publish — so the fields are asserted, not just its presence.
+func TestPairMintsAFleetDeviceCert(t *testing.T) {
+	const machineID = "karns-mbp-a1b2-0f9a12cd"
+	srv, fk := newFleetPairServer(t, machineID)
+
+	token, _ := srv.pairing.start(time.Now())
+	key := deviceKey(0x2a)
+	// Deliberately untidy, to pin which spelling of the name is signed: the
+	// normalised label the registry holds, never the device's raw string.
+	out := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(key), "  phone \n"), "relay")
+	if out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200", out.Status, out.Body)
+	}
+
+	list := devices(t, srv)
+	if len(list) != 1 {
+		t.Fatalf("registry = %+v, want the one device just paired", list)
+	}
+	cert, err := fleet.VerifyDevice(fk.Public(), list[0].Cert)
+	if err != nil {
+		t.Fatalf("the stored cert does not verify under this daemon's fleet key: %v", err)
+	}
+	if !bytes.Equal(cert.Device, key) {
+		t.Error("the cert names a different device key than the one paired")
+	}
+	if cert.Name != "phone" || cert.Name != list[0].Label {
+		t.Errorf("cert name = %q, want the registry's normalised label %q", cert.Name, list[0].Label)
+	}
+	if cert.PairedOn != machineID {
+		t.Errorf("cert pairedOn = %q, want this machine's relay id %q", cert.PairedOn, machineID)
+	}
+}
+
+// TestPairMintsNoCertWithoutAMachineID: `pairedOn` is a machine id in the
+// spec and the directory the next stage brings keys certs by it, so a cert
+// claiming the empty machine is one nothing can attribute — signing it would
+// put an unusable artifact into the fleet's permanent record. A daemon in
+// that state (holding a fleet key from relay.json, with no place on the relay
+// because relay.New refused the rest of the file, so SetRelayMachine never
+// ran) mints nothing and pairs exactly as a fleet-less daemon does.
+func TestPairMintsNoCertWithoutAMachineID(t *testing.T) {
+	srv, _ := newFleetPairServer(t, "")
+
+	token, _ := srv.pairing.start(time.Now())
+	key := deviceKey(0x2a)
+	out := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(key), "phone"), "relay")
+	if out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200 — the ceremony is not refused over the cert", out.Status, out.Body)
+	}
+
+	list := devices(t, srv)
+	if len(list) != 1 || list[0].Label != "phone" {
+		t.Fatalf("registry = %+v, want the one device paired as usual", list)
+	}
+	if len(list[0].Cert) != 0 {
+		t.Fatalf("a cert was minted with no machine id to name: %x", list[0].Cert)
 	}
 }
 

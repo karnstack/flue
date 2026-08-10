@@ -28,9 +28,10 @@ const RELAY_LINES = [
   ok('worker deployed: flue-relay'),
   ok('web app uploaded'),
   ok('reachable at https://flue-relay.you.workers.dev'),
-  ok('this machine joined as laptop (laptop-9f3a)'),
+  ok('fleet key minted (Cloudflare never sees it)'),
+  ok('this machine joined as laptop (laptop-9f3a-3f9a12cd)'),
   output('\n  to add another machine, run this on it:\n'),
-  output('    flue relay join wss://flue-relay.you.workers.dev --secret …'),
+  output('    flue relay join wss://flue-relay.you.workers.dev --secret … --fleet …'),
 ]
 
 const PROBLEMS = [

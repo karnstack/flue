@@ -65,8 +65,19 @@ function connectionNotice(status: ConnStatus): string | null {
  * and `client.relay` folds that into the same `{status:'off'}` a daemon with no
  * relay sends. Rendering "Not configured" from it would put the loudest claim
  * on this screen on the page before anything had said it.
+ *
+ * `unusable` splits the last of those: the transport says `off` both for a
+ * machine that never had a relay and for one whose relay.json the daemon
+ * refuses to dial, and calling the second "Not configured" is how an upgrade
+ * that ended remote access reads as a machine that never set it up.
  */
-function StatusBadge({ status }: { status: RelayInfo['status'] | null }) {
+function StatusBadge({
+  status,
+  unusable,
+}: {
+  status: RelayInfo['status'] | null
+  unusable?: boolean
+}) {
   if (status === null) {
     return (
       <Badge variant="outline" className="shrink-0">
@@ -90,6 +101,13 @@ function StatusBadge({ status }: { status: RelayInfo['status'] | null }) {
         */}
         <ArrowPathIcon aria-hidden="true" className="motion-safe:animate-spin" />
         Connecting
+      </Badge>
+    )
+  }
+  if (unusable) {
+    return (
+      <Badge variant="outline" className="shrink-0">
+        Not usable
       </Badge>
     )
   }
@@ -179,6 +197,49 @@ function NotConfigured({ info }: { info: RelayUIInfo | null }) {
           would be one that never connects. Deploying a relay below is what opens it — from this
           page, or from a terminal on this machine.
         </p>
+      </StatePanel>
+
+      <Integrations>
+        <CloudflareConnectCard info={info} setupCommand={SETUP_COMMAND} />
+      </Integrations>
+    </>
+  )
+}
+
+/**
+ * A relay this machine has a configuration file for and will not dial.
+ *
+ * The state the screen used to swallow. relay.json exists and parses, so the
+ * daemon calls itself configured; the transport refuses the file, so no socket
+ * is ever opened and the welcome reports `off` — the same word a machine that
+ * never had a relay gets. The commonest way in is an upgrade: a relay.json
+ * written before the fleet key existed carries no fleet seed, and the fleet
+ * key is not optional (spec/fleet-trust.md).
+ *
+ * The faults are repeated in the daemon's own words rather than paraphrased.
+ * They are the strings `flue status` prints (relayProblems in
+ * cmd/flue/main.go), and a second wording for the same fact is one more thing
+ * that can drift away from it.
+ */
+function Unusable({ info }: { info: RelayUIInfo }) {
+  return (
+    <>
+      <StatePanel
+        icon={GlobeAltIcon}
+        title="This machine will not dial the relay it is configured for"
+      >
+        <p className={cn(PROSE, 'max-w-[65ch]')}>
+          The daemon found a relay configured here and refuses it — {(info.problems ?? []).join(', ')}{' '}
+          — so nothing outside this computer can reach these sessions, and pairing a device stays
+          shut.
+        </p>
+        <p className={cn(PROSE, 'max-w-[65ch]')}>
+          Running the join line on this machine, from a machine already on the relay, writes a
+          complete configuration and costs nothing else. Deploying below replaces the relay
+          entirely — a fresh secret and a fresh fleet key — which every other machine then has to
+          re-join and every paired browser has to pair again.
+        </p>
+        <Command command={STATUS_COMMAND} />
       </StatePanel>
 
       <Integrations>
@@ -348,6 +409,17 @@ export function RemoteRoute() {
   const status: RelayInfo['status'] =
     relay.status === 'connected' && origin === '' ? 'connecting' : relay.status
 
+  /*
+   * Whether the daemon is refusing a relay.json it has, rather than having
+   * none. The transport cannot tell the two apart — both are `off` on the
+   * welcome — so the fact comes from the daemon's own answer about its config
+   * file, which names each fault (`problems` on /api/relay/info). Null while
+   * that answer is on its way, and on a relay origin where it is never asked
+   * for; both read as false, which keeps this to the loopback screen it is
+   * about.
+   */
+  const unusable = Boolean(relayUI?.configured && relayUI.problems?.length)
+
   return (
     /*
       The cap moves up here from the panels inside it, which each carried
@@ -364,7 +436,7 @@ export function RemoteRoute() {
       */}
       <PageHeader
         crumbs={[{ label: 'Remote access' }]}
-        actions={<StatusBadge status={greeted ? status : null} />}
+        actions={<StatusBadge status={greeted ? status : null} unusable={unusable} />}
       >
         <p className={cn(PROSE, 'max-w-[65ch]')}>
           The daemon listens on this computer and nowhere else. A relay gives it an address the
@@ -384,7 +456,8 @@ export function RemoteRoute() {
       </PageHeader>
 
       {!greeted && <AwaitingWelcome connecting={conn === 'connecting'} />}
-      {greeted && status === 'off' && <NotConfigured info={relayUI} />}
+      {greeted && status === 'off' && unusable && relayUI && <Unusable info={relayUI} />}
+      {greeted && status === 'off' && !unusable && <NotConfigured info={relayUI} />}
       {greeted && status === 'connecting' && <Dialling />}
       {greeted && status === 'connected' && (
         <>

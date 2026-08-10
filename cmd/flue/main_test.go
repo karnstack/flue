@@ -21,6 +21,7 @@ import (
 
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 )
@@ -1261,6 +1262,7 @@ func TestStatusReportsAConfiguredRelayWithoutItsSecret(t *testing.T) {
 		Origin:      "https://flue-relay.example",
 		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
 		MachineName: "Karn's MacBook Pro",
+		FleetSeed:   testFleetSeed,
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
 	}
@@ -1275,6 +1277,12 @@ func TestStatusReportsAConfiguredRelayWithoutItsSecret(t *testing.T) {
 	}
 	if strings.Contains(out, secret) {
 		t.Fatalf("status printed the daemon secret:\n%s", out)
+	}
+	// The fleet key is the other credential relay.json holds, and the newer
+	// one: it signs every cert the fleet trusts, so a status output pasted
+	// into a bug report must not carry it either.
+	if strings.Contains(out, testFleetSeed) {
+		t.Fatalf("status printed the fleet key:\n%s", out)
 	}
 }
 
@@ -1306,17 +1314,27 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 		Origin:      "https://r.example",
 		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
 		MachineName: "Karn's MacBook Pro",
+		FleetSeed:   testFleetSeed,
 	}); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
 	}
 
+	// The identity serve would have built: the same file's seed, parsed. The
+	// relay leg refuses to start without a fleet key, so a zero Identity here
+	// would test nothing but that refusal.
+	fk, err := fleet.Parse(testFleetSeed)
+	if err != nil {
+		t.Fatalf("fleet.Parse: %v", err)
+	}
+	id := daemon.Identity{Fleet: fk}
+
 	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth("0123456789abcdef", 0),
-		uiHandler(), version, daemon.Identity{})
+		uiHandler(), version, id)
 	t.Cleanup(srv.Shutdown)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startRelay(ctx, srv, daemon.Identity{})
+	startRelay(ctx, srv, id)
 
 	deadline := time.Now().Add(3 * time.Second)
 	for attempts.Load() == 0 {
@@ -1396,13 +1414,20 @@ func TestStatusReportsAnIncompleteRelayConfig(t *testing.T) {
 		relay config.Relay
 		want  string
 	}{
-		{"no url", config.Relay{Secret: secret, Origin: "https://r.example", MachineID: "m-0001"}, "no url"},
-		{"no secret", config.Relay{URL: "wss://r.example", Origin: "https://r.example", MachineID: "m-0001"}, "no secret"},
-		{"no origin", config.Relay{URL: "wss://r.example", Secret: secret, MachineID: "m-0001"}, "no origin"},
+		{"no url", config.Relay{Secret: secret, FleetSeed: testFleetSeed, Origin: "https://r.example", MachineID: "m-0001"}, "no url"},
+		{"no secret", config.Relay{URL: "wss://r.example", FleetSeed: testFleetSeed, Origin: "https://r.example", MachineID: "m-0001"}, "no secret"},
+		{"no origin", config.Relay{URL: "wss://r.example", Secret: secret, FleetSeed: testFleetSeed, MachineID: "m-0001"}, "no origin"},
 		// A relay.json from before machines had ids, or one hand-edited into
 		// that shape: the daemon will not dial it (relay.New refuses), so the
 		// status line has to say why rather than call it configured.
-		{"no machine id", config.Relay{URL: "wss://r.example", Secret: secret, Origin: "https://r.example"}, "no machine id"},
+		{"no machine id", config.Relay{URL: "wss://r.example", Secret: secret, FleetSeed: testFleetSeed, Origin: "https://r.example"}, "no machine id"},
+		// The one an upgrade produces on its own: a relay.json written before
+		// the fleet key existed is complete by every older rule and refused by
+		// relay.New (spec/fleet-trust.md keeps no compatibility with those).
+		// Until this case existed, that machine lost remote access while
+		// `flue status`, `flue relay status` and /api/relay/info all called it
+		// configured and fine.
+		{"no fleet key", config.Relay{URL: "wss://r.example", Secret: secret, Origin: "https://r.example", MachineID: "m-0001"}, "no fleet key"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())

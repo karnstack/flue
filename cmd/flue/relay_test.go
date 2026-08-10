@@ -22,6 +22,7 @@ import (
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/fleet"
 	relaybundle "github.com/karnstack/flue/relay"
 	"github.com/karnstack/flue/web"
 )
@@ -31,6 +32,11 @@ import (
 // nowhere", and they are only worth anything if a match could not be a
 // coincidence.
 const setupToken = "cf-token-must-never-be-printed-or-stored"
+
+// testFleetSeed is a fleet key spelled the way the join line spells one: 32
+// bytes, unpadded base64url. Fixed rather than minted, so a test that asserts
+// on a rebuilt join line can name the string it expects.
+const testFleetSeed = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 
 // --- the fake Cloudflare API -------------------------------------------------
 
@@ -579,6 +585,26 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 		t.Fatalf("the saved secret decodes to %d bytes, want %d", len(raw), 32)
 	}
 
+	// The second credential, which is the whole of stage 2: setup mints a
+	// fleet key, persists it here, and hands it on in the join line. A
+	// regression that dropped `FleetSeed:` from this SaveRelay would leave
+	// every machine that joined afterwards unable to start its relay leg at
+	// all (relay.New refuses a config without one) — and, before this
+	// assertion existed, would leave the suite green.
+	if _, err := fleet.Parse(saved.FleetSeed); err != nil {
+		t.Fatalf("relay.json fleet_seed = %q, want a key fleet.Parse accepts: %v", saved.FleetSeed, err)
+	}
+	// And it went to Cloudflare in no shape at all — not as the secret, not
+	// as a binding, not in the uploaded module. That is the property the
+	// whole design rests on (spec/fleet-trust.md): the Worker gates routing
+	// and holds nothing that signs.
+	if f.secretText == saved.FleetSeed {
+		t.Fatal("the fleet key was uploaded as the worker's secret")
+	}
+	if hits := configFilesContaining(t, saved.FleetSeed); len(hits) != 1 || filepath.Base(hits[0]) != "relay.json" {
+		t.Fatalf("the fleet key should be in relay.json and nowhere else, got %v", hits)
+	}
+
 	// The URL is the bare host — the /daemon/<machine id> leg is the
 	// transport's to append, so a relay.json is one machine's whole
 	// registration: address, credential, and which machine it is.
@@ -611,7 +637,10 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 		fmt.Sprintf("✓ web app uploaded (%d files)", len(files)),
 		"✓ secret set",
 		"✓ reachable at https://" + host,
-		"flue relay join wss://" + host + " --secret " + saved.Secret,
+		"✓ fleet key minted",
+		// Both credentials, exactly as saved: the line is the hand-off, and
+		// a line missing --fleet is one `flue relay join` refuses outright.
+		"flue relay join wss://" + host + " --secret " + saved.Secret + " --fleet " + saved.FleetSeed,
 		"token stored for one-click updates",
 	} {
 		if !strings.Contains(transcript, want) {
@@ -898,7 +927,7 @@ func TestRunRelayJoinWritesTheRelayConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	var out bytes.Buffer
-	if err := runRelayJoin(&out, []string{"wss://flue-relay.karn.workers.dev", "--secret", "s3cr3t-from-setup"}); err != nil {
+	if err := runRelayJoin(&out, []string{"wss://flue-relay.karn.workers.dev", "--secret", "s3cr3t-from-setup", "--fleet", testFleetSeed}); err != nil {
 		t.Fatalf("runRelayJoin: %v", err)
 	}
 
@@ -912,6 +941,13 @@ func TestRunRelayJoinWritesTheRelayConfig(t *testing.T) {
 	}
 	if saved.Secret != "s3cr3t-from-setup" {
 		t.Fatalf("relay.json secret = %q, want the one given", saved.Secret)
+	}
+	// The other half of the line, and the half nothing else can replace: a
+	// join that persisted the secret and dropped the fleet key would write a
+	// relay.json this daemon refuses to dial (relay.New), which is a machine
+	// that joined and then silently has no relay leg.
+	if saved.FleetSeed != testFleetSeed {
+		t.Fatalf("relay.json fleet_seed = %q, want the one given (%q)", saved.FleetSeed, testFleetSeed)
 	}
 	assertMachineIDMinted(t, saved.MachineID, saved.Secret)
 	hostname, err := os.Hostname()
@@ -957,7 +993,7 @@ func TestRunRelayJoinNormalizesTheAddress(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 			var out bytes.Buffer
-			if err := runRelayJoin(&out, []string{tc.arg, "--secret", "s"}); err != nil {
+			if err := runRelayJoin(&out, []string{tc.arg, "--secret", "s", "--fleet", testFleetSeed}); err != nil {
 				t.Fatalf("runRelayJoin(%q): %v", tc.arg, err)
 			}
 			saved := loadSavedRelay(t)
@@ -978,7 +1014,7 @@ func TestRunRelayJoinTakesADisplayName(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	var out bytes.Buffer
-	if err := runRelayJoin(&out, []string{"wss://r.example", "--secret", "s", "--name", "Study Mac Mini"}); err != nil {
+	if err := runRelayJoin(&out, []string{"wss://r.example", "--secret", "s", "--fleet", testFleetSeed, "--name", "Study Mac Mini"}); err != nil {
 		t.Fatalf("runRelayJoin: %v", err)
 	}
 	if saved := loadSavedRelay(t); saved.MachineName != "Study Mac Mini" {
@@ -1000,10 +1036,12 @@ func TestRunRelayJoinRefusesBadArguments(t *testing.T) {
 		{"no url", []string{"--secret", "s"}, "url"},
 		{"no secret", []string{"wss://r.example"}, "--secret"},
 		{"empty secret", []string{"wss://r.example", "--secret", ""}, "--secret"},
-		{"a scheme that is neither", []string{"http://r.example", "--secret", "s"}, "wss://"},
+		{"a scheme that is neither", []string{"http://r.example", "--secret", "s", "--fleet", testFleetSeed}, "wss://"},
 		{"no host", []string{"wss://", "--secret", "s"}, "url"},
-		{"a path on the url", []string{"wss://r.example/daemon", "--secret", "s"}, "path"},
-		{"a name past 64 runes", []string{"wss://r.example", "--secret", "s", "--name", strings.Repeat("é", 65)}, "--name"},
+		{"a path on the url", []string{"wss://r.example/daemon", "--secret", "s", "--fleet", testFleetSeed}, "path"},
+		{"a name past 64 runes", []string{"wss://r.example", "--secret", "s", "--fleet", testFleetSeed, "--name", strings.Repeat("é", 65)}, "--name"},
+		{"no fleet key", []string{"wss://r.example", "--secret", "s"}, "--fleet"},
+		{"a mangled fleet key", []string{"wss://r.example", "--secret", "s", "--fleet", "not-base64url!!"}, "fleet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -1036,6 +1074,7 @@ func TestRunRelayStatusReportsTheConfiguredRelay(t *testing.T) {
 	if err := config.SaveRelay(config.Relay{
 		URL:         "wss://flue-relay.karn.workers.dev",
 		Secret:      "s3cret-value",
+		FleetSeed:   testFleetSeed,
 		Origin:      "https://flue-relay.karn.workers.dev",
 		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
 		MachineName: "Karn's MacBook Pro",
@@ -1052,6 +1091,12 @@ func TestRunRelayStatusReportsTheConfiguredRelay(t *testing.T) {
 	}
 	if strings.Contains(got, "s3cret-value") {
 		t.Fatalf("status printed the relay secret: %q", got)
+	}
+	// Neither credential, and the fleet key least of all: this line ends up
+	// in terminals, screenshots and bug reports, and the fleet key is the one
+	// that admits devices everywhere.
+	if strings.Contains(got, testFleetSeed) {
+		t.Fatalf("status printed the fleet key: %q", got)
 	}
 }
 

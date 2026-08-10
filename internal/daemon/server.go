@@ -72,6 +72,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -86,6 +87,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/flynn/noise"
 	"github.com/karnstack/flue/internal/crypto"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
@@ -119,6 +121,14 @@ var (
 type Identity struct {
 	Key     noise.DHKey
 	Devices *crypto.DeviceStore
+
+	// Fleet is the fleet key from relay.json (spec/fleet-trust.md), and the
+	// zero value means this daemon has none — a daemon that never joined a
+	// relay, or joined one from before the key existed. With it, a pairing
+	// ceremony also mints a fleet device cert and a revocation also mints
+	// the signed record that keeps the key dead fleet-wide; without it,
+	// both paths run exactly as they always did, minus the signing.
+	Fleet fleet.Key
 }
 
 // Server serves the flue API and the embedded UI on loopback.
@@ -910,6 +920,17 @@ func (s *Server) SetRelayMachine(id, name string) {
 	s.relayMachineID, s.relayMachineName = id, name
 }
 
+// relayMachine reads the identity SetRelayMachine recorded. The id can be
+// empty — a daemon with no relay, or a pairing that raced startup — and the
+// one consumer that persists it (the device cert's pairedOn) records the
+// empty string honestly rather than inventing a name.
+func (s *Server) relayMachine() (m struct{ id, name string }) {
+	s.relayMu.RLock()
+	defer s.relayMu.RUnlock()
+	m.id, m.name = s.relayMachineID, s.relayMachineName
+	return m
+}
+
 // relayInfo is what a welcome carries, or nil when this daemon has no relay.
 //
 // Nil rather than an object saying "off": the field is optional on both sides,
@@ -1145,9 +1166,41 @@ func validDeviceID(id string) bool {
 }
 
 // removeDevice unpairs a device, reporting whether there was one to unpair.
+//
+// On a daemon holding the fleet key, unpairing is two writes and their order
+// is load-bearing: the signed revocation is recorded first, the registry
+// entry removed second. An entry removed without its revocation on file is
+// not revoked at all — the device's fleet cert would walk it straight back
+// into the registry on its next handshake (AddFromFleetCert) — so a
+// revocation that cannot be recorded fails the whole revoke, loudly, rather
+// than performing the half that does not stick. The converse partial (a
+// revocation recorded, the removal failed) is safe, and safe by mechanism
+// rather than by luck: both acceptance paths read the revocation list inside
+// the same critical section as their registry read — crypto.FindByKey for
+// rule 1, AddFromFleetCert for rule 2 — so the key is already dead to the
+// acceptance rule while the entry still shows on the Devices screen, and the
+// retry completes it.
+//
+// The signed blob is kept by the store (crypto.StoredRevocation) because it
+// is the same artifact the fleet directory will publish so every other
+// machine drops the key too; until that stage lands, the record is local
+// and this machine is the only one it binds.
 func (s *Server) removeDevice(id string) (crypto.Device, bool, error) {
 	if s.identity.Devices == nil {
 		return crypto.Device{}, false, errNoDeviceRegistry
+	}
+	if s.identity.Fleet.Valid() {
+		dev, ok, err := s.identity.Devices.FindByID(id)
+		if err != nil || !ok {
+			return crypto.Device{}, ok, err
+		}
+		blob, err := s.identity.Fleet.Sign(fleet.Revocation{Device: dev.PublicKey, IAT: time.Now().Unix()})
+		if err == nil {
+			err = s.identity.Devices.AddRevocation(dev.PublicKey, blob)
+		}
+		if err != nil {
+			return crypto.Device{}, false, fmt.Errorf("daemon: recording the revocation: %w", err)
+		}
 	}
 	return s.identity.Devices.Remove(id)
 }

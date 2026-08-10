@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/flynn/noise"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaywire"
 )
 
@@ -125,11 +127,16 @@ func newTestTransport(t *testing.T, r *fakeRelay, secret string, log *slog.Logge
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+	fleetKey, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tr, err := New(Config{
 		URL:       r.URL(),
 		Secret:    secret,
 		Origin:    "https://relay.example",
 		MachineID: testMachineID,
+		FleetPub:  fleetKey.Public(),
 	}, srv, noise.DHKey{}, nil, log)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -168,7 +175,11 @@ func runTransport(t *testing.T, tr *Transport) func() {
 
 func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 	t.Parallel()
-	full := Config{URL: "wss://relay.example", Secret: "s3cr3t", Origin: "https://relay.example", MachineID: "karns-mbp-a1b2-0f9a12cd"}
+	fleetKey, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := Config{URL: "wss://relay.example", Secret: "s3cr3t", Origin: "https://relay.example", MachineID: "karns-mbp-a1b2-0f9a12cd", FleetPub: fleetKey.Public()}
 
 	// Origin is the one worth stating a reason for. It is what every announced
 	// open and every forwarded pair is checked against, so an empty one does
@@ -186,15 +197,21 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{"no URL", Config{Secret: full.Secret, Origin: full.Origin, MachineID: full.MachineID}},
-		{"no secret", Config{URL: full.URL, Origin: full.Origin, MachineID: full.MachineID}},
-		{"no origin", Config{URL: full.URL, Secret: full.Secret, MachineID: full.MachineID}},
-		{"no machine id", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin}},
+		{"no URL", Config{Secret: full.Secret, Origin: full.Origin, MachineID: full.MachineID, FleetPub: full.FleetPub}},
+		{"no secret", Config{URL: full.URL, Origin: full.Origin, MachineID: full.MachineID, FleetPub: full.FleetPub}},
+		{"no origin", Config{URL: full.URL, Secret: full.Secret, MachineID: full.MachineID, FleetPub: full.FleetPub}},
+		{"no machine id", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, FleetPub: full.FleetPub}},
+		// The pre-fleet relay.json: everything else present, no fleet key.
+		// Refused by design — spec/fleet-trust.md keeps no compatibility
+		// with files from before the key — and the error names the re-join
+		// as the way out (asserted below).
+		{"no fleet key", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: full.MachineID}},
+		{"a truncated fleet key", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: full.MachineID, FleetPub: full.FleetPub[:31]}},
 		{"nothing at all", Config{}},
-		{"a machine id with a capital", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "My-Mac"}},
-		{"a machine id led by a dash", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "-a1b2-0f9a12cd"}},
-		{"a machine id without a MAC tag — the pre-tag mint", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "karns-mbp-a1b2"}},
-		{"a machine id past 63 characters", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: strings.Repeat("a", 55) + "-0f9a12cd"}},
+		{"a machine id with a capital", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "My-Mac", FleetPub: full.FleetPub}},
+		{"a machine id led by a dash", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "-a1b2-0f9a12cd", FleetPub: full.FleetPub}},
+		{"a machine id without a MAC tag — the pre-tag mint", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "karns-mbp-a1b2", FleetPub: full.FleetPub}},
+		{"a machine id past 63 characters", Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: strings.Repeat("a", 55) + "-0f9a12cd", FleetPub: full.FleetPub}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -233,10 +250,19 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 
 	t.Run("the machine id grammar error names the fault and the value", func(t *testing.T) {
 		t.Parallel()
-		_, err := New(Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "My-Mac"},
+		_, err := New(Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: "My-Mac", FleetPub: full.FleetPub},
 			&stubServer{}, noise.DHKey{}, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "not a valid slug") || !strings.Contains(err.Error(), "My-Mac") {
 			t.Fatalf("New with machine id \"My-Mac\" = %v, want an error quoting it as not a valid slug", err)
+		}
+	})
+
+	t.Run("the fleet key error names the way out", func(t *testing.T) {
+		t.Parallel()
+		_, err := New(Config{URL: full.URL, Secret: full.Secret, Origin: full.Origin, MachineID: full.MachineID},
+			&stubServer{}, noise.DHKey{}, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "no fleet key") || !strings.Contains(err.Error(), "join line") {
+			t.Fatalf("New without a fleet key = %v, want an error naming the missing key and the re-join", err)
 		}
 	})
 }
@@ -296,12 +322,17 @@ func TestTransportRefusesARedirectRatherThanFollowIt(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
+	fleetKey, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := &stubServer{}
 	tr, err := New(Config{
 		URL:       "ws" + strings.TrimPrefix(ts.URL, "http"),
 		Secret:    "s3cr3t",
 		Origin:    "https://relay.example",
 		MachineID: testMachineID,
+		FleetPub:  fleetKey.Public(),
 	}, srv, noise.DHKey{}, nil, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("New: %v", err)

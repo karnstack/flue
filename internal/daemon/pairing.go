@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/karnstack/flue/internal/fleet"
 )
 
 // PairPath is the second of the two routes that may be reached by a method
@@ -343,7 +345,55 @@ func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
 		return s.refusePair(peer, res.String())
 	}
 
-	dev, err := s.identity.Devices.Add(deviceLabel(req.Label), key)
+	label := DeviceLabel(req.Label)
+
+	// The ceremony that just completed is the moment the spec mints the fleet
+	// device cert (spec/fleet-trust.md, Certificates): this machine signs
+	// {device key, name, this machine's id, now} under the fleet key, and the
+	// registry entry carries the blob. Today the cert is what lets this
+	// device into every daemon that holds the fleet public key — it presents
+	// the blob in its handshake — and the stored copy is what the fleet
+	// directory will publish once that stage lands.
+	//
+	// A daemon without a fleet key mints nothing and pairs exactly as it
+	// always did. A signing failure is treated the same way, minus a log
+	// line: it is unreachable short of a corrupt key (the fields here are
+	// already validated), and refusing the user's ceremony over the cert
+	// would take working local pairing away to protect a convenience.
+	//
+	// So is a daemon that cannot name itself. `pairedOn` is a machine id in
+	// the spec, and the directory the next stage brings keys certs by it: a
+	// cert claiming the empty machine is one nothing can attribute and no
+	// reader can line up against the machine certs beside it. Rather than
+	// sign that, this mints nothing — the honest half of a half-configured
+	// relay.
+	//
+	// The state is reachable, narrowly: relayMachine's id is set by whoever
+	// starts the transport, and only once relay.New has accepted the config,
+	// so a relay.json carrying a fleet seed but missing (say) a machine id
+	// leaves this daemon holding a fleet key and no place on the relay. Such
+	// a machine is not on the relay at all, so a device paired here could not
+	// have reached a sibling on this cert's strength anyway: what the refusal
+	// costs is nothing the device had. `flue status` names the missing field;
+	// fixing it, restarting, and pairing again mints the cert.
+	var cert []byte
+	if s.identity.Fleet.Valid() {
+		if pairedOn := s.relayMachine().id; pairedOn == "" {
+			s.logger().Warn("not minting a fleet device cert: this daemon holds a fleet key but has no machine id on the relay; the device is paired to this machine only",
+				"peer", peer)
+		} else if blob, err := s.identity.Fleet.Sign(fleet.DeviceCert{
+			Device:   key,
+			Name:     label,
+			PairedOn: pairedOn,
+			IAT:      time.Now().Unix(),
+		}); err != nil {
+			s.logger().Error("could not mint a fleet device cert; the device is paired to this machine only", "err", err)
+		} else {
+			cert = blob
+		}
+	}
+
+	dev, err := s.identity.Devices.Add(label, key, cert)
 	if err != nil {
 		// The window is already spent, so this is not a retry loop the caller
 		// can drive; it is a device that was already paired, or a registry
@@ -468,10 +518,19 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 	s.writePairOutcome(w, s.PairDevice(body, r.RemoteAddr))
 }
 
-// deviceLabel normalises the device's self-chosen name: trimmed, bounded, and
+// DeviceLabel normalises a device's self-chosen name: trimmed, bounded, and
 // never empty, since it is what the devices screen shows next to a revoke
 // button — an unlabelled row is one the user cannot safely act on.
-func deviceLabel(raw string) string {
+//
+// Exported for the other place a device name enters this machine's registry:
+// the Name on a fleet device certificate, which the relay transport writes
+// into devices.json for a device some sibling machine paired
+// (internal/transport/relay/channel.go). Signed is not the same as tame —
+// the cert encoding bounds that field at 512 bytes and permits newlines and
+// control characters — so it goes through this normaliser rather than a
+// second, laxer one. One rule for what a device may be called, wherever the
+// name came from.
+func DeviceLabel(raw string) string {
 	l := strings.TrimSpace(raw)
 	if r := []rune(l); len(r) > maxLabelRunes {
 		l = string(r[:maxLabelRunes])

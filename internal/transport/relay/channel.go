@@ -5,10 +5,14 @@ package relay
 //
 // Everything here answers one question — is this browser a device the user
 // paired? The relay cannot answer it and is not asked to: it forwards opaque
-// bytes, and the proof arrives as the initiator's static key coming out of a
-// Noise IK handshake this process runs itself, checked against the device
-// registry on this machine. A key the registry does not hold is closed, not
-// served, however well-formed its handshake was.
+// bytes, and the proof arrives out of a Noise IK handshake this process runs
+// itself. Two proofs are accepted, in order (spec/fleet-trust.md): the
+// initiator's static key is in this machine's own device registry and not on
+// its revocation list, or the handshake's first message carried a device
+// certificate for exactly that key, signed by the fleet key and not revoked —
+// a device paired on a sibling machine, which this one then records as its
+// own. A key with neither is closed, not served, however well-formed its
+// handshake was.
 
 import (
 	"bytes"
@@ -23,6 +27,7 @@ import (
 
 	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaywire"
 )
 
@@ -337,7 +342,7 @@ func (t *Transport) serveChannel(s *socket, ch *channel, origin string) {
 		}
 	}()
 
-	nch, peerStatic, err := t.handshake(s, ch)
+	nch, peerStatic, payload, err := t.handshake(s, ch)
 	if err != nil {
 		if errors.Is(err, errChannelGone) || errors.Is(err, errSocketClosed) {
 			// The browser left, or the socket did, mid-handshake. Ordinary, and
@@ -350,15 +355,32 @@ func (t *Transport) serveChannel(s *socket, ch *channel, origin string) {
 		return
 	}
 
+	// Rule 1, and both halves of it: FindByKey answers "paired here, and not
+	// revoked here" in one critical section (crypto.DeviceStore.FindByKey).
+	// The revocation half is not belt and braces — revoking writes the
+	// revocation before it removes the registry entry, so an entry that
+	// outlived a half-completed revoke is exactly the case a registry-only
+	// lookup would wave through.
 	dev, paired, err := t.devices.FindByKey(peerStatic)
 	if err != nil {
-		// The registry could not be read. Refusing is the only safe direction:
-		// this daemon cannot tell a paired device from an unpaired one right
-		// now, and it is not going to guess.
+		// The registry, or the revocation list it is read against, could not
+		// be read. Refusing is the only safe direction: this daemon cannot
+		// tell a paired device from an unpaired or a revoked one right now,
+		// and it is not going to guess.
 		t.log.Error("could not read the device registry for a relayed browser",
 			"channel", ch.id, "err", err)
 		t.tell(s, relaywire.Close{Channel: ch.id})
 		return
+	}
+	if !paired {
+		// Rule 2 of the acceptance order: a key this machine never paired,
+		// carrying a fleet device cert in its handshake payload. Rule 1 above
+		// deliberately never looked at the payload — a device in the registry
+		// is served cert or no cert, so pairing on this machine keeps working
+		// if the fleet key ever rotates away. A revoked key reaches here too,
+		// and meets the same refusal on the way through: AddFromFleetCert
+		// checks the revocation list inside its own write.
+		dev, paired = t.admitByFleetCert(ch, peerStatic, payload)
 	}
 	if !paired {
 		// Not an error, a state: an unpaired browser cannot attach, and pairing
@@ -385,9 +407,86 @@ func (t *Transport) serveChannel(s *socket, ch *channel, origin string) {
 	t.log.Debug("relay channel ended", "channel", ch.id, "device", dev.ID)
 }
 
+// admitByFleetCert decides whether an unregistered key gets in on its
+// handshake payload: a fleet device certificate that verifies under the
+// fleet public key, names exactly the handshake's static key, and is not
+// revoked. A yes also writes the device into this machine's registry under
+// the cert's name — so the Devices screen shows it, LastSeen works, and the
+// daemon keeps serving it even if the fleet key later rotates away.
+//
+// The refusals are all the same silent false — the caller's "unpaired
+// device" close is the one answer a stranger gets, exactly as before — but
+// each is its own log line first, because "a cert that does not verify" and
+// "a revoked device presenting the cert it was paired with" are different
+// events to whoever reads stderr.
+//
+// The cert names the device's key, not its holder: what proves the browser
+// holds the key is the IK handshake itself, whose first message cannot be
+// built without the static's private half. The cert is public by design (a
+// later stage publishes it in the relay's directory), so this check must
+// never treat possession of the blob as the credential — the key equality
+// against the handshake's own static is the line that keeps a stolen blob
+// worthless.
+func (t *Transport) admitByFleetCert(ch *channel, peerStatic, payload []byte) (crypto.Device, bool) {
+	if len(payload) == 0 {
+		// A pre-fleet browser, or one pinned to this machine directly. Not
+		// even a log line of its own: this is the ordinary unpaired refusal.
+		return crypto.Device{}, false
+	}
+	cert, err := fleet.VerifyDevice(t.cfg.FleetPub, payload)
+	if err != nil {
+		t.log.Warn("relay channel presented a handshake payload that is not a verifying fleet device cert",
+			"channel", ch.id, "device", crypto.DeviceID(peerStatic), "err", err)
+		return crypto.Device{}, false
+	}
+	if !bytes.Equal(cert.Device, peerStatic) {
+		// A verifying cert for some other key. The handshake proved the
+		// browser holds peerStatic; the fleet vouched for a different device
+		// entirely, and honouring the pair would let any holder of any
+		// published cert attach as themselves.
+		t.log.Warn("relay channel presented a fleet cert for a different key",
+			"channel", ch.id, "device", crypto.DeviceID(peerStatic), "certDevice", crypto.DeviceID(cert.Device))
+		return crypto.Device{}, false
+	}
+
+	// Signed is not the same as tame. The cert's name is authentic — the
+	// fleet vouched for it — and still arbitrary: the encoding bounds it at
+	// 512 bytes and permits newlines and control characters, while its
+	// destination is devices.json and a row on the Devices screen. So it goes
+	// through the normaliser the local pairing ceremony puts its own labels
+	// through (trimmed, 64 runes, never empty), rather than a second and
+	// laxer rule for names that happen to arrive over the fleet. An empty
+	// name — which the minting ceremony never records but the encoding
+	// allows — comes back as "unnamed device" from the same place.
+	name := daemon.DeviceLabel(cert.Name)
+	dev, err := t.devices.AddFromFleetCert(name, peerStatic, payload, time.Unix(cert.IAT, 0))
+	switch {
+	case errors.Is(err, crypto.ErrDeviceRevoked):
+		// The one rule with its own sentence in the spec: a revocation
+		// permanently outranks a device cert for the same key, whatever
+		// either one's iat says. The check lives inside the registry write —
+		// one critical section with the add — so a concurrent revoke cannot
+		// land between a check here and the write.
+		t.log.Warn("relay channel presented a fleet cert for a revoked key",
+			"channel", ch.id, "device", crypto.DeviceID(peerStatic))
+		return crypto.Device{}, false
+	case err != nil:
+		// The registry could not be read or written — the same refusal
+		// direction FindByKey's error takes, for the same reason.
+		t.log.Error("could not register a fleet-certified device",
+			"channel", ch.id, "device", crypto.DeviceID(peerStatic), "err", err)
+		return crypto.Device{}, false
+	}
+	t.log.Info("relay channel admitted a fleet-certified device",
+		"channel", ch.id, "device", dev.ID, "pairedOn", cert.PairedOn)
+	return dev, true
+}
+
 // handshake runs the Noise IK responder over this channel and returns the
-// initiator's static key with it — the device identity the caller authorises.
-func (t *Transport) handshake(s *socket, ch *channel) (*crypto.Channel, []byte, error) {
+// initiator's static key with it — the device identity the caller authorises
+// — and message A's decrypted payload, where a fleet device cert rides when
+// the initiator has one.
+func (t *Transport) handshake(s *socket, ch *channel) (*crypto.Channel, []byte, []byte, error) {
 	deadline := time.NewTimer(handshakeDeadline)
 	defer deadline.Stop()
 
