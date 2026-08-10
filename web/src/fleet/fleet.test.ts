@@ -1624,7 +1624,7 @@ describe('a loopback tab that never ran a ceremony', () => {
     h.local.emitWelcome(loopbackWelcome())
     await vi.waitFor(() => expect(h.fleet.clientFor('loft-9f9f')).not.toBeNull())
     const reads = directory.calls.length
-    expect(post.calls).toHaveLength(1)
+    await vi.waitFor(() => expect(post.calls).toHaveLength(1))
 
     // A reconnect replays the welcome. Nothing is gained by it, so nothing is
     // asked and nothing is rebuilt.
@@ -1637,8 +1637,8 @@ describe('a loopback tab that never ran a ceremony', () => {
     // thing, and gains nothing — so it does not re-read the directory either.
     h.fleet.close()
     h.fleet.connect()
-    await flush()
-    expect(post.calls).toHaveLength(2)
+    await vi.waitFor(() => expect(post.calls).toHaveLength(2))
+    expect(directory.calls).toHaveLength(reads)
     h.fleet.close()
   })
 
@@ -1654,6 +1654,10 @@ describe('a loopback tab that never ran a ceremony', () => {
     h.fleet.connect()
     h.local.open()
     h.local.emitWelcome(loopbackWelcome())
+    // Both halves have to have happened before any of this is a claim about
+    // anything: the enrolment refused, and the expansion the welcome triggered
+    // finished. Neither waits on the other, so each is waited for.
+    await vi.waitFor(() => expect(post.calls).toHaveLength(1))
     await vi.waitFor(() => expect(h.fleet.gaps()).not.toBeNull())
 
     expect(await loadPinnedFleetKey()).toBeNull()

@@ -22,6 +22,20 @@
  * the relay at boot (it is the page's own origin, passed in by the caller;
  * nothing here reads `location`) and has no loopback at all. Both end in the
  * same place: one source per reachable machine, each id appearing once.
+ *
+ * The loopback tab has two more things to do before any of that means anything,
+ * and both arrive as seams rather than as knowledge this module goes looking
+ * for (see FleetOptions): it has to be enrolled as a device of the fleet, since
+ * it ran no ceremony and holds no certificate to present to a sibling machine,
+ * and it has to read the directory through its own daemon, because the relay
+ * answers a cross-origin fetch without the header a browser needs to hand it
+ * over. fleet/enrol.ts is both, and carries the argument for why a fleet key
+ * may be learned that way when it may not be learned over a connection.
+ *
+ * And the set is not fixed at page load. A machine that joins this afternoon
+ * appears in the directory this afternoon, so the expansion re-runs on an
+ * interval and on focus (`discover`) — additive only, because a read that comes
+ * back short is a relay having a bad minute rather than a machine leaving.
  */
 import { daemonSocketUrl, FlueClient, type ConnStatus } from '@/client/client'
 import type { ErrorMsg, Preview, SessionInfo, Welcome } from '@/client/protocol'
