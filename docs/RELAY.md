@@ -345,7 +345,21 @@ noise — and must not try. Every reader, daemon and browser both, checks every
 signature under the fleet public key and drops what fails. What a hostile
 relay can do here is serve the set stale, cut short or empty, which is the
 same power it always had (it could refuse to route); what it cannot do is mint
-an entry. The cost of a hostile relay stays availability, and nothing else.
+an entry.
+
+One caveat on "the cost of a hostile relay is availability, and nothing else",
+which is true everywhere else in this document. For a *certificate*, a relay
+that withholds one subtracts: you see fewer machines, or a device has to pair
+by hand. For a *revocation*, withholding adds — a machine that never receives
+one keeps admitting a device you cut off — and nothing in the answer says so,
+because entries are signed one by one and the set is not signed at all. What
+holds it in check is that every machine that knows a revocation re-publishes it
+on every connect and every half hour, so burying one means withholding it from
+everybody, continuously, forever; a machine that heard it once never unhears
+it; and the relay still cannot mint the certificate the revocation was about.
+The real fix is a signed statement about the whole set, and
+[`spec/relay-protocol.md`](../spec/relay-protocol.md), "What withholding
+costs", records it as future work rather than pretending it is done.
 
 Three things follow that an operator sees:
 

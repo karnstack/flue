@@ -16,8 +16,22 @@ import type { Env } from './index'
  * verifies every signature under the fleet public key and drops what fails.
  * What a hostile relay can do to this store is serve it stale, truncated or
  * empty; what it cannot do is mint an entry, because minting needs the key it
- * does not hold. Availability stays the relay's only power, which is the spine
- * of spec/relay-protocol.md and survives this leg intact.
+ * does not hold.
+ *
+ * "Availability is the relay's only power" — the spine of
+ * spec/relay-protocol.md — survives this leg with one exception, and the
+ * exception is worth naming here rather than only there. For a *certificate*,
+ * withholding subtracts: a machine cert this object hides is a machine the
+ * browser does not see. For a *revocation*, withholding adds — a machine that
+ * never receives one goes on admitting a device the operator cut off — and the
+ * answer a `GET` gives is shape-identical whether it is complete or filtered,
+ * because entries are signed one by one and the set is signed not at all. There
+ * is no epoch and no manifest for a reader to check an answer against. What
+ * bounds it is that every holder re-publishes every revocation it has on every
+ * connect and every 30 minutes, that a machine which has ingested one keeps it
+ * forever, and that the relay still cannot mint the certificate the revocation
+ * was about. A signed manifest is the real fix and is future work, not this
+ * file's (spec/relay-protocol.md, "What withholding costs").
  *
  * Entries are **content-addressed**: the storage key is the SHA-256 of the
  * exact bytes PUT, and nothing else. That is the only key a Worker which

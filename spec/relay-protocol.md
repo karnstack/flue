@@ -14,7 +14,10 @@ unchanged and travels inside, encrypted. The relay is a transport for it.
 It also defines one thing the relay *stores* rather than forwards: the fleet
 directory, a set of signed blobs it cannot verify (below). That leg holds no
 key either, and the rule it lives under is the same one this whole document
-turns on — the relay's only power is availability.
+turns on — the relay's only power is availability. **With one exception, which
+the directory introduced and which is stated wherever that phrase appears:
+withholding a revocation is not the same kind of loss as withholding a
+certificate.** See "What withholding costs" below.
 
 ```
 daemon  ---- wss /daemon/<id> ---->  Worker + one DO per machine  <---- wss /client/<id> ----  browser
@@ -189,7 +192,48 @@ reader — daemon and browser both — checks every signature under the fleet
 public key and drops what fails. A hostile relay can therefore serve a stale,
 truncated or empty directory, exactly as it could always refuse to route; what
 it cannot do is mint a machine or a device, because minting needs a key it does
-not hold. The cost of a hostile relay stays availability, and nothing else.
+not hold.
+
+### What withholding costs
+
+"The cost of a hostile relay stays availability, and nothing else" is exactly
+true of the routing legs and of the *certificates* in this store. It is not
+exactly true of the revocations, and the difference is worth stating rather
+than rounding off.
+
+For a certificate, omission subtracts: a machine cert the relay hides is a
+machine the browser does not see, a device cert it hides is a device that has
+to pair by hand. The reader ends up with less authority than the fleet granted,
+which is the shape "availability" describes.
+
+For a revocation, omission *adds*. A revocation only ever removes authority, so
+a machine that never receives one goes on admitting a device the operator cut
+off — and there is nothing in the answer to say so. A `GET /directory` that
+omits a revocation is shape-identical to one from a fleet that never issued it:
+the set is signed entry by entry and not as a whole, so there is no count, no
+epoch and no signature over the collection for a reader to check the answer
+against. A relay that filters is indistinguishable from a relay that is simply
+younger.
+
+What bounds this in practice, and why it is a stated weakness rather than an
+open door:
+
+- Revocations are re-published by every machine that holds one, on every
+  connect and every 30 minutes, so a relay must withhold *continuously* and
+  from *every* reader to keep one buried.
+- A machine that has already ingested a revocation has written it to its own
+  store; nothing the relay does later takes it back.
+- The relay cannot mint the device cert the withheld revocation was about. It
+  can only preserve authority the fleet had already granted, never invent it.
+
+**Future work, deliberately not built here: a signed manifest.** The fix is for
+the fleet to sign a statement *about the set* — an epoch counter, or a digest
+over the entry keys, minted under the fleet key and published like any other
+blob — so that a reader can tell "this is the whole directory as of epoch N"
+from "this is what the relay felt like handing me". That turns omission back
+into an availability failure a reader can detect. It needs a rule for who mints
+the manifest and when, and a rule for readers meeting two manifests at different
+epochs, and neither belongs in the same change as the directory itself.
 
 ```
 PUT    /directory  Bearer daemon secret; body is one signed blob, raw bytes
