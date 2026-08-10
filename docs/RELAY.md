@@ -478,7 +478,7 @@ blob locally, which is why the second number is the one that means anything:
 
 ```
 relay:    configured (wss://flue-relay.<sub>.workers.dev), status unknown from here
-fleet:    7 entries, 7 verified under this fleet key (2 machines, 3 devices, 2 revocations)
+fleet:    4 entries, 4 verified under this fleet key (2 machines, 2 revocations)
 ```
 
 `entries` is what the relay claims to hold; `verified` is how much of it this
@@ -487,8 +487,11 @@ it is a fleet key that has rotated, or a relay that is not the one this machine
 thinks it is — and status says so on a second line when it happens. It also
 says when this machine's own certificate is missing from the set, which is the
 one fault a freshly joined machine really has: other devices will not discover
-it. The same counts ride `GET /api/relay/info`, which is where the Remote
-screen reads them.
+it; when the directory is past 90% of its 512 entries, so a full one is a
+decision rather than a discovery; and when there are device certificates in
+there at all, which means a machine in your fleet is running a flue old enough
+to still publish them. The same counts ride `GET /api/relay/info`, which is
+where the Remote screen reads them.
 
 ## Cost model
 
