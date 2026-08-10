@@ -1678,6 +1678,31 @@ describe('a loopback tab that never ran a ceremony', () => {
     h.fleet.close()
   })
 
+  it('forgets the fleet when the welcome says this machine is not on a relay', async () => {
+    // `flue relay leave`, or a relay.json removed by hand, under a tab that was
+    // already open: the socket comes back and the daemon's welcome names no
+    // relay at all. What the last expansion could not build is not a fact about
+    // anything any more — there is no fleet for this browser to be missing
+    // from — so the snapshot the sessions screen speaks from goes with it.
+    // Without this it outlived the fleet it described, and the band went on
+    // telling the reader about machines that no longer exist to be reached.
+    const post = enrolFetch('this machine holds no fleet key', { ok: false, status: 409 })
+    const directory = directoryFetch([])
+    const h = loopbackFleet(() => enrolThisBrowser(post), directory)
+    h.fleet.connect()
+    h.local.open()
+    h.local.emitWelcome(loopbackWelcome())
+    await vi.waitFor(() => expect(h.fleet.gaps()).not.toBeNull())
+
+    // `status: 'off'` rather than an absent relay, which is the spelling the
+    // protocol says never arrives and every consumer must read the same way
+    // (client/protocol.ts, RelayInfo).
+    h.local.emitWelcome(welcome({ status: 'off' }))
+
+    expect(h.fleet.gaps()).toBeNull()
+    h.fleet.close()
+  })
+
   it('keeps the machine it is on when the relay cannot be read', async () => {
     // 502 from the daemon's proxy: the fault is upstream of this machine — the
     // relay is down, or the leg is mid-dial — and the tab is told so rather
@@ -1886,6 +1911,58 @@ describe('discovery', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     expect(expand).not.toHaveBeenCalled()
+    h.fleet.close()
+  })
+
+  it('stops reading once the machine has left the relay it named', async () => {
+    // The origin was learned once and kept for the epoch, so a tab open across
+    // a `flue relay leave` went on asking a relay this machine had left, every
+    // minute and on every focus, for as long as it stayed open. A welcome that
+    // names no relay is this machine saying it has none; the origin it named
+    // before is spent.
+    vi.useFakeTimers()
+    const expand = vi.fn(() => Promise.resolve([] as FleetSource[]))
+    const h = harness([[LOCAL_MACHINE_ID, '']], expand)
+    h.fleet.connect()
+    h.fake(LOCAL_MACHINE_ID).open()
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(
+      welcome({ status: 'connected', origin: 'https://relay.example' }),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(expand).toHaveBeenCalledTimes(1)
+
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(welcome())
+
+    await vi.advanceTimersByTimeAsync(180_000)
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(expand).toHaveBeenCalledTimes(1)
+    h.fleet.close()
+  })
+
+  it('expands again for a machine that joins a relay a second time', async () => {
+    // The other half of forgetting: a machine that left and joined again — or
+    // was repointed at a new relay — hands its tab a fresh origin, and the tab
+    // has to build against it rather than sit on the once-per-epoch flag the
+    // first expansion set.
+    vi.useFakeTimers()
+    const expand = vi.fn(() => Promise.resolve([] as FleetSource[]))
+    const h = harness([[LOCAL_MACHINE_ID, '']], expand)
+    h.fleet.connect()
+    h.fake(LOCAL_MACHINE_ID).open()
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(
+      welcome({ status: 'connected', origin: 'https://relay.example' }),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(welcome())
+
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(
+      welcome({ status: 'connected', origin: 'https://second.example' }),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(expand).toHaveBeenCalledTimes(2)
+    expect(expand).toHaveBeenLastCalledWith('https://second.example')
     h.fleet.close()
   })
 })

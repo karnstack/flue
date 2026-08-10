@@ -147,6 +147,11 @@ export interface FleetSource {
  * A snapshot of one expansion, not a verdict. The fleet re-expands the moment a
  * welcome hands over something that changes the answer, so a gap reported at
  * boot may be gone a heartbeat later; see FleetClient.adoptFromWelcome.
+ *
+ * **There is one of these only while this tab knows a relay**, and that is the
+ * precondition every sentence a screen writes from it stands on: gaps are a
+ * statement about a fleet, and a machine with no relay is not on one. See
+ * FleetClient.gaps.
  */
 export interface FleetGaps {
   /**
@@ -364,9 +369,24 @@ export class FleetClient {
   }
 
   /**
-   * What this browser could not reach, as of the last expansion, or null on a
-   * tab that has not run one — a loopback tab before its welcome names a
-   * relay, or a test driving scripted sources.
+   * What this browser could not reach on the fleet it is on, as of the last
+   * expansion — and null whenever there is no fleet for that to be a fact
+   * about.
+   *
+   * Null covers three states, and they are one state as far as any screen is
+   * concerned: a tab that has run no expansion (a loopback tab before its
+   * welcome names a relay, or a test driving scripted sources), a machine that
+   * has no relay configured at all, and a machine that had one and has left it.
+   * A tab in any of them reaches exactly the machines it can reach, and has no
+   * absent fleet to apologise for.
+   *
+   * That last one is why this is worth stating rather than leaving implicit. A
+   * gaps snapshot used to outlive the relay that gave it meaning: a tab open
+   * across a `flue relay leave` kept the last expansion's counts for the life
+   * of the tab, and the sessions screen kept telling its reader to go and
+   * repair a fleet that no longer existed. `localWelcome` drops it when the
+   * daemon says it is not on a relay, and `noteGaps` refuses to take a new one
+   * while that is true.
    *
    * Read after an onFleet delivery: noteGaps emits, so a screen holding this
    * as state is told when it changes for the same reason it is told when a
@@ -378,6 +398,10 @@ export class FleetClient {
 
   /** Record what the builder skipped, and tell the screens if it changed. */
   private noteGaps(g: FleetGaps) {
+    // Nothing to be missing from. An expansion still in flight when the daemon
+    // said it had left the relay would otherwise land its counts here after
+    // localWelcome had dropped them, and put the band back up.
+    if (this.relayOrigin === null) return
     const held = this.gapsState
     if (
       held !== null &&
@@ -659,6 +683,9 @@ export class FleetClient {
    *     here, it triggers the one deferred source construction — once per
    *     epoch, because the welcome that carries it will arrive again on every
    *     reconnect and the machines it names are already held.
+   *
+   * And one fact that arrives by *not* being there: a welcome with no relay on
+   * it is this machine saying it is on none. See `forgetRelay`.
    */
   private localWelcome(w: Welcome) {
     const slot = this.slots.find((s) => s.id === LOCAL_MACHINE_ID)
@@ -681,19 +708,63 @@ export class FleetClient {
       }
     }
 
-    const origin = w.relay?.origin
-    if (origin !== undefined) {
-      // Remembered whether or not it triggers a build, because the *other*
-      // trigger — a certificate arriving after the expansion already ran —
-      // has no welcome of its own to read an origin from.
-      this.relayOrigin = origin
-      if (!this.expanded) {
-        this.expanded = true
-        void this.adoptRemotes(origin)
+    // Absent and `off` are the same statement, and the protocol says so in as
+    // many words: a daemon with no relay omits the field, and `off` is the
+    // spelling that never arrives (client/protocol.ts, RelayInfo). A relay that
+    // is merely `connecting` is a relay — configured, dialling, and about to
+    // name an origin — so it is not this.
+    if (w.relay === undefined || w.relay.status === 'off') {
+      if (this.forgetRelay()) changed = true
+    } else {
+      const origin = w.relay.origin
+      if (origin !== undefined) {
+        // Remembered whether or not it triggers a build, because the *other*
+        // trigger — a certificate arriving after the expansion already ran —
+        // has no welcome of its own to read an origin from.
+        this.relayOrigin = origin
+        if (!this.expanded) {
+          this.expanded = true
+          void this.adoptRemotes(origin)
+        }
       }
     }
 
     if (changed) this.emit()
+  }
+
+  /**
+   * Take this tab off the relay it was told about, because the machine it
+   * rides has just said it is on none.
+   *
+   * The state this exists for is a tab left open across a `flue relay leave`,
+   * or a relay.json deleted by hand and the daemon restarted under it: the
+   * socket comes back, the welcome names no relay, and everything this tab
+   * learned from the last one is spent. Two things were wrong without it, and
+   * both lasted for the life of the tab —
+   *
+   *   - the discovery tick kept reading a directory through a machine that had
+   *     left the relay, once a minute and on every focus, for an answer that
+   *     can only be a 404 from its own daemon; and
+   *   - the gaps snapshot outlived the fleet it described, so the sessions
+   *     screen went on telling the reader to repair a fleet that no longer
+   *     exists — advice that is not merely stale but impossible to act on.
+   *
+   * `expanded` goes back down with it so a machine that joins a relay again
+   * builds against the new origin rather than sitting on a flag the first
+   * expansion set. The slots already built stay exactly where they are: this
+   * machine leaving a relay says nothing about whether the *other* machines are
+   * still on it, and dropping them would be the sessions screen emptying itself
+   * on a fact about somebody else — the same reason `adoptRemotes` is additive.
+   *
+   * Reports whether anything changed, so the ordinary welcome — every reconnect
+   * on a machine that never had a relay — costs one comparison and no emit.
+   */
+  private forgetRelay(): boolean {
+    if (this.relayOrigin === null && this.gapsState === null) return false
+    this.relayOrigin = null
+    this.expanded = false
+    this.gapsState = null
+    return true
   }
 
   /**
