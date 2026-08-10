@@ -26,6 +26,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -522,8 +524,15 @@ type migrationStep struct {
 }
 
 // pendingMigrations is the migration object for a script that currently carries
-// deployedTag ("" for a script that has none, or none at all), given the whole
-// history. Nil when there is nothing to apply.
+// deployedTag, given the whole history. Nil when there is nothing to apply.
+//
+// known says whether deployedTag is a fact or a guess. It is a fact when the
+// account's script list answered; it is a guess when that read failed, and the
+// guess is the empty tag — a first deploy — because that is the only shape that
+// can create the classes and it is what this client sent before it could ask at
+// all. A guess that is wrong is not left to rot: the upload is refused on the
+// precondition, Cloudflare's message names the tag the script really carries,
+// and Deploy recomputes from *that* and retries (expectedMigrationTag).
 //
 // The rule is wrangler's, step for step, because the account's state is shared
 // with it and a second opinion about which steps are outstanding would be a
@@ -544,7 +553,7 @@ type migrationStep struct {
 //     not know about. wrangler replays the whole history here instead, which
 //     is right for a config file a human is editing and wrong for a history
 //     compiled into a binary that may be the older of the two.
-func pendingMigrations(history []Migration, deployedTag string) *migrations {
+func pendingMigrations(history []Migration, deployedTag string, known bool) *migrations {
 	if len(history) == 0 {
 		return nil
 	}
@@ -556,7 +565,7 @@ func pendingMigrations(history []Migration, deployedTag string) *migrations {
 		}
 		return out
 	}
-	if deployedTag == "" {
+	if !known || deployedTag == "" {
 		return &migrations{NewTag: newTag, Steps: steps(history)}
 	}
 	for i, m := range history {
@@ -571,9 +580,31 @@ func pendingMigrations(history []Migration, deployedTag string) *migrations {
 	return nil
 }
 
+// sameMigrations reports whether two migration objects would produce the same
+// request. It is what stops Deploy retrying an upload byte-identical to the one
+// that just failed: Cloudflare naming a tag the client already assumed means
+// the refusal was about something else, and a second identical attempt would
+// only bury the first error behind the same one.
+func sameMigrations(a, b *migrations) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.OldTag != b.OldTag || a.NewTag != b.NewTag || len(a.Steps) != len(b.Steps) {
+		return false
+	}
+	for i := range a.Steps {
+		if !slices.Equal(a.Steps[i].NewSQLiteClasses, b.Steps[i].NewSQLiteClasses) {
+			return false
+		}
+	}
+	return true
+}
+
 // deployedMigrationTag is the migration tag the account's copy of this script
-// carries, or "" when the script does not exist, has no Durable Objects, or
-// cannot be asked.
+// carries. known is false when the question could not be answered at all — the
+// call failed, or the body was not the list it should be — and is true with an
+// empty tag when the account answered and this script is simply not in it, or
+// is there with no migration history.
 //
 // The endpoint is the account's script list, which is where wrangler reads the
 // same fact from (`getMigrationsToUpload`: GET /accounts/<id>/workers/scripts,
@@ -581,35 +612,45 @@ func pendingMigrations(history []Migration, deployedTag string) *migrations {
 // `migration_tag`). It is not paginated there and is not paginated here; the
 // response is metadata only, no script bodies, and maxResponseBytes bounds it.
 //
-// Every failure answers "" rather than an error, and that is a deliberate
-// downgrade rather than a swallowed fault. "" makes Deploy send the whole
-// history, which is exactly what this client did before it could ask the
-// question — so a token without permission to list scripts, or an endpoint
-// having a bad minute, costs a first deploy nothing and costs an upgrade the
-// same already-applied round trip it always paid. Refusing to deploy at all
-// would be the larger failure: a relay that cannot be updated because a
-// read-only pre-flight call failed.
-func (c *Client) deployedMigrationTag(ctx context.Context, accountID, script string) string {
+// The two answers are kept apart because they mean opposite things and only one
+// of them is safe to act on. "The account says this script has no tag" is a
+// first deploy: send the whole history with no old_tag, which is the only shape
+// that can create the classes. "I could not ask" is not a first deploy — it is
+// no information — and treating it as one is what turned a five-second network
+// blip into an upgrade that could not be performed at all: the whole history
+// with no old_tag is refused on the precondition by an existing v1 relay, and
+// the blanket recovery that then dropped migrations uploaded a script binding
+// FleetDirectory to a class no migration had created, which Cloudflare refuses
+// in turn. Two failures and no deploy, from a read-only pre-flight call.
+//
+// So an unreadable tag still sends the whole history — a first deploy must
+// work for a token that cannot list scripts — but Deploy no longer treats the
+// precondition refusal as noise. Cloudflare's 10079 names the tag the script
+// actually carries; that answer is better than the pre-flight read's, and it is
+// what the retry is computed from (expectedMigrationTag).
+func (c *Client) deployedMigrationTag(ctx context.Context, accountID, script string) (tag string, known bool) {
 	raw, err := c.call(ctx, apiCall{
 		method: http.MethodGet,
 		path:   fmt.Sprintf("/accounts/%s/workers/scripts", accountID),
 	})
 	if err != nil {
-		return ""
+		return "", false
 	}
 	var scripts []struct {
 		ID           string `json:"id"`
 		MigrationTag string `json:"migration_tag"`
 	}
 	if err := json.Unmarshal(raw, &scripts); err != nil {
-		return ""
+		return "", false
 	}
 	for _, s := range scripts {
 		if s.ID == script {
-			return s.MigrationTag
+			return s.MigrationTag, true
 		}
 	}
-	return ""
+	// The account answered and this script is not in the list: it does not
+	// exist yet, which is a fact and a first deploy.
+	return "", true
 }
 
 type assetsMetadata struct {
@@ -713,7 +754,8 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 	// so nothing deploys silently wrong — but nothing deploys at all, which is
 	// every existing relay unable to take the update that adds the directory.
 	if len(in.Migrations) > 0 {
-		meta.Migrations = pendingMigrations(in.Migrations, c.deployedMigrationTag(ctx, in.AccountID, in.ScriptName))
+		tag, known := c.deployedMigrationTag(ctx, in.AccountID, in.ScriptName)
+		meta.Migrations = pendingMigrations(in.Migrations, tag, known)
 	}
 
 	if in.Observability {
@@ -737,39 +779,71 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 	}
 
 	err := c.putScript(ctx, in, meta)
-	if err != nil && meta.Migrations != nil && migrationAlreadyApplied(err) {
-		// The belt behind the tag read above, and no longer the mechanism.
-		// Re-running setup against an account that already has the Worker is an
-		// ordinary thing to do — after a failed run, or to pick up a new build
-		// — and now sends no migration at all, because the tag says there is
-		// nothing outstanding. What is left here is the cases the read cannot
-		// cover: a tag lookup that failed and downgraded to "", a deploy racing
-		// another, an account whose script list lags its script. Cloudflare
-		// refuses a migration it has already applied, so the deploy is retried
-		// once without it. The classes still exist; only the migration is
-		// redundant.
-		meta.Migrations = nil
-
-		// The asset completion token was spent on the PUT that just failed, and
-		// Cloudflare does not document whether it survives a rejected upload.
-		// Rather than bet the whole idempotent-re-run path on it being reusable,
-		// the retry opens a fresh upload session. That session costs one request
-		// and no uploads in the normal case: every file is already stored, so it
-		// comes back with no buckets and its own token is the completion token.
-		if meta.Assets != nil {
-			jwt, refreshErr := c.uploadAssets(ctx, in.AccountID, in.ScriptName, in.Assets)
-			if refreshErr != nil {
-				// Both halves are wrapped. The refresh failure is what stopped
-				// the retry, but the deploy failure is why there was a retry at
-				// all, and dropping it leaves the user with a session error and
-				// no sign that a migration conflict is the thing to fix.
-				return fmt.Errorf("cloudflare: re-attaching the assets to retry without the already-applied migration: %w (the deploy this retried failed with: %w)", refreshErr, err)
-			}
-			meta.Assets.JWT = jwt
-		}
-		err = c.putScript(ctx, in, meta)
+	if err == nil || meta.Migrations == nil {
+		return err
 	}
-	return err
+	switch {
+	case isMigrationPrecondition(err):
+		// Cloudflare refused the migration because the script does not carry
+		// the tag this upload claimed it did — and its message names the tag it
+		// *does* carry. That is a better answer than the pre-flight read gave,
+		// so it is the one the retry is computed from: the same rule
+		// pendingMigrations applies to a tag off the script list, applied to a
+		// tag off the refusal.
+		//
+		// This is the path an existing v1 relay lands on when the pre-flight
+		// read failed and this deploy therefore guessed "first deploy". Before,
+		// it was answered by dropping migrations altogether, which uploaded a
+		// script binding FleetDirectory to a class no migration had created —
+		// refused in turn, so `flue relay update` died on every existing relay
+		// whose pre-flight read had a bad second. Now it is answered by sending
+		// the v2 step with old_tag: v1, which is what it needed.
+		want, ok := expectedMigrationTag(err)
+		if !ok {
+			// The refusal is a tag precondition and its message did not name
+			// the expected tag. Fail closed, which is what wrangler does here:
+			// there is nothing to compute a correct migration from, and the
+			// alternative — retry with none — is the very move that produces
+			// the second, more confusing refusal.
+			return err
+		}
+		next := pendingMigrations(in.Migrations, want, true)
+		if sameMigrations(next, meta.Migrations) {
+			// Cloudflare named the tag this upload already assumed, so the
+			// refusal was not about the tag being wrong. Retrying byte for byte
+			// would bury the real error behind a copy of itself.
+			return err
+		}
+		meta.Migrations = next
+	case migrationAlreadyApplied(err):
+		// A migration Cloudflare has already run. Distinct from the
+		// precondition above and left as it was: there is nothing to recompute
+		// — the classes exist, only the migration is redundant — so the retry
+		// simply drops it. The cases that reach here are a deploy racing
+		// another and an account whose script list lags its script.
+		meta.Migrations = nil
+	default:
+		return err
+	}
+
+	// The asset completion token was spent on the PUT that just failed, and
+	// Cloudflare does not document whether it survives a rejected upload.
+	// Rather than bet the whole idempotent-re-run path on it being reusable,
+	// the retry opens a fresh upload session. That session costs one request
+	// and no uploads in the normal case: every file is already stored, so it
+	// comes back with no buckets and its own token is the completion token.
+	if meta.Assets != nil {
+		jwt, refreshErr := c.uploadAssets(ctx, in.AccountID, in.ScriptName, in.Assets)
+		if refreshErr != nil {
+			// Both halves are wrapped. The refresh failure is what stopped the
+			// retry, but the deploy failure is why there was a retry at all,
+			// and dropping it leaves the user with a session error and no sign
+			// that a migration conflict is the thing to fix.
+			return fmt.Errorf("cloudflare: re-attaching the assets to retry the migration: %w (the deploy this retried failed with: %w)", refreshErr, err)
+		}
+		meta.Assets.JWT = jwt
+	}
+	return c.putScript(ctx, in, meta)
 }
 
 // putScript sends the multipart script upload: the metadata part and the
@@ -819,6 +893,60 @@ func (c *Client) putScript(ctx context.Context, in DeployInput, meta scriptMetad
 	return err
 }
 
+// isMigrationPrecondition reports whether err is Cloudflare refusing an upload
+// because the script does not carry the migration tag the upload claimed.
+//
+// 10079 is the code: "Actor migration tag precondition failed, got tag '' when
+// expected tag is 'v1'" — the request's `old_tag` (or its absence) did not
+// match what the account has recorded against the script. Seen live on the
+// first real `flue relay update`. The prose is matched beside the code because
+// Cloudflare has reported this condition under more than one code, and this
+// wording carries neither "migration … already" word the redundant-migration
+// refusal does.
+//
+// It is deliberately *not* folded into migrationAlreadyApplied. The two
+// refusals want opposite repairs: this one means "you named the wrong tag, here
+// is the right one", and dropping migrations in answer to it uploads a script
+// whose binding names a class no migration created.
+func isMigrationPrecondition(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Code == 10079 ||
+		strings.Contains(strings.ToLower(apiErr.Message), "migration tag precondition")
+}
+
+// expectedTagPattern pulls the tag out of a precondition refusal. Cloudflare's
+// message names both tags — "got tag 'x' when expected tag is 'y'" — and the
+// expected one is the fact this client is missing: it is what the account has
+// actually recorded against the script, from the account itself, at the moment
+// of the deploy. An empty capture is meaningful and is why the quantifier is
+// `*`: "expected tag is ''" says the script carries no migration history.
+var expectedTagPattern = regexp.MustCompile(`expected tag is '([^']*)'`)
+
+// expectedMigrationTag is the tag Cloudflare says the script really carries,
+// read out of a precondition refusal.
+//
+// ok is false when the refusal is not a precondition at all, or when it is one
+// whose message does not name the expected tag — a wording change, say. The
+// caller fails closed on that rather than guessing, because every guess
+// available here is one that has already been tried and refused.
+func expectedMigrationTag(err error) (tag string, ok bool) {
+	if !isMigrationPrecondition(err) {
+		return "", false
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return "", false
+	}
+	m := expectedTagPattern.FindStringSubmatch(apiErr.Message)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
 // migrationAlreadyApplied reports whether err is Cloudflare refusing a Durable
 // Object migration that the account has already run.
 //
@@ -829,7 +957,8 @@ func (c *Client) putScript(ctx context.Context, in DeployInput, meta scriptMetad
 // also catch a mismatched tag or a class that is not in the script — and for
 // those, retrying without migrations could succeed, deploying a Worker whose
 // Durable Object was never migrated and burying the real error behind a
-// second request.
+// second request. The mismatched-tag half of that is now its own case above,
+// with its own repair.
 //
 // Known residual: "…already depended on by existing Durable Objects" matches
 // here, and it is the message a genuine re-run produces — but Cloudflare uses
@@ -838,31 +967,18 @@ func (c *Client) putScript(ctx context.Context, in DeployInput, meta scriptMetad
 // re-run and dropping the migration would leave the mismatch in place. The two
 // are not separable from the text alone.
 //
-// The live signal that closes it — the deployed script's migration_tag — is
-// now read before deploying (deployedMigrationTag), which is what makes the
+// The live signal that narrows it — the deployed script's migration_tag — is
+// read before deploying (deployedMigrationTag), which is what makes the
 // ordinary re-run send no migration and never reach this function. The residual
-// survives only on the paths where that read came back empty, and its failure
-// mode is unchanged: a confusing error on an account that cannot work anyway,
-// not a silently wrong deploy of a fresh one.
+// survives only where that read came back unknown, and its failure mode is
+// unchanged: a confusing error on an account that cannot work anyway, not a
+// silently wrong deploy of a fresh one.
 func migrationAlreadyApplied(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	// 10079 is the tag-precondition refusal: "Actor migration tag
-	// precondition failed, got tag '' when expected tag is 'v1'" — the
-	// script already carries the tag this deploy's migration would apply,
-	// and the request's implied "currently untagged" is what failed. Seen
-	// live on the first real `flue relay update`; its wording carries
-	// neither "migration … already" word the older refusal does, which is
-	// why the code is matched and not just the prose.
-	if apiErr.Code == 10079 {
-		return true
-	}
 	msg := strings.ToLower(apiErr.Message)
-	if strings.Contains(msg, "migration tag precondition") {
-		return true
-	}
 	return strings.Contains(msg, "migration") && strings.Contains(msg, "already")
 }
 

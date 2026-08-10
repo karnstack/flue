@@ -1339,6 +1339,168 @@ func TestDeployFallsBackToTheWholeHistoryWhenTheTagIsUnreadable(t *testing.T) {
 	}
 }
 
+// sentMigrations decodes the migration object out of one script upload's
+// metadata part, or nil when the upload carried none.
+type sentMigrations struct {
+	OldTag string `json:"old_tag"`
+	NewTag string `json:"new_tag"`
+	Steps  []struct {
+		NewSQLiteClasses []string `json:"new_sqlite_classes"`
+	} `json:"steps"`
+}
+
+func migrationsIn(t *testing.T, r recorded) *sentMigrations {
+	t.Helper()
+	var m struct {
+		Migrations *sentMigrations `json:"migrations"`
+	}
+	body := partNamed(t, parseParts(t, r.ContentType, r.Body), "metadata").Body
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatalf("decoding metadata: %v", err)
+	}
+	return m.Migrations
+}
+
+func scriptPuts(f *fixture) []recorded {
+	var out []recorded
+	for _, r := range f.requests() {
+		if r.Method == http.MethodPut && r.Path == "/accounts/acct-123/workers/scripts/flue-relay" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// TestDeployRecoversTheUpgradeWhenTheTagReadFailed is the v1 → v2 upgrade
+// surviving a five-second network blip, which is the deploy this whole release
+// requires an existing relay to take.
+//
+// The chain it guards: the pre-flight script-list read times out, so the deploy
+// has no tag and sends the whole history with no old_tag; Cloudflare refuses
+// that on the precondition (10079) and *names the tag the script really
+// carries*. The recovery has to read that name and retry with `old_tag: v1` and
+// v2's step alone. Answering the refusal by dropping migrations instead — which
+// is what a blanket already-applied recovery does — uploads a script whose
+// DIRECTORY binding names a class no migration ever created, is refused again,
+// and leaves `flue relay update` dead on every relay whose pre-flight read had
+// a bad second.
+func TestDeployRecoversTheUpgradeWhenTheTagReadFailed(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == scriptListPath:
+			// The transient failure: a read-only pre-flight call having a bad
+			// minute. The deploy has no tag to work from.
+			writeAPIError(w, http.StatusGatewayTimeout, 10000, "internal error")
+		case strings.HasSuffix(r.URL.Path, "/assets-upload-session"):
+			writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "session-jwt", "buckets": [][]string{}})
+		default:
+			var m struct {
+				Migrations *sentMigrations `json:"migrations"`
+			}
+			if err := json.Unmarshal(partNamed(t, parseParts(t, r.Header.Get("Content-Type"), body), "metadata").Body, &m); err != nil {
+				t.Fatalf("decoding metadata: %v", err)
+			}
+			switch {
+			case m.Migrations != nil && m.Migrations.OldTag == "v1":
+				// The correct upload for a script at v1.
+				writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+			case m.Migrations == nil:
+				// What a blanket already-applied recovery sends, and what
+				// Cloudflare does with it: the script binds DIRECTORY to a
+				// class no migration created.
+				writeAPIError(w, http.StatusBadRequest, 10061,
+					"Uncaught TypeError: Cannot read properties of undefined; binding DIRECTORY refers to class FleetDirectory which is not exported by the script")
+			default:
+				// The first attempt: the whole history with no old_tag, which
+				// this script — already at v1 — refuses on the precondition.
+				// The message is Cloudflare's own, and naming the expected tag
+				// is the fact the client is missing.
+				writeAPIError(w, http.StatusBadRequest, 10079,
+					"Actor migration tag precondition failed, got tag '' when expected tag is 'v1'")
+			}
+		}
+	})
+	f.noScriptList = true
+
+	if err := f.client().Deploy(context.Background(), deployFixture()); err != nil {
+		t.Fatalf("Deploy after an unreadable tag and a precondition refusal: %v", err)
+	}
+
+	puts := scriptPuts(f)
+	if len(puts) != 2 {
+		t.Fatalf("script PUTs = %d, want 2 (the guess and the correction): %s", len(puts), f.paths())
+	}
+	first := migrationsIn(t, puts[0])
+	if first == nil || first.OldTag != "" || len(first.Steps) != 2 {
+		t.Errorf("first upload = %+v, want the whole history with no old_tag", first)
+	}
+	got := migrationsIn(t, puts[1])
+	if got == nil {
+		t.Fatal("the retry dropped migrations; FleetDirectory would never be created")
+	}
+	if got.OldTag != "v1" || got.NewTag != "v2" {
+		t.Errorf("retry tags = %q -> %q, want v1 -> v2 read out of Cloudflare's own message", got.OldTag, got.NewTag)
+	}
+	if len(got.Steps) != 1 || !reflect.DeepEqual(got.Steps[0].NewSQLiteClasses, []string{"FleetDirectory"}) {
+		t.Errorf("retry steps = %+v, want exactly the v2 step", got.Steps)
+	}
+}
+
+// TestDeployFailsClosedOnAnUnreadablePrecondition: a tag precondition whose
+// message does not name the expected tag leaves nothing to compute a correct
+// migration from. wrangler fails closed there and so does this — the one
+// alternative, retrying with no migrations, is exactly the move that turns one
+// clear refusal into a second, more confusing one.
+func TestDeployFailsClosedOnAnUnreadablePrecondition(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == scriptListPath:
+			writeAPIError(w, http.StatusForbidden, 10000, "Authentication error")
+		case strings.HasSuffix(r.URL.Path, "/assets-upload-session"):
+			writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "session-jwt", "buckets": [][]string{}})
+		default:
+			writeAPIError(w, http.StatusBadRequest, 10079, "Actor migration tag precondition failed")
+		}
+	})
+	f.noScriptList = true
+
+	err := f.client().Deploy(context.Background(), deployFixture())
+	if err == nil {
+		t.Fatal("Deploy succeeded on a precondition it could not repair")
+	}
+	// The refusal reaches the user intact rather than as whatever a blind
+	// second attempt would have produced.
+	if !strings.Contains(err.Error(), "precondition") {
+		t.Errorf("the error lost the precondition refusal: %v", err)
+	}
+	if puts := scriptPuts(f); len(puts) != 1 {
+		t.Errorf("script PUTs = %d, want 1: a refusal with nothing to learn from is not retried", len(puts))
+	}
+}
+
+// TestDeployDoesNotRetryATagItAlreadyClaimed: Cloudflare naming the very tag
+// this upload sent means the refusal was about something else, and a byte-
+// identical second attempt would bury the real error behind a copy of itself.
+func TestDeployDoesNotRetryATagItAlreadyClaimed(t *testing.T) {
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, _ []byte) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/assets-upload-session"):
+			writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "session-jwt", "buckets": [][]string{}})
+		default:
+			writeAPIError(w, http.StatusBadRequest, 10079,
+				"Actor migration tag precondition failed, got tag 'v1' when expected tag is 'v1'")
+		}
+	})
+	f.deployedTag = "v1"
+
+	if err := f.client().Deploy(context.Background(), deployFixture()); err == nil {
+		t.Fatal("Deploy succeeded against a relay that refused every upload")
+	}
+	if puts := scriptPuts(f); len(puts) != 1 {
+		t.Errorf("script PUTs = %d, want 1: the retry would have been identical", len(puts))
+	}
+}
+
 // TestDeployLeavesANewerScriptAlone: a script carrying a tag this binary has
 // never heard of was deployed by a newer flue, and replaying this binary's
 // older history over it would undo a migration it does not know about.
