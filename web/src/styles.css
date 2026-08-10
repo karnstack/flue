@@ -50,6 +50,13 @@
  */
 @source not '../**/*.go';
 /*
+ * And the end-to-end harness, for the same reason as src/testing/: it is
+ * test-only by definition, nothing in it renders markup, and its prose is
+ * about processes, ports and certificates — sentences no author of it should
+ * have to write around a CSS scanner.
+ */
+@source not '../e2e/**';
+/*
  * Worth knowing before writing a *comment* in any file still inside the
  * perimeter: Tailwind scans prose exactly as it scans markup, so an ordinary
  * English word that is also a bare utility name compiles a rule. `inline`,
