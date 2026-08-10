@@ -584,6 +584,10 @@ describe('a fleet, end to end', () => {
       // certificate.
       const certs = await directoryCerts()
       expect(certs.filter((c) => c.kind === 'revoke')).toHaveLength(1)
+      // Asked again on this side of a real pairing ceremony, because the
+      // ceremony is what mints a device certificate: the earlier check could
+      // only speak for enrolment.
+      expect(certs.filter((c) => c.kind === 'device')).toHaveLength(0)
       const seen = await readDirectory({
         origin: fleet.relayOrigin,
         fleetPub,
