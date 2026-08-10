@@ -244,6 +244,35 @@ func (s *Server) daemonPubParam() string {
 	return base64.RawURLEncoding.EncodeToString(s.identity.Key.Public)
 }
 
+// fleetPubParam is the fleet *public* key as the pairing URL carries it, and
+// the empty string on a daemon that holds no fleet key.
+//
+// It rides the QR beside `k` and for the same reason, one level up: `k`
+// anchors this browser to this machine, and this anchors it to the whole
+// fleet (spec/fleet-trust.md, "What changes in the handshake"). A device that
+// pins it accepts any machine whose machine certificate verifies under it and
+// pins that certificate's `noise` key for the IK handshake — which is what
+// turns "pair once per machine" into "pair once". So it has to arrive by the
+// one leg of the ceremony an intermediary cannot sit in, exactly as the
+// daemon's own key does; a fleet key learned from the relay's answer would be
+// a browser trusting whoever served it a machine list.
+//
+// The public half only, and never the seed: the seed is in the join line and
+// in relay.json, and a browser that held it could mint certificates for the
+// fleet. Same encoding as `k` — unpadded URL-safe base64, spliced raw.
+//
+// Empty is a real answer, not a fault. A daemon whose relay.json predates the
+// fleet key, or one deployed from the Remote screen in a process that booted
+// without one (Identity is fixed at construction), pairs exactly as it always
+// did: the browser pins this machine and learns of no others.
+func (s *Server) fleetPubParam() string {
+	pub := s.identity.Fleet.Public()
+	if len(pub) == 0 {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(pub)
+}
+
 // PairOutcome is the transport-neutral answer to a pairing attempt: the HTTP
 // status and the JSON body the request should be answered with.
 //
@@ -404,6 +433,18 @@ func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
 
 	s.logger().Info("device paired", "peer", peer, "device", dev.ID, "label", dev.Label)
 
+	// Nothing is published to the fleet directory here, and the absence is the
+	// design rather than an omission (spec/fleet-trust.md, "Device certificates
+	// are deliberately not in the directory"). The cert goes to the one party
+	// it is about: this answer hands it to the device, and every welcome hands
+	// it over again. No daemon ever reads one out of the directory — a roaming
+	// device is admitted on the cert it *presents* in its handshake, which is
+	// rule 2 — so publishing it would only put the device's public key and the
+	// label its owner typed on a credential-less `GET /directory`, and spend
+	// one of 512 permanent entries per ceremony ever performed.
+	//
+	// A revoke still publishes: that one has to reach machines, not devices.
+
 	// The device was registered on a request the user's other screen never
 	// sees, so the screen has to be told. Broadcast before the answer is
 	// returned: the pairing device is not the one waiting for this.
@@ -411,10 +452,29 @@ func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
 
 	// A map rather than a struct, because the encoder sorts a map's keys and
 	// that is the byte order this endpoint has always answered in.
-	answer, err := json.Marshal(map[string]any{
+	fields := map[string]any{
 		"deviceId":  dev.ID,
 		"daemonPub": s.daemonPub(),
-	})
+	}
+	// And the certificate the ceremony just minted, handed straight to the
+	// device it is about.
+	//
+	// This is what the device presents to every *other* machine in the fleet,
+	// and this answer is where it should come from: the browser pinned the
+	// fleet public key out of the QR a moment ago, so it can check this blob
+	// itself, and a hostile relay in the middle can only make the check fail.
+	// Handing it over here is what lets device certificates stay off the
+	// credential-less `GET /directory` — where they were a roster of every
+	// device's public key and human label, readable by anybody, and one
+	// permanent directory entry per ceremony ever performed.
+	//
+	// Absent when nothing was minted (no fleet key, or no machine id), which is
+	// the same "paired to this machine only" this function already reports up
+	// the page. Base64 like every other []byte on this endpoint.
+	if len(cert) > 0 {
+		fields["deviceCert"] = cert
+	}
+	answer, err := json.Marshal(fields)
 	if err != nil {
 		// Two strings the daemon chose itself; unreachable short of a broken
 		// encoder. The device is paired either way, so the refusal is about

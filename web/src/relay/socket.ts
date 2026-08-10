@@ -60,11 +60,24 @@ export interface RelayIdentity {
   /** This browser's static Noise key, from `@/crypto/keys`. */
   deviceKey: DeviceKey
   /**
-   * The daemon's static public key, pinned at pairing time. The relay
-   * authorizes no browser — Noise against this key is what proves the far
-   * end, and the handshake fails closed against anything else.
+   * The daemon's static public key. Pinned at pairing time for a machine this
+   * browser paired with, or taken from a machine certificate that verified
+   * under the pinned fleet key (relay/directory.ts) for one it never met. The
+   * relay authorizes no browser — Noise against this key is what proves the
+   * far end, and the handshake fails closed against anything else.
    */
   daemonPub: Uint8Array
+  /**
+   * This device's fleet certificate, sealed into message A's payload.
+   *
+   * It is how a daemon that has never seen this device admits it: the
+   * certificate verifies under the fleet public key and names exactly the
+   * static key the handshake proves possession of
+   * (internal/transport/relay/channel.go, rule 2). Absent for a browser that
+   * has none — pairing on this machine still works without one, because rule
+   * 1 finds the key in the daemon's own registry and never reads the payload.
+   */
+  deviceCert?: Uint8Array
 }
 
 /** The subset of WebSocket this socket drives, so tests can substitute one. */
@@ -94,7 +107,9 @@ export function relaySocket(
   machineId: string,
   wsFactory: (url: string) => RawSocket = browserSocket,
 ): SocketLike {
-  const hs = initiatorHandshake(identity.deviceKey.privateKey, identity.daemonPub)
+  const hs = initiatorHandshake(identity.deviceKey.privateKey, identity.daemonPub, {
+    payload: identity.deviceCert,
+  })
 
   /**
    * Null until `dial` runs at the bottom of this function. Nothing else in

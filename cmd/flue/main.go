@@ -111,6 +111,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue relay status       show the configured relay
   flue relay update       redeploy this release's relay; secret and pairings kept
   flue relay address URL  repoint this machine at a custom domain on the same relay
+  flue relay reset        empty the relay's fleet directory; the fleet republishes
   flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N] [--open]   run the daemon in the foreground
   flue update             download the newest release, swap this binary, restart the daemon
@@ -411,17 +412,63 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 			return false
 		}
 	}
-	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin, MachineID: rc.MachineID, FleetPub: fleetKey.Public()}
+	cfg := relay.Config{
+		URL:         rc.URL,
+		Secret:      rc.Secret,
+		Origin:      rc.Origin,
+		MachineID:   rc.MachineID,
+		MachineCert: rc.MachineCert,
+		FleetPub:    fleetKey.Public(),
+	}
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
 	if err != nil {
 		logger.Warn("relay not started", "err", err)
 		return false
+	}
+	// The directory leg, beside the hub leg and independent of it: one keeps
+	// this machine's browsers connected, the other keeps this machine's idea
+	// of who the fleet trusts up to date (spec/fleet-trust.md, "The fleet
+	// directory"). It is started here rather than inside the transport
+	// because neither needs the other — a daemon whose hub socket is down
+	// still has to hear a revocation, and one whose directory is down still
+	// serves every device paired to it.
+	//
+	// A directory this daemon cannot build is a warning and nothing more, for
+	// the reason every fault in this function is: flue's promise is a terminal
+	// in a browser tab, and the fleet is what makes that tab openable from the
+	// next machine along.
+	dir, err := relay.NewDirectory(cfg, srv, identity.Key, identity.Devices, logger)
+	if err != nil {
+		logger.Warn("fleet directory not started", "err", err)
+	} else {
+		// Installed before the goroutine, so a pairing or a revoke that
+		// happens while the first dial is still in flight is queued rather
+		// than lost.
+		srv.SetFleetPublisher(dir)
+		srv.SetDirectoryCounts(func() daemon.DirectoryCounts {
+			c := dir.Counts()
+			return daemon.DirectoryCounts(c)
+		})
+		go func() {
+			if err := dir.Run(ctx); err != nil {
+				logger.Warn("fleet directory stopped", "err", err)
+			}
+		}()
 	}
 	// The machine's identity rides every welcome alongside the status, so the
 	// UI can build /client/<id> URLs for this machine. It is configuration
 	// rather than socket state, which is why it is set here — once, by the
 	// process that read relay.json — and not by the transport's callbacks.
 	srv.SetRelayMachine(rc.MachineID, rc.MachineName)
+	// And the origin, for the Content-Security-Policy this daemon serves its own
+	// UI under. A loopback tab talks to the relay for everything that is not
+	// this machine — `wss://<relay>/client/<id>` per sibling machine, and
+	// `https://<relay>/directory` to learn which siblings exist — and neither is
+	// covered by `'self'`. Set from relay.json rather than from the transport's
+	// status because a document's policy is fixed when it is served, and a tab
+	// opened while the relay is still dialling still has to be allowed to reach
+	// it (daemon.LocalCSPFor).
+	srv.SetRelayOrigin(rc.Origin)
 	// Before the goroutine, never after it. The transport reports this itself
 	// the moment it starts dialling, and this only covers the window before it
 	// is scheduled — but a seed written *after* the goroutine started races the

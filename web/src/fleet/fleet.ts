@@ -25,8 +25,17 @@
  */
 import { daemonSocketUrl, FlueClient, type ConnStatus } from '@/client/client'
 import type { ErrorMsg, Preview, SessionInfo, Welcome } from '@/client/protocol'
-import { loadOrCreateDeviceKey, loadPinnedDaemonKeyFor, type DeviceKey } from '@/crypto/keys'
-import { listMachines } from '@/relay/machines'
+import { sameKey, verifyCert } from '@/crypto/cert'
+import {
+  loadOrCreateDeviceKey,
+  loadPinnedDaemonKeyFor,
+  loadPinnedDeviceCert,
+  loadPinnedFleetKey,
+  savePinnedDeviceCert,
+  type DeviceKey,
+} from '@/crypto/keys'
+import { readDirectory, type DirectoryFetch, type FleetView } from '@/relay/directory'
+import { listMachines, mergeMachines } from '@/relay/machines'
 import { relaySocket, type RawSocket } from '@/relay/socket'
 import {
   LOCAL_MACHINE_ID,
@@ -138,6 +147,19 @@ export class FleetClient {
   private staggers = new Set<ReturnType<typeof setTimeout>>()
   /** Whether this epoch has already built remotes from a learned origin. */
   private expanded = false
+  /**
+   * The relay origin the expansion ran against, kept so a certificate that
+   * arrives after it can ask for a second one. Null on a tab whose welcome
+   * has not named a relay, which is a tab with nothing to expand into.
+   */
+  private relayOrigin: string | null = null
+  /**
+   * Whether a re-supplied certificate has already forced that second
+   * expansion. Once per epoch: a browser gains machines the first time it
+   * holds a certificate at all, and re-running on every later welcome would
+   * be a directory read per reconnect for a set that cannot have changed.
+   */
+  private certExpanded = false
   /** The slot id the loopback daemon holds on the relay, once known. */
   private twinId: string | null = null
   /** Bumped by close, so an in-flight expansion can tell it was orphaned. */
@@ -181,6 +203,8 @@ export class FleetClient {
     this.running = false
     this.epoch++
     this.expanded = false
+    this.certExpanded = false
+    this.relayOrigin = null
     if (this.poll !== null) {
       clearInterval(this.poll)
       this.poll = null
@@ -327,9 +351,17 @@ export class FleetClient {
       slot.client.onError((err) => this.emitError(slot.id, err)),
       slot.client.onRevoked((reason) => this.slotRevoked(slot, reason)),
     ]
-    // Only the loopback daemon's welcome carries facts the fleet acts on —
-    // its host name, its relay slot, the relay origin. A remote source's
-    // welcome names the machine the record already names.
+    // Every welcome may carry this device's own fleet certificate, whichever
+    // machine sent it: the daemon hands one to the device it has just
+    // authenticated, so any machine this browser can still reach re-supplies
+    // the blob it needs for the machines it cannot. Deliberately not gated on
+    // which slot: the local daemon is as good a source as a remote one, and a
+    // browser that has lost its certificate is usually a browser that can only
+    // reach one machine.
+    slot.unsubs.push(slot.client.onWelcome((w) => void this.adoptCert(w)))
+    // The rest of the welcome is the loopback daemon's alone — its host name,
+    // its relay slot, the relay origin. A remote source's welcome names the
+    // machine the record already names.
     if (slot.id === LOCAL_MACHINE_ID) {
       slot.unsubs.push(slot.client.onWelcome((w) => this.localWelcome(w)))
     }
@@ -423,12 +455,48 @@ export class FleetClient {
     }
 
     const origin = w.relay?.origin
-    if (origin !== undefined && !this.expanded) {
-      this.expanded = true
-      void this.adoptRemotes(origin)
+    if (origin !== undefined) {
+      // Remembered whether or not it triggers a build, because the *other*
+      // trigger — a certificate arriving after the expansion already ran —
+      // has no welcome of its own to read an origin from.
+      this.relayOrigin = origin
+      if (!this.expanded) {
+        this.expanded = true
+        void this.adoptRemotes(origin)
+      }
     }
 
     if (changed) this.emit()
+  }
+
+  /**
+   * A welcome's certificate, kept — and the machines it unlocks, taken now
+   * rather than on the next page load.
+   *
+   * The order this repairs: a browser that boots holding no certificate builds
+   * sources for the machines it pinned by hand and skips every machine it can
+   * only reach on the fleet's word (`fleetSources` reads the stored
+   * certificate once). The first welcome then hands it one. Without this, that
+   * certificate sits in IndexedDB unused until something reloads the tab —
+   * which is exactly the case the re-supply path exists for, since a browser
+   * that lost its certificate is a browser that is missing machines.
+   *
+   * Only a certificate this browser did not already hold re-expands, so the
+   * usual welcome — the same blob it has had all along — costs one IndexedDB
+   * read and nothing else. `certExpanded` bounds it to one rebuild per epoch
+   * even if several slots say hello at once.
+   *
+   * The rebuild is `adoptRemotes` unchanged, which is why this is safe to run
+   * a second time: it is idempotent by id, skips the twin, and discards
+   * everything if the fleet closed while it was reading the directory.
+   */
+  private async adoptCert(w: Welcome) {
+    if (!(await adoptFleetCert(w))) return
+    if (this.certExpanded || !this.running) return
+    const origin = this.relayOrigin
+    if (origin === null) return
+    this.certExpanded = true
+    await this.adoptRemotes(origin)
   }
 
   /**
@@ -548,9 +616,78 @@ export class FleetClient {
 }
 
 /**
+ * Keep this device's fleet certificate when a welcome offers one.
+ *
+ * This is the re-supply path, and the reason a certificate no longer has to
+ * live in the relay's public directory. The ceremony hands one over in its
+ * answer; every relayed connection after that offers the same blob again,
+ * inside Noise, to a device that has already proved it holds the key the
+ * certificate names. So a browser that never stored one, or lost it, or was
+ * paired before its machine had a fleet key, picks one up from any machine it
+ * can still reach that way. A loopback welcome carries none — a session-token
+ * connection has named no device key — so this listener earns its keep on the
+ * relay sources, and a tab that only ever paired over loopback re-pairs.
+ *
+ * Verified before it is kept, under the fleet key pinned at pairing and against
+ * this browser's own device key — the same three checks the pairing page makes,
+ * for the same reason: a certificate arriving over a channel is a claim until
+ * a signature says otherwise, and one naming another device's key is not this
+ * browser's to present. Everything else is dropped in silence, because a
+ * certificate is what reaches *other* machines and its absence costs nothing on
+ * the machine that just said hello.
+ *
+ * The new blob is written even when one is already stored, and the two are
+ * usually different bytes rather than the same ones. Every machine that has
+ * ever paired this device holds a certificate of its own, all of them equally
+ * valid and differing only in `name` and `pairedOn`, so a browser paired on
+ * two machines keeps whichever welcome landed last. That is not a problem to
+ * solve: any of them admits it everywhere, and the machine that just
+ * authenticated this device is as good a source as any.
+ *
+ * **Returns whether this browser gained a certificate it did not have**, which
+ * is the one case the caller can act on: the set of machines a browser can
+ * reach is computed from the certificate it holds, so a browser that had none
+ * has machines to gain. A replacement changes nothing about reachability, so
+ * it reports false — see FleetClient.adoptCert.
+ */
+export async function adoptFleetCert(w: Welcome): Promise<boolean> {
+  if (w.fleetCert === undefined || w.fleetCert === '') return false
+  try {
+    const fleetPub = await loadPinnedFleetKey()
+    if (fleetPub === null) return false
+    const blob = decodeBase64(w.fleetCert)
+    if (blob === null) return false
+    const cert = verifyCert(fleetPub, blob)
+    if (cert === null || cert.kind !== 'device') return false
+    const key = await loadOrCreateDeviceKey()
+    if (!sameKey(cert.device, key.publicKey)) return false
+    // Read before the write, because "was there one before this" is the answer
+    // the caller wants and the write destroys it.
+    const held = await loadPinnedDeviceCert()
+    await savePinnedDeviceCert(blob)
+    return held === null
+  } catch {
+    // A key store that will not open, a welcome that carried nonsense. Both
+    // mean this browser keeps whatever it already had, which is the same
+    // answer it has for a daemon that offered nothing.
+    return false
+  }
+}
+
+/** Standard base64 with padding, which is how Go's encoding/json writes the
+ *  `[]byte` this field is. Null for anything that is not. */
+function decodeBase64(text: string): Uint8Array | null {
+  try {
+    return Uint8Array.from(atob(text), (c) => c.charCodeAt(0))
+  } catch {
+    return null
+  }
+}
+
+/**
  * Build the sources a tab starts from — the production builder behind
- * FleetClient, and the only place fleet code touches storage or constructs a
- * transport.
+ * FleetClient, and the only place fleet code touches storage, reads the
+ * directory or constructs a transport.
  *
  * `loopback` says whether this origin serves /ws at all: true on a page the
  * daemon itself served, where the local source is built nameless and the
@@ -558,17 +695,35 @@ export class FleetClient {
  * own origin on a relay tab, null on a loopback tab that has not heard from
  * its daemon yet (FleetClient learns it there; see `localWelcome`).
  *
- * Each listMachines record with a pinned key becomes a source built exactly
- * as relayBoot builds its client — same identity, same relaySocket, same
- * factory seam — so the wrong-key bug class has one spelling to be tested
- * against. A record without a key is skipped silently rather than surfaced:
- * the fleet lists machines that can be reached, and re-pairing the missing
- * one is the picker's business, not a status row's.
+ * **Two ways a machine gets here, and one way it is reached.** A pairing
+ * record with a pinned key is the original: a ceremony this browser performed,
+ * whose key the user witnessed. A machine certificate out of the fleet
+ * directory is the other, and it is what makes a machine joined last week
+ * appear in this list without anybody scanning anything — verified under the
+ * fleet key pinned at pairing, then trusted for exactly one thing, the `noise`
+ * key to hand the handshake. Either way the source is built as relayBoot
+ * builds its client — same identity shape, same relaySocket, same factory seam
+ * — so the wrong-key bug class has one spelling to be tested against.
+ *
+ * The pinned key wins where a machine has both. It is the stronger fact — a
+ * user carried it across on a screen they physically control — and it outlives
+ * a fleet key that rotates away, which is the same reason the daemon's rule 1
+ * never looks at a certificate. The directory still gets the last word on the
+ * machine's *name*, which is its own to state.
+ *
+ * A row nothing can reach is skipped in silence rather than surfaced: a
+ * pairing record whose key is gone and which the fleet does not name, or a
+ * fleet machine this device has no certificate to present to. The fleet lists
+ * machines that can be reached, and re-pairing is the picker's business, not a
+ * status row's.
  */
 export async function fleetSources(opts: {
   loopback: boolean
   relayOrigin: string | null
   wsFactory?: (url: string) => RawSocket
+  /** How the directory is read. Production passes nothing; a test hands over
+   *  an answer the way it hands over a socket factory. */
+  directoryFetch?: DirectoryFetch
 }): Promise<FleetSource[]> {
   const sources: FleetSource[] = []
   if (opts.loopback) {
@@ -578,32 +733,117 @@ export async function fleetSources(opts: {
   if (origin === null) return sources
 
   // One device key serves every machine — it is this browser's identity, not
-  // a machine's — loaded once and only once a pinned record proves the tab
-  // has any handshake to spend it on.
+  // a machine's — loaded at most once.
   let deviceKey: DeviceKey | null = null
-  for (const record of listMachines()) {
-    let daemonPub: Uint8Array | null
-    try {
-      daemonPub = await loadPinnedDaemonKeyFor(record.id)
-    } catch {
-      // A key store that will not open answers as a missing pin does: this
-      // record cannot be handshaken for, and the fleet lists what it can reach.
-      continue
-    }
-    if (daemonPub === null) continue
+  const device = async (): Promise<DeviceKey | null> => {
     if (deviceKey === null) {
       try {
         deviceKey = await loadOrCreateDeviceKey()
       } catch {
-        break
+        // A key store that will not open is a tab with no identity to spend
+        // on any handshake. Nothing here can be built; the picker's empty
+        // state is the way back.
+        return null
       }
     }
-    const identity = { deviceKey, daemonPub }
+    return deviceKey
+  }
+
+  const view = await fleetView(origin, device, opts.directoryFetch)
+  // This device's own certificate, from this browser's store rather than from
+  // the relay: the machine that minted it handed it over at pairing and hands
+  // it over again on every welcome (fleet.ts, adoptFleetCert), so the public
+  // directory never has to carry one.
+  //
+  // Dropped when the directory says this key is revoked. That is the reader's
+  // rule and it is enforced here rather than in storage: a revocation outranks
+  // a certificate whatever either one's `iat` says, so a browser that went on
+  // presenting a stored certificate after the fleet cut it off would be
+  // deciding it knows better than the fleet — and would be refused by any
+  // daemon that had heard, which is a channel that opens and closes.
+  const deviceCert = view.revoked ? null : await storedDeviceCert()
+
+  for (const machine of mergeMachines(listMachines(), view.machines)) {
+    let pinned: Uint8Array | null = null
+    try {
+      pinned = await loadPinnedDaemonKeyFor(machine.id)
+    } catch {
+      // A key store that will not open answers as a missing pin does, and the
+      // fleet's own key may still name this machine.
+    }
+    const certified = view.machines.find((m) => m.id === machine.id) ?? null
+    const daemonPub = pinned ?? certified?.noise ?? null
+    if (daemonPub === null) continue
+    // A machine this browser never paired with admits it on the device
+    // certificate and on nothing else (channel.go, rule 2). Without one there
+    // is no handshake to attempt, only a row that would sit at unreachable.
+    if (pinned === null && deviceCert === null) continue
+    const key = await device()
+    if (key === null) break
+    const identity = {
+      deviceKey: key,
+      daemonPub,
+      ...(deviceCert !== null && { deviceCert }),
+    }
     sources.push({
-      id: record.id,
-      name: record.name,
-      client: new FlueClient(origin, (o) => relaySocket(o, identity, record.id, opts.wsFactory)),
+      id: machine.id,
+      name: machine.name,
+      client: new FlueClient(origin, (o) => relaySocket(o, identity, machine.id, opts.wsFactory)),
     })
   }
   return sources
+}
+
+/**
+ * What the fleet directory says, or nothing at all.
+ *
+ * Nothing is the answer for a browser with no pinned fleet key — one that
+ * paired before the key existed, or with a daemon that holds none — and it is
+ * an ordinary answer: that browser reaches the machines it paired with
+ * directly, exactly as it always did. Reading the directory *without* the key
+ * would be worse than not reading it, because an unverifiable machine list is
+ * a relay naming whatever machines it likes.
+ *
+ * Everything else it can go wrong with is inside readDirectory, which never
+ * rejects: a relay that has not been updated answers 503 on this route, an
+ * unreachable one answers nothing, and both mean "no machines learned" rather
+ * than "no fleet".
+ */
+async function fleetView(
+  origin: string,
+  device: () => Promise<DeviceKey | null>,
+  fetch: DirectoryFetch | undefined,
+): Promise<FleetView> {
+  let fleetPub: Uint8Array | null
+  try {
+    fleetPub = await loadPinnedFleetKey()
+  } catch {
+    return EMPTY_FLEET
+  }
+  if (fleetPub === null) return EMPTY_FLEET
+  const key = await device()
+  if (key === null) return EMPTY_FLEET
+  return readDirectory({
+    origin,
+    fleetPub,
+    devicePub: key.publicKey,
+    ...(fetch !== undefined && { fetch }),
+  })
+}
+
+const EMPTY_FLEET: FleetView = {
+  machines: [],
+  revoked: false,
+  entries: 0,
+  verified: 0,
+}
+
+/** This device's stored fleet certificate, or null — including when the key
+ *  store will not open, which is a browser with no identity to spend anyway. */
+async function storedDeviceCert(): Promise<Uint8Array | null> {
+  try {
+    return await loadPinnedDeviceCert()
+  } catch {
+    return null
+  }
 }

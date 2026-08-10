@@ -4,9 +4,17 @@ import { RouterProvider } from '@tanstack/react-router'
 import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { loadOrCreateDeviceKey, loadPinnedDaemonKey, loadPinnedDaemonKeyFor } from '@/crypto/keys'
+import {
+  loadOrCreateDeviceKey,
+  loadPinnedDaemonKey,
+  loadPinnedDaemonKeyFor,
+  loadPinnedDeviceCert,
+  loadPinnedFleetKey,
+  savePinnedFleetKey,
+} from '@/crypto/keys'
 import { listMachines } from '@/relay/machines'
 import { createFlueRouter } from '@/router'
+import { base64, deviceCert, FLEET_PUB, machineCert, OTHER_SEED } from '@/testing/fleet'
 
 /** The token a QR code carries: unpadded URL-safe base64 of 32 bytes. */
 const TOKEN = 'Zm91cnRlZW4tY2hhcnMtb2YtdG9rZW4tc2hhcGVkLXQ'
@@ -22,6 +30,10 @@ const DAEMON_PUB_PARAM = urlSafe(DAEMON_PUB)
 /** Some other daemon's key — 32 bytes that are not the ones in the QR. */
 const OTHER_PUB_BYTES = Uint8Array.from({ length: 32 }, (_, i) => 200 - i)
 const OTHER_PUB = btoa(String.fromCharCode(...OTHER_PUB_BYTES))
+
+/** The fleet public key, as `?f=` carries it: 32 bytes, unpadded URL-safe. */
+const FLEET_PUB_BYTES = Uint8Array.from({ length: 32 }, (_, i) => 100 + i)
+const FLEET_PUB_PARAM = urlSafe(btoa(String.fromCharCode(...FLEET_PUB_BYTES)))
 
 /** A whole pairing link, as the QR encodes it: the token and the key. */
 const LINK = `?t=${TOKEN}&k=${DAEMON_PUB_PARAM}`
@@ -509,6 +521,61 @@ describe('PairRoute on a relay origin', () => {
     expect(machines[0]!.pairedAt).toBeGreaterThan(0)
   })
 
+  it('pins the fleet key the link carried, and only from the link', async () => {
+    // The anchor for every machine this browser has not paired with: a
+    // certificate that verifies under this key is a machine it will dial.
+    // So it comes out of the QR — the one leg no intermediary can sit in —
+    // and never out of the answer to the POST.
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&f=${FLEET_PUB_PARAM}&d=blue-mesa&n=Blue%20Mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB_BYTES)
+    // The machine's own pin is unaffected: two facts, two records.
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('pairs the machine alone when the link carries no fleet key', async () => {
+    // A relay from before the fleet key, or a daemon that holds none. The
+    // ceremony is the one it always was, and nothing fleet-wide is pinned.
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&d=blue-mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedFleetKey()).toBeNull()
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('pins no fleet key from an `f` that is not 32 bytes', async () => {
+    // Nothing writes a short `f` but something that rewrote the link. It is
+    // refused as no fleet key rather than rounded off into one, and this
+    // machine still pairs — a browser that trusted it would be verifying
+    // every machine certificate under bytes a stranger chose.
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&f=c2hvcnQ&d=blue-mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedFleetKey()).toBeNull()
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('scrubs the fleet key out of the address bar with the rest', async () => {
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&f=${FLEET_PUB_PARAM}&d=blue-mesa`)
+    await waitFor(() => expect(document.location.search).toBe('?d=blue-mesa'))
+
+    // And the ceremony still runs on what the first render captured.
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB_BYTES)
+  })
+
   it('scrubs the secrets but keeps the machine the link names', async () => {
     // `location` is this suite's stub and stays frozen; `document.location`
     // is the real bar the scrub rewrites, so it is where the rewrite shows.
@@ -579,5 +646,130 @@ describe('PairRoute on a relay origin', () => {
     expect(screen.getByText(EXPIRY_NOTE)).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Pair' })).toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+/*
+ * The certificate the answer carries.
+ *
+ * This is the primary delivery — the welcome's copy is the second chance, and
+ * for a loopback tab there is no second chance at all — so it is worth its own
+ * suite. The signer is the real one from testdata/fleet/certs.json, because
+ * the whole assertion is a signature: `f` in the link is the public half, and
+ * a certificate is kept only if that key signed it.
+ *
+ * The device key is created before the render so the certificates below can
+ * name it. The page loads the same one out of this test's own IndexedDB.
+ */
+describe('PairRoute and the certificate in the answer', () => {
+  /** The real fleet key as `?f=` carries it: unpadded URL-safe base64. */
+  const REAL_FLEET_PARAM = urlSafe(base64(FLEET_PUB))
+  const relayLink = (over = '') => `${LINK}&f=${REAL_FLEET_PARAM}&d=blue-mesa${over}`
+
+  it('keeps a certificate the link’s fleet key signed for this browser', async () => {
+    const key = await loadOrCreateDeviceKey()
+    const cert = deviceCert(key.publicKey, 'Pixel by the sink', 'blue-mesa')
+    fetchMock.mockResolvedValue(paired({ deviceCert: base64(cert) }))
+    await renderRelayPair(relayLink())
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    // The bytes, unchanged: this is what the browser presents to every machine
+    // it has not paired with by hand, and a machine will check the signature.
+    expect(await loadPinnedDeviceCert()).toEqual(cert)
+    // And the pins the ceremony is really about are untouched by it.
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB)
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('drops a certificate signed by another fleet key', async () => {
+    // The attack this check exists for. The certificate rides the same channel
+    // as the answer, so whatever is on the far end can put anything there; the
+    // key that decides is the one the camera read, and a certificate signed by
+    // some other key is a machine list this browser would dial and a handshake
+    // every one of them would refuse.
+    const key = await loadOrCreateDeviceKey()
+    const forged = deviceCert(key.publicKey, 'Pixel', 'blue-mesa', 1_754_700_000, OTHER_SEED)
+    fetchMock.mockResolvedValue(paired({ deviceCert: base64(forged) }))
+    await renderRelayPair(relayLink())
+
+    await userEvent.click(await armedPairButton())
+    // The pairing itself stands: the daemon answered as the key in the QR, and
+    // this device reaches the machine it just paired with by that key alone.
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedDeviceCert()).toBeNull()
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('drops a certificate that names a different device', async () => {
+    // Well signed, and not this browser's to hold: a certificate is a
+    // statement about one device key, and presenting somebody else's proves
+    // nothing this browser can back with the private half it holds.
+    const someoneElse = Uint8Array.from({ length: 32 }, (_, i) => 0x40 + i)
+    fetchMock.mockResolvedValue(paired({ deviceCert: base64(deviceCert(someoneElse)) }))
+    await renderRelayPair(relayLink())
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedDeviceCert()).toBeNull()
+  })
+
+  it('drops a machine certificate offered where a device one belongs', async () => {
+    // It verifies perfectly well and says nothing about any device.
+    const noise = Uint8Array.from({ length: 32 }, (_, i) => 0x10 + i)
+    fetchMock.mockResolvedValue(paired({ deviceCert: base64(machineCert('blue-mesa', 'Blue Mesa', noise)) }))
+    await renderRelayPair(relayLink())
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedDeviceCert()).toBeNull()
+  })
+
+  it('pairs without complaint when the answer carries no certificate', async () => {
+    // The ordinary answer from a daemon holding no fleet key, or one with no
+    // place on a relay yet. Nothing is stored and nothing is wrong: this
+    // device reaches the machine it paired with, which is what it always did.
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(relayLink())
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedDeviceCert()).toBeNull()
+    expect(status()).not.toMatch(/certificate/i)
+  })
+
+  it('ignores a garbled certificate rather than failing the pairing', async () => {
+    fetchMock.mockResolvedValue(paired({ deviceCert: 'not base64 at all !!' }))
+    await renderRelayPair(relayLink())
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedDeviceCert()).toBeNull()
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('keeps nothing from a link with no fleet key, however well it verifies', async () => {
+    // The ordering that makes the check mean anything: the key the certificate
+    // is verified under comes from the link and is never re-read from storage.
+    // Here the browser already holds a pinned fleet key and the answer carries
+    // a certificate that key signed — and the link names no fleet at all, so
+    // the certificate is not considered. A page that reached for the stored
+    // key instead would keep it, and would be trusting a pin some earlier
+    // ceremony wrote to decide what this one may hand it.
+    await savePinnedFleetKey(FLEET_PUB)
+    const key = await loadOrCreateDeviceKey()
+    fetchMock.mockResolvedValue(paired({ deviceCert: base64(deviceCert(key.publicKey)) }))
+    await renderRelayPair(`${LINK}&d=blue-mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedDeviceCert()).toBeNull()
   })
 })

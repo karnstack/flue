@@ -633,6 +633,66 @@ func TestPairMintsAFleetDeviceCert(t *testing.T) {
 	}
 }
 
+// TestPairHandsTheDeviceItsOwnCert: the ceremony's answer carries the
+// certificate it just minted, to the device it is about.
+//
+// This is what lets device certificates stay off the credential-less
+// `GET /directory`, where they were a public roster of every device's key and
+// human label and spent one of the directory's 512 permanent entries per
+// ceremony ever performed. The browser pinned the fleet public key out of the
+// QR moments earlier, so it can check this blob itself and a hostile relay in
+// the middle can only make the check fail.
+func TestPairHandsTheDeviceItsOwnCert(t *testing.T) {
+	const machineID = "karns-mbp-a1b2-0f9a12cd"
+	srv, fk := newFleetPairServer(t, machineID)
+
+	token, _ := srv.pairing.start(time.Now())
+	key := deviceKey(0x2a)
+	out := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(key), "phone"), "relay")
+	if out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200", out.Status, out.Body)
+	}
+
+	var answer struct {
+		DeviceCert []byte `json:"deviceCert"`
+	}
+	if err := json.Unmarshal(out.Body, &answer); err != nil {
+		t.Fatalf("decoding the pairing answer: %v", err)
+	}
+	if len(answer.DeviceCert) == 0 {
+		t.Fatal("the pairing answer carries no device certificate; the device could reach no other machine")
+	}
+	cert, err := fleet.VerifyDevice(fk.Public(), answer.DeviceCert)
+	if err != nil {
+		t.Fatalf("the answered cert does not verify under this fleet key: %v", err)
+	}
+	if !bytes.Equal(cert.Device, key) {
+		t.Error("the answered cert names a device key other than the one just paired")
+	}
+	// The same artifact the registry holds, byte for byte. A certificate that
+	// differed here would be a second blob for one pairing, and the machine
+	// handing it out would be disagreeing with the machine that stored it.
+	list := devices(t, srv)
+	if len(list) != 1 || !bytes.Equal(list[0].Cert, answer.DeviceCert) {
+		t.Error("the answered cert is not the one the registry stored")
+	}
+}
+
+// TestPairAnswersNoCertWhenNoneWasMinted: a daemon with no place on the relay
+// mints nothing, and must not invent a field. The device is paired to this
+// machine and says so by omission.
+func TestPairAnswersNoCertWhenNoneWasMinted(t *testing.T) {
+	srv, _ := newFleetPairServer(t, "")
+	token, _ := srv.pairing.start(time.Now())
+	out := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(deviceKey(0x2a)), "phone"), "relay")
+	if out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200", out.Status, out.Body)
+	}
+	if bytes.Contains(out.Body, []byte("deviceCert")) {
+		t.Errorf("the answer carries a deviceCert from a daemon that minted none: %s", out.Body)
+	}
+}
+
 // TestPairMintsNoCertWithoutAMachineID: `pairedOn` is a machine id in the
 // spec and the directory the next stage brings keys certs by it, so a cert
 // claiming the empty machine is one nothing can attribute — signing it would
@@ -1024,6 +1084,88 @@ func TestPairStartURLCarriesTheDaemonKey(t *testing.T) {
 	if want := base64.StdEncoding.EncodeToString(raw); got.DaemonPub != want {
 		t.Errorf("daemonPub = %q, want the key from the URL %q", got.DaemonPub, want)
 	}
+
+	// A daemon with no fleet key says so by omission. An `f=` that was present
+	// and empty would read to the pairing page as a link something rewrote,
+	// which is not what a relay from before the fleet key is.
+	if q.Has("f") {
+		t.Errorf("f = %q on a daemon with no fleet key; the parameter should be absent", q.Get("f"))
+	}
+}
+
+// TestPairStartURLCarriesTheFleetKey: the QR is where the browser learns the
+// second key it pins.
+//
+// `k` anchors this browser to this machine; `f` anchors it to the fleet, and
+// from that pin the browser accepts any machine whose machine certificate
+// verifies under it (spec/fleet-trust.md, "What changes in the handshake").
+// That is a fleet-wide trust decision, so it has to arrive by the one leg of
+// the ceremony no intermediary can sit in — the same leg, and the same
+// encoding, as `k`. What must never travel here is the seed: a browser
+// holding it could mint certificates for the fleet.
+func TestPairStartURLCarriesTheFleetKey(t *testing.T) {
+	ts, srv, fk := newFleetPairHTTPServer(t)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.PairStart{})
+
+	var got wire.Pairing
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		p, ok := msg.(wire.Pairing)
+		if ok {
+			got = p
+		}
+		return ok
+	})
+
+	u, err := url.Parse(got.URL)
+	if err != nil {
+		t.Fatalf("pairing url %q does not parse: %v", got.URL, err)
+	}
+	f := u.Query().Get("f")
+	if f == "" {
+		t.Fatalf("pairing url %q carries no f=; the device cannot learn the fleet", got.URL)
+	}
+	if strings.ContainsAny(f, "+/=") {
+		t.Errorf("f = %q carries characters that are not URL-safe", f)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(f)
+	if err != nil {
+		t.Fatalf("f = %q is not unpadded URL-safe base64: %v", f, err)
+	}
+	if !bytes.Equal(raw, fk.Public()) {
+		t.Errorf("f decodes to %x, want the fleet public key %x", raw, fk.Public())
+	}
+	// The public half and nothing else. The seed is the credential that signs
+	// for the whole fleet, and no URL a phone opens may ever carry it.
+	if strings.Contains(got.URL, fk.Seed()) {
+		t.Fatal("the pairing url carries the fleet seed; it must carry the public key alone")
+	}
+	if !bytes.Equal(raw, srv.identity.Fleet.Public()) {
+		t.Error("f is not this daemon's own fleet public key")
+	}
+}
+
+// newFleetPairHTTPServer is newPairServer with a fleet key and a place on the
+// relay — what a machine that has run `flue relay join` looks like.
+func newFleetPairHTTPServer(t *testing.T) (*httptest.Server, *Server, fleet.Key) {
+	t.Helper()
+	dir := t.TempDir()
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	srv := New(session.NewRegistry(time.Now), nil, http.NotFoundHandler(), "test",
+		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: fk})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	srv.SetAuth(local.NewAuth(tok, portOf(t, ts)))
+	srv.SetRelayMachine("karns-mbp-a1b2-0f9a12cd", "Karn's MacBook Pro")
+	return ts, srv, fk
 }
 
 func TestPairCancelInvalidatesTheToken(t *testing.T) {

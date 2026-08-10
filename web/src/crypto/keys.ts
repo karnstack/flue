@@ -64,6 +64,39 @@ const DAEMON_RECORD = 'daemon-static'
  */
 const DEVICE_RECORD_PREFIX = 'daemon-static:'
 
+/**
+ * Where the fleet public key is pinned: one record, because one relay origin
+ * is one fleet (spec/fleet-trust.md, "The fleet directory").
+ *
+ * This is the anchor the whole of auto-pairing hangs from. A machine
+ * certificate that verifies under this key is a machine this browser will
+ * dial, pinning the `noise` key that certificate names — so a record that
+ * could be replaced silently would be every machine's static key, decided
+ * once and never asked about again. It is written from the pairing ceremony
+ * and from nowhere else, with a value that arrived in the QR: the one leg no
+ * intermediary can sit in.
+ *
+ * The Ed25519 *public* half only. The seed rides the join line between
+ * machines and never reaches a browser — a browser holding it could mint
+ * certificates for the fleet, which is the one thing the layering in
+ * spec/fleet-trust.md exists to keep out of Cloudflare's reach and out of a
+ * tab's.
+ *
+ * Per origin rather than per machine, unlike `DEVICE_RECORD_PREFIX`, and the
+ * difference is not an inconsistency: a daemon's static key is a fact about
+ * one machine, and the fleet key is a fact about the relay in front of all of
+ * them. IndexedDB is already scoped to the origin, so one record here is one
+ * fleet key per relay.
+ */
+const FLEET_RECORD = 'fleet-public'
+
+/**
+ * This device's own fleet certificate, per origin like the fleet key that
+ * verifies it. See `savePinnedDeviceCert` for why it is kept rather than read
+ * off the relay.
+ */
+const DEVICE_CERT_RECORD = 'fleet-device-cert'
+
 const openDb = (factory: IDBFactory) =>
   new Promise<IDBDatabase>((resolve, reject) => {
     const req = factory.open(DB_NAME, 1)
@@ -178,6 +211,120 @@ export async function loadPinnedDaemonKeyFor(
 }
 
 /**
+ * Pin the fleet this browser has just joined, from the `f=` in the pairing
+ * link.
+ *
+ * Called from the same moment, and on the same evidence, as
+ * `savePinnedDaemonKeyFor`: the user carried a code across from a screen they
+ * physically control, and both keys were read out of it. What this one buys is
+ * every *other* machine — the directory names them, this key is what makes
+ * their certificates mean anything, and neither the relay nor anything sitting
+ * in front of it can produce one.
+ *
+ * Overwrites, for the reason the daemon pin does: re-pairing is how a browser
+ * moves to another fleet, and re-setup (`flue relay setup`) mints a fresh
+ * fleet key that every device then pairs against. A browser that refused the
+ * overwrite would be stranded on a key nothing signs under any more, with
+ * clearing site data as the only way back.
+ *
+ * Which puts the same weight on the caller: only a key that arrived in the
+ * link may be written here. A fleet key taken from an answer over the wire
+ * would be the trust-on-first-use the pinning exists to end, one level up —
+ * whoever supplied it could then mint a machine certificate for every machine
+ * this browser will ever dial.
+ */
+export async function savePinnedFleetKey(
+  publicKey: Uint8Array,
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const db = await openDb(factory)
+  try {
+    await tx(db, 'readwrite', (s) => s.put({ publicKey }, FLEET_RECORD))
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * The pinned fleet public key, or null in a browser that has never paired
+ * with a fleet.
+ *
+ * Null is an ordinary answer, not a fault: a browser paired before the fleet
+ * key existed, or with a daemon that holds none, reaches every machine it
+ * paired with directly and learns of no others. What it must never do is read
+ * the directory without one — an unverifiable machine list is a relay naming
+ * whatever machines it likes.
+ */
+export async function loadPinnedFleetKey(
+  factory: IDBFactory = indexedDB,
+): Promise<Uint8Array | null> {
+  return read(FLEET_RECORD, factory)
+}
+
+/**
+ * Keep this device's own fleet certificate — the signed blob it presents to
+ * every machine it has not paired with by hand.
+ *
+ * Stored rather than fetched, and that is the change this record represents.
+ * The certificate used to be read out of the relay's credential-less
+ * `GET /directory`, which meant every device's public key and human label sat
+ * in a document anybody could read, and every pairing ceremony ever performed
+ * spent one of the directory's 512 permanent entries. It now arrives over
+ * channels that are already private and already authenticated — in the pairing
+ * answer, and again in the welcome of every *relayed* connection — so the
+ * public copy buys nothing.
+ *
+ * The second delivery is a relay-tab property and not a universal one, which
+ * is worth knowing before relying on it: a loopback connection authenticates a
+ * machine-local session token rather than a device key, so the daemon does not
+ * know whose certificate to send and sends none (internal/daemon/server.go,
+ * fleetCertFor). A browser paired only over loopback holds what the ceremony
+ * wrote here and has no second source for it.
+ *
+ * It is public data either way: a certificate is a signed statement about a
+ * public key, and holding one grants nothing without the private half of the
+ * device key beside it in this same store. What this record protects is not
+ * secrecy but *supply* — a browser that cannot produce its certificate cannot
+ * reach a machine it never paired with.
+ *
+ * Per origin, like the fleet key it verifies under: a certificate signed by one
+ * fleet means nothing to another, and the two records are only ever read
+ * together.
+ *
+ * Callers must verify it under the pinned fleet key before writing it. This
+ * function does not, deliberately — it is storage, and crypto/cert.ts is where
+ * signatures are checked — but a caller that skipped the check would be keeping
+ * whatever the far end said, and presenting it later to a machine that will
+ * check it properly and refuse.
+ */
+export async function savePinnedDeviceCert(
+  cert: Uint8Array,
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const db = await openDb(factory)
+  try {
+    await tx(db, 'readwrite', (s) => s.put({ publicKey: cert }, DEVICE_CERT_RECORD))
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * This device's fleet certificate, or null when it has none.
+ *
+ * Null is an ordinary answer and not a fault: a browser paired with a daemon
+ * that held no fleet key, or before this machine had a place on the relay, has
+ * none — and reaches every machine it paired with directly, exactly as it
+ * always did. What it cannot do without one is walk into a machine it has never
+ * met, which is the thing a certificate is for.
+ */
+export async function loadPinnedDeviceCert(
+  factory: IDBFactory = indexedDB,
+): Promise<Uint8Array | null> {
+  return readBlob(DEVICE_CERT_RECORD, factory)
+}
+
+/**
  * Drop the key pinned for one machine.
  *
  * The other half of forgetting a machine (relay/machines.ts): a record without
@@ -215,7 +362,35 @@ async function read(record: string, factory: IDBFactory): Promise<Uint8Array | n
     // Absent is the honest reading of a record this module could never have
     // written: the boot fails closed into the picker, where pairing again is
     // on offer, instead of open into a loop nothing on screen explains.
+    //
+    // The fleet key is the same 32 bytes and fails the same way closed: a
+    // verifier handed a key of the wrong width refuses every certificate,
+    // which is a browser that lists no machines rather than one that trusts
+    // the wrong ones.
     return key.length === KEY_BYTES ? key : null
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * One record read as an opaque blob: no width check, because a certificate is
+ * not a key and has no fixed length.
+ *
+ * It shares `read`'s copy-out rule for the same reason, and stops there. What
+ * makes a stored certificate trustworthy is its signature under the pinned
+ * fleet key, which crypto/cert.ts checks every time it is used — so there is
+ * nothing this function could usefully refuse that the verifier would not.
+ */
+async function readBlob(record: string, factory: IDBFactory): Promise<Uint8Array | null> {
+  const db = await openDb(factory)
+  try {
+    const existing = await tx<{ publicKey: Uint8Array } | undefined>(db, 'readonly', (s) =>
+      s.get(record),
+    )
+    if (!existing) return null
+    const blob = new Uint8Array(existing.publicKey)
+    return blob.length === 0 ? null : blob
   } finally {
     db.close()
   }

@@ -4,8 +4,10 @@ import {
   loadOrCreateDeviceKey,
   loadPinnedDaemonKey,
   loadPinnedDaemonKeyFor,
+  loadPinnedFleetKey,
   savePinnedDaemonKey,
   savePinnedDaemonKeyFor,
+  savePinnedFleetKey,
 } from './keys'
 
 describe('the browser device key', () => {
@@ -162,5 +164,56 @@ describe('a daemon key pinned per device', () => {
     await savePinnedDaemonKeyFor('aaaaaaaaaaaa', KEY_A, db)
     await savePinnedDaemonKeyFor('aaaaaaaaaaaa', KEY_B, db)
     expect(await loadPinnedDaemonKeyFor('aaaaaaaaaaaa', db)).toEqual(KEY_B)
+  })
+})
+
+describe('the pinned fleet key', () => {
+  const FLEET = new Uint8Array(32).fill(0xf1)
+
+  it('is absent in a browser that has never paired with a fleet', async () => {
+    // An ordinary answer, not a fault: a browser paired before the fleet key
+    // existed reaches the machines it paired with directly and learns of no
+    // others. What it must never do is read the directory without one.
+    expect(await loadPinnedFleetKey(new IDBFactory())).toBeNull()
+  })
+
+  it('round-trips the bytes the pairing link carried', async () => {
+    const db = new IDBFactory()
+    await savePinnedFleetKey(FLEET, db)
+    expect(await loadPinnedFleetKey(db)).toEqual(FLEET)
+  })
+
+  it('refuses a record that is not 32 bytes', async () => {
+    // An Ed25519 public key is 32 bytes. A verifier handed anything else
+    // refuses every certificate, which is a browser that lists no machines —
+    // and this is the honest reading of a record this module never wrote.
+    const db = new IDBFactory()
+    await savePinnedFleetKey(new Uint8Array(31), db)
+    expect(await loadPinnedFleetKey(db)).toBeNull()
+  })
+
+  it('is one record per origin, beside every machine pin', async () => {
+    // A daemon's static key is a fact about one machine; the fleet key is a
+    // fact about the relay in front of all of them. Neither slot is the
+    // other's, under any id.
+    const db = new IDBFactory()
+    const machineKey = new Uint8Array(32).fill(0xaa)
+    await savePinnedDaemonKeyFor('aaaaaaaaaaaa', machineKey, db)
+    await savePinnedFleetKey(FLEET, db)
+
+    expect(await loadPinnedFleetKey(db)).toEqual(FLEET)
+    expect(await loadPinnedDaemonKeyFor('aaaaaaaaaaaa', db)).toEqual(machineKey)
+    expect(await loadPinnedDaemonKey(db)).toBeNull()
+  })
+
+  it('is replaced by a later ceremony, because re-setup mints a new fleet', async () => {
+    // `flue relay setup` mints a fresh fleet key and every device pairs
+    // again. A browser that refused the overwrite would be stranded on a key
+    // nothing signs under any more.
+    const db = new IDBFactory()
+    await savePinnedFleetKey(FLEET, db)
+    const next = new Uint8Array(32).fill(0xf2)
+    await savePinnedFleetKey(next, db)
+    expect(await loadPinnedFleetKey(db)).toEqual(next)
   })
 })

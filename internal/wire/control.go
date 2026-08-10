@@ -188,6 +188,26 @@ type Welcome struct {
 	// Relay is how this daemon is reachable from outside the machine, or nil
 	// when it is not configured for a relay at all. See RelayInfo.
 	Relay *RelayInfo `json:"relay,omitempty"`
+
+	// FleetCert is this device's own fleet certificate — the signed blob it
+	// presents to every *other* machine in the fleet to be admitted without a
+	// second ceremony (spec/fleet-trust.md, rule 2) — or empty when there is
+	// none to give.
+	//
+	// It rides the welcome because this connection is the one place the cert
+	// can be handed over privately and to the right device at once: the socket
+	// is inside Noise, so the relay carries ciphertext, and the far end has
+	// already proved it holds the key the cert names. The alternative this
+	// replaced was publishing every device cert to the credential-less
+	// `GET /directory` and letting the browser find its own — which worked, and
+	// put every device's public key and human label in a document anybody on
+	// the internet could read, and spent one of the directory's 512 permanent
+	// entries on every pairing ceremony ever performed.
+	//
+	// Empty for a loopback connection (no device identity to hand one to), for
+	// a daemon with no fleet key, and for a device paired before the fleet key
+	// existed. A client that gets none keeps whatever it already had.
+	FleetCert []byte `json:"fleetCert,omitempty"`
 }
 
 // RelayInfo is the state of the daemon's relay leg, as of the moment the

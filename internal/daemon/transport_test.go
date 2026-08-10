@@ -3,9 +3,12 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/karnstack/flue/internal/crypto"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
@@ -108,6 +112,99 @@ func TestServeConnSpeaksTheWireProtocol(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeConn did not return after the conn closed")
+	}
+}
+
+// TestWelcomeCarriesTheDevicesFleetCert is the re-supply path, and the reason a
+// device certificate no longer has to live in the relay's credential-less
+// directory.
+//
+// The ceremony hands one over in its answer; every connection after that offers
+// the same blob again, inside Noise, to a device that has just proved it holds
+// the key the certificate names. A browser that never stored one, or lost it,
+// or was paired before this machine had a fleet key, picks one up from any
+// machine it can still reach — and without it, that browser can reach only the
+// machines it paired with by hand.
+func TestWelcomeCarriesTheDevicesFleetCert(t *testing.T) {
+	dir := t.TempDir()
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	devices := crypto.NewDeviceStore(dir)
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
+		Identity{Key: key, Devices: devices, Fleet: fk})
+	t.Cleanup(srv.Shutdown)
+	srv.SetRelayMachine("karns-mbp-a1b2-0f9a12cd", "Karn's MacBook Pro")
+
+	// A device paired the ordinary way, so the registry holds the cert the
+	// ceremony minted.
+	token, _ := srv.pairing.start(time.Now())
+	devPub := deviceKey(0x2a)
+	out := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(devPub), "phone"), "relay")
+	if out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200", out.Status, out.Body)
+	}
+
+	// A connection that authenticated as that device — which is what the relay
+	// transport hands over after a handshake: the id for the log lines and the
+	// key the handshake proved, which is what the certificate is looked up on.
+	p := newPipeConn()
+	go srv.ServeConn(context.Background(), p, ConnMeta{
+		Peer: "relay", DeviceID: crypto.DeviceID(devPub), DeviceKey: devPub,
+	})
+	t.Cleanup(func() { _ = p.Close() })
+
+	w, ok := expectControl(t, p).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame was not a welcome")
+	}
+	if len(w.FleetCert) == 0 {
+		t.Fatal("the welcome carried no fleet cert; this device could reach no machine it had not paired with")
+	}
+	cert, err := fleet.VerifyDevice(fk.Public(), w.FleetCert)
+	if err != nil {
+		t.Fatalf("the welcome's cert does not verify under this fleet key: %v", err)
+	}
+	if !bytes.Equal(cert.Device, devPub) {
+		t.Error("the welcome offered a certificate for another device's key")
+	}
+
+	// And a connection with no device identity — every loopback one — is
+	// offered nothing: a certificate is a statement about a device key, and a
+	// session-token connection has not named one.
+	local := newPipeConn()
+	go srv.ServeConn(context.Background(), local, ConnMeta{Peer: "test"})
+	t.Cleanup(func() { _ = local.Close() })
+	lw, ok := expectControl(t, local).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame on the loopback conn was not a welcome")
+	}
+	if len(lw.FleetCert) != 0 {
+		t.Errorf("a loopback welcome carried a fleet cert: %x", lw.FleetCert)
+	}
+
+	// And the lookup is on the key, not on the id. The id is
+	// hex(sha256(key))[:12] — 48 bits — and crypto.Add deliberately permits two
+	// devices to hold colliding ones, so a welcome resolved by id would hand
+	// the wrong device's certificate to whichever of them connected. Here the
+	// id is the paired device's and the key is not, which is exactly what a
+	// collision looks like from this function's side.
+	other := newPipeConn()
+	go srv.ServeConn(context.Background(), other, ConnMeta{
+		Peer: "relay", DeviceID: crypto.DeviceID(devPub), DeviceKey: deviceKey(0x5b),
+	})
+	t.Cleanup(func() { _ = other.Close() })
+	ow, ok := expectControl(t, other).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame on the colliding-id conn was not a welcome")
+	}
+	if len(ow.FleetCert) != 0 {
+		t.Errorf("a welcome offered another device's certificate to a key it does not name: %x", ow.FleetCert)
 	}
 }
 

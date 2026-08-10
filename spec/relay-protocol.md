@@ -1,7 +1,8 @@
 # flue relay protocol
 
-The relay is a Cloudflare Worker (one Durable Object per machine) that bridges
-each daemon's single outbound socket to any number of browser tabs. It
+The relay is a Cloudflare Worker (one Durable Object per machine, plus one for
+the fleet directory) that bridges each daemon's single outbound socket to any
+number of browser tabs. It
 forwards bytes and nothing else: it holds no Noise keys, reads no terminal traffic, and cannot
 tell one keystroke from another. What it *does* see — the control channel is
 cleartext — is set out under "What the relay sees" below.
@@ -9,6 +10,14 @@ cleartext — is set out under "What the relay sees" below.
 This document defines the two sockets that meet at the relay and the framing on
 each. It does **not** redefine the wire protocol — `spec/protocol.md` is
 unchanged and travels inside, encrypted. The relay is a transport for it.
+
+It also defines one thing the relay *stores* rather than forwards: the fleet
+directory, a set of signed blobs it cannot verify (below). That leg holds no
+key either, and the rule it lives under is the same one this whole document
+turns on — the relay's only power is availability. **With one exception, which
+the directory introduced and which is stated wherever that phrase appears:
+withholding a revocation is not the same kind of loss as withholding a
+certificate.** See "What withholding costs" below.
 
 ```
 daemon  ---- wss /daemon/<id> ---->  Worker + one DO per machine  <---- wss /client/<id> ----  browser
@@ -25,6 +34,26 @@ Three layers stack, outermost first:
 | Channel framing | `[4-byte big-endian channel][payload]` | daemon and relay |
 | Noise IK | handshake messages, then transport ciphertexts | daemon and browser |
 | Kind framing | `[1 byte kind][wire protocol bytes]` | daemon and browser |
+
+The directory leg stacks none of them. It is HTTP plus one push socket, and
+what travels on it is a signed blob in whatever encoding the fleet key signs
+(`spec/fleet-trust.md`, Certificates) — bytes the relay stores, serves and
+forwards without a frame of its own around them, because it cannot read them
+and any framing it added would be a chance to reshape what a reader is about
+to check a signature over.
+
+The routes, in one place:
+
+| Route | Auth | Metered | Object |
+|---|---|---|---|
+| `WS /daemon/<id>` | Bearer daemon secret | no | that machine's hub |
+| `WS /client/<id>` | none | yes | that machine's hub |
+| `POST /api/pair/<id>` | none | yes | that machine's hub |
+| `PUT /directory` | Bearer daemon secret | no | the directory |
+| `GET /directory` | none | yes | the directory |
+| `DELETE /directory` | Bearer daemon secret | no | the directory |
+| `WS /directory` | Bearer daemon secret | no | the directory |
+| `GET /api/health` | none | no | none — the Worker alone |
 
 ## The daemon leg
 
@@ -148,15 +177,201 @@ distinction would be lost. This byte carries it, and the layer above the relay
 reads the same `(text, data)` pair it reads locally. An empty payload, or any
 kind byte other than `0x00` or `0x01`, is a protocol error.
 
+## The fleet directory
+
+One more Durable Object, and the only one that is not per machine: the fleet
+directory, `idFromName("directory")`, because one relay is one fleet
+(`spec/fleet-trust.md`, "The fleet directory"). It holds the signed artifacts
+that have to reach every machine and every device — machine certs and
+revocations — and it holds them as **blobs it cannot verify**, because the
+fleet key never touches the Worker.
+
+*Device* certificates are deliberately not among them. A device is handed its
+own by the machine that minted it, over the pairing answer and over every
+welcome, so publishing them here would only have made a credential-less route
+into a roster of the operator's device keys and spent one permanent entry per
+ceremony against a cap of 512. The Worker cannot tell one blob from another and
+does not try; this is a rule the daemons keep, not one this leg enforces.
+
+That is the invariant this leg exists to preserve, and it must survive every
+future change to it: **the relay stores and serves, and never verifies.** Every
+reader — daemon and browser both — checks every signature under the fleet
+public key and drops what fails. A hostile relay can therefore serve a stale,
+truncated or empty directory, exactly as it could always refuse to route; what
+it cannot do is mint a machine or a device, because minting needs a key it does
+not hold.
+
+### What withholding costs
+
+"The cost of a hostile relay stays availability, and nothing else" is exactly
+true of the routing legs and of the *certificates* in this store. It is not
+exactly true of the revocations, and the difference is worth stating rather
+than rounding off.
+
+For a certificate, omission subtracts: a machine cert the relay hides is a
+machine the browser does not see, and one it has no way to reach until it pairs
+with that machine by hand. The reader ends up with less authority than the
+fleet granted, which is the shape "availability" describes. (Device certs are
+not in this store to be withheld — they travel to the device that owns them —
+so the only certificate this paragraph is about is a machine's.)
+
+For a revocation, omission *adds*. A revocation only ever removes authority, so
+a machine that never receives one goes on admitting a device the operator cut
+off — and there is nothing in the answer to say so. A `GET /directory` that
+omits a revocation is shape-identical to one from a fleet that never issued it:
+the set is signed entry by entry and not as a whole, so there is no count, no
+epoch and no signature over the collection for a reader to check the answer
+against. A relay that filters is indistinguishable from a relay that is simply
+younger.
+
+What bounds this in practice, and why it is a stated weakness rather than an
+open door:
+
+- Revocations are re-published by every machine that holds one, on every
+  connect and every 30 minutes, so a relay must withhold *continuously* and
+  from *every* reader to keep one buried.
+- A machine that has already ingested a revocation has written it to its own
+  store; nothing the relay does later takes it back.
+- The relay cannot mint the device cert the withheld revocation was about. It
+  can only preserve authority the fleet had already granted, never invent it.
+
+**Future work, deliberately not built here: a signed manifest.** The fix is for
+the fleet to sign a statement *about the set* — an epoch counter, or a digest
+over the entry keys, minted under the fleet key and published like any other
+blob — so that a reader can tell "this is the whole directory as of epoch N"
+from "this is what the relay felt like handing me". That turns omission back
+into an availability failure a reader can detect. It needs a rule for who mints
+the manifest and when, and a rule for readers meeting two manifests at different
+epochs, and neither belongs in the same change as the directory itself.
+
+```
+PUT    /directory  Bearer daemon secret; body is one signed blob, raw bytes
+GET    /directory  credential-less, rate limited; the whole set
+DELETE /directory  Bearer daemon secret; empties the whole set
+WS     /directory  Bearer daemon secret; relay → daemon pushes, on write
+```
+
+Nothing lives under the prefix: `/directory/<anything>` is the Worker's own
+`404 {"error":"not found"}` — not the machine 404, because nothing here names a
+machine — and a method other than `GET`, `PUT` or `DELETE` is `405` with
+`Allow: GET, PUT, DELETE`.
+
+**Entries are content-addressed.** An entry's key is the lowercase hex SHA-256
+of the blob's exact bytes, and there is no other name for it. That is the only
+key a Worker that cannot read a blob is entitled to compute: a caller-supplied
+name would put the relay in charge of a namespace it cannot check, and one
+buggy or hostile secret-holder could then PUT a machine cert over a revocation
+with the relay's help. Content addressing makes that structurally impossible —
+a PUT can only ever *add* — and two properties fall out of it:
+
+- **Idempotence.** The same bytes PUT again are the same key and the same
+  value: no second entry, no push. A daemon may re-announce everything it holds
+  on every reconnect, and a PUT replayed from the wire changes nothing.
+- **Byte-exactness.** A blob comes back exactly as it went in. Bytes the relay
+  had altered would not hash to the name it filed them under, and every reader
+  verifies a signature over these bytes.
+
+`PUT` answers `201 {"key":"<hex>"}` when it created the entry and
+`200 {"key":"<hex>"}` when the blob was already there; the body is the same
+either way, so the status is the whole of the difference. An empty body is
+`400 {"error":"empty blob"}` — not a signed anything under any encoding.
+
+`GET` answers, as `application/json`, no-store:
+
+```json
+{ "v": 1, "entries": [ { "key": "<hex sha-256>", "blob": "<base64>" } ] }
+```
+
+`blob` is standard base64 with padding — the alphabet Go's `encoding/json`
+reads a `[]byte` field in, so a daemon's struct decodes it with no help. **No
+order is promised.** Storage hands entries back sorted by key, which is to say
+by digest, which is to say by nothing; a reader that inferred "newest last"
+would be reading a property of SHA-256. Ordering that means anything lives
+inside the blobs, in `iat`, where a reader that has checked a signature can
+trust it. Neither is any *ranking* the relay's: a revocation outranks a device
+cert for the same key whatever their timestamps, and that is a rule about
+meaning, which readers hold and the relay does not.
+
+**The push socket** carries one binary message per new entry, and that message
+is exactly the blob's bytes — no envelope, no key, no framing, for the reason
+the whole leg is unframed. The fan-out reaches every connected daemon including
+the one whose machine made the PUT (an HTTP request carries no socket identity,
+and a push a receiver already holds is a no-op). Duplicates push nothing: the
+set did not change.
+
+Unlike `/daemon`, there is no takeover here: every machine in the fleet holds
+one of these at once, which is the point. At most 256 are held, answered
+`503 {"error":"too many directory sockets"}` over that — not a DoS bound, since
+the leg is secret-gated, but a bound on what one PUT costs, which is one send
+per socket.
+
+Pushes are best effort, and the socket is **push-only** — a write is `PUT
+/directory`, an HTTP request that answers with the key it filed, so any message
+from a daemon on this socket other than the keepalive below is a protocol error
+and closes it with `1002`. A daemon converges the rest of the way by reading
+`GET /directory`, and the order that closes the gap is: **open the socket
+first, then GET.** A write that lands in between arrives by one path or the
+other — or by both, which content addressing makes harmless.
+
+**Bounds.** The directory is written by secret-holders and readable without a
+credential, so it is bounded at both ends: a blob is at most **4 KiB**
+(`413 {"error":"blob too large"}`), and the directory holds at most **512**
+entries. At the cap a PUT of a new blob is refused with
+`507 {"error":"directory full"}` — its own status, so a daemon can tell "your
+blob is fine and I will not keep it" from a 413 or a 401 without reading prose
+— while a PUT of a blob already stored still answers 200, because it asks for
+no room. The refusal precedes the store and therefore the fan-out: a refused
+blob is not kept and is **not pushed to any connected daemon**, because the
+push socket carries new entries and a refusal creates none. A revocation
+refused here has reached nobody.
+
+Refusing rather than evicting is deliberate and is a security decision, not a
+capacity one. Every eviction policy can drop a revocation, and a directory that
+silently forgets a revocation re-admits the device it revoked to every machine
+that had not yet heard. Nothing in this leg ever deletes *an* entry.
+
+Nor does it need to. The only entry that can ever be superseded is a machine
+certificate a machine re-minted, which is single digits out of 512 in the life
+of a fleet — a revocation is never superseded, and a device certificate is not
+in the store at all. `spec/fleet-trust.md` works the count through and declines
+to build pruning on the strength of it. If it is ever wanted anyway, it has to
+be a decision signed under the fleet key and carried out by something that can
+read what it is deleting. That is not the relay, and it must not become the
+relay.
+
+**The reset**, and why the cap needs one. Refusal is permanent: nothing evicts,
+the object is named by a constant, and Durable Object storage survives every
+redeploy of the script — so a directory that has reached 512 stays there
+forever, and a fleet whose directory is full is a fleet whose *revocations* have
+stopped crossing machines. `DELETE /directory` is the way out. It empties the
+whole set and the entry count, answers `200 {"reset":true,"removed":<n>}`, and
+closes every push socket with `1012` so that each daemon reconnects and
+re-publishes at once rather than at its next half-hourly republish.
+
+All-or-nothing is what makes it a thing a relay may do: a wipe needs no opinion
+about what any blob means, where a prune would need the fleet key. It is gated
+by the daemon secret — the same credential a PUT presents, held by exactly the
+machines that could fill the directory in the first place — and it is
+`flue relay reset` on the operator's side.
+
+Convergence after a reset is the daemons' own: each re-offers everything it
+holds on every connect and every 30 minutes, so the fleet refills the set. The
+residual, which readers of this spec are owed: **a blob whose only remaining
+holder never reconnects is lost by a wipe** — in practice a revocation
+published by a machine that has since been decommissioned. Every machine that
+already ingested it still holds it and re-publishes it, so the window is narrow;
+it is not zero, and re-revoking from any surviving machine closes it.
+
 ## Keepalive
 
-Either leg may send the **text** frame `flue-ping`; the Cloudflare edge answers
+Any socket the relay holds — either leg of a machine hub, and the directory
+socket — may send the **text** frame `flue-ping`; the Cloudflare edge answers
 `flue-pong` from the Durable Object's auto-response, without waking it. No leg
 ever has to answer a ping itself — the edge does, so neither the daemon nor a
 browser sees one — and a received `flue-pong` is dropped silently. Neither
 string ever carries a channel header: they are text frames, and everything
-channel-framed is binary. Any other text frame on either socket is a protocol
-error.
+channel-framed is binary. Any other text frame is a protocol error, on all
+three.
 
 This is the one place the relay adds something `spec/protocol.md` says does not
 exist ("WebSocket ping/pong frames only. There is no application-level ping").
@@ -181,10 +396,18 @@ Object bounds it directly: a cap on concurrent channels, a deadline on
 completing the handshake, after which the channel is closed, and a cap on the
 size of one client message.
 
+The directory's legs are gated by the same one secret: `PUT /directory` and the
+`/directory` upgrade present the bearer, and `GET /directory` presents nothing,
+for the same reason `/client` presents nothing — what the directory holds is
+signed, public by design, and worthless to forge without the fleet key. The
+secret is what says who may *write*, and it is all the Worker has to say it
+with, since it cannot verify a single blob it stores.
+
 Both legs, and `POST /api/pair`, carry a **machine id** in the path —
 `/daemon/<id>`, `/client/<id>`, `/api/pair/<id>` — and the Worker routes on it:
 `idFromName(id)` selects that machine's Durable Object, and the hub receives
-the bare prefix, never the id. The id is **self-certifying**:
+the bare prefix, never the id. (`/directory` carries none: one relay is one
+fleet, so its object's name is a constant.) The id is **self-certifying**:
 
 ```
 machine-id  =  <slug> "-" <tag>
@@ -221,11 +444,15 @@ The tag changes none of that — it authenticates the *mint*, not the caller.
 The real id is semi-public (it rides pairing links), and the Worker bills
 every request before any of this runs, so the credential-less routes also sit
 behind a **rate rule**: one Cloudflare rate-limiting binding, keyed by
-connecting IP, over `/client/*` and `POST /api/pair/*` — 300 requests per
+connecting IP, over `/client/*`, `POST /api/pair/*` and every request to
+`/directory` that does not present the secret — 300 requests per
 60 s per IP per Cloudflare location, answered `429 {"error":"rate limited"}`
 over it. Generous enough that a fleet of tabs never sees it; tight enough
-that burning quota, or walking the tag space, needs a botnet. The daemon leg
-is not rate limited: it is secret-gated and one socket per machine. The rule
+that burning quota, or walking the tag space, needs a botnet. The daemon legs
+are not rate limited: they are secret-gated, one socket per machine. The
+metering on `/directory` is decided by the credential rather than the method
+on purpose — otherwise an anonymous caller waving an `Upgrade` header would
+have a cheaper road to the 401 than the metered `GET` beside it. The rule
 is fail-open by design — a Worker deployed without the binding routes rather
 than refuses — because it bounds cost, not access.
 
@@ -255,8 +482,27 @@ observe is:
 - who is connected, when, and for how long;
 - channel ids, message counts and message sizes — enough for traffic analysis
   of a session, not its content;
-- the whole pairing exchange: the single-use pairing token, the device's public
-  key, and the daemon's.
+- the whole pairing exchange, when it goes through the relay: the single-use
+  pairing token, the device's public key and the label its owner typed, the
+  daemon's key, and — in the answer — the device certificate the ceremony
+  minted. `POST /api/pair` is parked and forwarded in cleartext by the hub;
+  taking device certificates out of the directory did **not** change this, and
+  nothing else could, since the request is the ceremony;
+- everything in the fleet directory: machine ids and display names, and who
+  revoked what and when. The blobs are opaque to the *code* and not to the
+  operator of the machine running it. The relay already routed by machine id,
+  so the delta is machine names and the revocation history.
+
+**The distinction between those last two is the one the directory's design
+turns on, and it is easy to blur.** A device certificate is seen by the relay
+*operator* either way, because a relayed pairing transits their Worker. What
+keeping it out of the directory removes is a different exposure: `GET
+/directory` needs no credential, so a published certificate was readable by
+anybody who learned the relay's address — a roster of the operator's device
+keys and the human labels beside them, on the open internet, permanently. The
+change is "not published to strangers", not "not seen by the operator". One
+operator on their own Worker is why the operator's own view is acceptable, and
+`docs/RELAY.md` states both halves rather than leaving either to be discovered.
 
 Public-key material is public by design. The **token is not**: a hostile relay
 could spend a live one with a key of its own and register itself as a paired

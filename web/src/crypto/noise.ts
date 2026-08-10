@@ -118,15 +118,41 @@ export interface InitiatorHandshake {
   readMessageB(msg: Uint8Array): NoiseChannel // <- e, ee, se; throws on any failure
 }
 
+export interface InitiatorOptions {
+  /**
+   * What message A's encrypted payload carries: this device's fleet
+   * certificate, or nothing.
+   *
+   * IK's first message has always had a payload slot and it was always empty.
+   * The fleet fills it (spec/fleet-trust.md, "What changes in the
+   * handshake"): a daemon that has never seen this device's key admits it on
+   * a certificate that verifies under the fleet public key and names exactly
+   * the static key the handshake proves possession of. Nothing else in the
+   * pattern changes, and the payload is sealed like any other — it rides
+   * inside `encryptAndHash`, so a relay reads none of it.
+   *
+   * Absent is the ordinary case for a browser paired to this machine
+   * directly: the daemon finds its key in the local registry and never looks
+   * at the payload (internal/transport/relay/channel.go, rule 1). Sending the
+   * certificate anyway costs nothing and is what carries a device to a
+   * machine it has never met.
+   */
+  payload?: Uint8Array
+  /** Fixed only where a vector is being reproduced; production draws from
+   *  crypto.getRandomValues. */
+  ephemeralPriv?: Uint8Array
+}
+
 export function initiatorHandshake(
   staticPriv: Uint8Array,
   peerStaticPub: Uint8Array,
-  ephemeralPriv?: Uint8Array, // tests only; defaults to crypto.getRandomValues
+  opts: InitiatorOptions = {},
 ): InitiatorHandshake {
   const ss = new SymmetricState()
   const s = { priv: staticPriv, pub: x25519.getPublicKey(staticPriv) }
-  const ePriv = ephemeralPriv ?? crypto.getRandomValues(new Uint8Array(32))
+  const ePriv = opts.ephemeralPriv ?? crypto.getRandomValues(new Uint8Array(32))
   const e = { priv: ePriv, pub: x25519.getPublicKey(ePriv) }
+  const certPayload = opts.payload ?? new Uint8Array(0)
 
   // IK pre-message: the responder's static key is mixed before message A.
   ss.mixHash(new Uint8Array(0)) // prologue (empty)
@@ -145,7 +171,7 @@ export function initiatorHandshake(
       const encS = ss.encryptAndHash(s.pub)
       // -> ss
       ss.mixKey(x25519.getSharedSecret(s.priv, peerStaticPub))
-      const payload = ss.encryptAndHash(new Uint8Array(0))
+      const payload = ss.encryptAndHash(certPayload)
       return concat(e.pub, encS, payload)
     },
     readMessageB(msg) {

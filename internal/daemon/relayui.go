@@ -95,6 +95,55 @@ type RelayUIStatus struct {
 	// service — the handler is the one on the Server that holds the state.
 	Transport       string `json:"transport,omitempty"`
 	TransportOrigin string `json:"transport_origin,omitempty"`
+
+	// Directory is the fleet directory as this daemon last saw it, or nil on a
+	// daemon that is not reading one (no relay, or a relay from before the
+	// directory existed). It is the second half of the answer to "is my fleet
+	// wired up": Transport says this machine can be *reached*, and this says
+	// it can hear what the other machines have signed — which is what a
+	// revocation travels on.
+	Directory *DirectoryCounts `json:"directory,omitempty"`
+}
+
+// DirectoryCounts is what this daemon last read out of the fleet directory.
+//
+// Entries is what the relay claimed; Verified is how much of it carried a
+// signature under this fleet's key, and the gap between the two is the only
+// interesting number here — a relay serving blobs this fleet did not sign is
+// either a fleet key that has rotated or a relay that is not the one this
+// machine thinks it is.
+//
+// It is a layout shared with internal/transport/relay (DirectoryCounts there),
+// converted rather than imported: this package must not depend on a transport,
+// which is the same reason RelayUI is an interface.
+type DirectoryCounts struct {
+	Connected   bool `json:"connected"`
+	Entries     int  `json:"entries"`
+	Verified    int  `json:"verified"`
+	Machines    int  `json:"machines"`
+	Devices     int  `json:"devices"`
+	Revocations int  `json:"revocations"`
+}
+
+// SetDirectoryCounts installs the reader for the line above. A func rather
+// than a value because the numbers change under a socket this package does not
+// own, and a snapshot pushed on every change would be a push per revocation
+// for a field nothing subscribes to.
+func (s *Server) SetDirectoryCounts(read func() DirectoryCounts) {
+	s.fleetPubMu.Lock()
+	defer s.fleetPubMu.Unlock()
+	s.directoryCounts = read
+}
+
+func (s *Server) directoryStatus() *DirectoryCounts {
+	s.fleetPubMu.Lock()
+	read := s.directoryCounts
+	s.fleetPubMu.Unlock()
+	if read == nil {
+		return nil
+	}
+	c := read()
+	return &c
 }
 
 // RelayUIAccount is one Cloudflare account a token can reach, for the picker.
@@ -183,6 +232,9 @@ func (s *Server) handleRelayInfo(w http.ResponseWriter, r *http.Request) {
 	s.relayMu.Lock()
 	st.Transport, st.TransportOrigin = s.relayStatus, s.relayOrigin
 	s.relayMu.Unlock()
+	// Filled by the handler for the same reason Transport is: it is live state
+	// this Server holds, not something the deploy service could know.
+	st.Directory = s.directoryStatus()
 	writeJSON(w, st)
 }
 

@@ -213,10 +213,11 @@ const pairRoute = createRoute({
    */
   validateSearch: (
     search: Record<string, unknown>,
-  ): { t?: string; k?: string; d?: string; n?: string } => {
-    const out: { t?: string; k?: string; d?: string; n?: string } = {}
+  ): { t?: string; k?: string; f?: string; d?: string; n?: string } => {
+    const out: { t?: string; k?: string; f?: string; d?: string; n?: string } = {}
     if (typeof search.t === 'string' && search.t !== '') out.t = search.t
     if (typeof search.k === 'string' && search.k !== '') out.k = search.k
+    if (typeof search.f === 'string' && search.f !== '') out.f = search.f
     if (typeof search.d === 'string' && search.d !== '') out.d = search.d
     if (typeof search.n === 'string' && search.n !== '') out.n = search.n
     return out

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { x25519 } from '@noble/curves/ed25519.js'
+import certs from '../../../testdata/fleet/certs.json'
 import vectors from '../../../testdata/noise/ik.json'
 import { FlueClient } from '@/client/client'
 import type { NoiseChannel } from '@/crypto/noise'
@@ -95,6 +96,12 @@ class FakeDaemon {
     return peer
   }
 
+  /** What message A carried in its payload slot — the fleet device
+   *  certificate a real daemon reads there, or empty. */
+  payload(): Uint8Array | null {
+    return this.hs.payload()
+  }
+
   /** The next wire-protocol frame the client sent, decrypted and unframed. */
   read(raw: FakeRaw): { text: boolean; data: Uint8Array } {
     return decodePlain(this.channel!.open(this.take(raw)))
@@ -134,12 +141,14 @@ function harness(
     daemonPriv?: Uint8Array
     pin?: Uint8Array
     machineId?: string
+    deviceCert?: Uint8Array
   } = {},
 ) {
   const daemonPriv = opts.daemonPriv ?? DAEMON_PRIV
   const identity: RelayIdentity = {
     deviceKey: { privateKey: DEVICE_PRIV, publicKey: x25519.getPublicKey(DEVICE_PRIV) },
     daemonPub: opts.pin ?? x25519.getPublicKey(daemonPriv),
+    ...(opts.deviceCert !== undefined && { deviceCert: opts.deviceCert }),
   }
   const urls: string[] = []
   const raws: FakeRaw[] = []
@@ -243,6 +252,32 @@ describe('opening the relay socket', () => {
     // nothing in front of it.
     expect(sent[0]!.byteLength).toBe(96)
     expect(hex(h.daemon.handshake(h.raw))).toBe(hex(h.identity.deviceKey.publicKey))
+  })
+
+  it('seals the fleet device certificate into message A', () => {
+    // Rule 2 of the daemon's acceptance order reads exactly this slot
+    // (internal/transport/relay/channel.go, admitByFleetCert): a machine this
+    // browser never paired with admits it on the certificate, or not at all.
+    // Sealed, not sent beside — the relay forwarding these bytes reads none
+    // of them.
+    const cert = unhex(certs.cases.find((c) => c.name === 'device')!.signedHex)
+    const h = harness({ deviceCert: cert })
+    h.raw.open()
+
+    h.daemon.handshake(h.raw)
+    expect(hex(h.daemon.payload()!)).toBe(hex(cert))
+    // The certificate is inside the sealed payload, so message A grew by
+    // exactly its length: nothing was sent alongside.
+    expect(h.raw.binary()[0]!.byteLength).toBe(96 + cert.length)
+  })
+
+  it('sends an empty payload when this browser holds no certificate', () => {
+    // The ordinary case for a browser paired to this machine directly: rule 1
+    // finds its key in the daemon's own registry and never looks here.
+    const h = harness()
+    h.raw.open()
+    h.daemon.handshake(h.raw)
+    expect(h.daemon.payload()).toHaveLength(0)
   })
 
   it('fires onopen only once the handshake has completed', () => {

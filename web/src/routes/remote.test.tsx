@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { FlueClientProvider } from '@/client/provider'
 import type { RelayInfo } from '@/client/protocol'
+import { DIRECTORY_WARN_AT, MAX_ENTRIES } from '@/relay/directory'
 import { renderWithRouter } from '@/testing/render'
 import { fakeClient, type FakeSocket } from '@/testing/socket'
 import { RemoteRoute } from './remote'
@@ -50,6 +51,31 @@ async function mountRemote({ relay }: { relay?: RelayInfo } = {}) {
  */
 const SETUP = 'flue relay setup'
 const STATUS = 'flue relay status'
+
+/**
+ * Run a case with /api/relay/info answering `info`.
+ *
+ * The screen asks the daemon for everything the welcome does not carry — what
+ * can be deployed, and what the fleet directory holds — so a case about either
+ * has to stub the endpoint, and put the global back afterwards.
+ */
+async function withRelayInfo(info: unknown, run: () => Promise<void>): Promise<void> {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(JSON.stringify(info), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    ),
+  )
+  try {
+    await run()
+  } finally {
+    vi.unstubAllGlobals()
+  }
+}
 
 /** What a browser that refuses the clipboard is told. */
 const BY_HAND =
@@ -150,6 +176,154 @@ describe('RemoteRoute', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+
+  it('reports what this machine hears of its fleet', async () => {
+    // Two legs to one relay, and they fail apart: the badge above says this
+    // machine can be reached, and this says it can hear what the other
+    // machines have signed — which is what a revocation travels on.
+    await withRelayInfo(
+      {
+        configured: true,
+        can_deploy: true,
+        version: 'v',
+        directory: {
+          connected: true,
+          entries: 7,
+          verified: 7,
+          machines: 2,
+          devices: 3,
+          revocations: 2,
+        },
+      },
+      async () => {
+        await mountRemote({ relay: RELAY_UP })
+        expect(await screen.findByText(/2 machines, 2 revocations/)).toBeTruthy()
+        // Device certificates are not published to the directory any more, so
+        // three of them there is an anomaly, named rather than counted
+        // silently beside the machines — and named without guessing at a
+        // cause, since no released flue has a directory to have published one
+        // from.
+        expect(
+          screen.getByText(
+            /3 device certificates in the directory: nothing in this fleet should be publishing one/,
+          ),
+        ).toBeTruthy()
+      },
+    )
+  })
+
+  it('says so when this machine is reachable and hearing nothing', async () => {
+    // The flag day: a relay deployed before the FleetDirectory object answers
+    // nothing on /directory. Sessions are fine, so nothing else on this
+    // screen would say a word about it.
+    await withRelayInfo(
+      {
+        configured: true,
+        can_deploy: true,
+        version: 'v',
+        directory: {
+          connected: false,
+          entries: 0,
+          verified: 0,
+          machines: 0,
+          devices: 0,
+          revocations: 0,
+        },
+      },
+      async () => {
+        await mountRemote({ relay: RELAY_UP })
+        expect(await screen.findByText(/not reading the fleet directory/)).toBeTruthy()
+        expect(screen.getByText(/flue relay update/)).toBeTruthy()
+      },
+    )
+  })
+
+  it('names the entries this fleet key did not sign', async () => {
+    await withRelayInfo(
+      {
+        configured: true,
+        can_deploy: true,
+        version: 'v',
+        directory: {
+          connected: true,
+          entries: 9,
+          verified: 7,
+          machines: 2,
+          devices: 3,
+          revocations: 2,
+        },
+      },
+      async () => {
+        await mountRemote({ relay: RELAY_UP })
+        expect(await screen.findByText(/2 entries in the directory were signed by something else/))
+          .toBeTruthy()
+      },
+    )
+  })
+
+  it('warns before the directory fills, and names the way out', async () => {
+    // The cap has no gentle failure: at 512 the relay refuses every new blob
+    // before storing it and therefore before pushing it, so a revoke made
+    // past that point reaches nobody, and nothing frees an entry short of a
+    // reset. A screen that only reported the counts would leave a 507 in a
+    // daemon log as the operator's first signal.
+    await withRelayInfo(
+      {
+        configured: true,
+        can_deploy: true,
+        version: 'v',
+        directory: {
+          connected: true,
+          entries: DIRECTORY_WARN_AT,
+          verified: DIRECTORY_WARN_AT,
+          machines: 2,
+          devices: 400,
+          revocations: 58,
+        },
+      },
+      async () => {
+        await mountRemote({ relay: RELAY_UP })
+        expect(
+          await screen.findByText(
+            new RegExp(`${DIRECTORY_WARN_AT} of ${MAX_ENTRIES} entries full`),
+          ),
+        ).toBeTruthy()
+        expect(screen.getByText(/flue relay reset/)).toBeTruthy()
+      },
+    )
+  })
+
+  it('says nothing about capacity while there is room to spare', async () => {
+    await withRelayInfo(
+      {
+        configured: true,
+        can_deploy: true,
+        version: 'v',
+        directory: {
+          connected: true,
+          entries: DIRECTORY_WARN_AT - 1,
+          verified: DIRECTORY_WARN_AT - 1,
+          machines: 2,
+          devices: 400,
+          revocations: 57,
+        },
+      },
+      async () => {
+        await mountRemote({ relay: RELAY_UP })
+        expect(await screen.findByText(/2 machines, 57 revocations/)).toBeTruthy()
+        expect(screen.queryByText(/flue relay reset/)).toBeNull()
+      },
+    )
+  })
+
+  it('says nothing about a fleet on a daemon that is reading no directory', async () => {
+    await withRelayInfo({ configured: true, can_deploy: true, version: 'v' }, async () => {
+      await mountRemote({ relay: RELAY_UP })
+      expect(await screen.findByText('Connected')).toBeTruthy()
+      expect(screen.queryByText(/fleet directory/)).toBeNull()
+      expect(screen.queryByText(/machines,/)).toBeNull()
+    })
   })
 
   it('copies the address the relay carries this machine at', async () => {

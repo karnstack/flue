@@ -1,9 +1,13 @@
 export interface Env {
   HUB: DurableObjectNamespace
+  /** The fleet directory: one object per relay, because one relay is one fleet
+   * (spec/fleet-trust.md, "The fleet directory"). Not per machine, which is
+   * why it is a namespace of its own rather than a name in HUB's. */
+  DIRECTORY: DurableObjectNamespace
   ASSETS: Fetcher
   DAEMON_SECRET: string
   /** The per-IP rate limiter over the credential-less routes (`/client/*`,
-   * `POST /api/pair/*`) — a Cloudflare rate-limiting binding, declared in
+   * `POST /api/pair/*`, `GET /directory`) — a Cloudflare rate-limiting binding, declared in
    * wrangler.jsonc (`ratelimits`) and in the deploy `flue relay setup` builds
    * (internal/relaydeploy, RateLimitBinding); the two must agree. Optional
    * and fail-open: the rule bounds quota burn, it is not auth, and a Worker
@@ -132,6 +136,30 @@ const rateLimited = () =>
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
   })
 
+/** A path under a prefix the Worker owns but does not serve. Not the machine
+ * 404: `/directory/anything` names no machine, and answering that it is not
+ * one would be a lie about what was asked. */
+const notFound = () =>
+  new Response('{"error":"not found"}', {
+    status: 404,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  })
+
+const methodNotAllowed = (allow: string) =>
+  new Response('{"error":"method not allowed"}', {
+    status: 405,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      Allow: allow,
+    },
+  })
+
+/** The name of the one directory object. One relay is one fleet, so this is a
+ * constant rather than anything read off the request: there is no second
+ * directory to route to, and a name in the path would only invent one. */
+const DIRECTORY_NAME = 'directory'
+
 /**
  * May this credential-less request proceed, under the per-IP rate rule?
  *
@@ -210,6 +238,52 @@ export default {
       // token and earns no HMAC: asset requests are unmetered, and the tag
       // check exists to guard Durable Object wakes, not page loads.
     }
+    if (claims(url.pathname, '/directory')) {
+      // The fleet directory: one object for the whole relay, no id in the
+      // path, three shapes on one URL (spec/fleet-trust.md, "The fleet
+      // directory"). Nothing lives under it, and the Worker keeps refusal
+      // authority over the whole prefix — `/directory/anything` is the
+      // Worker's own 404, never the SPA.
+      if (url.pathname !== '/directory') return notFound()
+      // The relay holds no fleet key and verifies none of what this leg
+      // carries; what it can check is who may *write*, and that is the same
+      // bearer secret the daemon leg presents. Checked once, up front,
+      // because it decides both the auth answer and the metering below.
+      const daemon = authorizeDaemon(req, env)
+      // The rate rule meters everything on this prefix that does not hold the
+      // secret — which is the credential-less `GET /directory` the spec puts
+      // behind it, and equally an anonymous caller waving an `Upgrade` header
+      // to reach the 401 by a cheaper road. The secret-holding legs stay
+      // unmetered for the reason `/daemon` is: they are secret-gated, and a
+      // fleet is a handful of machines.
+      if (!daemon && !(await allowRate(req, env))) return rateLimited()
+      const upgrade = req.headers.get('Upgrade')?.toLowerCase() === 'websocket'
+      // DELETE is gated exactly as PUT and the socket are, and by the same
+      // secret: it empties the whole directory (src/directory.ts, reset), which
+      // is the only way out of a full one and therefore the only way a fleet
+      // whose kill switch has stopped being distributed gets it back. It is
+      // reachable by whoever holds the daemon secret, which is every machine in
+      // the fleet — the same set that can already PUT, and the same set that
+      // could always fill the directory in the first place.
+      if ((upgrade || req.method === 'PUT' || req.method === 'DELETE') && !daemon) {
+        return unauthorized()
+      }
+      if (!upgrade && req.method !== 'GET' && req.method !== 'PUT' && req.method !== 'DELETE') {
+        return methodNotAllowed('GET, PUT, DELETE')
+      }
+      // Fail closed on a Worker deployed without the binding — an older
+      // `flue relay setup` than this script. Unlike CLIENT_RATE, which is
+      // fail-open because it bounds cost rather than access, there is no
+      // degraded directory to serve without the object: 503 says so, and the
+      // rest of the relay (which is every session on it) keeps running.
+      if (!env.DIRECTORY) {
+        return new Response('{"error":"directory unavailable"}', {
+          status: 503,
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        })
+      }
+      return env.DIRECTORY.get(env.DIRECTORY.idFromName(DIRECTORY_NAME)).fetch(req)
+    }
     if (url.pathname === '/api/health' && req.method === 'GET') {
       // Liveness of the Worker and nothing else — no id, no Durable Object
       // woken, nothing about any daemon. An uptime monitor pointed here costs
@@ -230,4 +304,5 @@ export default {
     return env.ASSETS.fetch(req)
   },
 }
+export { FleetDirectory } from './directory'
 export { DaemonHub } from './hub'

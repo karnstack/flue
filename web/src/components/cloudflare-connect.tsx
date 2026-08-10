@@ -59,6 +59,32 @@ export interface RelayUIInfo {
   deployed_version?: string
   has_token?: boolean
   account_name?: string
+  /**
+   * The fleet directory as this daemon last read it (daemon.DirectoryCounts).
+   * Absent on a daemon that is not reading one at all — no relay, or a relay
+   * config the transport refused — which is a different thing from a
+   * directory it is reading and cannot reach.
+   */
+  directory?: DirectoryCounts
+}
+
+/**
+ * What one read of the fleet directory found.
+ *
+ * `connected` is whether this daemon is holding the directory socket right
+ * now; the counts are the last snapshot read on it, so they mean nothing
+ * without it. `entries` is what the relay claimed to be holding and `verified`
+ * is how much of that this fleet's key actually signed — the gap is the only
+ * interesting number here, and it is a rotated fleet key or a relay belonging
+ * to another fleet.
+ */
+export interface DirectoryCounts {
+  connected: boolean
+  entries: number
+  verified: number
+  machines: number
+  devices: number
+  revocations: number
 }
 
 interface DeployResult {

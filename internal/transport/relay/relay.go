@@ -167,6 +167,15 @@ type Config struct {
 	// acceptance order and silently drops rule 2 (channel.go). Only the
 	// public half ever reaches this package.
 	FleetPub ed25519.PublicKey
+
+	// MachineCert is this machine's own fleet certificate as relay.json
+	// stores it (config.Relay.MachineCert), minted by the command that joined
+	// this machine to the relay. The directory leg publishes it so the
+	// fleet's browsers can find this machine; nothing else here reads it, and
+	// an empty one costs discovery rather than access — see
+	// Directory.machineCert, which refuses to publish one that no longer
+	// describes this daemon.
+	MachineCert []byte
 }
 
 // ErrIncompleteConfig is what New answers a Config it cannot dial with: a
@@ -216,8 +225,11 @@ type Server interface {
 
 // The daemon is the implementation, and the compiler is what keeps the two in
 // step: a signature that drifts here fails to build rather than failing to
-// serve.
-var _ Server = (*daemon.Server)(nil)
+// serve. FleetSink (directory.go) is the same contract for the other leg.
+var (
+	_ Server    = (*daemon.Server)(nil)
+	_ FleetSink = (*daemon.Server)(nil)
+)
 
 // Transport dials the relay and serves channels until ctx ends. It reconnects
 // with jittered exponential backoff and only returns when its context is done.

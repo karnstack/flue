@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -21,6 +22,11 @@ func TestSaveRelayRoundTrips(t *testing.T) {
 		Origin:      "https://flue-relay.karn.workers.dev",
 		MachineID:   "karns-macbook-pro-local-a1b2",
 		MachineName: "Karn's MacBook Pro.local",
+		// Bytes, not a string: the machine certificate is a signed blob, and
+		// the round trip has to preserve it byte for byte — a browser pins the
+		// Noise key inside it, so JSON that mangled one byte would be a
+		// machine nothing in the fleet can handshake with.
+		MachineCert: []byte{0x00, 0xff, 0x10, 'f', 'l', 'u', 'e'},
 	}
 	if err := SaveRelay(want); err != nil {
 		t.Fatalf("SaveRelay: %v", err)
@@ -33,7 +39,7 @@ func TestSaveRelayRoundTrips(t *testing.T) {
 	if !ok {
 		t.Fatal("LoadRelay ok = false after SaveRelay, want true")
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("LoadRelay = %+v, want %+v", got, want)
 	}
 }
@@ -147,7 +153,7 @@ func TestLoadRelayReportsAbsence(t *testing.T) {
 	if ok {
 		t.Fatalf("LoadRelay ok = true with no relay.json, want false (got %+v)", got)
 	}
-	if got != (Relay{}) {
+	if !reflect.DeepEqual(got, Relay{}) {
 		t.Errorf("LoadRelay = %+v with no relay.json, want the zero value", got)
 	}
 }

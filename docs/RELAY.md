@@ -69,7 +69,7 @@ daemon  ---- wss /daemon/<id> ---->  Worker + one DO per machine  <---- wss /cli
 ```sh
 flue relay setup     # machine 1: paste a Cloudflare API token, watch it deploy
 flue relay join …    # every other machine: the one line setup printed, verbatim
-flue relay status    # what is configured
+flue relay status    # what is configured, and what the fleet directory holds
 ```
 
 Setup needs a token from the **"Edit Cloudflare Workers"** template. It verifies
@@ -105,6 +105,12 @@ worse failure than not joining.
 `--name` sets the label the machine picker shows; it defaults to the hostname
 and rides the pairing link's query (`n=`) so the pairing browser can write it
 down, never a path, and never anything the Worker routes on.
+
+Join also mints this machine's own **machine certificate** — its id, its name
+and its Noise static key, signed under the fleet key — and stores it. That is
+what a browser reads out of the directory to reach a machine it never paired
+with, so a machine that joined and was never restarted is a machine the fleet
+cannot see; the restart is not optional.
 
 Run it from a **release binary** (`make build`, or an installed flue). The
 Worker and the web app are both compiled into that binary, and a dev build
@@ -203,6 +209,28 @@ A relay's version is the version of the flue that deployed it, the Worker
 ships inside the binary, so `brew upgrade flue && flue relay update` is the
 whole upgrade story.
 
+**A relay deployed before the fleet directory needs this run once.** The
+directory is a second Durable Object class (`FleetDirectory`), and a Worker
+that predates it has no such binding: `/directory` answers
+`503 {"error":"directory unavailable"}`, and `flue relay status` says so in
+as many words —
+
+```
+fleet:    unreachable (this relay has no directory; run `flue relay update` to redeploy it)
+```
+
+— which is the whole of the flag day. Until it is run, no revocation crosses
+machines and no browser learns of a machine it did not pair with by hand.
+(Device certificates are unaffected either way: they never travel through the
+directory. A device gets its own from the machine that paired it, over the
+pairing answer and every welcome, and that works on a relay of any vintage.)
+Nothing else is affected: sessions, pairing and every
+machine you already paired keep working exactly as before, which is what makes
+this an upgrade rather than an outage. `flue relay update` adds the class (the
+deploy reads the migration tag the account's copy of the script already
+carries and sends only the steps behind it), and the daemons publish
+everything they hold on their next connect.
+
 ### A custom domain
 
 Route a domain to the Worker in the Cloudflare dashboard (Workers → your
@@ -289,14 +317,200 @@ The honest cost sits on the other side of the same line. Every machine holds
 the same private key — trust inside the fleet is symmetric, any machine can
 sign for the fleet, and there is no ceremony between machines — so a
 compromised machine can mint a device certificate every other machine will
-honour, and the shared-secret analysis above understates what it can do by
-exactly that much. That is the trade that buys pairing once for a fleet
-instead of once per machine, for the one-operator model this is built for,
-and it is why re-setup (fresh secret, fresh fleet key, everyone re-joins and
-re-pairs) is the whole of compromise recovery. Revoking a *device* is
-per-machine today; making a revocation reach the fleet needs the directory
-that distributes it, which is the next stage of
-[`spec/fleet-trust.md`](../spec/fleet-trust.md).
+honour — and a *machine* certificate naming a Noise key of its own, which a
+browser that has never paired the machine it names will pin and dial. (A
+browser that did pair it keeps the key from its own ceremony, which is
+stronger evidence than anything read off the relay, so that one is not
+repointed.) The shared-secret analysis above understates what a compromised
+machine can do by exactly that much. That is the trade that buys pairing once
+for a fleet instead of once per machine, for the one-operator model this is
+built for, and it is why re-setup (fresh secret, fresh fleet key, everyone
+re-joins and re-pairs) is the whole of compromise recovery.
+
+### The fleet directory
+
+Certificates only mean something once they reach the machines and devices
+that check them. Daemons do not talk to each other and should not start to,
+so the relay carries them: one more Durable Object, not per machine, holding
+the signed blobs the fleet has produced — machine certificates and
+revocations.
+
+Your *device* certificates are not in there, deliberately. The machine that
+paired a device hands that device its certificate directly — in the pairing
+answer, and again every time it connects — so there is no reason to publish a
+list of your devices' keys and the names you gave them on a route that needs no
+credential, and no reason to spend one of the directory's 512 permanent entries
+every time you pair something.
+
+```
+PUT    /directory  the daemon secret; one signed blob
+GET    /directory  no credential at all; the whole set
+DELETE /directory  the daemon secret; empties the whole set (`flue relay reset`)
+WS     /directory  the daemon secret; one push per new entry
+```
+
+**The relay stores and serves, and verifies nothing.** It holds no fleet key,
+so it cannot tell a machine certificate from a revocation from 200 bytes of
+noise — and must not try. Every reader, daemon and browser both, checks every
+signature under the fleet public key and drops what fails. What a hostile
+relay can do here is serve the set stale, cut short or empty, which is the
+same power it always had (it could refuse to route); what it cannot do is mint
+an entry.
+
+One caveat on "the cost of a hostile relay is availability, and nothing else",
+which is true everywhere else in this document. For a *certificate*, a relay
+that withholds one subtracts: you see fewer machines, or a device has to pair
+by hand. For a *revocation*, withholding adds — a machine that never receives
+one keeps admitting a device you cut off — and nothing in the answer says so,
+because entries are signed one by one and the set is not signed at all. What
+holds it in check is that every machine that knows a revocation re-publishes it
+on every connect and every half hour, so burying one means withholding it from
+everybody, continuously, forever; a machine that heard it once never unhears
+it; and the relay still cannot mint the certificate the revocation was about.
+The real fix is a signed statement about the whole set, and
+[`spec/relay-protocol.md`](../spec/relay-protocol.md), "What withholding
+costs", records it as future work rather than pretending it is done.
+
+Three things follow that an operator sees:
+
+- **A machine joined later needs no ceremony.** `flue relay join` mints that
+  machine's certificate and publishes it; the next directory read on every
+  paired browser puts the machine in the list, and the certificate each of
+  those devices already holds is what the new machine lets them in on.
+- **Pair a device once, for the fleet.** The ceremony's machine signs the
+  device certificate and hands it to the device it is about. The browser being
+  paired takes the fleet *public* key out of the same QR that carries the
+  daemon's own
+  (`f=` beside `k=`) and pins it — the QR is the one leg of the ceremony no
+  intermediary can sit in — and from then on it accepts any machine whose
+  certificate verifies under that key, pinning the Noise key the certificate
+  names. The device presents its own certificate in the handshake, which is
+  how a machine that has never seen it admits it.
+- **A revoke crosses machines.** Revoking on any machine's Devices screen
+  publishes a revocation; every connected daemon hears the push within
+  seconds, drops the key from its own registry and closes that device's
+  channels. A revocation permanently outranks a device certificate for the
+  same key whatever the timestamps say, on every reader — un-revoking is
+  pairing again, under a new key.
+
+**Entries are content-addressed and no single entry is ever deleted.** The
+storage key is the SHA-256 of the exact bytes, so a `PUT` can only add, a blob
+comes back byte for byte, and re-publishing costs nothing. Nothing prunes,
+deliberately: every eviction policy can drop a revocation, and a directory that
+forgets a revocation re-admits the device it revoked to every machine that had
+not yet heard. The whole set can be emptied at once — see the reset below —
+because that needs no opinion about what any one blob means, which is the only
+kind of deletion a relay holding no fleet key is entitled to perform.
+
+Which is why it can fill up. A blob is capped at 4 KiB and the set at **512
+entries**, and at the cap a new blob is refused with
+`507 {"error":"directory full"}` rather than making room. What that means to
+you: nothing already published stops working — every certificate and every
+revocation in there keeps being served and honoured — but the *next* thing
+your fleet signs **is not stored and is not pushed to anybody**. The refusal
+comes before both: the relay does not keep the blob, so there is no new entry
+to fan out, and the push socket carries new entries and nothing else. Nobody is
+notified, including the machines that are connected right now.
+
+So a device paired after that point works on the machine that paired it and
+nowhere else. And, far more seriously, a revocation made after that point takes
+effect **only on the machine it was typed on** — that machine drops the key
+from its own registry and closes that device's channels, because a revoke is
+local first — while every other machine in the fleet goes on admitting the
+device on the certificate it already holds. Re-publishing does not rescue it
+either: the machine re-offers that revocation on every reconnect and every half
+hour, and is answered 507 every time. The daemon that hit it logs
+
+```
+the fleet directory is full; this artifact was not stored and was not pushed
+to anyone, so no machine will learn of it from here — run `flue relay reset`
+to empty the directory
+```
+
+and `flue relay status` shows the count sitting at 512. 512 is years of
+pair-and-revoke churn for one operator (entries are machines, devices, and one
+revocation per device ever revoked), so reaching it is a signal worth reading:
+either something is publishing in a loop, or the relay is shared with a fleet
+it should not be.
+
+**The way out is `flue relay reset`**, and it is the only way out. Redeploying
+does not clear the directory and neither does re-running setup: the Durable
+Object is named by a constant, its storage outlives every deploy of the script,
+and a fresh fleet key does not delete the blobs it orphans — it just leaves 512
+signatures nobody can verify occupying the cap. So there is one command:
+
+```
+$ flue relay reset
+this empties the relay's fleet directory: every machine certificate
+and every revocation the relay is holding.
+...
+type yes to continue: yes
+  ✓ fleet directory reset (512 entries cleared)
+```
+
+It empties the set — never a chosen part of it, because choosing needs the
+fleet key the relay must never hold — and the fleet then puts itself back:
+every machine re-publishes everything it holds on connect and every 30 minutes,
+and the reset disconnects the push sockets so that reconnect happens in seconds
+rather than at the next half hour. A machine that is switched off republishes
+its share when it next starts.
+
+What a wipe costs, stated rather than buried: **a blob whose only remaining
+holder never reconnects is gone.** The one that matters is a revocation
+published by a machine that has since been decommissioned — every machine that
+already heard it still holds it in its own `revocations.json` and re-publishes
+it from there, so this is a narrow window and not a general loss, but it is not
+an empty one. If you are not sure, revoke the device again from any machine
+after the reset; a revocation is idempotent everywhere it lands.
+
+**What the relay learns from it.** The blobs are opaque to the *code* and not
+to whoever runs the Worker: machine ids and display names, and who revoked what
+and when, are in there, signed rather than secret. The relay already routed by
+machine id; the delta is machine names and the revocation history. None of it
+opens anything — reaching a machine still needs the private half of a device
+key that never leaves the browser holding it — but it is a real change in what
+a relay operator can see, and on your own Worker, in front of your own
+machines, that is the trade this document would rather state than leave to be
+discovered.
+
+**What keeping device certificates out of it does and does not buy, precisely.**
+It does *not* hide them from your relay's operator. When you pair through the
+relay, the whole ceremony transits the Worker in cleartext — the token, your
+device's public key, the label you typed, and the certificate that comes back
+in the answer — and no arrangement of the directory changes that, because the
+request *is* the ceremony. What it removes is a different exposure: `GET
+/directory` takes no credential, by design, since what it carries is signed
+rather than secret. A device certificate published there was readable by
+anybody who knew your relay's address, forever — a list of your devices' public
+keys and the names you gave them, on the open internet — and it spent one of
+512 permanent entries every time you paired anything. So: still seen by the
+operator you already trust to route your terminals; no longer readable by
+strangers. If you would rather your operator not see a ceremony either, pair
+over the daemon's own origin, which is the advice
+[`spec/relay-protocol.md`](../spec/relay-protocol.md) gives for the pairing
+token as well. The full list of what a relay sees is in that document, under
+"What the relay sees".
+
+**Reading it.** `flue relay status` asks the relay directly and verifies every
+blob locally, which is why the second number is the one that means anything:
+
+```
+relay:    configured (wss://flue-relay.<sub>.workers.dev), status unknown from here
+fleet:    4 entries, 4 verified under this fleet key (2 machines, 2 revocations)
+```
+
+`entries` is what the relay claims to hold; `verified` is how much of it this
+machine's fleet key actually signed. A gap between them is worth looking at —
+it is a fleet key that has rotated, or a relay that is not the one this machine
+thinks it is — and status says so on a second line when it happens. It also
+says when this machine's own certificate is missing from the set, which is the
+one fault a freshly joined machine really has: other devices will not discover
+it; when the directory is past 90% of its 512 entries, so a full one is a
+decision rather than a discovery; and when there are device certificates in
+there at all, which nothing in your fleet should be publishing. It does not
+guess how one got there — no released flue has a fleet directory to have
+published it from — but it is worth a look. The same counts ride
+`GET /api/relay/info`, which is where the Remote screen reads them.
 
 ## Cost model
 

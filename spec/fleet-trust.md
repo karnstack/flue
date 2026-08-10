@@ -127,11 +127,77 @@ One additional Durable Object per fleet (`idFromName("directory")`, one relay
 is one fleet) with three routes:
 
 ```
-PUT  /directory            daemon leg auth (Bearer secret); body: one cert or revocation
-GET  /directory            credential-less; the full set: machine certs, device certs, revocations
-WS   /directory (daemons)  daemon leg auth; push on write, so daemons learn of new
-                           devices/revocations without polling
+PUT    /directory          daemon leg auth (Bearer secret); body: one cert or revocation
+GET    /directory          credential-less; the full set: machine certs and revocations
+DELETE /directory          daemon leg auth; empties the whole set (`flue relay reset`)
+WS     /directory (daemons)  daemon leg auth; push on write, so daemons learn of new
+                           revocations without polling
 ```
+
+**Device certificates are deliberately not in the directory.** A device gets
+its own certificate from the machine that minted it — in the pairing answer,
+and again in the welcome of every connection it opens anywhere in the fleet —
+both channels on which it is already authenticated, and the second of which is
+inside Noise. Publishing them as well bought one thing, a browser being able to
+find its own, and cost two: `GET /directory` needs no credential, so it became
+a public roster of the operator's device keys and the human labels beside them;
+and nothing in the directory is ever deleted one entry at a time, so each
+ceremony ever performed spent one of 512 permanent entries. No daemon ever read
+one from there — a machine admits a roaming device on the certificate the
+device *presents* in its handshake, which is rule 2 — so nothing needed them.
+
+What the directory still owes a stored certificate is the other half of the
+rule: a browser reads the revocations and stops presenting a certificate whose
+key the fleet has cut off.
+
+**Pruning superseded entries: considered, and not built.** The reason is that
+there is almost nothing left to prune, not that a delete would be dangerous.
+
+Count what can ever be *superseded* now. A revocation never is: it is the
+final word about a key and outranks everything, forever. A device certificate
+is not in here at all. That leaves a machine certificate a machine re-minted,
+which happens when `flue relay setup`/`join` runs on that machine again — a
+handful of times in the life of a fleet, and one entry each. Against a cap of
+512, the growth term this would reclaim is single digits. A mechanism, its
+failure modes and its tests, to win back a fraction of a percent of a store
+that no longer grows with use, is not a trade worth making.
+
+The failure it would guard against is already covered, and covered by
+something with no opinion about any blob: `DELETE /directory`
+(`flue relay reset`) empties the store, and every daemon re-publishes
+everything it holds on its next connect and every 30 minutes thereafter, so
+the fleet refills itself. The status surfaces warn from 90% of the cap, so
+arriving at the wall is a decision rather than a discovery. What a wipe
+genuinely costs — a blob whose only remaining holder never reconnects — is
+stated with the route itself in `docs/RELAY.md` rather than hidden here.
+
+Two arguments that would be tempting here are **not** the reason, and are
+written down so nobody re-derives them as one:
+
+- *"A targeted delete on the daemon secret would let one compromised machine
+  delete any entry."* True, and this design already ships `DELETE /directory`
+  on that same secret, which lets that machine delete **every** entry
+  including every revocation. A targeted delete would be strictly weaker than
+  what the secret already buys, and self-healing for the same reason the wipe
+  is. The secret is a fleet-wide credential; a compromised machine holding one
+  is the case `spec/relay-protocol.md` treats under re-setup, not a case
+  pruning would change.
+- *"A signed delete would need the relay to verify."* Also true, and it is a
+  real cost — but it is the cost of the *signed* variant only, so it is an
+  argument about which mechanism, not about whether to have one.
+
+**Future work, deliberately not built: a verify-only deletion gate.** The
+fleet *public* key could be bound to the Worker so that a `DELETE` naming
+digests is honoured only when a fleet-signed statement authorises it. The
+private key still never goes near the relay, so this does not weaken minting.
+It is not built because it makes the Worker a policy engine — today it stores
+bytes and serves them, and every rule about what those bytes mean lives in the
+readers — and because it creates a rotation problem the rest of this design
+does not have: rotating the fleet key would leave a Worker bound to the old
+public half, unable to honour a delete signed by the new one and still willing
+to honour one signed by the old. Either shape of that fix (a rotation
+ceremony, or a Worker that accepts two keys during an overlap) is a bigger
+change than the entries it would reclaim.
 
 The Worker stores blobs it cannot check; every reader verifies every
 signature under the fleet public key and drops what fails. A hostile relay
@@ -140,21 +206,36 @@ but cannot mint a machine or a device, because it does not hold the fleet
 key. Availability remains the relay's only power; that invariant is the spine
 of `spec/relay-protocol.md` and survives intact.
 
-Privacy note for `docs/RELAY.md`: the directory makes machine names/ids and
-device public keys/names visible to the relay (they are signed, not secret).
-The relay already routes by machine id; the delta is names and device pubs.
-One operator, their own Worker: acceptable, but stated.
+Privacy note for `docs/RELAY.md`: the directory makes machine names and ids
+visible to the relay, and to anyone who reads the credential-less route (they
+are signed, not secret). The relay already routes by machine id, so the delta
+is machine *names* and the revocation history — who was cut off and when.
+One operator, their own Worker: acceptable, and stated.
+
+State the device-certificate delta precisely, because it is easy to overclaim.
+The relay *operator* still sees every device certificate: a relayed pairing
+posts through the Worker in cleartext and the certificate comes back in the
+answer (`spec/relay-protocol.md`, "What the relay sees"), and no directory
+arrangement changes that, since the request is the ceremony. What keeping them
+out of the directory removes is the **anonymous reader**: `GET /directory`
+takes no credential, so a published certificate was a device public key and its
+owner's label readable by anyone who knew the relay's address, permanently.
+"Not published to strangers", not "not seen by the operator".
 
 Flows, end to end:
 
 - **New machine.** `flue relay join` (one line) → daemon mints its machine
   cert, PUTs it, opens the directory socket. Every paired browser's next
-  directory read shows the machine; every existing device cert already in the
-  directory lets those devices straight in. No ceremony.
+  directory read shows the machine, and presents the certificate it already
+  holds to be let in. No ceremony.
 - **New device.** Pair once, on any machine (that machine's `/pair` page,
-  reached through the relay as today). The ceremony's machine mints the
-  device cert, PUTs it; every other daemon hears the push. The phone's next
-  directory read gives it the whole fleet.
+  reached through the relay as today). The ceremony's machine mints the device
+  cert and hands it to the device in the pairing answer, which the browser
+  verifies under the fleet key it pinned from the QR seconds earlier and keeps.
+  The phone's next directory read gives it the whole fleet's machines, and its
+  stored certificate is what those machines admit it on. Any machine it can
+  reach re-offers the same certificate in its welcome, so losing it is not
+  losing the fleet.
 - **Revoke.** The Devices screen on any machine revokes any fleet device: PUT
   the revocation, push to every daemon, each drops the key from its local
   registry and closes its channels — the existing `revoked{reason}` flow, now

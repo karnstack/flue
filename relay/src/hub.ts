@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import { decodeFrame, encodeFrame } from './frame'
+import { JSON_NO_STORE, readCapped } from './http'
 import type { Env } from './index'
 
 /**
@@ -557,11 +558,6 @@ const MAX_PENDING_PAIRS = 8
 /** Statuses a `Response` may not carry a body for. */
 const NULL_BODY_STATUS = new Set([204, 205, 304])
 
-/** What every JSON answer this hub writes carries. `no-store` because all of
- * them are about the state of one live ceremony: a refusal that got cached by
- * anything in the path would outlive the condition that caused it. */
-const JSON_NO_STORE = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
-
 /** What a daemon socket remembers across hibernation. */
 interface DaemonAttachment {
   /** False once replaced. `getWebSockets` can still list the dying socket, so
@@ -633,45 +629,6 @@ function pairStatus(status: unknown): number {
   return typeof status === 'number' && Number.isInteger(status) && status >= 200 && status <= 599
     ? status
     : 502
-}
-
-/**
- * The request body, or null if it runs past `max`.
- *
- * Content-Length is consulted first so an honestly-labelled oversized POST is
- * refused without being read, and the stream is then counted as it arrives:
- * a chunked body declares no length at all, and buffering an undeclared one
- * would hand the credential-less pairing endpoint a memory DoS — the same
- * exposure the channel cap and the handshake deadline bound on the client leg
- * (spec/relay-protocol.md, Auth).
- */
-async function readCapped(req: Request, max: number): Promise<Uint8Array | null> {
-  const declared = Number(req.headers.get('Content-Length'))
-  if (Number.isFinite(declared) && declared > max) return null
-  if (!req.body) return new Uint8Array(0)
-  const reader = req.body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      total += value.byteLength
-      if (total > max) return null
-      chunks.push(value)
-    }
-  } finally {
-    // Releases the leg of an oversized body we stopped reading; a no-op once
-    // the stream has ended on its own.
-    await reader.cancel().catch(() => {})
-  }
-  const out = new Uint8Array(total)
-  let at = 0
-  for (const chunk of chunks) {
-    out.set(chunk, at)
-    at += chunk.byteLength
-  }
-  return out
 }
 
 /** WebSocket endpoints answer plain HTTP with 426, upgrade required. */

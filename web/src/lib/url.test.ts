@@ -74,7 +74,23 @@ describe('scrubPairingParams', () => {
   it('removes every repetition of the parameters', () => {
     // URLSearchParams.delete removes all entries with the name, but a helper
     // that reached for get()/set() would leave the second copy behind.
-    history.replaceState(null, '', '/pair?t=one&t=two&k=a&k=b')
+    history.replaceState(null, '', '/pair?t=one&t=two&k=a&k=b&f=c&f=d')
+    scrubPairingParams()
+    expect(location.search).toBe('')
+  })
+
+  it('removes the fleet key with them', () => {
+    // `f` is the pin for every machine this browser will ever dial. It is
+    // read on the first render and never from the address bar again, so what
+    // a link still carrying it is, afterwards, is a live-looking pairing link
+    // in a history entry.
+    history.replaceState(null, '', '/pair?t=secret&k=daemonkey&f=fleetkey&d=blue-mesa')
+    scrubPairingParams()
+    expect(location.search).toBe('?d=blue-mesa')
+  })
+
+  it('scrubs a fleet key travelling alone', () => {
+    history.replaceState(null, '', '/pair?f=fleetkey')
     scrubPairingParams()
     expect(location.search).toBe('')
   })

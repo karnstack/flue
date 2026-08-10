@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -18,9 +21,11 @@ import (
 
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaydeploy"
+	"github.com/karnstack/flue/internal/transport/relay"
 	relaybundle "github.com/karnstack/flue/relay"
 	"github.com/karnstack/flue/web"
 )
@@ -69,7 +74,7 @@ const (
 // number, and EOF alone is not enough of a guarantee to rely on.
 const accountPromptAttempts = 3
 
-const relayUsage = "usage: flue relay <setup|join|status|update|address>"
+const relayUsage = "usage: flue relay <setup|join|status|update|address|reset>"
 
 func cmdRelay(args []string) error {
 	if len(args) == 0 {
@@ -88,6 +93,8 @@ func cmdRelay(args []string) error {
 		return runRelayUpdate(os.Stdout, os.Stdin, &cloudflare.Client{}, args[1:])
 	case "address":
 		return runRelayAddress(os.Stdout, args[1:])
+	case "reset":
+		return runRelayReset(os.Stdout, os.Stdin, args[1:])
 	default:
 		return fmt.Errorf("unknown relay subcommand %q; %s", args[0], relayUsage)
 	}
@@ -268,6 +275,9 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 		AssetHeaders: relayAssetHeaders,
 		Version:      deployStamp(),
 		OnStep:       func(line string) { fmt.Fprintf(w, "  ✓ %s\n", line) },
+		// No tick: a note is something the deploy could not fix, and the same
+		// two-space indent every soft failure in this file already wears.
+		OnNote: func(line string) { fmt.Fprintf(w, "  %s\n", line) },
 	})
 	if err != nil {
 		return err
@@ -298,6 +308,17 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 	machineID := config.MintMachineID(hostname, secret, rand.Reader)
 	machineName := truncateRunes(hostname, machineNameMaxRunes)
 
+	// The machine's own certificate, signed under the fleet key just minted:
+	// what the daemon publishes to the relay's fleet directory so every
+	// browser in the fleet can reach this machine without pairing to it
+	// (spec/fleet-trust.md, "The fleet directory"). Not fatal — a relay whose
+	// machines cannot be discovered still carries every device paired
+	// directly to them — and the line says which half is missing.
+	machineCert, err := mintMachineCert(fleetKey, machineID, machineName)
+	if err != nil {
+		fmt.Fprintf(w, "  could not mint this machine's fleet certificate (%v); other devices will not discover this machine\n", err)
+	}
+
 	// Last, deliberately. relay.json is what makes the daemon dial, and every
 	// step above can fail; writing it earlier would leave a daemon dialling a
 	// relay that was never finished. Re-running setup is the fix for anything
@@ -316,6 +337,7 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 		Origin:      origin,
 		MachineID:   machineID,
 		MachineName: machineName,
+		MachineCert: machineCert,
 		Worker:      worker,
 	}); err != nil {
 		return fmt.Errorf("save the relay configuration: %w", err)
@@ -352,6 +374,47 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 // humans — never part of a URL — so the only limit it needs is one that keeps
 // a machine list rendering as a list.
 const machineNameMaxRunes = 64
+
+// mintMachineCert signs this machine's fleet machine certificate: the id it
+// holds on the relay, its display name, and the Noise static key every device
+// that reaches it must pin (spec/fleet-trust.md, Certificates).
+//
+// It is minted here — in the three commands that write relay.json — rather
+// than by the daemon, and the reason is the directory's shape rather than
+// convenience. The relay stores blobs by the hash of their own bytes, so a
+// cert re-minted at each start would carry a fresh `iat`, land under a fresh
+// key, and spend one of the directory's 512 entries every time the daemon
+// restarted. Minting it exactly where the facts it asserts are decided means
+// one blob, for the life of this machine's place on this relay.
+//
+// It reads (and, on a machine that has never served, creates) the daemon's
+// static key, which is the same key `flue serve` would load a moment later:
+// the cert has to name the key devices will actually meet, and a cert naming a
+// key that did not exist yet would be a browser pinning nothing.
+//
+// A failure is returned, not swallowed. Every caller treats it as "this
+// machine joins without a machine cert" and says so — the honest half of a
+// half-configured relay, exactly as `flue relay setup` already treats a fleet
+// key it cannot mint.
+func mintMachineCert(key fleet.Key, machineID, machineName string) ([]byte, error) {
+	if !key.Valid() {
+		return nil, fleet.ErrNoKey
+	}
+	dir, err := config.Dir()
+	if err != nil {
+		return nil, fmt.Errorf("locate the config directory: %w", err)
+	}
+	static, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		return nil, fmt.Errorf("load the daemon static key: %w", err)
+	}
+	return key.Sign(fleet.MachineCert{
+		ID:    machineID,
+		Name:  machineName,
+		Noise: static.Public,
+		IAT:   time.Now().Unix(),
+	})
+}
 
 const relayJoinUsage = "usage: flue relay join <url> --secret <secret> --fleet <fleet key> [--name <label>]"
 
@@ -435,6 +498,17 @@ func runRelayJoin(w io.Writer, args []string) error {
 	// the daemon leg's 401 reports, found one dial later.
 	machineID := config.MintMachineID(hostname, *secret, rand.Reader)
 
+	// This machine's certificate under the fleet key that arrived on the join
+	// line — the artifact the daemon publishes so the fleet's browsers can
+	// find this machine at all (spec/fleet-trust.md, "New machine"). Its
+	// absence costs discovery and nothing else, so it is reported rather than
+	// fatal: a join that stopped here would leave a machine with no relay
+	// config over a convenience.
+	machineCert, err := mintMachineCert(fleetKey, machineID, machineName)
+	if err != nil {
+		fmt.Fprintf(w, "  could not mint this machine's fleet certificate (%v); other devices will not discover this machine\n", err)
+	}
+
 	// The same shape setup writes, derived the same way: bare wss:// URL, the
 	// https origin on the same host. SaveRelay is 0600 — the file holds the
 	// relay's whole credential, the fleet key now included. The seed is
@@ -448,6 +522,7 @@ func runRelayJoin(w io.Writer, args []string) error {
 		Origin:      "https://" + host,
 		MachineID:   machineID,
 		MachineName: machineName,
+		MachineCert: machineCert,
 	}); err != nil {
 		return fmt.Errorf("save the relay configuration: %w", err)
 	}
@@ -498,10 +573,372 @@ func truncateRunes(s string, n int) string {
 	return string(runes[:n])
 }
 
-// runRelayStatus prints what is configured, which is the same line flue status
-// carries — one answer, one place it is decided.
+// runRelayStatus prints what is configured — the same line `flue status`
+// carries, one answer decided in one place — and then asks the relay itself
+// about the fleet directory.
+//
+// The second line is why this command exists separately from `flue status`.
+// relayLine reports a file on disk and says so; the directory is the one part
+// of a fleet whose health cannot be read from any local file, and it is
+// readable from here without the daemon's help because `GET /directory` needs
+// no credential and its contents are signed. So a user asking "is my fleet
+// actually wired up" gets an answer that came from the relay, in a command
+// they ran on purpose — while `flue status`, which is printed on every
+// enable/disable and reads no network, stays local.
 func runRelayStatus(w io.Writer) error {
 	fmt.Fprintln(w, relayLine())
+	rc, ok, err := config.LoadRelay()
+	if err != nil || !ok {
+		// relayLine already said which of the two this is, in its own words.
+		return nil
+	}
+	fmt.Fprintln(w, directoryLine(rc))
+	return nil
+}
+
+// directoryLine is what the relay's fleet directory says about this fleet,
+// read live and verified locally.
+//
+// Verified is the number that means something. The relay hands out whatever it
+// is holding, so "entries" is the relay's claim; what a fleet key can check is
+// how many of those blobs it signed, and the breakdown after it is the fleet
+// as this machine's own key can prove it: machines, devices, revocations. A
+// gap between the two numbers is worth seeing — it is a rotated fleet key, or
+// a relay that is not the one this machine thinks it is.
+func directoryLine(rc config.Relay) string {
+	if rc.FleetSeed == "" {
+		// relayLine already names this as the fault that stops the daemon
+		// dialling at all; there is nothing this line could verify.
+		return "fleet:    unknown (this relay.json carries no fleet key)"
+	}
+	key, err := fleet.Parse(rc.FleetSeed)
+	if err != nil {
+		return "fleet:    unknown (the fleet key in relay.json cannot be parsed)"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), relayStepTimeout)
+	defer cancel()
+	counts, err := fetchDirectory(ctx, rc, key.Public())
+	if err != nil {
+		// Named without the URL: relayLine printed it one line up.
+		return fmt.Sprintf("fleet:    unreachable (%v)", err)
+	}
+	line := fmt.Sprintf("fleet:    %s, %d verified under this fleet key",
+		plural(counts.Entries, "entry", "entries"), counts.Verified)
+	// Machines and revocations, which is what the directory carries. Device
+	// certificates are not published to it — they go to the device that owns
+	// them (spec/fleet-trust.md) — so a count of them here would read as "this
+	// fleet has no devices" when it means "the directory does not list them",
+	// which are different claims and only the second is true. It is still
+	// *counted*, because a non-zero value is a real signal.
+	//
+	// The line does not name a cause, because there is no honest one to name.
+	// No released flue has a fleet directory at all, so "an older flue is
+	// still publishing them" — which this line used to say — cannot ever be
+	// true; what is left is a build from between the two, or a hand-written
+	// PUT by whoever holds the daemon secret. Both deserve a look and neither
+	// is a diagnosis a status line can make from a count.
+	line += fmt.Sprintf(" (%s, %s)",
+		plural(counts.Machines, "machine", "machines"),
+		plural(counts.Revocations, "revocation", "revocations"))
+	if counts.Devices > 0 {
+		line += fmt.Sprintf("\n          %s in the directory; nothing in this fleet should be publishing one",
+			plural(counts.Devices, "device certificate", "device certificates"))
+	}
+	if counts.Entries != counts.Verified {
+		line += fmt.Sprintf("\n          %s signed by something else; this relay may belong to another fleet",
+			plural(counts.Entries-counts.Verified, "entry is", "entries are"))
+	}
+	line += capacityLine(counts.Entries)
+	if counts.MachineListed {
+		return line
+	}
+	return line + "\n          this machine is not in the directory: other devices will not discover it"
+}
+
+// capacityLine is the warning that the directory is filling up, or the flatter
+// statement that it is already full. Empty for a fleet with room, because a
+// status report that says "everything is fine" in three ways is one nobody
+// reads.
+//
+// It is here because the cap fails hard and silently. At MaxDirectoryEntries
+// the relay refuses every new blob — before storing it and therefore before
+// pushing it, so a revocation made past that point reaches nobody — and no
+// deploy, update or re-setup frees an entry. Without this line the first thing
+// an operator sees is a 507 in a daemon log after a revoke they believed had
+// crossed the fleet.
+func capacityLine(entries int) string {
+	switch {
+	case entries >= relay.MaxDirectoryEntries:
+		return fmt.Sprintf("\n          the directory is full (%d of %d): nothing new is distributed, not even a revocation. `flue relay reset` empties it and the fleet republishes",
+			entries, relay.MaxDirectoryEntries)
+	case entries >= relay.DirectoryWarnAt:
+		return fmt.Sprintf("\n          the directory is %d of %d entries full; at %d nothing new is distributed, not even a revocation. `flue relay reset` empties it and the fleet republishes",
+			entries, relay.MaxDirectoryEntries, relay.MaxDirectoryEntries)
+	default:
+		return ""
+	}
+}
+
+// plural is the one-or-many spelling of a count. The status report is prose a
+// person reads, and "1 machines" is the kind of thing that makes a tool look
+// like it is guessing.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, one)
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+// directoryCounts is what one read of the directory found.
+type directoryCounts struct {
+	Entries     int
+	Verified    int
+	Machines    int
+	Devices     int
+	Revocations int
+	// MachineListed is whether one of the verified machine certs names this
+	// machine's id — the difference between "the fleet is fine" and "the fleet
+	// is fine and cannot see me".
+	MachineListed bool
+}
+
+// fetchDirectory reads `GET /directory` and verifies every entry under pub.
+//
+// It presents the daemon secret even though the route is credential-less, for
+// the reason the daemon's own reader does: the Worker meters exactly the
+// callers that present none, and that budget exists for browsers.
+func fetchDirectory(ctx context.Context, rc config.Relay, pub ed25519.PublicKey) (directoryCounts, error) {
+	var out directoryCounts
+	url := directoryURL(rc.URL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return out, err
+	}
+	if rc.Secret != "" {
+		req.Header.Set("Authorization", "Bearer "+rc.Secret)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			// The Worker's own answer for a deploy that predates the directory
+			// binding (relay/src/index.ts). Naming it is worth a sentence: the
+			// fix is `flue relay update`, not anything about this machine.
+			return out, errors.New("this relay has no directory; run `flue relay update` to redeploy it")
+		}
+		return out, fmt.Errorf("the relay answered HTTP %d", resp.StatusCode)
+	}
+	var doc struct {
+		Entries []struct {
+			Blob []byte `json:"blob"`
+		} `json:"entries"`
+	}
+	// The same ceiling the daemon reads under: a status command must not be an
+	// unbounded read from a machine on the internet either.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxDirectoryRead)).Decode(&doc); err != nil {
+		return out, errors.New("the relay answered something that is not a directory")
+	}
+	out.Entries = len(doc.Entries)
+	for _, e := range doc.Entries {
+		cert, err := fleet.Verify(pub, e.Blob)
+		if err != nil {
+			continue
+		}
+		out.Verified++
+		switch c := cert.(type) {
+		case fleet.MachineCert:
+			out.Machines++
+			if c.ID == rc.MachineID {
+				out.MachineListed = true
+			}
+		case fleet.DeviceCert:
+			out.Devices++
+		case fleet.Revocation:
+			out.Revocations++
+		}
+	}
+	return out, nil
+}
+
+// maxDirectoryRead bounds the body this command will parse: the directory's
+// own ceiling (512 entries of 4 KiB) in base64, with room to spare.
+const maxDirectoryRead = 4 << 20
+
+// directoryURL is `/directory` on the host relay.json dials, as HTTP.
+//
+// Derived from the socket URL rather than from Origin, the same way the
+// daemon's own directory leg derives it: the directory to ask about a fleet is
+// the one attached to the relay this machine dials, and a half-edited
+// relay.json should not be able to send the question somewhere else. ws is
+// handled beside wss because a local relay under `pnpm dev` is spelled that
+// way.
+func directoryURL(relayURL string) string {
+	base := strings.TrimRight(relayURL, "/")
+	switch {
+	case strings.HasPrefix(base, "wss://"):
+		base = "https://" + strings.TrimPrefix(base, "wss://")
+	case strings.HasPrefix(base, "ws://"):
+		base = "http://" + strings.TrimPrefix(base, "ws://")
+	}
+	return base + "/directory"
+}
+
+// resetDirectory empties the relay's fleet directory: `DELETE /directory` under
+// the daemon secret, which wipes every blob and the entry count with it and
+// closes the push sockets so each daemon reconnects and re-publishes at once.
+//
+// The secret is the whole credential here, as it is on a PUT. The relay holds
+// no fleet key and can judge no blob, so what it can gate is who may *write*,
+// and emptying the store is the largest write there is.
+func resetDirectory(ctx context.Context, rc config.Relay) (removed int, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, directoryURL(rc.URL), nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+rc.Secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized:
+		return 0, errors.New("the relay refused this machine's credential; the secret in relay.json is not the one this Worker holds")
+	case http.StatusServiceUnavailable:
+		// The Worker's own answer for a deploy that predates the directory
+		// binding (relay/src/index.ts), and the same sentence fetchDirectory
+		// gives it: there is nothing to reset because there is nothing there.
+		return 0, errors.New("this relay has no directory; run `flue relay update` to redeploy it")
+	default:
+		return 0, fmt.Errorf("the relay answered HTTP %d", resp.StatusCode)
+	}
+	var doc struct {
+		Reset   bool `json:"reset"`
+		Removed int  `json:"removed"`
+	}
+	// A small, fixed-shape answer, read under a bound for the reason every
+	// other read of this relay is: the far end is a machine on the internet and
+	// this process is not obliged to trust its brevity.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<10)).Decode(&doc); err != nil || !doc.Reset {
+		return 0, errors.New("the relay answered something that is not a directory reset")
+	}
+	return doc.Removed, nil
+}
+
+const relayResetUsage = "usage: flue relay reset [--yes]"
+
+// relayResetWarning is what the command says before it asks. Both halves are
+// load-bearing: the first is why an operator would ever run this, the second is
+// the one thing a wipe can cost that re-publishing does not put back.
+const relayResetWarning = `this empties the relay's fleet directory: every machine certificate
+and every revocation the relay is holding.
+
+every machine re-publishes everything it holds when it reconnects, so a
+fleet that is switched on refills the directory within seconds. what does
+not come back is a blob whose only remaining holder never reconnects —
+in practice a revocation published by a machine that is now gone. every
+machine that already heard that revocation still holds it and re-publishes
+it; if you are unsure, revoke the device again from any machine afterwards.
+
+`
+
+// relayResetDone is the note after the wipe: what happens next, without the
+// user having to know that publishAll runs on every connect.
+const relayResetDone = `
+the directory is empty. every connected machine was disconnected from it and
+re-publishes what it holds on reconnect, so it refills on its own; a machine
+that is switched off refills its share when it next starts.
+`
+
+// runRelayReset empties the relay's fleet directory — the escape hatch for a
+// full one, and the only one there is.
+//
+// It exists because the directory refuses a 513th entry rather than evicting
+// (relay/src/directory.ts, full), nothing there ever deletes a single entry,
+// and Durable Object storage outlives every redeploy: neither `flue relay
+// update` nor a fresh `flue relay setup` against a new script name reaches it.
+// A directory that has filled up therefore stays full forever, and a full
+// directory is a fleet whose *revocations* stop crossing machines — the one
+// failure mode in this design that costs more than visibility. So there has to
+// be a way to empty it, and this is it.
+//
+// It is a wipe rather than a prune, and that is not laziness — nor is it a
+// judgement that a prune would be unsafe. There is next to nothing to prune:
+// a revocation is never superseded, a device certificate is not in the store
+// at all, and what is left is a machine certificate a machine re-minted, which
+// is single digits out of 512 over a fleet's whole life (spec/fleet-trust.md
+// works the count). Removing any *named* entry would mean the relay reading
+// the blobs, or checking a signature over the digests, and both give this leg
+// an opinion about what it holds. Deleting all of them needs no opinion about
+// any of them.
+//
+// The confirmation is a typed "yes" rather than a flag alone, because the one
+// unrecoverable case — a revocation whose last holder never reconnects — is not
+// something a person should meet by autocompleting a command. --yes is there
+// for the scripted path.
+//
+// **Why `flue relay setup` does not do this too, having been asked.** It has a
+// claim to: a re-setup mints a fresh fleet key, which turns every blob already
+// in the directory into a signature no machine in the new fleet can verify —
+// dead weight against a 512-entry cap that nothing else ever frees. But setup
+// would have to send this request in the seconds after it enabled the
+// workers.dev subdomain and bound a *new* secret, and neither of those is live
+// at the edge the moment the API accepts it: the reset would be racing two
+// propagations at once, so it would fail often, on the one command a user runs
+// before they have any idea what a fleet directory is, and it would fail
+// loudest on a first deploy where there was nothing to clear. A step that
+// unreliable is worse than a separate command that always works. So this is the
+// separate command, `flue relay status` says when it is needed, and
+// docs/RELAY.md names it as the way out.
+func runRelayReset(w io.Writer, r io.Reader, args []string) error {
+	fs := flag.NewFlagSet("relay reset", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	yes := fs.Bool("yes", false, "do not ask for confirmation")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w; %s", err, relayResetUsage)
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q; %s", fs.Arg(0), relayResetUsage)
+	}
+
+	cfg, ok, err := config.LoadRelay()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("no relay is configured on this machine; `flue relay setup` deploys one first")
+	}
+	if cfg.Secret == "" {
+		// The daemon secret is the whole credential on this route. Said here
+		// rather than met as a 401 from a relay that is not at fault.
+		return errors.New("relay.json carries no daemon secret; re-run the join line printed by `flue relay setup`")
+	}
+
+	if !*yes {
+		fmt.Fprint(w, relayResetWarning)
+		fmt.Fprint(w, "type yes to continue: ")
+		line, readErr := bufio.NewReader(r).ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("read the confirmation: %w", readErr)
+		}
+		if strings.TrimSpace(line) != "yes" {
+			fmt.Fprintln(w, "  nothing was reset")
+			return nil
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), relayStepTimeout)
+	defer cancel()
+	removed, err := resetDirectory(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("reset the fleet directory: %w", err)
+	}
+	fmt.Fprintf(w, "  ✓ fleet directory reset (%s cleared)\n", plural(removed, "entry", "entries"))
+	fmt.Fprint(w, relayResetDone)
 	return nil
 }
 
@@ -597,6 +1034,12 @@ func runRelayUpdate(w io.Writer, r io.Reader, api *cloudflare.Client, args []str
 		Assets:       assets,
 		AssetHeaders: relayAssetHeaders,
 		Version:      deployStamp(),
+		// OnStep is deliberately unset — this command prints its own ✓ lines
+		// in its own words — but a note must not go with it: this is the
+		// command that meets a relay deployed by a newer flue, and the whole
+		// point of the note is that the 10061 which follows says nothing about
+		// why.
+		OnNote: func(line string) { fmt.Fprintf(w, "  %s\n", line) },
 	}); err != nil {
 		return err
 	}

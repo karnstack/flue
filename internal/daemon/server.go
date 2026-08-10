@@ -153,6 +153,19 @@ type Server struct {
 	relayUIMu sync.Mutex
 	relayUI   RelayUI
 
+	// fleetPub is where a freshly minted certificate or revocation goes to be
+	// published to the fleet directory, injected by whoever starts the relay
+	// transport (SetFleetPublisher). Nil on a daemon with no relay, and on
+	// every daemon a test constructs, which is why every caller checks: this
+	// daemon pairs and revokes identically without one, and the local
+	// registry is the record either way.
+	fleetPubMu sync.Mutex
+	fleetPub   FleetPublisher
+	// directoryCounts reads what the directory leg last saw, for the Remote
+	// screen's status. Under the same lock as the publisher because it is the
+	// same object installed at the same moment.
+	directoryCounts func() DirectoryCounts
+
 	// release is the update checker behind ReleasePath, injected the same way
 	// and nil by default. See release.go.
 	release releaseState
@@ -210,6 +223,10 @@ type Server struct {
 	// the status callbacks do not carry it.
 	relayMachineID   string
 	relayMachineName string
+	// relayConfigured is the origin relay.json names, whether or not the
+	// transport has reached it. It exists for the Content-Security-Policy and
+	// nothing else — see LocalCSPFor.
+	relayConfigured string
 
 	primaryMu sync.Mutex
 	primary   map[string]*conn // session ID -> primary connection
@@ -399,7 +416,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/", s.withAuth(http.NotFoundHandler()))
 	mux.Handle("/", s.withAuth(s.ui))
 
-	return securityHeaders(methodPolicy(mux))
+	return s.securityHeaders(methodPolicy(mux))
 }
 
 // methodPolicy rejects everything but GET and HEAD, plus POST to the named
@@ -470,7 +487,9 @@ const (
 	// is not same-origin under CSP's rules because the scheme differs.
 	cspLoopbackSockets = " ws://127.0.0.1:* ws://localhost:*"
 
-	// LocalCSP is what this daemon serves its own UI under.
+	// LocalCSP is what this daemon serves its own UI under when it has no relay
+	// configured. A daemon that has one serves LocalCSPFor(origin) instead —
+	// see there for why the relay origin has to be in `connect-src`.
 	LocalCSP = cspHead + cspLoopbackSockets + cspTail
 
 	// RelayCSP is what a relay origin serves the same bundle under. It is
@@ -480,10 +499,116 @@ const (
 	RelayCSP = cspHead + cspTail
 )
 
-func securityHeaders(next http.Handler) http.Handler {
+// LocalCSPFor is what this daemon serves its own UI under when relay.json
+// names a relay: LocalCSP, plus that one origin in `connect-src`.
+//
+// It is not a convenience. A page the daemon served on loopback reaches its own
+// daemon over `ws://127.0.0.1:7717`, and everything *else* it reaches is on the
+// relay: `wss://<relay>/client/<id>` for every other machine in the fleet, and
+// now `https://<relay>/directory` to find out which machines those are. Neither
+// is covered by `'self'` — a different origin is a different origin, whatever
+// this daemon's relationship with it — so under the policy without this clause
+// the browser blocks both. The socket failure looks like a machine that will
+// not connect; the fetch failure looks like nothing at all, because
+// `readDirectory` answers "no machines" for every fault by design. A loopback
+// tab would quietly show a fleet of one.
+//
+// One exact origin, and only the two schemes the page uses on it. That is a far
+// narrower grant than the loopback clause beside it — which carries wildcard
+// ports and is the standing item in docs/FOLLOW-UPS.md §6 — and it is the
+// origin this daemon is configured to dial anyway. It comes from relay.json
+// rather than from the live transport because a policy is fixed when the
+// document is served: a tab loaded while the relay was still dialling would
+// otherwise carry a policy that forbids the connection the page makes a second
+// later, and nothing would correct it short of a reload.
+//
+// The relay-served copy of the same bundle keeps RelayCSP, which grants nothing
+// beyond 'self': there the relay *is* the origin.
+func LocalCSPFor(relayOrigin string) string {
+	if relayOrigin == "" {
+		return LocalCSP
+	}
+	// The socket is the https origin with the scheme swapped, which is exactly
+	// how web/src/relay/socket.ts builds it.
+	ws := "wss://" + strings.TrimPrefix(strings.TrimPrefix(relayOrigin, "https://"), "http://")
+	if strings.HasPrefix(relayOrigin, "http://") {
+		ws = "ws://" + strings.TrimPrefix(relayOrigin, "http://")
+	}
+	return cspHead + cspLoopbackSockets + " " + relayOrigin + " " + ws + cspTail
+}
+
+// fleetCertFor is the fleet device certificate belonging to the device this
+// connection authenticated as, for the welcome to carry.
+//
+// Resolved by the key bytes and not by the id, which is the same discipline
+// crypto.FindByKey keeps and for the same reason: an id is hex(sha256(key))
+// truncated to 48 bits, and Add deliberately permits two devices to hold
+// colliding ids, so a lookup by id alone can name a device that is not this
+// one. The consequence here would be handing a browser somebody else's
+// certificate — recoverable, because the browser checks the subject against
+// its own key before storing it and every machine checks it again at the
+// handshake, but "the other end will notice" is not a reason for this end to
+// answer the wrong question. FindByKey also refuses a revoked key inside the
+// same critical section as the read, so a revocation that landed since the
+// handshake costs this welcome its certificate, which is the right answer.
+//
+// Empty for every connection with no device identity, which is every loopback
+// one: a certificate is a statement about a device key, and a session-token
+// connection has not named one. Empty too when the registry cannot be read, or
+// when the device was paired before this machine held a fleet key — there is no
+// certificate to hand over, and inventing one here would mean minting under the
+// fleet key for a device whose ceremony never earned it.
+//
+// It re-mints nothing. The blob is the one this machine's ceremony signed and
+// devices.json has held ever since, or the one the device itself presented in
+// its handshake after pairing elsewhere (AddFromFleetCert). Handing back the
+// same bytes keeps a certificate one artifact for the life of a pairing, which
+// is what lets a browser compare what it holds against what it is offered.
+func (s *Server) fleetCertFor(deviceKey []byte) []byte {
+	if len(deviceKey) == 0 || s.identity.Devices == nil {
+		return nil
+	}
+	dev, ok, err := s.identity.Devices.FindByKey(deviceKey)
+	if err != nil {
+		// The socket is up and the device is admitted; a registry that cannot
+		// be read right now costs this device its certificate on this
+		// connection and nothing else. The next one carries it. Logged by id,
+		// because that is the identity every other line about this device —
+		// and the Devices screen — speaks in.
+		s.logger().Warn("could not read a device's fleet certificate for the welcome",
+			"device", crypto.DeviceID(deviceKey), "err", err)
+		return nil
+	}
+	if !ok || len(dev.Cert) == 0 {
+		return nil
+	}
+	return dev.Cert
+}
+
+// SetRelayOrigin records the origin relay.json names, for the Content-Security-
+// Policy alone.
+//
+// Deliberately not the same field as the transport's `relayOrigin`, which is
+// socket state and is empty until a dial succeeds. This is configuration: it is
+// true from the moment relay.json is read, and the CSP on a document has to
+// permit the connections that document will make later, including the ones it
+// makes while the relay is still coming up.
+func (s *Server) SetRelayOrigin(origin string) {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	s.relayConfigured = origin
+}
+
+func (s *Server) configuredRelayOrigin() string {
+	s.relayMu.RLock()
+	defer s.relayMu.RUnlock()
+	return s.relayConfigured
+}
+
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", LocalCSP)
+		w.Header().Set("Content-Security-Policy", LocalCSPFor(s.configuredRelayOrigin()))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1181,10 +1306,12 @@ func validDeviceID(id string) bool {
 // acceptance rule while the entry still shows on the Devices screen, and the
 // retry completes it.
 //
-// The signed blob is kept by the store (crypto.StoredRevocation) because it
-// is the same artifact the fleet directory will publish so every other
-// machine drops the key too; until that stage lands, the record is local
-// and this machine is the only one it binds.
+// The signed blob is kept by the store (crypto.StoredRevocation) and handed
+// to the fleet directory, because it is the same artifact every other machine
+// drops the key on — one revoke on any Devices screen, and the key is dead
+// fleet-wide. A daemon with no directory publisher keeps it locally and binds
+// only itself, which is the whole difference between a machine on a relay and
+// one that is not.
 func (s *Server) removeDevice(id string) (crypto.Device, bool, error) {
 	if s.identity.Devices == nil {
 		return crypto.Device{}, false, errNoDeviceRegistry
@@ -1201,8 +1328,120 @@ func (s *Server) removeDevice(id string) (crypto.Device, bool, error) {
 		if err != nil {
 			return crypto.Device{}, false, fmt.Errorf("daemon: recording the revocation: %w", err)
 		}
+		// On file locally, so now to the rest of the fleet: this is the blob
+		// every other machine drops the key on (ApplyFleetRevocation, at the
+		// far end of the directory). Published before the registry write
+		// rather than after, because the revocation is the part that must
+		// travel and the removal below can fail — a revoke that got half way
+		// should have got the *outward* half.
+		s.publishFleetBlob(blob)
 	}
 	return s.identity.Devices.Remove(id)
+}
+
+// --- the fleet directory ---
+
+// FleetPublisher publishes one signed fleet artifact — a device certificate or
+// a revocation this daemon has just minted — to the relay's fleet directory,
+// so the other machines in the fleet learn of it without being asked
+// (spec/fleet-trust.md, "The fleet directory").
+//
+// Publish must not block: its callers are the pairing ceremony and the revoke
+// op, both of which are answering a client that is waiting, and neither has
+// anywhere to put a network failure. Losing a publish is survivable by
+// construction — everything publishable is also written to disk, and the
+// implementation re-publishes what this machine holds on every reconnect — so
+// the contract is "take this and go away", not "deliver this".
+type FleetPublisher interface {
+	PublishFleetBlob(blob []byte)
+}
+
+// SetFleetPublisher installs the directory client. Nil — a daemon with no
+// relay, or any test's — means minted artifacts stay on this machine, which is
+// exactly what a machine that is not on a relay should do with them.
+func (s *Server) SetFleetPublisher(p FleetPublisher) {
+	s.fleetPubMu.Lock()
+	defer s.fleetPubMu.Unlock()
+	s.fleetPub = p
+}
+
+// publishFleetBlob hands one signed artifact to the directory, if there is one
+// to hand it to. Empty blobs are dropped here rather than at each call site: a
+// daemon with no fleet key mints nothing, and its callers should not each have
+// to remember that.
+func (s *Server) publishFleetBlob(blob []byte) {
+	if len(blob) == 0 {
+		return
+	}
+	s.fleetPubMu.Lock()
+	p := s.fleetPub
+	s.fleetPubMu.Unlock()
+	if p == nil {
+		return
+	}
+	p.PublishFleetBlob(blob)
+}
+
+// ApplyFleetRevocation is the receiving half of the fleet-wide kill switch: a
+// revocation minted on some other machine, verified under the fleet public key
+// by the transport that read it out of the directory, and now applied here.
+//
+// Three things, in this order, and the order is the same one revokeDevice
+// keeps for a locally-minted revocation:
+//
+//  1. Record the revocation. This is what makes the key dead to both
+//     acceptance paths — crypto.FindByKey for rule 1, AddFromFleetCert for
+//     rule 2 — and it is first because it is the half that must not be
+//     skipped: an entry removed without its revocation on file is not revoked
+//     at all, since the device's own fleet cert would walk it straight back in
+//     on the next handshake.
+//  2. Drop the local registry row, if this machine had one. By key rather
+//     than by id: the caller holds 32 bytes and the id is a 48-bit digest of
+//     them (crypto.RemoveByKey says what that difference is worth).
+//  3. Close the device's live channels with the reason every revoked device
+//     gets. This is the part that makes it a kill switch rather than a
+//     bookkeeping change — a socket already established is the access, and a
+//     registry nothing re-reads would not take it away.
+//
+// It is idempotent, which the push socket and the reconnect GET both require:
+// hearing the same revocation twice records nothing new, removes nothing
+// twice, and closes an empty set of connections.
+//
+// Verification is deliberately not repeated here. It belongs to the reader
+// that owns the fleet public key, and this method's contract is that it has
+// already happened — which is why the parameters are the parsed key and the
+// blob rather than a blob to be trusted.
+func (s *Server) ApplyFleetRevocation(deviceKey, blob []byte) error {
+	if s.identity.Devices == nil {
+		return errNoDeviceRegistry
+	}
+	if err := s.identity.Devices.AddRevocation(deviceKey, blob); err != nil {
+		return fmt.Errorf("daemon: recording a fleet revocation: %w", err)
+	}
+	dev, removed, err := s.identity.Devices.RemoveByKey(deviceKey)
+	if err != nil {
+		// The revocation is on file, so the key is already refused everywhere
+		// it matters; what failed is the Devices screen catching up. Reported
+		// so the caller logs it, and the next delivery of this revocation —
+		// the reconnect GET, if nothing else — completes it.
+		return fmt.Errorf("daemon: dropping a revoked device from the registry: %w", err)
+	}
+	// Keyed by the id the connection registry is keyed by, which is the digest
+	// of the same key the handshake proved (channel.go).
+	id := crypto.DeviceID(deviceKey)
+	closed := s.disconnectDevice(id, "revoked")
+	if !removed && closed == 0 {
+		// A revocation for a device this machine never paired and is not
+		// carrying. Recorded and nothing else — which is the common case in a
+		// fleet, and must stay silent enough not to drown the log on the
+		// reconnect that re-reads the whole directory.
+		return nil
+	}
+	s.logger().Info("device revoked by the fleet",
+		"device", id, "label", dev.Label, "unpaired", removed, "connections", closed)
+	// The Devices screen is showing a row that no longer exists.
+	s.broadcastDeviceList()
+	return nil
 }
 
 // disconnectDevice tells every connection belonging to deviceID why it is

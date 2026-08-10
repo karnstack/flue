@@ -4,6 +4,11 @@
   "bindings": [
     {
       "type": "durable_object_namespace",
+      "name": "DIRECTORY",
+      "class_name": "FleetDirectory"
+    },
+    {
+      "type": "durable_object_namespace",
       "name": "HUB",
       "class_name": "DaemonHub"
     },
@@ -23,10 +28,13 @@
   ],
   "keep_bindings": ["secret_text"],
   "migrations": {
-    "new_tag": "v1",
+    "new_tag": "v2",
     "steps": [
       {
         "new_sqlite_classes": ["DaemonHub"]
+      },
+      {
+        "new_sqlite_classes": ["FleetDirectory"]
       }
     ]
   },
@@ -35,7 +43,7 @@
     "config": {
       "html_handling": "auto-trailing-slash",
       "not_found_handling": "single-page-application",
-      "run_worker_first": ["/daemon", "/client", "/api/*"],
+      "run_worker_first": ["/daemon", "/client", "/api/*", "/directory", "/directory/*"],
       "_headers": "/*\n  X-Fixture: yes\n"
     }
   },

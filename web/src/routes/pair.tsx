@@ -3,10 +3,13 @@ import { useSearch } from '@tanstack/react-router'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { sameKey as sameCertKey, verifyCert } from '@/crypto/cert'
 import {
   loadOrCreateDeviceKey,
   savePinnedDaemonKey,
   savePinnedDaemonKeyFor,
+  savePinnedDeviceCert,
+  savePinnedFleetKey,
   type DeviceKey,
 } from '@/crypto/keys'
 import { scrubPairingParams } from '@/lib/url'
@@ -125,6 +128,9 @@ const FIELD_LABEL = 'text-base/6 font-medium text-zinc-950 sm:text-sm/6 dark:tex
 interface PairAnswer {
   deviceId?: unknown
   daemonPub?: unknown
+  /** This device's fleet certificate, base64, when the ceremony minted one.
+   *  Absent from a daemon with no fleet key or no place on a relay. */
+  deviceCert?: unknown
 }
 
 /**
@@ -165,19 +171,72 @@ function fromBase64(text: string): Uint8Array | null {
 }
 
 /**
- * The daemon's static key as the QR carries it: unpadded URL-safe base64.
+ * A key as the QR carries it: 32 bytes in unpadded URL-safe base64.
  *
- * `?k=` is spliced into the pairing URL raw by the daemon — see conn.go, which
- * does the same with the token — so the alphabet is RFC 4648 §5 and there is no
- * padding to strip. Anything that is not exactly 32 bytes of that is not a
- * Noise static key and is refused as one, rather than being rounded off into a
- * shorter string that happens to decode.
+ * `?k=` and `?f=` are spliced into the pairing URL raw by the daemon — see
+ * conn.go, which does the same with the token — so the alphabet is RFC 4648 §5
+ * and there is no padding to strip. Anything that is not exactly 32 bytes of
+ * that is not a key of either kind and is refused as one, rather than being
+ * rounded off into a shorter string that happens to decode.
  */
 function keyFromLink(text: string): Uint8Array | null {
   if (text === '' || /[^A-Za-z0-9_-]/.test(text)) return null
   const std = text.replace(/-/g, '+').replace(/_/g, '/')
   const key = fromBase64(std.padEnd(Math.ceil(std.length / 4) * 4, '='))
   return key !== null && key.length === KEY_BYTES ? key : null
+}
+
+/**
+ * Keep the fleet certificate the ceremony handed over, if it is this device's.
+ *
+ * Three checks and no arguing with the result. It has to decode; it has to
+ * verify under the fleet key **from the link**, which is the one thing on this
+ * page no intermediary could have chosen; and it has to be a device
+ * certificate naming *this* browser's key. Anything else is dropped in silence.
+ *
+ * Silence is right because a missing certificate is not a broken pairing. The
+ * device is registered on the machine it just paired with and reaches it by
+ * key alone; what a certificate adds is the machines it has *not* paired with,
+ * and a daemon with no fleet key or no place on a relay legitimately mints
+ * none.
+ *
+ * **How much of a second chance there is depends on which page this is.** A
+ * tab paired *through the relay* has one: every welcome carries the same blob
+ * again (internal/daemon/conn.go, fleetCertFor), so any machine it can still
+ * reach re-supplies it. A tab paired over **loopback** has none — the daemon
+ * cannot know which device a cookie-authenticated tab is, so it sends no
+ * certificate in that welcome, and a loopback ceremony pins the daemon key
+ * without a machine id (`savePinnedDaemonKey` below), so such a tab holds no
+ * per-machine pin to reach a sibling with and has nobody else to ask. For that
+ * tab this answer is the only delivery there is; losing what it wrote means
+ * pairing again.
+ *
+ * The store failure is swallowed for the same reason and not the same shape as
+ * the daemon key's, which fails the ceremony: without the daemon's key this
+ * device can reach nothing, and without this it reaches everything it paired
+ * with.
+ */
+async function keepDeviceCert(
+  value: unknown,
+  fleetPub: Uint8Array,
+  devicePub: Uint8Array,
+): Promise<void> {
+  if (typeof value !== 'string' || value === '') return
+  const blob = fromBase64(value)
+  if (blob === null) return
+  const cert = verifyCert(fleetPub, blob)
+  // Not merely "it verified": a machine certificate, or a certificate for
+  // somebody else's device, verifies perfectly well and is not this browser's
+  // to hold or to present.
+  if (cert === null || cert.kind !== 'device' || !sameCertKey(cert.device, devicePub)) return
+  try {
+    await savePinnedDeviceCert(blob)
+  } catch {
+    // A store that would not keep it costs the fleet, not the pairing: this
+    // device still reaches the machine it just paired with. A relay tab is
+    // offered it again on its next welcome; a loopback one is not, and pairs
+    // again. See the note above.
+  }
 }
 
 /** Longer than any refusal written for a person; the daemon's own is two
@@ -315,7 +374,7 @@ export function PairRoute() {
    * landing on the no-token explanation is the ceremony over, not broken.
    */
   const link = useRef(search)
-  const { t, k, d, n } = link.current
+  const { t, k, f, d, n } = link.current
 
   /*
    * The one look the address bar gets. The moment the render above has the
@@ -341,6 +400,7 @@ export function PairRoute() {
    */
   const token = typeof t === 'string' ? t : ''
   const carried = typeof k === 'string' ? k : ''
+  const carriedFleet = typeof f === 'string' ? f : ''
 
   /**
    * Whether this page was served by a relay, which is the fork in the whole
@@ -376,6 +436,23 @@ export function PairRoute() {
    * Uint8Array every render is a fresh effect dependency every render.
    */
   const pinned = useMemo(() => keyFromLink(carried), [carried])
+
+  /**
+   * The fleet public key, from the same QR and by the same argument one level
+   * up: `pinned` is which machine this device may talk to, and this is which
+   * *fleet* — every machine whose certificate verifies under it, including
+   * ones that join months from now (spec/fleet-trust.md). A device that
+   * learned it from the answer to its own POST, or from the directory it is
+   * about to read, would be trusting whoever sat in the middle to name the
+   * fleet.
+   *
+   * Absent is an ordinary link, not a broken one: a daemon with no fleet key
+   * omits the parameter, and pairing then means this machine alone. Present
+   * but not 32 bytes is neither — nothing writes that but something that
+   * rewrote the link — so it is refused as no fleet key rather than rounded
+   * off into one, and the ceremony carries on for this machine.
+   */
+  const pinnedFleet = useMemo(() => keyFromLink(carriedFleet), [carriedFleet])
 
   const [key, setKey] = useState<DeviceKey | null>(null)
   const [label, setLabel] = useState(defaultLabel)
@@ -430,10 +507,15 @@ export function PairRoute() {
    * no better account of why than it does, and a paraphrase would be this page
    * inventing a reason.
    *
-   * `expected` is the key from the QR, taken as an argument rather than read
-   * from the closure so that this function cannot be reached without one.
+   * `expected` is the daemon key from the QR and `fleet` the fleet key beside
+   * it, both taken as arguments rather than read from the closure so that this
+   * function cannot be reached without the first.
    */
-  async function attempt(device: DeviceKey, expected: Uint8Array): Promise<Failure | null> {
+  async function attempt(
+    device: DeviceKey,
+    expected: Uint8Array,
+    fleet: Uint8Array | null,
+  ): Promise<Failure | null> {
     // On a relay the machine id picks the hub; submit() cannot run without one
     // there, so the bare endpoint is always the loopback daemon's own.
     const endpoint =
@@ -514,6 +596,26 @@ export function PairRoute() {
       } else {
         await savePinnedDaemonKey(expected)
       }
+      // Last, and from the link rather than from anything the daemon said.
+      // The pins above are this machine; this one is the fleet — with it the
+      // browser accepts any machine whose certificate verifies under it, so
+      // it is written only after the ceremony this device physically
+      // performed has otherwise succeeded. A link with no `f` writes nothing
+      // and pairs this machine alone, which is what a relay from before the
+      // fleet key gives.
+      if (fleet !== null) await savePinnedFleetKey(fleet)
+      // And this device's own certificate, if the ceremony minted one: the
+      // blob it will present to every machine it has *not* paired with.
+      //
+      // Checked here rather than taken on trust, under the fleet key from the
+      // link and against this browser's own device key. The certificate came
+      // down the same channel the answer did, so the daemon could be anything
+      // until the QR's key says otherwise — and a certificate naming somebody
+      // else's device key is not this browser's to keep or to present. A
+      // failed check writes nothing and costs nothing: the pairing stands and
+      // this device reaches the machine it just paired with, which is what a
+      // ceremony against a daemon holding no fleet key gives anyway.
+      if (fleet !== null) await keepDeviceCert(answer?.deviceCert, fleet, device.publicKey)
     } catch {
       return {
         text: `This browser would not keep the daemon’s key, so this device cannot reach it. ${ORPHAN_NOTE}`,
@@ -529,7 +631,7 @@ export function PairRoute() {
     const named = label.trim() || FALLBACK_LABEL
     setFailure(null)
     setSending(true)
-    void attempt(key, pinned).then((outcome) => {
+    void attempt(key, pinned, pinnedFleet).then((outcome) => {
       setSending(false)
       if (outcome === null) setPaired(named)
       else setFailure(outcome)

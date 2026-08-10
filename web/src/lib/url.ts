@@ -28,40 +28,54 @@ export function stripHandoff(url: string): string {
   return `${u.origin}${u.pathname}${query ? `?${query}` : ''}${u.hash}`
 }
 
-/** The query parameters a pairing link carries its secrets in: the single-use
- *  token and the daemon's static public key. `internal/daemon/conn.go` writes
- *  both, and routes/pair.tsx is the one reader. */
+/** The query parameters a pairing link carries its credentials in: the
+ *  single-use token, the daemon's static public key, and the fleet public key.
+ *  `internal/daemon/conn.go` writes all three, and routes/pair.tsx is the one
+ *  reader. */
 export const PAIRING_TOKEN_PARAM = 't'
 export const PAIRING_KEY_PARAM = 'k'
+export const PAIRING_FLEET_PARAM = 'f'
+
+/** The three the scrub takes, in one place so a fourth cannot be added to the
+ *  link and forgotten here. */
+const PAIRING_PARAMS = [PAIRING_TOKEN_PARAM, PAIRING_KEY_PARAM, PAIRING_FLEET_PARAM]
 
 /**
- * Remove the pairing secrets from the address bar.
+ * Remove the pairing credentials from the address bar.
  *
- * The pairing link carries `?t=<single-use token>&k=<daemon static key>`, and
- * unlike `h` they cannot be stripped at the entry point: main.tsx runs before
- * the router reads the location, so a scrub there would be a ceremony that
- * never starts. The pairing page calls this instead, after it has captured
- * both into memory — the token is a live bearer credential until the daemon's
- * two-minute window closes, and the address bar is where it would otherwise
- * outlive the ceremony: in the history entry, in anything that syncs history,
- * and in whatever the user copies out of it.
+ * The pairing link carries `?t=<single-use token>&k=<daemon static key>` and,
+ * from a daemon that holds a fleet key, `&f=<fleet public key>`. Unlike `h`
+ * they cannot be stripped at the entry point: main.tsx runs before the router
+ * reads the location, so a scrub there would be a ceremony that never starts.
+ * The pairing page calls this instead, after it has captured all three into
+ * memory — the token is a live bearer credential until the daemon's two-minute
+ * window closes, and the address bar is where it would otherwise outlive the
+ * ceremony: in the history entry, in anything that syncs history, and in
+ * whatever the user copies out of it.
+ *
+ * The two keys are public, and they go with the token anyway. They are read
+ * once, on the first render, and never from the address bar again — so what a
+ * link still carrying them is, after that, is a live-looking pairing link with
+ * a spent token in it, sitting in a history entry to be reopened or forwarded.
+ * The keys are also the whole of what the ceremony pins, and `f` is the pin
+ * for every machine this browser will ever dial; the fewer places it can be
+ * copied out of and pasted into a link somebody else opens, the better.
  *
  * `d` and `n` are left where they are. A machine id and its display name are
- * not secrets, and stripping them would be a second job hiding inside a
- * function named for one.
+ * not credentials of any kind, and stripping them would be a second job hiding
+ * inside a function named for one.
  *
- * replaceState rather than pushState, because the entry holding the secrets
- * is the thing being rewritten, not something to keep behind the back button.
+ * replaceState rather than pushState, because the entry holding the token is
+ * the thing being rewritten, not something to keep behind the back button.
  * The href handed to it is relative: a same-document rewrite needs no origin,
  * and not restating one is one fewer thing to have wrong.
  */
 export function scrubPairingParams(): void {
   const u = new URL(location.href)
-  if (!u.searchParams.has(PAIRING_TOKEN_PARAM) && !u.searchParams.has(PAIRING_KEY_PARAM)) return
+  if (!PAIRING_PARAMS.some((p) => u.searchParams.has(p))) return
   // delete() removes every entry with the name; get()/set() would leave a
   // second copy of a repeated parameter behind.
-  u.searchParams.delete(PAIRING_TOKEN_PARAM)
-  u.searchParams.delete(PAIRING_KEY_PARAM)
+  for (const p of PAIRING_PARAMS) u.searchParams.delete(p)
   const query = u.searchParams.toString()
   history.replaceState(null, '', `${u.pathname}${query ? `?${query}` : ''}${u.hash}`)
 }

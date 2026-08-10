@@ -9,6 +9,7 @@ import {
   CloudflareConfiguredCard,
   CloudflareConnectCard,
   useRelayUIInfo,
+  type DirectoryCounts,
   type RelayUIInfo,
 } from '@/components/cloudflare-connect'
 import { Command, Copyable } from '@/components/copyable'
@@ -18,6 +19,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useRelayTransport } from '@/hooks/use-relay-transport'
 import { cn } from '@/lib/utils'
+import { DIRECTORY_WARN_AT, MAX_ENTRIES } from '@/relay/directory'
 
 /**
  * The commands this screen hands over, spelled exactly as the CLI spells them
@@ -38,6 +40,10 @@ const STATUS_COMMAND = 'flue relay status'
  * a single-word name pasted together in a constant is beyond its reach.
  */
 const PROSE = 'text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400'
+
+/** The quieter voice, for a fact under a paragraph rather than a paragraph of
+ *  its own — the same size the Cloudflare card's own notes are set in. */
+const NOTE = 'text-sm/6 text-pretty text-zinc-600 sm:text-xs/5 dark:text-zinc-400'
 
 /**
  * What to say about a connection that is not currently carrying anything.
@@ -283,13 +289,14 @@ function Dialling() {
  * `reachable` in routes/devices.tsx — so this is where the reader is told the
  * gate has opened, with the way through it beside the sentence.
  */
-function Reachable({ origin }: { origin: string }) {
+function Reachable({ origin, directory }: { origin: string; directory?: DirectoryCounts }) {
   return (
     <StatePanel icon={GlobeAltIcon} title="Reachable from anywhere">
       <p className={cn(PROSE, 'max-w-[65ch]')}>
         The relay carries this machine at the address below, and you can pair a device against this
         address now — the code Devices offers names it rather than 127.0.0.1.
       </p>
+      <FleetLine directory={directory} />
       {/*
         Copyable, and breakable, as the pairing URL on Devices is: this is a
         string somebody may want to send to themselves, and a relay origin on
@@ -323,6 +330,99 @@ function Reachable({ origin }: { origin: string }) {
       </div>
     </StatePanel>
   )
+}
+
+/**
+ * What this machine can hear of its fleet, under the address it answers on.
+ *
+ * Two legs go to one relay and they fail apart: the hub leg above is whether
+ * this machine can be *reached*, and this is whether it hears what the other
+ * machines have signed — which is what a device certificate and, far more
+ * urgently, a revocation travel on. A machine reachable but deaf still serves
+ * every device paired to it and will not learn that one of them was cut off
+ * elsewhere, and nothing on this screen said so before.
+ *
+ * Nothing is rendered when the daemon is not reading a directory at all: the
+ * counts would be a claim about a leg that does not exist. `flue relay status`
+ * is named rather than paraphrased for the "why" — it asks the relay itself,
+ * from a terminal, and its answer is longer than a line of this panel.
+ */
+function FleetLine({ directory }: { directory?: DirectoryCounts }) {
+  if (directory === undefined) return null
+  if (!directory.connected) {
+    return (
+      <p className={cn(NOTE, 'max-w-[65ch]')}>
+        This machine is not reading the fleet directory, so a device paired on another machine will
+        not reach it, and a device revoked on another machine may still be admitted here. A relay
+        deployed before the directory existed answers nothing on it until{' '}
+        <code className="font-mono">flue relay update</code> is run once.
+      </p>
+    )
+  }
+  const unsigned = directory.entries - directory.verified
+  return (
+    <>
+      {/*
+        Machines and revocations, which is what the directory carries. Device
+        certificates go to the device that owns them and are not published
+        here, so a count of them would read as "this fleet has no devices"
+        when it means "the directory does not list them" — two different
+        claims, and only the second is true.
+
+        A non-zero one is still worth naming, and the wording does not guess
+        at how it got there. No released flue has a fleet directory at all,
+        so "an older flue published it" cannot be the explanation; what is
+        left is a build from between the two, or somebody with the daemon
+        secret and a PUT. Both are worth a second look and neither is worth
+        a diagnosis this screen cannot make.
+      */}
+      <p className={cn(NOTE, 'max-w-[65ch]')}>
+        Fleet: {count(directory.machines, 'machine')},{' '}
+        {count(directory.revocations, 'revocation')} — everything this machine's fleet key could
+        check.
+        {directory.devices > 0 &&
+          ` ${count(directory.devices, 'device certificate')} in the directory: nothing in this fleet should be publishing one.`}
+        {unsigned > 0 &&
+          ` ${count(unsigned, 'entry', 'entries')} in the directory ${
+            unsigned === 1 ? 'was' : 'were'
+          } signed by something else; this relay may belong to another fleet.`}
+      </p>
+      <FleetCapacity entries={directory.entries} />
+    </>
+  )
+}
+
+/**
+ * How close the directory is to the one limit it has no gentle failure for.
+ *
+ * Nothing above 10% of headroom, because a screen that reports health three
+ * ways is one nobody reads. Past that it is worth the room: at the cap the
+ * relay refuses every new blob *before* storing it and therefore before
+ * pushing it, so a device paired after that point reaches only the machine
+ * that paired it, and a revocation made after it reaches nobody at all. No
+ * deploy or update frees an entry — `flue relay reset` is the only thing that
+ * does, and the fleet republishes into the empty directory by itself.
+ */
+function FleetCapacity({ entries }: { entries: number }) {
+  if (entries < DIRECTORY_WARN_AT) return null
+  const full = entries >= MAX_ENTRIES
+  return (
+    <p className={cn(NOTE, 'max-w-[65ch]')}>
+      {full
+        ? `The fleet directory is full (${entries} of ${MAX_ENTRIES} entries). `
+        : `The fleet directory is ${entries} of ${MAX_ENTRIES} entries full. `}
+      {full ? 'Nothing new is being distributed' : `At ${MAX_ENTRIES} nothing new is distributed`} —
+      a device paired from here reaches only this machine, and a revoke reaches nobody. Run{' '}
+      <code className="font-mono">flue relay reset</code> to empty it; every machine republishes
+      what it holds.
+    </p>
+  )
+}
+
+/** One or many, spelled out: "1 machines" makes a screen look like it is
+ *  guessing. */
+function count(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`
 }
 
 /**
@@ -461,7 +561,7 @@ export function RemoteRoute() {
       {greeted && status === 'connecting' && <Dialling />}
       {greeted && status === 'connected' && (
         <>
-          <Reachable origin={origin} />
+          <Reachable origin={origin} {...(relayUI?.directory && { directory: relayUI.directory })} />
           {relayUI?.configured && (
             <Integrations>
               <CloudflareConfiguredCard info={relayUI} />
