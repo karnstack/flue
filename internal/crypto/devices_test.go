@@ -385,6 +385,69 @@ func TestDeviceStoreRemove(t *testing.T) {
 // an attack one fleet member can mount on another's registry, and the whole
 // point of the fleet key is that its holders are the operator's own machines
 // rather than the operator's own devices.
+// TestSetCertFillsOnlyAnEmptyCert: the repair for a device paired while its
+// machine had no fleet key, and the three things it must refuse.
+//
+// Filling an empty cert is the whole feature — that entry was otherwise stuck
+// forever, since Add writes the cert once at the ceremony and AddFromFleetCert
+// wants one the device already holds. Everything else here is a refusal:
+// replacing a certificate that exists (the stored blob is one artifact for the
+// life of a pairing), minting for a key nobody paired, and minting for a key
+// the fleet has revoked.
+func TestSetCertFillsOnlyAnEmptyCert(t *testing.T) {
+	dir := t.TempDir()
+	s := NewDeviceStore(dir)
+
+	key := testKey(t)
+	if _, err := s.Add("phone", key, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	wrote, err := s.SetCert(key, []byte("a-signed-blob"))
+	if err != nil || !wrote {
+		t.Fatalf("SetCert on a device with no cert = %v, %v; want it written", wrote, err)
+	}
+	dev, ok, err := s.FindByKey(key)
+	if err != nil || !ok {
+		t.Fatalf("FindByKey = %v, %v", ok, err)
+	}
+	if !bytes.Equal(dev.Cert, []byte("a-signed-blob")) {
+		t.Fatalf("stored cert = %q, want the blob just written", dev.Cert)
+	}
+
+	// A second call changes nothing: a browser compares what it holds against
+	// what it is offered, and a registry that re-minted per connection would
+	// hand it different bytes every time.
+	wrote, err = s.SetCert(key, []byte("a-different-blob"))
+	if err != nil || wrote {
+		t.Fatalf("SetCert over an existing cert = %v, %v; want it refused", wrote, err)
+	}
+	dev, _, _ = s.FindByKey(key)
+	if !bytes.Equal(dev.Cert, []byte("a-signed-blob")) {
+		t.Fatalf("stored cert = %q; an existing certificate was replaced", dev.Cert)
+	}
+
+	// A key nobody paired gets nothing. This mints for this machine's own
+	// pairings; a device that paired elsewhere comes in through
+	// AddFromFleetCert, carrying a certificate of its own.
+	if wrote, err := s.SetCert(testKey(t), []byte("blob")); err != nil || wrote {
+		t.Fatalf("SetCert for an unregistered key = %v, %v; want it refused", wrote, err)
+	}
+
+	// And a revoked key gets nothing, whatever devices.json still says: a
+	// revocation permanently outranks a certificate.
+	dead := testKey(t)
+	if _, err := s.Add("laptop", dead, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.AddRevocation(dead, []byte("rev")); err != nil {
+		t.Fatalf("AddRevocation: %v", err)
+	}
+	if _, err := s.SetCert(dead, []byte("blob")); !errors.Is(err, ErrDeviceRevoked) {
+		t.Fatalf("SetCert for a revoked key = %v, want ErrDeviceRevoked", err)
+	}
+}
+
 func TestRemoveByKeyComparesTheWholeKey(t *testing.T) {
 	dir := t.TempDir()
 	s := NewDeviceStore(dir)

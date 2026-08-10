@@ -617,16 +617,16 @@ func LocalCSPFor(relayOrigin string) string {
 //
 // Empty for every connection with no device identity, which is every loopback
 // one: a certificate is a statement about a device key, and a session-token
-// connection has not named one. Empty too when the registry cannot be read, or
-// when the device was paired before this machine held a fleet key — there is no
-// certificate to hand over, and inventing one here would mean minting under the
-// fleet key for a device whose ceremony never earned it.
+// connection has not named one. Empty too when the registry cannot be read.
 //
-// It re-mints nothing. The blob is the one this machine's ceremony signed and
-// devices.json has held ever since, or the one the device itself presented in
-// its handshake after pairing elsewhere (AddFromFleetCert). Handing back the
-// same bytes keeps a certificate one artifact for the life of a pairing, which
-// is what lets a browser compare what it holds against what it is offered.
+// It re-mints nothing for a device that has one. The blob is the one this
+// machine's ceremony signed and devices.json has held ever since, or the one
+// the device itself presented in its handshake after pairing elsewhere
+// (AddFromFleetCert). Handing back the same bytes keeps a certificate one
+// artifact for the life of a pairing, which is what lets a browser compare
+// what it holds against what it is offered.
+//
+// A device with none is the one case that does mint: see backfillFleetCert.
 func (s *Server) fleetCertFor(deviceKey []byte) []byte {
 	if len(deviceKey) == 0 || s.identity.Devices == nil {
 		return nil
@@ -642,10 +642,85 @@ func (s *Server) fleetCertFor(deviceKey []byte) []byte {
 			"device", crypto.DeviceID(deviceKey), "err", err)
 		return nil
 	}
-	if !ok || len(dev.Cert) == 0 {
+	if !ok {
 		return nil
 	}
+	if len(dev.Cert) == 0 {
+		return s.backfillFleetCert(dev)
+	}
 	return dev.Cert
+}
+
+// backfillFleetCert mints the certificate a device's own ceremony could not,
+// on the first connection where this machine can.
+//
+// Who this is for: every device paired while this machine held no fleet key.
+// Devices from before the key existed, and — the reason this was written —
+// devices paired in the window between a relay being set up and a daemon being
+// restarted, which was a window this program used to require and no longer
+// has. Their registry entries carry no cert, Add writes one only at the
+// ceremony, and AddFromFleetCert needs a cert the device already holds, so
+// nothing repaired them: the browser reached the machine it paired with, could
+// present nothing to any sibling, and re-pairing was the only way out. That is
+// also what made the re-supply path in web/src/fleet/fleet.ts a promise the
+// daemon could not keep — "a browser paired before its machine had a fleet key
+// picks one up from any machine it can still reach" needs a machine with one to
+// hand over.
+//
+// Lazily, at the welcome, rather than in a sweep at startup, and the reason is
+// the same one that put the fleet key on a live read: this daemon may acquire
+// a fleet key at any moment, from a file another process writes. A sweep would
+// have to be re-run to be correct — on a timer, or on a watcher, or on the
+// restart this whole change exists to remove — while the welcome is exactly the
+// moment the answer is needed and the moment the device is present to receive
+// it. It costs one relay.json read per connection for devices that have no
+// cert, and none at all once they do: the mint is persisted, so this runs once
+// per device, not once per connection.
+//
+// Every failure is silent to the device and loud in the log. The connection is
+// established, the device is admitted, and a welcome without a certificate is
+// the answer this daemon has been giving that device all along.
+//
+// What it does not do is publish. Device certificates are deliberately absent
+// from the fleet directory (PairDevice says why), and this changes nothing
+// about that: the cert goes to the one party it is about.
+func (s *Server) backfillFleetCert(dev crypto.Device) []byte {
+	fi := s.fleetIdentity()
+	if !fi.Key.Valid() || fi.MachineID == "" {
+		return nil
+	}
+	// The ceremony's own timestamp, not this moment: `iat` is when the device
+	// joined the fleet, which is the fact the Devices screen shows on every
+	// other machine (AddFromFleetCert takes pairedAt from the cert). A registry
+	// entry from before that field was written falls back to now, which is at
+	// worst late and never a claim about a pairing that did not happen.
+	iat := dev.PairedAt
+	if iat.IsZero() {
+		iat = time.Now()
+	}
+	blob, err := fi.Key.Sign(fleet.DeviceCert{
+		Device:   dev.PublicKey,
+		Name:     dev.Label,
+		PairedOn: fi.MachineID,
+		IAT:      iat.Unix(),
+	})
+	if err != nil {
+		s.logger().Error("could not mint the fleet certificate a device was paired without",
+			"device", dev.ID, "err", err)
+		return nil
+	}
+	if _, err := s.identity.Devices.SetCert(dev.PublicKey, blob); err != nil {
+		// The blob is good and the device is here, so it is handed over
+		// anyway: the welcome is what the device actually needs, and a
+		// registry write that failed costs this machine its own copy, not the
+		// device its certificate. The next connection tries again.
+		s.logger().Warn("could not record a back-filled fleet certificate; the device has it, this machine does not",
+			"device", dev.ID, "err", err)
+		return blob
+	}
+	s.logger().Info("minted the fleet certificate a device was paired without; it can reach the rest of the fleet now",
+		"device", dev.ID, "pairedOn", fi.MachineID)
+	return blob
 }
 
 // SetRelayOrigin records the origin relay.json names, for the Content-Security-

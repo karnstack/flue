@@ -204,6 +204,67 @@ func (s *DeviceStore) AddFromFleetCert(label string, publicKey, cert []byte, pai
 	return d, nil
 }
 
+// SetCert gives a device the fleet certificate its own pairing never minted,
+// reporting whether it wrote one.
+//
+// It exists for the devices paired while their machine held no fleet key —
+// before the key existed at all, or in the window between a `flue relay setup`
+// and the daemon restart that used to be needed before the daemon could sign.
+// Those entries were stuck: Add writes Cert exactly once, at the ceremony, and
+// AddFromFleetCert needs a certificate the device already holds. A device with
+// neither reaches the machine it paired with and no other, for as long as the
+// pairing lasts, with nothing anywhere able to repair it.
+//
+// Three refusals, and each is the same rule stated somewhere else in this file:
+//
+//   - A key that is not registered gets nothing. This mints for pairings this
+//     machine performed, not for strangers; AddFromFleetCert is the door a
+//     device that paired elsewhere comes in by.
+//   - A key on the revocation list gets nothing, checked inside the same
+//     critical section as the write, exactly as AddFromFleetCert checks it: a
+//     revocation permanently outranks a certificate, and a concurrent revoke
+//     must not be able to slip between the question and the answer.
+//   - A device that already holds a certificate keeps it. The stored blob is
+//     one artifact for the life of a pairing — that is what lets a browser
+//     compare what it holds against what it is offered — and re-minting would
+//     hand it different bytes on every reconnect.
+//
+// The comparison is on the key bytes rather than on the id, for the reason
+// RemoveByKey gives: the id is a 48-bit digest, and this writes a credential.
+func (s *DeviceStore) SetCert(publicKey, cert []byte) (bool, error) {
+	if len(publicKey) != 32 {
+		return false, fmt.Errorf("crypto: device key must be 32 bytes, got %d", len(publicKey))
+	}
+	if len(cert) == 0 {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if revoked, err := s.isRevokedLocked(publicKey); err != nil {
+		return false, err
+	} else if revoked {
+		return false, ErrDeviceRevoked
+	}
+	devices, err := s.load()
+	if err != nil {
+		return false, err
+	}
+	for i := range devices {
+		if !bytes.Equal(devices[i].PublicKey, publicKey) {
+			continue
+		}
+		if len(devices[i].Cert) != 0 {
+			return false, nil
+		}
+		devices[i].Cert = slices.Clone(cert)
+		if err := s.save(devices); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // RemoveByKey unpairs whichever device holds publicKey, reporting whether
 // there was one. Missing is not an error: it is the ordinary answer for a
 // revocation that arrived from the fleet directory naming a device this
