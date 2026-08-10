@@ -298,18 +298,38 @@ func httpScheme(url string) string {
 
 // PublishFleetBlob queues one artifact this daemon just minted. It never
 // blocks and never fails, which is daemon.FleetPublisher's contract: the
-// callers are a pairing ceremony and a revoke, each with a client waiting and
-// nowhere to put a network error.
+// caller is a revoke, with a client waiting and nowhere to put a network
+// error.
+//
+// **A device certificate is dropped here, whoever offers one.** It is the only
+// blob kind this leg refuses, and the refusal is a guard rather than a policy
+// the callers rely on: `mine` does not publish them and the pairing ceremony
+// does not either, so nothing should ever reach this line — but the cost of
+// one that did is permanent (nothing in the directory is deleted one entry at
+// a time) and public (`GET /directory` needs no credential, and a device cert
+// names a device key and the label its owner typed). A future call site that
+// forgets meets a log line here instead of a roster of the operator's devices
+// on the open internet. Why they are not in the directory at all is on `mine`.
+//
+// The parse is a decode of bytes this daemon just signed, on the caller's
+// goroutine: microseconds, and the queue send below is what must not block.
+// Unparseable blobs are passed through rather than dropped — this is not a
+// validator, and the directory's own readers verify everything they ingest.
 //
 // A full queue drops the blob with a log line rather than waiting. That is
 // safe for exactly one reason, and it is worth naming: everything publishable
-// is written to disk first — the device cert into devices.json, the revocation
-// into revocations.json, the machine cert into relay.json — and publishAll
-// re-offers all of it on every connect and every republishEvery. A dropped
-// push costs latency, never the artifact.
+// is written to disk first — the revocation into revocations.json, the machine
+// cert into relay.json — and publishAll re-offers all of it on every connect
+// and every republishEvery. A dropped push costs latency, never the artifact.
 func (d *Directory) PublishFleetBlob(blob []byte) {
 	if len(blob) == 0 {
 		return
+	}
+	if cert, err := fleet.Verify(d.cfg.FleetPub, blob); err == nil {
+		if _, isDevice := cert.(fleet.DeviceCert); isDevice {
+			d.log.Warn("refused to publish a device certificate to the fleet directory; device certificates go to the device that owns them, in the pairing answer and in every welcome")
+			return
+		}
 	}
 	select {
 	case d.pub <- bytes.Clone(blob):

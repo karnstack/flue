@@ -433,13 +433,17 @@ func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
 
 	s.logger().Info("device paired", "peer", peer, "device", dev.ID, "label", dev.Label)
 
-	// The ceremony happened here; the fleet has to hear about it. Publishing
-	// the cert to the relay's directory is what lets this device open a
-	// sibling machine without a second ceremony — the sibling's daemon hears
-	// the push, and the device's own browser reads the machine list out of the
-	// same directory (spec/fleet-trust.md, "New device"). Nil for a daemon
-	// with no fleet key or no relay; publishFleetBlob drops both.
-	s.publishFleetBlob(cert)
+	// Nothing is published to the fleet directory here, and the absence is the
+	// design rather than an omission (spec/fleet-trust.md, "Device certificates
+	// are deliberately not in the directory"). The cert goes to the one party
+	// it is about: this answer hands it to the device, and every welcome hands
+	// it over again. No daemon ever reads one out of the directory — a roaming
+	// device is admitted on the cert it *presents* in its handshake, which is
+	// rule 2 — so publishing it would only put the device's public key and the
+	// label its owner typed on a credential-less `GET /directory`, and spend
+	// one of 512 permanent entries per ceremony ever performed.
+	//
+	// A revoke still publishes: that one has to reach machines, not devices.
 
 	// The device was registered on a request the user's other screen never
 	// sees, so the screen has to be told. Broadcast before the answer is

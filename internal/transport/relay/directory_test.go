@@ -401,6 +401,39 @@ func TestDirectoryPublishesAFreshlyMintedArtifact(t *testing.T) {
 	f.fd.awaitPublished(t, blob, "a revocation minted while connected")
 }
 
+// TestDirectoryRefusesToPublishADeviceCert: the guard on the live path. No
+// caller offers one today — the ceremony hands its cert to the device and
+// `mine` does not walk the registry — but a call site that forgot would spend
+// a permanent entry out of 512 and put a device key and its owner's label on
+// the credential-less GET. The refusal is here so that costs a log line
+// instead.
+func TestDirectoryRefusesToPublishADeviceCert(t *testing.T) {
+	f := newDirFixture(t)
+	f.run(t)
+	f.fd.awaitRead(t, 1)
+
+	devCert, err := f.fleet.Sign(fleet.DeviceCert{
+		Device: someKey(t, 0x66), Name: "phone", PairedOn: testMachineID, IAT: time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.dir.PublishFleetBlob(devCert)
+
+	// The fence: a revocation offered after it, on the same single-consumer
+	// queue, so by the time this lands the device cert has had its turn.
+	rev := f.revocation(t, someKey(t, 0x67))
+	f.dir.PublishFleetBlob(rev)
+	f.fd.awaitPublished(t, rev, "a revocation minted while connected")
+
+	if f.fd.published(devCert) {
+		t.Error("a device certificate reached the directory; it belongs to the device, not to a public store")
+	}
+	if !strings.Contains(f.log.String(), "refused to publish a device certificate") {
+		t.Errorf("nothing in the log says why the device certificate was dropped:\n%s", f.log.String())
+	}
+}
+
 // TestDirectoryRefusesToPublishAStaleMachineCert: the cert names the Noise key
 // browsers will pin, so publishing one that names a key this daemon no longer
 // holds would advertise a machine nothing in the fleet can handshake with —

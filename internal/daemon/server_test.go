@@ -3521,11 +3521,18 @@ func TestApplyFleetRevocationNeedsARegistry(t *testing.T) {
 	}
 }
 
-// TestPairingPublishesTheDeviceCertToTheFleet: the ceremony's cert is what
-// lets the device open a sibling machine without a second ceremony, and it
-// only gets there if the ceremony hands it to the directory. The publisher is
-// the seam the relay's directory leg sits behind.
-func TestPairingPublishesTheDeviceCertToTheFleet(t *testing.T) {
+// TestPairingPublishesNothingToTheFleet: a ceremony mints a device
+// certificate and hands it to the device, in the answer and in every welcome
+// after it. It publishes nothing. Publishing the cert as well would put the
+// device's public key and the label its owner typed on the credential-less
+// `GET /directory` and spend one of 512 permanent entries per ceremony ever
+// performed, and would buy nothing — no daemon reads a device cert from
+// there (see the directory leg's ingest).
+//
+// The cert really is minted, and asserted here, because "published nothing"
+// must not be able to pass for the wrong reason: a ceremony that quietly
+// stopped minting would satisfy an empty publisher too.
+func TestPairingPublishesNothingToTheFleet(t *testing.T) {
 	ts, srv := newPairServer(t)
 	fk, err := fleet.Mint(rand.Reader)
 	if err != nil {
@@ -3551,16 +3558,28 @@ func TestPairingPublishesTheDeviceCertToTheFleet(t *testing.T) {
 	}
 	_ = ts
 
-	blobs := pub.blobs()
-	if len(blobs) != 1 {
-		t.Fatalf("published %d artifacts on a pairing, want 1", len(blobs))
+	if blobs := pub.blobs(); len(blobs) != 0 {
+		kinds := make([]string, 0, len(blobs))
+		for _, b := range blobs {
+			if c, err := fleet.Verify(fk.Public(), b); err == nil {
+				kinds = append(kinds, c.Kind())
+			} else {
+				kinds = append(kinds, "unverifiable")
+			}
+		}
+		t.Fatalf("a pairing published %v to the fleet directory, want nothing", kinds)
 	}
-	cert, err := fleet.VerifyDevice(fk.Public(), blobs[0])
+
+	dev, ok, err := srv.identity.Devices.FindByKey(key)
+	if err != nil || !ok {
+		t.Fatalf("FindByKey after pairing = %v, %v", ok, err)
+	}
+	cert, err := fleet.VerifyDevice(fk.Public(), dev.Cert)
 	if err != nil {
-		t.Fatalf("the published artifact is not a device cert under the fleet key: %v", err)
+		t.Fatalf("the ceremony did not mint a device cert for the registry: %v", err)
 	}
 	if !bytes.Equal(cert.Device, key) {
-		t.Errorf("published a cert for %x, want the device just paired %x", cert.Device, key)
+		t.Errorf("minted a cert for %x, want the device just paired %x", cert.Device, key)
 	}
 }
 
