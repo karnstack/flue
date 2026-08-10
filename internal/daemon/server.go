@@ -537,6 +537,39 @@ func LocalCSPFor(relayOrigin string) string {
 	return cspHead + cspLoopbackSockets + " " + relayOrigin + " " + ws + cspTail
 }
 
+// fleetCertFor is the fleet device certificate belonging to the device this
+// connection authenticated as, for the welcome to carry.
+//
+// Empty for every connection with no device identity, which is every loopback
+// one: a certificate is a statement about a device key, and a session-token
+// connection has not named one. Empty too when the registry cannot be read, or
+// when the device was paired before this machine held a fleet key — there is no
+// certificate to hand over, and inventing one here would mean minting under the
+// fleet key for a device whose ceremony never earned it.
+//
+// It re-mints nothing. The blob is the one this machine's ceremony signed and
+// devices.json has held ever since, or the one the device itself presented in
+// its handshake after pairing elsewhere (AddFromFleetCert). Handing back the
+// same bytes keeps a certificate one artifact for the life of a pairing, which
+// is what lets a browser compare what it holds against what it is offered.
+func (s *Server) fleetCertFor(deviceID string) []byte {
+	if deviceID == "" || s.identity.Devices == nil {
+		return nil
+	}
+	dev, ok, err := s.identity.Devices.FindByID(deviceID)
+	if err != nil {
+		// The socket is up and the device is admitted; a registry that cannot
+		// be read right now costs this device its certificate on this
+		// connection and nothing else. The next one carries it.
+		s.logger().Warn("could not read a device's fleet certificate for the welcome", "device", deviceID, "err", err)
+		return nil
+	}
+	if !ok || len(dev.Cert) == 0 {
+		return nil
+	}
+	return dev.Cert
+}
+
 // SetRelayOrigin records the origin relay.json names, for the Content-Security-
 // Policy alone.
 //

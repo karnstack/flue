@@ -633,6 +633,66 @@ func TestPairMintsAFleetDeviceCert(t *testing.T) {
 	}
 }
 
+// TestPairHandsTheDeviceItsOwnCert: the ceremony's answer carries the
+// certificate it just minted, to the device it is about.
+//
+// This is what lets device certificates stay off the credential-less
+// `GET /directory`, where they were a public roster of every device's key and
+// human label and spent one of the directory's 512 permanent entries per
+// ceremony ever performed. The browser pinned the fleet public key out of the
+// QR moments earlier, so it can check this blob itself and a hostile relay in
+// the middle can only make the check fail.
+func TestPairHandsTheDeviceItsOwnCert(t *testing.T) {
+	const machineID = "karns-mbp-a1b2-0f9a12cd"
+	srv, fk := newFleetPairServer(t, machineID)
+
+	token, _ := srv.pairing.start(time.Now())
+	key := deviceKey(0x2a)
+	out := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(key), "phone"), "relay")
+	if out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200", out.Status, out.Body)
+	}
+
+	var answer struct {
+		DeviceCert []byte `json:"deviceCert"`
+	}
+	if err := json.Unmarshal(out.Body, &answer); err != nil {
+		t.Fatalf("decoding the pairing answer: %v", err)
+	}
+	if len(answer.DeviceCert) == 0 {
+		t.Fatal("the pairing answer carries no device certificate; the device could reach no other machine")
+	}
+	cert, err := fleet.VerifyDevice(fk.Public(), answer.DeviceCert)
+	if err != nil {
+		t.Fatalf("the answered cert does not verify under this fleet key: %v", err)
+	}
+	if !bytes.Equal(cert.Device, key) {
+		t.Error("the answered cert names a device key other than the one just paired")
+	}
+	// The same artifact the registry holds, byte for byte. A certificate that
+	// differed here would be a second blob for one pairing, and the machine
+	// handing it out would be disagreeing with the machine that stored it.
+	list := devices(t, srv)
+	if len(list) != 1 || !bytes.Equal(list[0].Cert, answer.DeviceCert) {
+		t.Error("the answered cert is not the one the registry stored")
+	}
+}
+
+// TestPairAnswersNoCertWhenNoneWasMinted: a daemon with no place on the relay
+// mints nothing, and must not invent a field. The device is paired to this
+// machine and says so by omission.
+func TestPairAnswersNoCertWhenNoneWasMinted(t *testing.T) {
+	srv, _ := newFleetPairServer(t, "")
+	token, _ := srv.pairing.start(time.Now())
+	out := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(deviceKey(0x2a)), "phone"), "relay")
+	if out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200", out.Status, out.Body)
+	}
+	if bytes.Contains(out.Body, []byte("deviceCert")) {
+		t.Errorf("the answer carries a deviceCert from a daemon that minted none: %s", out.Body)
+	}
+}
+
 // TestPairMintsNoCertWithoutAMachineID: `pairedOn` is a machine id in the
 // spec and the directory the next stage brings keys certs by it, so a cert
 // claiming the empty machine is one nothing can attribute — signing it would

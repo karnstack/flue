@@ -326,6 +326,13 @@ func (c *conn) serve() {
 		// so what a client holds is what was true when it arrived, which is
 		// also when it decides what to render.
 		Relay: c.srv.relayInfo(),
+		// And the device's own fleet certificate, for the device that just
+		// proved it holds the key the certificate names. This is the re-supply
+		// path: the ceremony hands one over in its answer, and this hands the
+		// same one over again on every connection, so a browser that never
+		// stored it, or lost it, or was paired before this machine had a fleet
+		// key, gets one from any machine it can still reach.
+		FleetCert: c.srv.fleetCertFor(c.device),
 	})
 
 	for {

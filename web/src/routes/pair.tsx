@@ -3,10 +3,12 @@ import { useSearch } from '@tanstack/react-router'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { sameKey as sameCertKey, verifyCert } from '@/crypto/cert'
 import {
   loadOrCreateDeviceKey,
   savePinnedDaemonKey,
   savePinnedDaemonKeyFor,
+  savePinnedDeviceCert,
   savePinnedFleetKey,
   type DeviceKey,
 } from '@/crypto/keys'
@@ -126,6 +128,9 @@ const FIELD_LABEL = 'text-base/6 font-medium text-zinc-950 sm:text-sm/6 dark:tex
 interface PairAnswer {
   deviceId?: unknown
   daemonPub?: unknown
+  /** This device's fleet certificate, base64, when the ceremony minted one.
+   *  Absent from a daemon with no fleet key or no place on a relay. */
+  deviceCert?: unknown
 }
 
 /**
@@ -179,6 +184,48 @@ function keyFromLink(text: string): Uint8Array | null {
   const std = text.replace(/-/g, '+').replace(/_/g, '/')
   const key = fromBase64(std.padEnd(Math.ceil(std.length / 4) * 4, '='))
   return key !== null && key.length === KEY_BYTES ? key : null
+}
+
+/**
+ * Keep the fleet certificate the ceremony handed over, if it is this device's.
+ *
+ * Three checks and no arguing with the result. It has to decode; it has to
+ * verify under the fleet key **from the link**, which is the one thing on this
+ * page no intermediary could have chosen; and it has to be a device
+ * certificate naming *this* browser's key. Anything else is dropped in silence.
+ *
+ * Silence is right because a missing certificate is not a broken pairing. The
+ * device is registered on the machine it just paired with and reaches it by
+ * key alone; what a certificate adds is the machines it has *not* paired with,
+ * and a daemon with no fleet key or no place on a relay legitimately mints
+ * none. There is also a second chance built in: every connection's welcome
+ * carries the same blob again (internal/daemon/conn.go), so a browser that
+ * ends up here without one picks it up the next time it connects.
+ *
+ * The store failure is swallowed for the same reason and not the same shape as
+ * the daemon key's, which fails the ceremony: without the daemon's key this
+ * device can reach nothing, and without this it reaches everything it paired
+ * with.
+ */
+async function keepDeviceCert(
+  value: unknown,
+  fleetPub: Uint8Array,
+  devicePub: Uint8Array,
+): Promise<void> {
+  if (typeof value !== 'string' || value === '') return
+  const blob = fromBase64(value)
+  if (blob === null) return
+  const cert = verifyCert(fleetPub, blob)
+  // Not merely "it verified": a machine certificate, or a certificate for
+  // somebody else's device, verifies perfectly well and is not this browser's
+  // to hold or to present.
+  if (cert === null || cert.kind !== 'device' || !sameCertKey(cert.device, devicePub)) return
+  try {
+    await savePinnedDeviceCert(blob)
+  } catch {
+    // A store that would not keep it costs the fleet, not the pairing. The
+    // welcome offers it again on the next connection.
+  }
 }
 
 /** Longer than any refusal written for a person; the daemon's own is two
@@ -546,6 +593,18 @@ export function PairRoute() {
       // and pairs this machine alone, which is what a relay from before the
       // fleet key gives.
       if (fleet !== null) await savePinnedFleetKey(fleet)
+      // And this device's own certificate, if the ceremony minted one: the
+      // blob it will present to every machine it has *not* paired with.
+      //
+      // Checked here rather than taken on trust, under the fleet key from the
+      // link and against this browser's own device key. The certificate came
+      // down the same channel the answer did, so the daemon could be anything
+      // until the QR's key says otherwise — and a certificate naming somebody
+      // else's device key is not this browser's to keep or to present. A
+      // failed check writes nothing and costs nothing: the pairing stands and
+      // this device reaches the machine it just paired with, which is what a
+      // ceremony against a daemon holding no fleet key gives anyway.
+      if (fleet !== null) await keepDeviceCert(answer?.deviceCert, fleet, device.publicKey)
     } catch {
       return {
         text: `This browser would not keep the daemon’s key, so this device cannot reach it. ${ORPHAN_NOTE}`,

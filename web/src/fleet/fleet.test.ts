@@ -5,10 +5,16 @@ import { x25519 } from '@noble/curves/ed25519.js'
 import vectors from '../../../testdata/noise/ik.json'
 import type { ConnStatus, FlueClient } from '@/client/client'
 import type { ErrorMsg, SessionInfo, Welcome } from '@/client/protocol'
-import { loadOrCreateDeviceKey, savePinnedDaemonKeyFor, savePinnedFleetKey } from '@/crypto/keys'
+import {
+  loadOrCreateDeviceKey,
+  loadPinnedDeviceCert,
+  savePinnedDaemonKeyFor,
+  savePinnedFleetKey,
+} from '@/crypto/keys'
 import { saveMachine } from '@/relay/machines'
 import type { RawSocket } from '@/relay/socket'
 import {
+  base64,
   deviceCert,
   directoryFetch,
   FLEET_PUB,
@@ -17,7 +23,7 @@ import {
   revocation,
 } from '@/testing/fleet'
 import { responderHandshake } from '@/testing/noise-daemon'
-import { FleetClient, fleetSources, type FleetSource } from './fleet'
+import { adoptFleetCert, FleetClient, fleetSources, type FleetSource } from './fleet'
 import { LOCAL_MACHINE_ID, type FleetSession, type MachineState } from './types'
 
 const unhex = (s: string) => new Uint8Array((s.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)))
@@ -908,5 +914,80 @@ describe('fleetSources with a fleet directory', () => {
       directoryFetch: directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)]),
     })
     expect(sources).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// adoptFleetCert: how a browser gets its certificate after the ceremony that
+// minted it, now that the relay's public directory does not carry one.
+// ---------------------------------------------------------------------------
+
+describe('adoptFleetCert', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    vi.stubGlobal('indexedDB', new IDBFactory())
+  })
+
+  /** A welcome carrying `cert`, base64, as the daemon sends one. */
+  function welcomeWith(cert: Uint8Array | undefined): Welcome {
+    return {
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'mbp',
+      ver: 'test',
+      ...(cert !== undefined && { fleetCert: base64(cert) }),
+    }
+  }
+
+  it('keeps a certificate that verifies under the pinned fleet key and names this device', async () => {
+    await savePinnedFleetKey(FLEET_PUB)
+    const key = await loadOrCreateDeviceKey()
+    const cert = deviceCert(key.publicKey, 'phone', 'attic-pi')
+
+    await adoptFleetCert(welcomeWith(cert))
+    expect(await loadPinnedDeviceCert()).toEqual(cert)
+  })
+
+  it('refuses a certificate signed by another fleet', async () => {
+    // The pin is the whole check: a relay that served the page could offer a
+    // certificate signed by a key it holds, and this browser would present it
+    // to a machine that will refuse it.
+    await savePinnedFleetKey(FLEET_PUB)
+    const key = await loadOrCreateDeviceKey()
+    await adoptFleetCert(welcomeWith(deviceCert(key.publicKey, 'phone', 'attic-pi', 1_754_700_000, OTHER_SEED)))
+    expect(await loadPinnedDeviceCert()).toBeNull()
+  })
+
+  it('refuses a certificate for another device, however well it verifies', async () => {
+    await savePinnedFleetKey(FLEET_PUB)
+    const someoneElse = x25519.getPublicKey(new Uint8Array(32).fill(0x77))
+    await adoptFleetCert(welcomeWith(deviceCert(someoneElse, 'someone else', 'attic-pi')))
+    expect(await loadPinnedDeviceCert()).toBeNull()
+  })
+
+  it('refuses a machine certificate offered where a device one belongs', async () => {
+    await savePinnedFleetKey(FLEET_PUB)
+    await adoptFleetCert(welcomeWith(machineCert('loft-9f9f', 'Loft', LOFT_PUB)))
+    expect(await loadPinnedDeviceCert()).toBeNull()
+  })
+
+  it('keeps nothing when this browser pinned no fleet key', async () => {
+    // Nothing to check it against, so nothing that could be checked. A browser
+    // in this state reaches the machines it paired with and no others, which
+    // is what it did before the fleet key existed.
+    const key = await loadOrCreateDeviceKey()
+    await adoptFleetCert(welcomeWith(deviceCert(key.publicKey, 'phone', 'attic-pi')))
+    expect(await loadPinnedDeviceCert()).toBeNull()
+  })
+
+  it('leaves what it holds alone when a welcome offers nothing', async () => {
+    await savePinnedFleetKey(FLEET_PUB)
+    const key = await loadOrCreateDeviceKey()
+    const cert = deviceCert(key.publicKey, 'phone', 'attic-pi')
+    await adoptFleetCert(welcomeWith(cert))
+
+    await adoptFleetCert(welcomeWith(undefined))
+    expect(await loadPinnedDeviceCert()).toEqual(cert)
   })
 })

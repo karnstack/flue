@@ -25,10 +25,12 @@
  */
 import { daemonSocketUrl, FlueClient, type ConnStatus } from '@/client/client'
 import type { ErrorMsg, Preview, SessionInfo, Welcome } from '@/client/protocol'
+import { sameKey, verifyCert } from '@/crypto/cert'
 import {
   loadOrCreateDeviceKey,
   loadPinnedDaemonKeyFor,
   loadPinnedFleetKey,
+  savePinnedDeviceCert,
   type DeviceKey,
 } from '@/crypto/keys'
 import { readDirectory, type DirectoryFetch, type FleetView } from '@/relay/directory'
@@ -333,9 +335,17 @@ export class FleetClient {
       slot.client.onError((err) => this.emitError(slot.id, err)),
       slot.client.onRevoked((reason) => this.slotRevoked(slot, reason)),
     ]
-    // Only the loopback daemon's welcome carries facts the fleet acts on —
-    // its host name, its relay slot, the relay origin. A remote source's
-    // welcome names the machine the record already names.
+    // Every welcome may carry this device's own fleet certificate, whichever
+    // machine sent it: the daemon hands one to the device it has just
+    // authenticated, so any machine this browser can still reach re-supplies
+    // the blob it needs for the machines it cannot. Fire-and-forget, and
+    // deliberately not gated on which slot: the local daemon is as good a
+    // source as a remote one, and a browser that has lost its certificate is
+    // usually a browser that can only reach one machine.
+    slot.unsubs.push(slot.client.onWelcome((w) => void adoptFleetCert(w)))
+    // The rest of the welcome is the loopback daemon's alone — its host name,
+    // its relay slot, the relay origin. A remote source's welcome names the
+    // machine the record already names.
     if (slot.id === LOCAL_MACHINE_ID) {
       slot.unsubs.push(slot.client.onWelcome((w) => this.localWelcome(w)))
     }
@@ -550,6 +560,58 @@ export class FleetClient {
       status: s.status,
       ...(s.revoked !== null && { revokedReason: s.revoked }),
     }))
+  }
+}
+
+/**
+ * Keep this device's fleet certificate when a welcome offers one.
+ *
+ * This is the re-supply path, and the reason a certificate no longer has to
+ * live in the relay's public directory. The ceremony hands one over in its
+ * answer; every connection after that offers the same blob again, inside Noise,
+ * to a device that has already proved it holds the key the certificate names.
+ * So a browser that never stored one, or lost it, or was paired before its
+ * machine had a fleet key, picks one up from any machine it can still reach.
+ *
+ * Verified before it is kept, under the fleet key pinned at pairing and against
+ * this browser's own device key — the same three checks the pairing page makes,
+ * for the same reason: a certificate arriving over a channel is a claim until
+ * a signature says otherwise, and one naming another device's key is not this
+ * browser's to present. Everything else is dropped in silence, because a
+ * certificate is what reaches *other* machines and its absence costs nothing on
+ * the machine that just said hello.
+ *
+ * The new blob is written even when one is already stored. A certificate is
+ * re-minted only by a fresh ceremony, so the usual case is the same bytes
+ * again; when it does differ, the machine that just authenticated this device
+ * is a better source than whatever a previous connection left behind.
+ */
+export async function adoptFleetCert(w: Welcome): Promise<void> {
+  if (w.fleetCert === undefined || w.fleetCert === '') return
+  try {
+    const fleetPub = await loadPinnedFleetKey()
+    if (fleetPub === null) return
+    const blob = decodeBase64(w.fleetCert)
+    if (blob === null) return
+    const cert = verifyCert(fleetPub, blob)
+    if (cert === null || cert.kind !== 'device') return
+    const key = await loadOrCreateDeviceKey()
+    if (!sameKey(cert.device, key.publicKey)) return
+    await savePinnedDeviceCert(blob)
+  } catch {
+    // A key store that will not open, a welcome that carried nonsense. Both
+    // mean this browser keeps whatever it already had, which is the same
+    // answer it has for a daemon that offered nothing.
+  }
+}
+
+/** Standard base64 with padding, which is how Go's encoding/json writes the
+ *  `[]byte` this field is. Null for anything that is not. */
+function decodeBase64(text: string): Uint8Array | null {
+  try {
+    return Uint8Array.from(atob(text), (c) => c.charCodeAt(0))
+  } catch {
+    return null
   }
 }
 

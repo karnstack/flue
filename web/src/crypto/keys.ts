@@ -90,6 +90,13 @@ const DEVICE_RECORD_PREFIX = 'daemon-static:'
  */
 const FLEET_RECORD = 'fleet-public'
 
+/**
+ * This device's own fleet certificate, per origin like the fleet key that
+ * verifies it. See `savePinnedDeviceCert` for why it is kept rather than read
+ * off the relay.
+ */
+const DEVICE_CERT_RECORD = 'fleet-device-cert'
+
 const openDb = (factory: IDBFactory) =>
   new Promise<IDBDatabase>((resolve, reject) => {
     const req = factory.open(DB_NAME, 1)
@@ -255,6 +262,62 @@ export async function loadPinnedFleetKey(
 }
 
 /**
+ * Keep this device's own fleet certificate — the signed blob it presents to
+ * every machine it has not paired with by hand.
+ *
+ * Stored rather than fetched, and that is the change this record represents.
+ * The certificate used to be read out of the relay's credential-less
+ * `GET /directory`, which meant every device's public key and human label sat
+ * in a document anybody could read, and every pairing ceremony ever performed
+ * spent one of the directory's 512 permanent entries. It now arrives twice over
+ * channels that are already private and already authenticated — in the pairing
+ * answer, and in the welcome on every connection — so the public copy buys
+ * nothing.
+ *
+ * It is public data either way: a certificate is a signed statement about a
+ * public key, and holding one grants nothing without the private half of the
+ * device key beside it in this same store. What this record protects is not
+ * secrecy but *supply* — a browser that cannot produce its certificate cannot
+ * reach a machine it never paired with.
+ *
+ * Per origin, like the fleet key it verifies under: a certificate signed by one
+ * fleet means nothing to another, and the two records are only ever read
+ * together.
+ *
+ * Callers must verify it under the pinned fleet key before writing it. This
+ * function does not, deliberately — it is storage, and crypto/cert.ts is where
+ * signatures are checked — but a caller that skipped the check would be keeping
+ * whatever the far end said, and presenting it later to a machine that will
+ * check it properly and refuse.
+ */
+export async function savePinnedDeviceCert(
+  cert: Uint8Array,
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const db = await openDb(factory)
+  try {
+    await tx(db, 'readwrite', (s) => s.put({ publicKey: cert }, DEVICE_CERT_RECORD))
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * This device's fleet certificate, or null when it has none.
+ *
+ * Null is an ordinary answer and not a fault: a browser paired with a daemon
+ * that held no fleet key, or before this machine had a place on the relay, has
+ * none — and reaches every machine it paired with directly, exactly as it
+ * always did. What it cannot do without one is walk into a machine it has never
+ * met, which is the thing a certificate is for.
+ */
+export async function loadPinnedDeviceCert(
+  factory: IDBFactory = indexedDB,
+): Promise<Uint8Array | null> {
+  return readBlob(DEVICE_CERT_RECORD, factory)
+}
+
+/**
  * Drop the key pinned for one machine.
  *
  * The other half of forgetting a machine (relay/machines.ts): a record without
@@ -298,6 +361,29 @@ async function read(record: string, factory: IDBFactory): Promise<Uint8Array | n
     // which is a browser that lists no machines rather than one that trusts
     // the wrong ones.
     return key.length === KEY_BYTES ? key : null
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * One record read as an opaque blob: no width check, because a certificate is
+ * not a key and has no fixed length.
+ *
+ * It shares `read`'s copy-out rule for the same reason, and stops there. What
+ * makes a stored certificate trustworthy is its signature under the pinned
+ * fleet key, which crypto/cert.ts checks every time it is used — so there is
+ * nothing this function could usefully refuse that the verifier would not.
+ */
+async function readBlob(record: string, factory: IDBFactory): Promise<Uint8Array | null> {
+  const db = await openDb(factory)
+  try {
+    const existing = await tx<{ publicKey: Uint8Array } | undefined>(db, 'readonly', (s) =>
+      s.get(record),
+    )
+    if (!existing) return null
+    const blob = new Uint8Array(existing.publicKey)
+    return blob.length === 0 ? null : blob
   } finally {
     db.close()
   }

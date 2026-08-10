@@ -323,6 +323,19 @@ export interface Welcome {
   caps?: string[]
   /** Absent when this daemon is not configured for a relay. See RelayInfo. */
   relay?: RelayInfo
+  /**
+   * This device's own fleet certificate, base64 — the blob it presents to
+   * machines it has never paired with (spec/fleet-trust.md, rule 2).
+   *
+   * It rides every welcome rather than being fetched, and that is the whole of
+   * how a browser gets one after the ceremony that minted it: the socket is
+   * inside Noise and the far end has already proved it holds the key the
+   * certificate names, so this is the private, authenticated channel the public
+   * `GET /directory` used to stand in for. Absent on a loopback connection
+   * (no device identity), on a daemon with no fleet key, and for a device
+   * paired before that key existed.
+   */
+  fleetCert?: string
 }
 
 export interface Sessions {

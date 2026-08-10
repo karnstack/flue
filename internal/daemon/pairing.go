@@ -448,10 +448,29 @@ func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
 
 	// A map rather than a struct, because the encoder sorts a map's keys and
 	// that is the byte order this endpoint has always answered in.
-	answer, err := json.Marshal(map[string]any{
+	fields := map[string]any{
 		"deviceId":  dev.ID,
 		"daemonPub": s.daemonPub(),
-	})
+	}
+	// And the certificate the ceremony just minted, handed straight to the
+	// device it is about.
+	//
+	// This is what the device presents to every *other* machine in the fleet,
+	// and this answer is where it should come from: the browser pinned the
+	// fleet public key out of the QR a moment ago, so it can check this blob
+	// itself, and a hostile relay in the middle can only make the check fail.
+	// Handing it over here is what lets device certificates stay off the
+	// credential-less `GET /directory` — where they were a roster of every
+	// device's public key and human label, readable by anybody, and one
+	// permanent directory entry per ceremony ever performed.
+	//
+	// Absent when nothing was minted (no fleet key, or no machine id), which is
+	// the same "paired to this machine only" this function already reports up
+	// the page. Base64 like every other []byte on this endpoint.
+	if len(cert) > 0 {
+		fields["deviceCert"] = cert
+	}
+	answer, err := json.Marshal(fields)
 	if err != nil {
 		// Two strings the daemon chose itself; unreachable short of a broken
 		// encoder. The device is paired either way, so the refusal is about
