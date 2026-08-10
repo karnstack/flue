@@ -1324,8 +1324,10 @@ func TestRunRelayStatusReportsTheFleetDirectory(t *testing.T) {
 		"1 machine, 1 revocation",
 		// Device certificates are not published to the directory any more, so
 		// one that is there is worth naming as the anomaly it is rather than
-		// counting silently beside the machines.
-		"1 device certificate in the directory",
+		// counting silently beside the machines — and worth naming without a
+		// cause attached, since no released flue has a directory at all and
+		// so none can have published one.
+		"1 device certificate in the directory; nothing in this fleet should be publishing one",
 		// The entry nobody in this fleet signed, named as such rather than
 		// quietly counted: a relay serving blobs this key did not sign is
 		// either a rotated fleet key or somebody else's relay.

@@ -629,13 +629,19 @@ func directoryLine(rc config.Relay) string {
 	// them (spec/fleet-trust.md) — so a count of them here would read as "this
 	// fleet has no devices" when it means "the directory does not list them",
 	// which are different claims and only the second is true. It is still
-	// *counted*, because a non-zero value is a real signal worth naming: an
-	// older machine in this fleet is still publishing them.
+	// *counted*, because a non-zero value is a real signal.
+	//
+	// The line does not name a cause, because there is no honest one to name.
+	// No released flue has a fleet directory at all, so "an older flue is
+	// still publishing them" — which this line used to say — cannot ever be
+	// true; what is left is a build from between the two, or a hand-written
+	// PUT by whoever holds the daemon secret. Both deserve a look and neither
+	// is a diagnosis a status line can make from a count.
 	line += fmt.Sprintf(" (%s, %s)",
 		plural(counts.Machines, "machine", "machines"),
 		plural(counts.Revocations, "revocation", "revocations"))
 	if counts.Devices > 0 {
-		line += fmt.Sprintf("\n          %s in the directory; a machine in this fleet is running a flue that still publishes them",
+		line += fmt.Sprintf("\n          %s in the directory; nothing in this fleet should be publishing one",
 			plural(counts.Devices, "device certificate", "device certificates"))
 	}
 	if counts.Entries != counts.Verified {

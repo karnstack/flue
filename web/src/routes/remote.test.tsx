@@ -200,9 +200,15 @@ describe('RemoteRoute', () => {
         await mountRemote({ relay: RELAY_UP })
         expect(await screen.findByText(/2 machines, 2 revocations/)).toBeTruthy()
         // Device certificates are not published to the directory any more, so
-        // three of them there is an older machine in the fleet, named rather
-        // than counted silently beside the machines.
-        expect(screen.getByText(/3 device certificates in the directory/)).toBeTruthy()
+        // three of them there is an anomaly, named rather than counted
+        // silently beside the machines — and named without guessing at a
+        // cause, since no released flue has a directory to have published one
+        // from.
+        expect(
+          screen.getByText(
+            /3 device certificates in the directory: nothing in this fleet should be publishing one/,
+          ),
+        ).toBeTruthy()
       },
     )
   })
