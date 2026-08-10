@@ -70,6 +70,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1463,6 +1464,9 @@ var errNoDeviceRegistry = errors.New("daemon: this daemon has no device registry
 
 // deviceList reads the registry into the shape the wire carries: unix seconds
 // rather than the registry's time.Time, and never the device's public key.
+//
+// Each row is also asked where it came from, which is a question only its
+// certificate can answer — see wire.DeviceInfo.PairedOn.
 func (s *Server) deviceList() (wire.DeviceList, error) {
 	if s.identity.Devices == nil {
 		return wire.DeviceList{}, errNoDeviceRegistry
@@ -1471,6 +1475,10 @@ func (s *Server) deviceList() (wire.DeviceList, error) {
 	if err != nil {
 		return wire.DeviceList{}, err
 	}
+	// One read of the fleet key for the whole list rather than one per row: it
+	// comes off relay.json (Identity.Fleet is read-on-use), and a registry with
+	// a dozen devices in it should not be a dozen file reads.
+	fleetPub := s.fleetIdentity().Key.Public()
 	infos := make([]wire.DeviceInfo, 0, len(paired))
 	for _, d := range paired {
 		infos = append(infos, wire.DeviceInfo{
@@ -1478,9 +1486,37 @@ func (s *Server) deviceList() (wire.DeviceList, error) {
 			Label:    d.Label,
 			PairedAt: d.PairedAt.Unix(),
 			LastSeen: d.LastSeen.Unix(),
+			PairedOn: pairedOn(fleetPub, d.Cert),
 		})
 	}
 	return wire.DeviceList{Devices: infos}, nil
+}
+
+// pairedOn is the machine named by a device row's certificate, or "" when
+// nothing signed says.
+//
+// Verified rather than merely parsed, and this is the whole of why it is a
+// function rather than a field read. The blob is bytes off this machine's own
+// disk, so the threat is not an attacker on the wire — it is that a screen is
+// about to draw a distinction on it, and the distinction decides whether a
+// button revokes a device from one machine or from the entire fleet. A claim
+// that carries that much should be checked against the key that is supposed to
+// have made it, every time it is read, and cost nothing to check.
+//
+// Every failure lands on the same answer: no key, no certificate, a blob that
+// does not verify, a certificate of the wrong kind. "This machine's own" is the
+// conservative reading — it is the one that does not offer the fleet-wide
+// revoke — and it is also what an honest daemon says about a device it paired
+// before it had a fleet key at all.
+func pairedOn(fleetPub ed25519.PublicKey, cert []byte) string {
+	if len(fleetPub) == 0 || len(cert) == 0 {
+		return ""
+	}
+	dc, err := fleet.VerifyDevice(fleetPub, cert)
+	if err != nil {
+		return ""
+	}
+	return dc.PairedOn
 }
 
 // markDeviceSeen records that deviceID is connected right now — the only event
