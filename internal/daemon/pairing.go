@@ -404,6 +404,14 @@ func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
 
 	s.logger().Info("device paired", "peer", peer, "device", dev.ID, "label", dev.Label)
 
+	// The ceremony happened here; the fleet has to hear about it. Publishing
+	// the cert to the relay's directory is what lets this device open a
+	// sibling machine without a second ceremony — the sibling's daemon hears
+	// the push, and the device's own browser reads the machine list out of the
+	// same directory (spec/fleet-trust.md, "New device"). Nil for a daemon
+	// with no fleet key or no relay; publishFleetBlob drops both.
+	s.publishFleetBlob(cert)
+
 	// The device was registered on a request the user's other screen never
 	// sees, so the screen has to be told. Broadcast before the answer is
 	// returned: the pairing device is not the one waiting for this.

@@ -411,11 +411,48 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 			return false
 		}
 	}
-	cfg := relay.Config{URL: rc.URL, Secret: rc.Secret, Origin: rc.Origin, MachineID: rc.MachineID, FleetPub: fleetKey.Public()}
+	cfg := relay.Config{
+		URL:         rc.URL,
+		Secret:      rc.Secret,
+		Origin:      rc.Origin,
+		MachineID:   rc.MachineID,
+		MachineCert: rc.MachineCert,
+		FleetPub:    fleetKey.Public(),
+	}
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
 	if err != nil {
 		logger.Warn("relay not started", "err", err)
 		return false
+	}
+	// The directory leg, beside the hub leg and independent of it: one keeps
+	// this machine's browsers connected, the other keeps this machine's idea
+	// of who the fleet trusts up to date (spec/fleet-trust.md, "The fleet
+	// directory"). It is started here rather than inside the transport
+	// because neither needs the other — a daemon whose hub socket is down
+	// still has to hear a revocation, and one whose directory is down still
+	// serves every device paired to it.
+	//
+	// A directory this daemon cannot build is a warning and nothing more, for
+	// the reason every fault in this function is: flue's promise is a terminal
+	// in a browser tab, and the fleet is what makes that tab openable from the
+	// next machine along.
+	dir, err := relay.NewDirectory(cfg, srv, identity.Key, identity.Devices, logger)
+	if err != nil {
+		logger.Warn("fleet directory not started", "err", err)
+	} else {
+		// Installed before the goroutine, so a pairing or a revoke that
+		// happens while the first dial is still in flight is queued rather
+		// than lost.
+		srv.SetFleetPublisher(dir)
+		srv.SetDirectoryCounts(func() daemon.DirectoryCounts {
+			c := dir.Counts()
+			return daemon.DirectoryCounts(c)
+		})
+		go func() {
+			if err := dir.Run(ctx); err != nil {
+				logger.Warn("fleet directory stopped", "err", err)
+			}
+		}()
 	}
 	// The machine's identity rides every welcome alongside the status, so the
 	// UI can build /client/<id> URLs for this machine. It is configuration

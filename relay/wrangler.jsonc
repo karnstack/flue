@@ -40,13 +40,15 @@
   // Two classes: DaemonHub is one object per machine, FleetDirectory is one
   // object for the relay (spec/fleet-trust.md, "The fleet directory").
   //
-  // The deploy twin owes three things to the directory — this binding, the v2
-  // migration below, and the two "/directory" entries above — and does not
-  // have them yet: internal/relaydeploy gains them with the daemon side of
-  // this feature, which is what will first need a deployed relay to answer
-  // /directory. Until then this file is the only place the object exists, so
-  // `pnpm dev` and the vitest pool serve it and `flue relay setup` does not
-  // (the Worker answers 503 there rather than throwing — src/index.ts).
+  // internal/relaydeploy is now level with this file on all three counts the
+  // directory needs — this binding (DirectoryBinding/DirectoryClass), the v2
+  // migration below (Migrations), and the two "/directory" entries above
+  // (RunWorkerFirst) — so `flue relay setup` and `pnpm dev` deploy the same
+  // object and the 503 the Worker answers without the binding is once again
+  // only what an older flue's relay serves. Edit both or neither, and note
+  // that the *tags* are part of the contract: Cloudflare records the tag
+  // against the deployed script, so a wrangler deploy and a flue deploy of one
+  // Worker have to name the same migration history.
   "durable_objects": {
     "bindings": [
       { "name": "HUB", "class_name": "DaemonHub" },

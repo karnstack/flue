@@ -153,6 +153,19 @@ type Server struct {
 	relayUIMu sync.Mutex
 	relayUI   RelayUI
 
+	// fleetPub is where a freshly minted certificate or revocation goes to be
+	// published to the fleet directory, injected by whoever starts the relay
+	// transport (SetFleetPublisher). Nil on a daemon with no relay, and on
+	// every daemon a test constructs, which is why every caller checks: this
+	// daemon pairs and revokes identically without one, and the local
+	// registry is the record either way.
+	fleetPubMu sync.Mutex
+	fleetPub   FleetPublisher
+	// directoryCounts reads what the directory leg last saw, for the Remote
+	// screen's status. Under the same lock as the publisher because it is the
+	// same object installed at the same moment.
+	directoryCounts func() DirectoryCounts
+
 	// release is the update checker behind ReleasePath, injected the same way
 	// and nil by default. See release.go.
 	release releaseState
@@ -1181,10 +1194,12 @@ func validDeviceID(id string) bool {
 // acceptance rule while the entry still shows on the Devices screen, and the
 // retry completes it.
 //
-// The signed blob is kept by the store (crypto.StoredRevocation) because it
-// is the same artifact the fleet directory will publish so every other
-// machine drops the key too; until that stage lands, the record is local
-// and this machine is the only one it binds.
+// The signed blob is kept by the store (crypto.StoredRevocation) and handed
+// to the fleet directory, because it is the same artifact every other machine
+// drops the key on — one revoke on any Devices screen, and the key is dead
+// fleet-wide. A daemon with no directory publisher keeps it locally and binds
+// only itself, which is the whole difference between a machine on a relay and
+// one that is not.
 func (s *Server) removeDevice(id string) (crypto.Device, bool, error) {
 	if s.identity.Devices == nil {
 		return crypto.Device{}, false, errNoDeviceRegistry
@@ -1201,8 +1216,120 @@ func (s *Server) removeDevice(id string) (crypto.Device, bool, error) {
 		if err != nil {
 			return crypto.Device{}, false, fmt.Errorf("daemon: recording the revocation: %w", err)
 		}
+		// On file locally, so now to the rest of the fleet: this is the blob
+		// every other machine drops the key on (ApplyFleetRevocation, at the
+		// far end of the directory). Published before the registry write
+		// rather than after, because the revocation is the part that must
+		// travel and the removal below can fail — a revoke that got half way
+		// should have got the *outward* half.
+		s.publishFleetBlob(blob)
 	}
 	return s.identity.Devices.Remove(id)
+}
+
+// --- the fleet directory ---
+
+// FleetPublisher publishes one signed fleet artifact — a device certificate or
+// a revocation this daemon has just minted — to the relay's fleet directory,
+// so the other machines in the fleet learn of it without being asked
+// (spec/fleet-trust.md, "The fleet directory").
+//
+// Publish must not block: its callers are the pairing ceremony and the revoke
+// op, both of which are answering a client that is waiting, and neither has
+// anywhere to put a network failure. Losing a publish is survivable by
+// construction — everything publishable is also written to disk, and the
+// implementation re-publishes what this machine holds on every reconnect — so
+// the contract is "take this and go away", not "deliver this".
+type FleetPublisher interface {
+	PublishFleetBlob(blob []byte)
+}
+
+// SetFleetPublisher installs the directory client. Nil — a daemon with no
+// relay, or any test's — means minted artifacts stay on this machine, which is
+// exactly what a machine that is not on a relay should do with them.
+func (s *Server) SetFleetPublisher(p FleetPublisher) {
+	s.fleetPubMu.Lock()
+	defer s.fleetPubMu.Unlock()
+	s.fleetPub = p
+}
+
+// publishFleetBlob hands one signed artifact to the directory, if there is one
+// to hand it to. Empty blobs are dropped here rather than at each call site: a
+// daemon with no fleet key mints nothing, and its callers should not each have
+// to remember that.
+func (s *Server) publishFleetBlob(blob []byte) {
+	if len(blob) == 0 {
+		return
+	}
+	s.fleetPubMu.Lock()
+	p := s.fleetPub
+	s.fleetPubMu.Unlock()
+	if p == nil {
+		return
+	}
+	p.PublishFleetBlob(blob)
+}
+
+// ApplyFleetRevocation is the receiving half of the fleet-wide kill switch: a
+// revocation minted on some other machine, verified under the fleet public key
+// by the transport that read it out of the directory, and now applied here.
+//
+// Three things, in this order, and the order is the same one revokeDevice
+// keeps for a locally-minted revocation:
+//
+//  1. Record the revocation. This is what makes the key dead to both
+//     acceptance paths — crypto.FindByKey for rule 1, AddFromFleetCert for
+//     rule 2 — and it is first because it is the half that must not be
+//     skipped: an entry removed without its revocation on file is not revoked
+//     at all, since the device's own fleet cert would walk it straight back in
+//     on the next handshake.
+//  2. Drop the local registry row, if this machine had one. By key rather
+//     than by id: the caller holds 32 bytes and the id is a 48-bit digest of
+//     them (crypto.RemoveByKey says what that difference is worth).
+//  3. Close the device's live channels with the reason every revoked device
+//     gets. This is the part that makes it a kill switch rather than a
+//     bookkeeping change — a socket already established is the access, and a
+//     registry nothing re-reads would not take it away.
+//
+// It is idempotent, which the push socket and the reconnect GET both require:
+// hearing the same revocation twice records nothing new, removes nothing
+// twice, and closes an empty set of connections.
+//
+// Verification is deliberately not repeated here. It belongs to the reader
+// that owns the fleet public key, and this method's contract is that it has
+// already happened — which is why the parameters are the parsed key and the
+// blob rather than a blob to be trusted.
+func (s *Server) ApplyFleetRevocation(deviceKey, blob []byte) error {
+	if s.identity.Devices == nil {
+		return errNoDeviceRegistry
+	}
+	if err := s.identity.Devices.AddRevocation(deviceKey, blob); err != nil {
+		return fmt.Errorf("daemon: recording a fleet revocation: %w", err)
+	}
+	dev, removed, err := s.identity.Devices.RemoveByKey(deviceKey)
+	if err != nil {
+		// The revocation is on file, so the key is already refused everywhere
+		// it matters; what failed is the Devices screen catching up. Reported
+		// so the caller logs it, and the next delivery of this revocation —
+		// the reconnect GET, if nothing else — completes it.
+		return fmt.Errorf("daemon: dropping a revoked device from the registry: %w", err)
+	}
+	// Keyed by the id the connection registry is keyed by, which is the digest
+	// of the same key the handshake proved (channel.go).
+	id := crypto.DeviceID(deviceKey)
+	closed := s.disconnectDevice(id, "revoked")
+	if !removed && closed == 0 {
+		// A revocation for a device this machine never paired and is not
+		// carrying. Recorded and nothing else — which is the common case in a
+		// fleet, and must stay silent enough not to drown the log on the
+		// reconnect that re-reads the whole directory.
+		return nil
+	}
+	s.logger().Info("device revoked by the fleet",
+		"device", id, "label", dev.Label, "unpaired", removed, "connections", closed)
+	// The Devices screen is showing a row that no longer exists.
+	s.broadcastDeviceList()
+	return nil
 }
 
 // disconnectDevice tells every connection belonging to deviceID why it is

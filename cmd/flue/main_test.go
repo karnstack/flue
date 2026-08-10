@@ -1297,15 +1297,26 @@ func TestStatusReportsAConfiguredRelayWithoutItsSecret(t *testing.T) {
 func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	var attempts atomic.Int64
-	var auth, path atomic.Value
+	// Both legs dial the same host, so what is recorded is per path: the hub
+	// leg at /daemon/<id> and the fleet directory at /directory. Recording a
+	// single "last dial" would be a race between two goroutines that both
+	// start here.
+	var mu sync.Mutex
+	dialed := map[string]string{} // path -> Authorization
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth.Store(r.Header.Get("Authorization"))
-		path.Store(r.URL.Path)
-		attempts.Add(1)
+		mu.Lock()
+		dialed[r.URL.Path] = r.Header.Get("Authorization")
+		mu.Unlock()
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}))
 	defer ts.Close()
+
+	sawDial := func(path string) (string, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		auth, ok := dialed[path]
+		return auth, ok
+	}
 
 	const secret = "s3cr3t-daemon-secret"
 	if err := config.SaveRelay(config.Relay{
@@ -1336,20 +1347,26 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 	defer cancel()
 	startRelay(ctx, srv, id)
 
-	deadline := time.Now().Add(3 * time.Second)
-	for attempts.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the daemon never dialled the configured relay")
+	// One relay.json, two legs: the hub the browsers arrive on, and the fleet
+	// directory the revocations arrive on. The machine id from relay.json
+	// rides the hub path — it is how the Worker knows which machine's hub this
+	// socket is — and the directory has no id in its path at all, because one
+	// relay is one fleet.
+	for _, want := range []string{"/daemon/karns-macbook-pro-a1b2-0f9a12cd", "/directory"} {
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			auth, ok := sawDial(want)
+			if ok {
+				if auth != "Bearer "+secret {
+					t.Errorf("Authorization on %s = %q, want %q", want, auth, "Bearer "+secret)
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the daemon never dialled %s", want)
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got, want := auth.Load().(string), "Bearer "+secret; got != want {
-		t.Errorf("Authorization = %q, want %q", got, want)
-	}
-	// The machine id from relay.json rides the dial path — it is how the
-	// Worker knows which machine's hub this socket is.
-	if got, want := path.Load().(string), "/daemon/karns-macbook-pro-a1b2-0f9a12cd"; got != want {
-		t.Errorf("dial path = %q, want %q", got, want)
 	}
 }
 

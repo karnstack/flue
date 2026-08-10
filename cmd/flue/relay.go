@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -18,6 +21,7 @@ import (
 
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaydeploy"
@@ -298,6 +302,17 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 	machineID := config.MintMachineID(hostname, secret, rand.Reader)
 	machineName := truncateRunes(hostname, machineNameMaxRunes)
 
+	// The machine's own certificate, signed under the fleet key just minted:
+	// what the daemon publishes to the relay's fleet directory so every
+	// browser in the fleet can reach this machine without pairing to it
+	// (spec/fleet-trust.md, "The fleet directory"). Not fatal — a relay whose
+	// machines cannot be discovered still carries every device paired
+	// directly to them — and the line says which half is missing.
+	machineCert, err := mintMachineCert(fleetKey, machineID, machineName)
+	if err != nil {
+		fmt.Fprintf(w, "  could not mint this machine's fleet certificate (%v); other devices will not discover this machine\n", err)
+	}
+
 	// Last, deliberately. relay.json is what makes the daemon dial, and every
 	// step above can fail; writing it earlier would leave a daemon dialling a
 	// relay that was never finished. Re-running setup is the fix for anything
@@ -316,6 +331,7 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 		Origin:      origin,
 		MachineID:   machineID,
 		MachineName: machineName,
+		MachineCert: machineCert,
 		Worker:      worker,
 	}); err != nil {
 		return fmt.Errorf("save the relay configuration: %w", err)
@@ -352,6 +368,47 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 // humans — never part of a URL — so the only limit it needs is one that keeps
 // a machine list rendering as a list.
 const machineNameMaxRunes = 64
+
+// mintMachineCert signs this machine's fleet machine certificate: the id it
+// holds on the relay, its display name, and the Noise static key every device
+// that reaches it must pin (spec/fleet-trust.md, Certificates).
+//
+// It is minted here — in the three commands that write relay.json — rather
+// than by the daemon, and the reason is the directory's shape rather than
+// convenience. The relay stores blobs by the hash of their own bytes, so a
+// cert re-minted at each start would carry a fresh `iat`, land under a fresh
+// key, and spend one of the directory's 512 entries every time the daemon
+// restarted. Minting it exactly where the facts it asserts are decided means
+// one blob, for the life of this machine's place on this relay.
+//
+// It reads (and, on a machine that has never served, creates) the daemon's
+// static key, which is the same key `flue serve` would load a moment later:
+// the cert has to name the key devices will actually meet, and a cert naming a
+// key that did not exist yet would be a browser pinning nothing.
+//
+// A failure is returned, not swallowed. Every caller treats it as "this
+// machine joins without a machine cert" and says so — the honest half of a
+// half-configured relay, exactly as `flue relay setup` already treats a fleet
+// key it cannot mint.
+func mintMachineCert(key fleet.Key, machineID, machineName string) ([]byte, error) {
+	if !key.Valid() {
+		return nil, fleet.ErrNoKey
+	}
+	dir, err := config.Dir()
+	if err != nil {
+		return nil, fmt.Errorf("locate the config directory: %w", err)
+	}
+	static, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		return nil, fmt.Errorf("load the daemon static key: %w", err)
+	}
+	return key.Sign(fleet.MachineCert{
+		ID:    machineID,
+		Name:  machineName,
+		Noise: static.Public,
+		IAT:   time.Now().Unix(),
+	})
+}
 
 const relayJoinUsage = "usage: flue relay join <url> --secret <secret> --fleet <fleet key> [--name <label>]"
 
@@ -435,6 +492,17 @@ func runRelayJoin(w io.Writer, args []string) error {
 	// the daemon leg's 401 reports, found one dial later.
 	machineID := config.MintMachineID(hostname, *secret, rand.Reader)
 
+	// This machine's certificate under the fleet key that arrived on the join
+	// line — the artifact the daemon publishes so the fleet's browsers can
+	// find this machine at all (spec/fleet-trust.md, "New machine"). Its
+	// absence costs discovery and nothing else, so it is reported rather than
+	// fatal: a join that stopped here would leave a machine with no relay
+	// config over a convenience.
+	machineCert, err := mintMachineCert(fleetKey, machineID, machineName)
+	if err != nil {
+		fmt.Fprintf(w, "  could not mint this machine's fleet certificate (%v); other devices will not discover this machine\n", err)
+	}
+
 	// The same shape setup writes, derived the same way: bare wss:// URL, the
 	// https origin on the same host. SaveRelay is 0600 — the file holds the
 	// relay's whole credential, the fleet key now included. The seed is
@@ -448,6 +516,7 @@ func runRelayJoin(w io.Writer, args []string) error {
 		Origin:      "https://" + host,
 		MachineID:   machineID,
 		MachineName: machineName,
+		MachineCert: machineCert,
 	}); err != nil {
 		return fmt.Errorf("save the relay configuration: %w", err)
 	}
@@ -498,11 +567,176 @@ func truncateRunes(s string, n int) string {
 	return string(runes[:n])
 }
 
-// runRelayStatus prints what is configured, which is the same line flue status
-// carries — one answer, one place it is decided.
+// runRelayStatus prints what is configured — the same line `flue status`
+// carries, one answer decided in one place — and then asks the relay itself
+// about the fleet directory.
+//
+// The second line is why this command exists separately from `flue status`.
+// relayLine reports a file on disk and says so; the directory is the one part
+// of a fleet whose health cannot be read from any local file, and it is
+// readable from here without the daemon's help because `GET /directory` needs
+// no credential and its contents are signed. So a user asking "is my fleet
+// actually wired up" gets an answer that came from the relay, in a command
+// they ran on purpose — while `flue status`, which is printed on every
+// enable/disable and reads no network, stays local.
 func runRelayStatus(w io.Writer) error {
 	fmt.Fprintln(w, relayLine())
+	rc, ok, err := config.LoadRelay()
+	if err != nil || !ok {
+		// relayLine already said which of the two this is, in its own words.
+		return nil
+	}
+	fmt.Fprintln(w, directoryLine(rc))
 	return nil
+}
+
+// directoryLine is what the relay's fleet directory says about this fleet,
+// read live and verified locally.
+//
+// Verified is the number that means something. The relay hands out whatever it
+// is holding, so "entries" is the relay's claim; what a fleet key can check is
+// how many of those blobs it signed, and the breakdown after it is the fleet
+// as this machine's own key can prove it: machines, devices, revocations. A
+// gap between the two numbers is worth seeing — it is a rotated fleet key, or
+// a relay that is not the one this machine thinks it is.
+func directoryLine(rc config.Relay) string {
+	if rc.FleetSeed == "" {
+		// relayLine already names this as the fault that stops the daemon
+		// dialling at all; there is nothing this line could verify.
+		return "fleet:    unknown (this relay.json carries no fleet key)"
+	}
+	key, err := fleet.Parse(rc.FleetSeed)
+	if err != nil {
+		return "fleet:    unknown (the fleet key in relay.json cannot be parsed)"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), relayStepTimeout)
+	defer cancel()
+	counts, err := fetchDirectory(ctx, rc, key.Public())
+	if err != nil {
+		// Named without the URL: relayLine printed it one line up.
+		return fmt.Sprintf("fleet:    unreachable (%v)", err)
+	}
+	line := fmt.Sprintf("fleet:    %s, %d verified under this fleet key",
+		plural(counts.Entries, "entry", "entries"), counts.Verified)
+	line += fmt.Sprintf(" (%s, %s, %s)",
+		plural(counts.Machines, "machine", "machines"),
+		plural(counts.Devices, "device", "devices"),
+		plural(counts.Revocations, "revocation", "revocations"))
+	if counts.Entries != counts.Verified {
+		line += fmt.Sprintf("\n          %s signed by something else; this relay may belong to another fleet",
+			plural(counts.Entries-counts.Verified, "entry is", "entries are"))
+	}
+	if counts.MachineListed {
+		return line
+	}
+	return line + "\n          this machine is not in the directory: other devices will not discover it"
+}
+
+// plural is the one-or-many spelling of a count. The status report is prose a
+// person reads, and "1 machines" is the kind of thing that makes a tool look
+// like it is guessing.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, one)
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+// directoryCounts is what one read of the directory found.
+type directoryCounts struct {
+	Entries     int
+	Verified    int
+	Machines    int
+	Devices     int
+	Revocations int
+	// MachineListed is whether one of the verified machine certs names this
+	// machine's id — the difference between "the fleet is fine" and "the fleet
+	// is fine and cannot see me".
+	MachineListed bool
+}
+
+// fetchDirectory reads `GET /directory` and verifies every entry under pub.
+//
+// It presents the daemon secret even though the route is credential-less, for
+// the reason the daemon's own reader does: the Worker meters exactly the
+// callers that present none, and that budget exists for browsers.
+func fetchDirectory(ctx context.Context, rc config.Relay, pub ed25519.PublicKey) (directoryCounts, error) {
+	var out directoryCounts
+	url := directoryURL(rc.URL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return out, err
+	}
+	if rc.Secret != "" {
+		req.Header.Set("Authorization", "Bearer "+rc.Secret)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			// The Worker's own answer for a deploy that predates the directory
+			// binding (relay/src/index.ts). Naming it is worth a sentence: the
+			// fix is `flue relay update`, not anything about this machine.
+			return out, errors.New("this relay has no directory; run `flue relay update` to redeploy it")
+		}
+		return out, fmt.Errorf("the relay answered HTTP %d", resp.StatusCode)
+	}
+	var doc struct {
+		Entries []struct {
+			Blob []byte `json:"blob"`
+		} `json:"entries"`
+	}
+	// The same ceiling the daemon reads under: a status command must not be an
+	// unbounded read from a machine on the internet either.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxDirectoryRead)).Decode(&doc); err != nil {
+		return out, errors.New("the relay answered something that is not a directory")
+	}
+	out.Entries = len(doc.Entries)
+	for _, e := range doc.Entries {
+		cert, err := fleet.Verify(pub, e.Blob)
+		if err != nil {
+			continue
+		}
+		out.Verified++
+		switch c := cert.(type) {
+		case fleet.MachineCert:
+			out.Machines++
+			if c.ID == rc.MachineID {
+				out.MachineListed = true
+			}
+		case fleet.DeviceCert:
+			out.Devices++
+		case fleet.Revocation:
+			out.Revocations++
+		}
+	}
+	return out, nil
+}
+
+// maxDirectoryRead bounds the body this command will parse: the directory's
+// own ceiling (512 entries of 4 KiB) in base64, with room to spare.
+const maxDirectoryRead = 4 << 20
+
+// directoryURL is `/directory` on the host relay.json dials, as HTTP.
+//
+// Derived from the socket URL rather than from Origin, the same way the
+// daemon's own directory leg derives it: the directory to ask about a fleet is
+// the one attached to the relay this machine dials, and a half-edited
+// relay.json should not be able to send the question somewhere else. ws is
+// handled beside wss because a local relay under `pnpm dev` is spelled that
+// way.
+func directoryURL(relayURL string) string {
+	base := strings.TrimRight(relayURL, "/")
+	switch {
+	case strings.HasPrefix(base, "wss://"):
+		base = "https://" + strings.TrimPrefix(base, "wss://")
+	case strings.HasPrefix(base, "ws://"):
+		base = "http://" + strings.TrimPrefix(base, "ws://")
+	}
+	return base + "/directory"
 }
 
 const relayUpdateUsage = "usage: flue relay update [--worker <name>]"

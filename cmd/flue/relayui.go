@@ -355,6 +355,12 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 	}
 	machineID := config.MintMachineID(hostname, secret, rand.Reader)
 	machineName := truncateRunes(hostname, machineNameMaxRunes)
+	// And this machine's own certificate under it, for the same reason
+	// runRelaySetup mints one: the fleet directory is how the browsers in this
+	// fleet learn that this machine exists, and a machine with no cert is a
+	// machine only the devices paired directly to it can reach. A failure is a
+	// step line, not a failed deploy.
+	machineCert, certErr := mintMachineCert(fleetKey, machineID, machineName)
 	if err := config.SaveRelay(config.Relay{
 		URL:         "wss://" + host,
 		Secret:      secret,
@@ -362,12 +368,16 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 		Origin:      "https://" + host,
 		MachineID:   machineID,
 		MachineName: machineName,
+		MachineCert: machineCert,
 		Worker:      worker,
 	}); err != nil {
 		return daemon.RelayUIDeployResult{}, fmt.Errorf("save the relay configuration: %w", err)
 	}
 	steps = append(steps, "fleet key minted (stays on your machines; Cloudflare never sees it)")
 	steps = append(steps, fmt.Sprintf("this machine joined as %s (%s)", machineName, machineID))
+	if certErr != nil {
+		steps = append(steps, "could not mint this machine's fleet certificate ("+certErr.Error()+"); other devices will not discover this machine")
+	}
 	// Said out loud because the transport this deploy is about to start does
 	// not cover it. daemon.Identity is fixed at construction, so the fleet key
 	// this process signs with is whatever relay.json held when it booted —

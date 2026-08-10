@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/karnstack/flue/internal/crypto"
+	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/wire"
@@ -3302,5 +3305,289 @@ func TestRelayUIJoinEndpoint(t *testing.T) {
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Fatalf("unconfigured GET join = %d, want 404", resp2.StatusCode)
+	}
+}
+
+// --- the fleet directory's half of revocation -------------------------------
+
+// TestApplyFleetRevocationIsTheFleetWideKillSwitch is the receiving end of a
+// revoke performed on another machine: the operator pressed the button on
+// machine A, machine A published the signed revocation, and this — machine B,
+// which never paired the device and was never asked — is what the directory
+// leg does with it.
+//
+// All three halves are asserted together because any one of them alone is not
+// a revocation. Recording it without dropping the row leaves the device on the
+// Devices screen; dropping the row without recording it lets the device's own
+// fleet cert walk it straight back in on the next handshake
+// (AddFromFleetCert); and doing both without closing the channels leaves the
+// revoked device holding a live, shell-spawning socket — the entry in a
+// registry nothing re-reads is not the access, the socket is.
+func TestApplyFleetRevocationIsTheFleetWideKillSwitch(t *testing.T) {
+	ts, srv := newPairServer(t)
+	buf := &syncBuffer{}
+	srv.SetLogger(slog.New(slog.NewTextHandler(buf, nil)))
+
+	phone := addDevice(t, srv, "phone", 0x2a)
+	laptop := addDevice(t, srv, "laptop", 0x3b)
+
+	device := dial(t, ts)
+	writeControl(t, device, wire.Hello{Ver: "test"})
+	readUntil(t, device, func(msg any, _ []byte) bool { _, ok := msg.(wire.Welcome); return ok })
+	srv.registerDeviceConn(phone.ID, serverConns(t, srv, 1)[0])
+
+	ui := dial(t, ts)
+	writeControl(t, ui, wire.Hello{Ver: "test"})
+	readUntil(t, ui, func(msg any, _ []byte) bool { _, ok := msg.(wire.Welcome); return ok })
+
+	// The blob is opaque here: verifying it is the caller's job, done under
+	// the fleet public key before this method is ever reached.
+	if err := srv.ApplyFleetRevocation(deviceKey(0x2a), []byte("signed-elsewhere")); err != nil {
+		t.Fatalf("ApplyFleetRevocation: %v", err)
+	}
+
+	// Told why, and then cut off.
+	readUntil(t, device, func(msg any, _ []byte) bool {
+		r, ok := msg.(wire.Revoked)
+		if ok && r.Reason != "revoked" {
+			t.Fatalf("revoked reason = %q, want %q", r.Reason, "revoked")
+		}
+		return ok
+	})
+	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rcancel()
+	for {
+		if _, _, err := device.Read(rctx); err != nil {
+			if rctx.Err() != nil {
+				t.Fatal("the revoked device's connection outlived a fleet revocation")
+			}
+			break
+		}
+	}
+
+	// Gone from the registry, and every remaining screen told so.
+	readUntil(t, ui, func(msg any, _ []byte) bool {
+		l, ok := msg.(wire.DeviceList)
+		if !ok {
+			return false
+		}
+		if len(l.Devices) != 1 || l.Devices[0].ID != laptop.ID {
+			t.Fatalf("deviceList = %+v, want just the laptop %s", l.Devices, laptop.ID)
+		}
+		return true
+	})
+	if list := devices(t, srv); len(list) != 1 || list[0].ID != laptop.ID {
+		t.Fatalf("registry = %+v after a fleet revocation, want just the laptop", list)
+	}
+
+	// And on the revocation list, which is the half that makes it stick: the
+	// device's own fleet cert must not be able to re-admit it.
+	revoked, err := srv.identity.Devices.IsRevoked(deviceKey(0x2a))
+	if err != nil || !revoked {
+		t.Fatalf("IsRevoked = %v, %v after a fleet revocation, want true", revoked, err)
+	}
+	if _, err := srv.identity.Devices.AddFromFleetCert("phone", deviceKey(0x2a), nil, time.Now()); !errors.Is(err, crypto.ErrDeviceRevoked) {
+		t.Fatalf("AddFromFleetCert after a fleet revocation = %v, want ErrDeviceRevoked", err)
+	}
+	waitForLog(t, buf, "device revoked by the fleet")
+}
+
+// TestApplyFleetRevocationIsIdempotent: the same revocation arrives on the
+// push socket and again in the snapshot of every reconnect, forever. Applying
+// it twice must be a no-op rather than an error, and must not broadcast a
+// device list on every delivery.
+func TestApplyFleetRevocationIsIdempotent(t *testing.T) {
+	_, srv := newPairServer(t)
+	addDevice(t, srv, "phone", 0x2a)
+
+	for i := 0; i < 3; i++ {
+		if err := srv.ApplyFleetRevocation(deviceKey(0x2a), []byte("signed-elsewhere")); err != nil {
+			t.Fatalf("ApplyFleetRevocation #%d: %v", i+1, err)
+		}
+	}
+	if list := devices(t, srv); len(list) != 0 {
+		t.Fatalf("registry = %+v after three deliveries of one revocation, want empty", list)
+	}
+	revs, err := srv.identity.Devices.Revocations()
+	if err != nil {
+		t.Fatalf("Revocations: %v", err)
+	}
+	if len(revs) != 1 {
+		t.Fatalf("revocation list = %d entries after three deliveries, want 1", len(revs))
+	}
+}
+
+// TestApplyFleetRevocationRecordsADeviceThisMachineNeverPaired: the common
+// case in a fleet. Nothing to unpair and nothing to disconnect, and the
+// recording still has to happen — it is what refuses the key when that device
+// eventually presents its cert to *this* machine.
+func TestApplyFleetRevocationRecordsADeviceThisMachineNeverPaired(t *testing.T) {
+	_, srv := newPairServer(t)
+	stranger := deviceKey(0x7c)
+
+	if err := srv.ApplyFleetRevocation(stranger, []byte("signed-elsewhere")); err != nil {
+		t.Fatalf("ApplyFleetRevocation: %v", err)
+	}
+	revoked, err := srv.identity.Devices.IsRevoked(stranger)
+	if err != nil || !revoked {
+		t.Fatalf("IsRevoked = %v, %v, want true", revoked, err)
+	}
+}
+
+// TestApplyFleetRevocationNeedsARegistry: a daemon constructed without an
+// identity has nowhere to record a revocation, and reporting success would
+// tell the directory leg that a key is dead when nothing on this machine
+// believes it.
+func TestApplyFleetRevocationNeedsARegistry(t *testing.T) {
+	srv := New(session.NewRegistry(time.Now), nil, nil, "test", Identity{})
+	t.Cleanup(srv.Shutdown)
+	if err := srv.ApplyFleetRevocation(deviceKey(0x01), []byte("blob")); !errors.Is(err, errNoDeviceRegistry) {
+		t.Fatalf("ApplyFleetRevocation on an identity-less daemon = %v, want errNoDeviceRegistry", err)
+	}
+}
+
+// TestPairingPublishesTheDeviceCertToTheFleet: the ceremony's cert is what
+// lets the device open a sibling machine without a second ceremony, and it
+// only gets there if the ceremony hands it to the directory. The publisher is
+// the seam the relay's directory leg sits behind.
+func TestPairingPublishesTheDeviceCertToTheFleet(t *testing.T) {
+	ts, srv := newPairServer(t)
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.identity.Fleet = fk
+	srv.SetRelayMachine("sibling-mac-a1b2-0f9a12cd", "sibling")
+	pub := &recordingPublisher{}
+	srv.SetFleetPublisher(pub)
+
+	token, _ := srv.pairing.start(time.Now())
+	key := deviceKey(0x5e)
+	body, err := json.Marshal(map[string]string{
+		"token":     token,
+		"publicKey": base64.StdEncoding.EncodeToString(key),
+		"label":     "phone",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := srv.PairDevice(body, "test"); out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d, want 200", out.Status)
+	}
+	_ = ts
+
+	blobs := pub.blobs()
+	if len(blobs) != 1 {
+		t.Fatalf("published %d artifacts on a pairing, want 1", len(blobs))
+	}
+	cert, err := fleet.VerifyDevice(fk.Public(), blobs[0])
+	if err != nil {
+		t.Fatalf("the published artifact is not a device cert under the fleet key: %v", err)
+	}
+	if !bytes.Equal(cert.Device, key) {
+		t.Errorf("published a cert for %x, want the device just paired %x", cert.Device, key)
+	}
+}
+
+// TestRevokePublishesTheRevocationToTheFleet: the outward half of the kill
+// switch. A revoke that stayed local would leave every other machine in the
+// fleet still admitting the device on its cert.
+func TestRevokePublishesTheRevocationToTheFleet(t *testing.T) {
+	_, srv := newPairServer(t)
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.identity.Fleet = fk
+	pub := &recordingPublisher{}
+	srv.SetFleetPublisher(pub)
+	phone := addDevice(t, srv, "phone", 0x2a)
+
+	if _, ok, err := srv.removeDevice(phone.ID); err != nil || !ok {
+		t.Fatalf("removeDevice = %v, %v", ok, err)
+	}
+	blobs := pub.blobs()
+	if len(blobs) != 1 {
+		t.Fatalf("published %d artifacts on a revoke, want 1", len(blobs))
+	}
+	cert, err := fleet.Verify(fk.Public(), blobs[0])
+	if err != nil {
+		t.Fatalf("the published artifact does not verify under the fleet key: %v", err)
+	}
+	rev, ok := cert.(fleet.Revocation)
+	if !ok {
+		t.Fatalf("published a %s certificate on a revoke", cert.Kind())
+	}
+	if !bytes.Equal(rev.Device, deviceKey(0x2a)) {
+		t.Errorf("published a revocation for %x, want the device revoked %x", rev.Device, deviceKey(0x2a))
+	}
+}
+
+// recordingPublisher stands in for the relay's directory leg.
+type recordingPublisher struct {
+	mu  sync.Mutex
+	got [][]byte
+}
+
+func (p *recordingPublisher) PublishFleetBlob(blob []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.got = append(p.got, append([]byte(nil), blob...))
+}
+
+func (p *recordingPublisher) blobs() [][]byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([][]byte(nil), p.got...)
+}
+
+// TestRelayInfoCarriesTheFleetDirectory: the Remote screen's other half of "is
+// my fleet wired up". Transport says this machine can be reached; the
+// directory says it can hear what the other machines have signed, which is
+// what a revocation travels on — a relay leg that is up while the directory is
+// down looks perfectly healthy and silently ignores every revoke performed
+// anywhere else.
+func TestRelayInfoCarriesTheFleetDirectory(t *testing.T) {
+	ts, srv := newPairServer(t)
+	srv.SetRelayUI(&stubRelayUI{})
+
+	read := func() RelayUIStatus {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, ts.URL+RelayInfoPath, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET info: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET info = %d, want 200", resp.StatusCode)
+		}
+		var st RelayUIStatus
+		if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+			t.Fatalf("decoding info: %v", err)
+		}
+		return st
+	}
+
+	// A daemon with no directory leg reports no directory at all, rather than
+	// an object full of zeroes that reads as "a fleet with nothing in it".
+	if st := read(); st.Directory != nil {
+		t.Fatalf("directory = %+v on a daemon with no directory leg, want nil", st.Directory)
+	}
+
+	srv.SetDirectoryCounts(func() DirectoryCounts {
+		return DirectoryCounts{Connected: true, Entries: 5, Verified: 4, Machines: 2, Devices: 1, Revocations: 1}
+	})
+	st := read()
+	if st.Directory == nil {
+		t.Fatal("directory = nil after the leg reported, want the counts")
+	}
+	if *st.Directory != (DirectoryCounts{Connected: true, Entries: 5, Verified: 4, Machines: 2, Devices: 1, Revocations: 1}) {
+		t.Errorf("directory = %+v, want what the leg reported", *st.Directory)
 	}
 }

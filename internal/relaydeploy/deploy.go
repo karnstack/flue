@@ -37,6 +37,16 @@ const (
 	DOBinding         = "HUB"
 	AssetsBinding     = "ASSETS"
 
+	// DirectoryClass and DirectoryBinding are the fleet directory: one Durable
+	// Object for the whole relay rather than one per machine, because one relay
+	// is one fleet (spec/fleet-trust.md, "The fleet directory"). Without the
+	// binding the Worker answers /directory with 503 by design
+	// (relay/src/index.ts) — a relay that serves every session and no
+	// directory — which is exactly what `flue relay setup` deployed between
+	// the Worker landing and this line.
+	DirectoryClass   = "FleetDirectory"
+	DirectoryBinding = "DIRECTORY"
+
 	// SecretName is the Worker secret the daemon authenticates its outbound
 	// leg with (relay/src/index.ts, authorizeDaemon).
 	SecretName = "DAEMON_SECRET"
@@ -94,11 +104,33 @@ func ValidWorkerName(name string) error {
 }
 
 // RunWorkerFirst are the paths the Worker handles itself rather than letting
-// the asset router answer from the bundle: the two WebSocket legs and the
-// pairing API. The bare entries matter alongside the globs — "/daemon/*"
-// alone would let the asset router answer a bare /daemon with the SPA before
-// the Worker's "no such machine" could.
-var RunWorkerFirst = []string{"/daemon", "/daemon/*", "/client", "/client/*", "/api/*"}
+// the asset router answer from the bundle: the two WebSocket legs, the pairing
+// API and the fleet directory. The bare entries matter alongside the globs —
+// "/daemon/*" alone would let the asset router answer a bare /daemon with the
+// SPA before the Worker's "no such machine" could, and on /directory the bare
+// path *is* the route while the starred form is the Worker's own 404.
+//
+// Twinned with `assets.run_worker_first` in relay/wrangler.jsonc; edit both or
+// neither.
+var RunWorkerFirst = []string{"/daemon", "/daemon/*", "/client", "/client/*", "/api/*", "/directory", "/directory/*"}
+
+// Migrations is the Durable Object migration history this relay carries, and
+// the twin of `migrations` in relay/wrangler.jsonc — tags included, because
+// the tag is what Cloudflare records against the deployed script and a
+// wrangler deploy and a `flue relay setup` of the same Worker have to agree on
+// it.
+//
+// v2 is its own step rather than an extra class on v1, and that is not a style
+// choice: v1 is already applied on every relay deployed before this build, and
+// a migration's contents cannot be edited after the fact — Cloudflare records
+// that the script is at v1 and would apply nothing further. A new class needs a
+// new tag. The whole list is sent on every deploy and the client applies only
+// the part the account has not reached (internal/cloudflare, pendingMigrations),
+// so a fresh account runs both steps and an existing relay runs only v2.
+var Migrations = []cloudflare.Migration{
+	{Tag: "v1", NewSQLiteClasses: []string{DOClass}},
+	{Tag: "v2", NewSQLiteClasses: []string{DirectoryClass}},
+}
 
 // Input is one deploy's worth of decisions, all made by the caller.
 type Input struct {
@@ -154,14 +186,15 @@ func Deploy(in Input) error {
 			ScriptName:        in.Worker,
 			Module:            in.Module,
 			CompatibilityDate: CompatibilityDate,
-			// Sent on every run, including re-runs of an account that already
-			// has the class. Cloudflare refuses a migration it has already
-			// applied and the client recovers from exactly that (see Deploy);
-			// the alternative — asking the account what it has already
-			// migrated — is a request that can only tell us something we can
-			// handle without asking.
-			NewSQLiteClasses:     []string{DOClass},
-			DOBindings:           map[string]string{DOBinding: DOClass},
+			// The whole history, every run. The client reads the tag the
+			// account's copy of the script carries and sends only the steps
+			// behind it, which is the one thing that makes an existing v1
+			// relay able to take v2's FleetDirectory: a client that could only
+			// say "introduce these classes" would have its migration refused
+			// on the tag precondition and then upload a script binding a class
+			// that was never created.
+			Migrations:           Migrations,
+			DOBindings:           map[string]string{DOBinding: DOClass, DirectoryBinding: DirectoryClass},
 			Assets:               in.Assets,
 			AssetsRunWorkerFirst: RunWorkerFirst,
 			// Without this the relay serves the same bundle the daemon does,

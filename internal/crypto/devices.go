@@ -204,6 +204,37 @@ func (s *DeviceStore) AddFromFleetCert(label string, publicKey, cert []byte, pai
 	return d, nil
 }
 
+// RemoveByKey unpairs whichever device holds publicKey, reporting whether
+// there was one. Missing is not an error: it is the ordinary answer for a
+// revocation that arrived from the fleet directory naming a device this
+// machine never paired, and for the second delivery of one it did.
+//
+// By key rather than by id, unlike Remove, because its caller holds the key
+// and the id is a 48-bit digest of it (DeviceID). Removing by id would let a
+// key ground out to collide with a paired device's digest unpair that device
+// — the mirror of the attack FindByKey's byte comparison exists to refuse —
+// and here the attacker's blob has already been checked for a fleet signature,
+// so the only thing standing between a hostile *fleet member* and unpairing
+// someone else's device is this comparison being on the bytes.
+func (s *DeviceStore) RemoveByKey(publicKey []byte) (Device, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	devices, err := s.load()
+	if err != nil {
+		return Device{}, false, err
+	}
+	for i, d := range devices {
+		if !bytes.Equal(d.PublicKey, publicKey) {
+			continue
+		}
+		if err := s.save(slices.Delete(devices, i, i+1)); err != nil {
+			return Device{}, false, err
+		}
+		return d, true, nil
+	}
+	return Device{}, false, nil
+}
+
 func (s *DeviceStore) Remove(id string) (Device, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

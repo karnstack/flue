@@ -43,14 +43,17 @@ const (
 // to reproduce over the REST API.
 func deployFixture() DeployInput {
 	return DeployInput{
-		AccountID:            "acct-123",
-		ScriptName:           "flue-relay",
-		Module:               []byte("export default { fetch() {} };\n"),
-		CompatibilityDate:    "2026-08-01",
-		NewSQLiteClasses:     []string{"DaemonHub"},
-		DOBindings:           map[string]string{"HUB": "DaemonHub"},
+		AccountID:         "acct-123",
+		ScriptName:        "flue-relay",
+		Module:            []byte("export default { fetch() {} };\n"),
+		CompatibilityDate: "2026-08-01",
+		Migrations: []Migration{
+			{Tag: "v1", NewSQLiteClasses: []string{"DaemonHub"}},
+			{Tag: "v2", NewSQLiteClasses: []string{"FleetDirectory"}},
+		},
+		DOBindings:           map[string]string{"HUB": "DaemonHub", "DIRECTORY": "FleetDirectory"},
 		Assets:               []Asset{assetHTML, assetJS, assetCSS},
-		AssetsRunWorkerFirst: []string{"/daemon", "/client", "/api/*"},
+		AssetsRunWorkerFirst: []string{"/daemon", "/client", "/api/*", "/directory", "/directory/*"},
 		AssetHeaders:         "/*\n  X-Fixture: yes\n",
 		AssetsBinding:        "ASSETS",
 		RateLimits:           []RateLimit{{Name: "CLIENT_RATE", NamespaceID: "1001", Limit: 300, Period: 60}},
@@ -77,9 +80,28 @@ type fixture struct {
 	t   *testing.T
 	srv *httptest.Server
 
+	// deployedTag is the migration tag this account's copy of the script
+	// carries, answered on the script-list endpoint Deploy reads it from
+	// (deployedMigrationTag). Empty is the honest default: an account with no
+	// script yet. Tests that model a relay already deployed set it before
+	// calling Deploy.
+	//
+	// It is answered by the fixture itself rather than by each test's handler
+	// because it is a pre-flight read every deploy makes, and thirty handlers
+	// each restating "and this is the script list" would be thirty chances to
+	// state it differently. The request is still recorded, so a test can
+	// assert that the read happened and what it asked for.
+	deployedTag string
+	// noScriptList makes the endpoint 404 through the test's own handler
+	// instead, which is how "the lookup failed" is staged.
+	noScriptList bool
+
 	mu   sync.Mutex
 	reqs []recorded
 }
+
+// scriptListPath is the endpoint Deploy reads the deployed migration tag from.
+const scriptListPath = "/accounts/acct-123/workers/scripts"
 
 func newFixture(t *testing.T, h func(w http.ResponseWriter, r *http.Request, body []byte)) *fixture {
 	t.Helper()
@@ -102,10 +124,30 @@ func newFixture(t *testing.T, h func(w http.ResponseWriter, r *http.Request, bod
 			Header:      r.Header.Clone(),
 		})
 		f.mu.Unlock()
+		if r.Method == http.MethodGet && r.URL.Path == scriptListPath && !f.noScriptList {
+			f.writeScriptList(w)
+			return
+		}
 		h(w, r, body)
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// writeScriptList answers the account's script list the way Cloudflare does:
+// one entry per script, carrying its id and its migration tag. An empty
+// deployedTag answers an empty account, which is a first deploy.
+func (f *fixture) writeScriptList(w http.ResponseWriter) {
+	if f.deployedTag == "" {
+		writeEnvelope(f.t, w, http.StatusOK, []any{})
+		return
+	}
+	writeEnvelope(f.t, w, http.StatusOK, []any{
+		// A neighbouring script, so "find the entry whose id matches" is
+		// tested rather than "take the first one".
+		map[string]any{"id": "someone-elses-worker", "migration_tag": "v9"},
+		map[string]any{"id": "flue-relay", "migration_tag": f.deployedTag},
+	})
 }
 
 func (f *fixture) client() *Client {
@@ -154,6 +196,23 @@ func writeEnvelope(t *testing.T, w http.ResponseWriter, status int, result any) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	fmt.Fprintf(w, `{"success":true,"errors":[],"messages":[],"result":%s}`, raw)
+}
+
+// scriptPut is the one script upload a deploy made, found by method rather
+// than by position: the requests around it (the migration-tag read, the asset
+// session, the buckets) come and go with the input.
+func scriptPut(t *testing.T, f *fixture) recorded {
+	t.Helper()
+	var found []recorded
+	for _, r := range f.requests() {
+		if r.Method == http.MethodPut {
+			found = append(found, r)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("got %d script PUTs, want 1: %s", len(found), f.paths())
+	}
+	return found[0]
 }
 
 // writeAPIError writes a Cloudflare failure envelope.
@@ -675,12 +734,19 @@ func TestDeployUploadsAssetsThenPutsTheScript(t *testing.T) {
 	}
 
 	reqs := f.requests()
-	if len(reqs) != 4 {
-		t.Fatalf("got %d requests (%s), want 4: session, 2 uploads, script PUT", len(reqs), f.paths())
+	if len(reqs) != 5 {
+		t.Fatalf("got %d requests (%s), want 5: the migration-tag read, the session, 2 uploads, the script PUT", len(reqs), f.paths())
+	}
+
+	// --- the migration tag is read first ----------------------------------
+	// Before anything is uploaded, because it decides what the script upload
+	// at the end of this list will carry.
+	if tagRead := reqs[0]; tagRead.Method != http.MethodGet || tagRead.Path != scriptListPath {
+		t.Errorf("first request = %s %s, want GET %s", tagRead.Method, tagRead.Path, scriptListPath)
 	}
 
 	// --- the upload session carries the manifest -------------------------
-	session := reqs[0]
+	session := reqs[1]
 	if session.Method != http.MethodPost {
 		t.Errorf("session method = %s, want POST", session.Method)
 	}
@@ -724,7 +790,7 @@ func TestDeployUploadsAssetsThenPutsTheScript(t *testing.T) {
 			hashCSS: {assetCSS.Body, "text/css; charset=utf-8"},
 		},
 	}
-	for i, up := range reqs[1:3] {
+	for i, up := range reqs[2:4] {
 		if up.Method != http.MethodPost {
 			t.Errorf("upload %d method = %s, want POST", i, up.Method)
 		}
@@ -762,7 +828,7 @@ func TestDeployUploadsAssetsThenPutsTheScript(t *testing.T) {
 	}
 
 	// --- the script PUT ---------------------------------------------------
-	script := reqs[3]
+	script := reqs[4]
 	if script.Method != http.MethodPut {
 		t.Errorf("script method = %s, want PUT", script.Method)
 	}
@@ -1069,7 +1135,8 @@ func TestDeployMetadataIsDeterministic(t *testing.T) {
 		if err := f.client().Deploy(context.Background(), in); err != nil {
 			t.Fatalf("Deploy: %v", err)
 		}
-		meta := partNamed(t, parseParts(t, f.requests()[1].ContentType, f.requests()[1].Body), "metadata")
+		put := scriptPut(t, f)
+		meta := partNamed(t, parseParts(t, put.ContentType, put.Body), "metadata")
 		if first == nil {
 			first = meta.Body
 			continue
@@ -1135,12 +1202,11 @@ func TestDeployWithoutAssetsSkipsTheSessionEntirely(t *testing.T) {
 	}
 }
 
-// TestDeployOmitsMigrationsWhenNoNewClasses: a re-deploy passes no new SQLite
-// classes, and sending a migration then would be an error on Cloudflare's side.
-func TestDeployOmitsMigrationsWhenNoNewClasses(t *testing.T) {
-	in := deployFixture()
-	in.NewSQLiteClasses = nil
-
+// TestDeployOmitsMigrationsWhenTheScriptIsUpToDate: a relay already carrying
+// the last tag in the history has nothing to migrate, and sending a migration
+// then is the refusal this client used to spend a whole extra script upload
+// recovering from.
+func TestDeployOmitsMigrationsWhenTheScriptIsUpToDate(t *testing.T) {
 	f := deployServer(t, nil, func(w http.ResponseWriter, parts []part) {
 		meta := partNamed(t, parts, "metadata")
 		var m map[string]any
@@ -1148,18 +1214,176 @@ func TestDeployOmitsMigrationsWhenNoNewClasses(t *testing.T) {
 			t.Fatalf("decoding metadata: %v", err)
 		}
 		if _, ok := m["migrations"]; ok {
-			t.Errorf("metadata carries migrations with no new classes: %s", meta.Body)
+			t.Errorf("metadata carries migrations for a script already at the last tag: %s", meta.Body)
 		}
-		// The durable object binding must survive: the class still exists, it
+		// The durable object bindings must survive: the classes still exist, it
 		// is only the migration that has already been applied.
 		if _, ok := m["bindings"]; !ok {
-			t.Errorf("metadata dropped the durable object binding: %s", meta.Body)
+			t.Errorf("metadata dropped the durable object bindings: %s", meta.Body)
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+	f.deployedTag = "v2"
+
+	if err := f.client().Deploy(context.Background(), deployFixture()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+}
+
+// TestDeployMigratesAnExistingRelayForward is the upgrade this whole mechanism
+// exists for: a relay deployed before the fleet directory sits at v1, and the
+// deploy that adds FleetDirectory has to apply v2 *and only* v2, against the
+// precondition that the script is still at v1.
+//
+// The failure it guards is not subtle but it is invisible from here: a client
+// that re-sent v1's step would be refused on the tag precondition, and the
+// retry that drops migrations would then upload a script whose DIRECTORY
+// binding names a class no migration ever created — which Cloudflare also
+// refuses, leaving every existing relay unable to take the update.
+func TestDeployMigratesAnExistingRelayForward(t *testing.T) {
+	var got struct {
+		Migrations *struct {
+			OldTag string `json:"old_tag"`
+			NewTag string `json:"new_tag"`
+			Steps  []struct {
+				NewSQLiteClasses []string `json:"new_sqlite_classes"`
+			} `json:"steps"`
+		} `json:"migrations"`
+	}
+	f := deployServer(t, nil, func(w http.ResponseWriter, parts []part) {
+		if err := json.Unmarshal(partNamed(t, parts, "metadata").Body, &got); err != nil {
+			t.Fatalf("decoding metadata: %v", err)
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+	f.deployedTag = "v1"
+
+	if err := f.client().Deploy(context.Background(), deployFixture()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if got.Migrations == nil {
+		t.Fatal("a v1 script was sent no migration; FleetDirectory would never exist")
+	}
+	if got.Migrations.OldTag != "v1" || got.Migrations.NewTag != "v2" {
+		t.Errorf("migration tags = %q -> %q, want v1 -> v2", got.Migrations.OldTag, got.Migrations.NewTag)
+	}
+	if len(got.Migrations.Steps) != 1 ||
+		!reflect.DeepEqual(got.Migrations.Steps[0].NewSQLiteClasses, []string{"FleetDirectory"}) {
+		t.Errorf("steps = %+v, want exactly the v2 step introducing FleetDirectory", got.Migrations.Steps)
+	}
+}
+
+// TestDeployReadsTheDeployedTagFromTheAccount pins where the tag comes from.
+// It is the account's script list — the same fact wrangler reads, from the same
+// endpoint — because a migration precondition can only be computed from what
+// the account actually carries.
+func TestDeployReadsTheDeployedTagFromTheAccount(t *testing.T) {
+	f := deployServer(t, nil, func(w http.ResponseWriter, _ []part) {
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+	f.deployedTag = "v1"
+	if err := f.client().Deploy(context.Background(), deployFixture()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	var asked int
+	for _, r := range f.requests() {
+		if r.Method == http.MethodGet && r.Path == scriptListPath {
+			asked++
+		}
+	}
+	if asked != 1 {
+		t.Errorf("script-list reads = %d, want exactly 1: %s", asked, f.paths())
+	}
+}
+
+// TestDeployFallsBackToTheWholeHistoryWhenTheTagIsUnreadable: the pre-flight
+// read is a convenience, not a gate. A token that cannot list scripts, or an
+// endpoint having a bad minute, must leave the deploy exactly as capable as it
+// was before this client could ask — the whole history, and the already-applied
+// retry behind it — rather than refusing to deploy over a read-only call.
+func TestDeployFallsBackToTheWholeHistoryWhenTheTagIsUnreadable(t *testing.T) {
+	var sentSteps int
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == scriptListPath:
+			writeAPIError(w, http.StatusForbidden, 10000, "Authentication error")
+		case strings.HasSuffix(r.URL.Path, "/assets-upload-session"):
+			writeEnvelope(t, w, http.StatusOK, map[string]any{"jwt": "session-jwt", "buckets": [][]string{}})
+		default:
+			var m struct {
+				Migrations *struct {
+					OldTag string `json:"old_tag"`
+					Steps  []any  `json:"steps"`
+				} `json:"migrations"`
+			}
+			if err := json.Unmarshal(partNamed(t, parseParts(t, r.Header.Get("Content-Type"), body), "metadata").Body, &m); err != nil {
+				t.Fatalf("decoding metadata: %v", err)
+			}
+			if m.Migrations == nil {
+				t.Fatal("no migration sent when the tag could not be read")
+			}
+			if m.Migrations.OldTag != "" {
+				t.Errorf("old_tag = %q, want none: an unreadable tag cannot claim a precondition", m.Migrations.OldTag)
+			}
+			sentSteps = len(m.Migrations.Steps)
+			writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+		}
+	})
+	f.noScriptList = true
+
+	if err := f.client().Deploy(context.Background(), deployFixture()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if sentSteps != 2 {
+		t.Errorf("steps sent = %d, want the whole history (2)", sentSteps)
+	}
+}
+
+// TestDeployLeavesANewerScriptAlone: a script carrying a tag this binary has
+// never heard of was deployed by a newer flue, and replaying this binary's
+// older history over it would undo a migration it does not know about.
+func TestDeployLeavesANewerScriptAlone(t *testing.T) {
+	f := deployServer(t, nil, func(w http.ResponseWriter, parts []part) {
+		var m map[string]any
+		if err := json.Unmarshal(partNamed(t, parts, "metadata").Body, &m); err != nil {
+			t.Fatalf("decoding metadata: %v", err)
+		}
+		if _, ok := m["migrations"]; ok {
+			t.Errorf("metadata carries a migration for a script from a newer flue: %v", m["migrations"])
+		}
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+	f.deployedTag = "v7"
+
+	if err := f.client().Deploy(context.Background(), deployFixture()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+}
+
+// TestDeployOmitsMigrationsWithNoHistory: a caller with nothing to migrate
+// sends no migration object at all, and asks the account nothing.
+func TestDeployOmitsMigrationsWithNoHistory(t *testing.T) {
+	in := deployFixture()
+	in.Migrations = nil
+
+	f := deployServer(t, nil, func(w http.ResponseWriter, parts []part) {
+		var m map[string]any
+		if err := json.Unmarshal(partNamed(t, parts, "metadata").Body, &m); err != nil {
+			t.Fatalf("decoding metadata: %v", err)
+		}
+		if _, ok := m["migrations"]; ok {
+			t.Errorf("metadata carries migrations with no history: %v", m["migrations"])
 		}
 		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
 	})
 
 	if err := f.client().Deploy(context.Background(), in); err != nil {
 		t.Fatalf("Deploy: %v", err)
+	}
+	for _, r := range f.requests() {
+		if r.Path == scriptListPath {
+			t.Errorf("read the deployed migration tag with nothing to migrate: %s", f.paths())
+		}
 	}
 }
 

@@ -60,6 +60,27 @@ type Relay struct {
 	// leaving it to be inferred from the secret's warning.
 	FleetSeed string `json:"fleet_seed,omitempty"`
 
+	// MachineCert is this machine's fleet machine certificate — the signed
+	// blob internal/fleet produces over {id, name, this daemon's Noise
+	// static public key, iat} — minted by whichever command wrote this file
+	// (`flue relay setup`, `flue relay join`, the Remote screen's deploy) and
+	// published to the relay's fleet directory by the daemon when it
+	// connects. It is a public artifact: it is signed, not secret, and every
+	// browser in the fleet reads it out of the directory to learn which Noise
+	// key to pin for this machine (spec/fleet-trust.md).
+	//
+	// It is stored rather than minted at startup because the directory is
+	// content-addressed: a cert re-minted on every boot would carry a fresh
+	// `iat`, hash to a fresh key, and spend one of the directory's 512
+	// entries per daemon restart. Stored, it is one entry forever.
+	//
+	// Empty means "this machine publishes no machine cert" — a relay.json
+	// written before this field, or one whose fleet key could not sign. The
+	// daemon says so once and carries on: a machine missing from the
+	// directory is one browsers cannot auto-discover, not one that stops
+	// working for the devices paired to it directly.
+	MachineCert []byte `json:"machine_cert,omitempty"`
+
 	// MachineID is the slot this machine holds on the relay: the <id> in the
 	// /daemon/<id> leg the daemon dials and the /client/<id> URLs browsers
 	// open. Minted by `flue relay setup` and `flue relay join` (MintMachineID),

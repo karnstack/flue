@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/karnstack/flue/internal/cloudflare"
 	"github.com/karnstack/flue/internal/config"
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/fleet"
 	relaybundle "github.com/karnstack/flue/relay"
@@ -66,6 +68,7 @@ type wireMetadata struct {
 	} `json:"bindings"`
 	KeepBindings []string `json:"keep_bindings"`
 	Migrations   *struct {
+		OldTag string `json:"old_tag"`
 		NewTag string `json:"new_tag"`
 		Steps  []struct {
 			NewSQLiteClasses []string `json:"new_sqlite_classes"`
@@ -113,10 +116,16 @@ type fakeCloudflare struct {
 	secretType       string
 	subdomainEnabled bool
 	scriptPuts       int
-	// migrated records that the Durable Object migration has been applied, so
-	// that a second deploy is refused the way the real API refuses one. This is
-	// what a re-run of `flue relay setup` actually meets.
-	migrated bool
+	// migrationTag is what the account's copy of the script carries, exactly
+	// as the real API reports it on the script list — empty until a deploy
+	// applies a migration, and then whatever that migration's new_tag was.
+	//
+	// Modelling it is what makes a re-run of `flue relay setup` behave here the
+	// way it does in production: the client reads this tag first and sends no
+	// migration when there is nothing outstanding, so the already-applied
+	// refusal below is reached only when a deploy insists on a migration the
+	// tag says is done.
+	migrationTag string
 }
 
 func newFakeCloudflare(t *testing.T, accounts []cloudflare.Account, subdomain string) *fakeCloudflare {
@@ -178,6 +187,18 @@ func (f *fakeCloudflare) route(w http.ResponseWriter, r *http.Request) {
 		writeResult(w, map[string]bool{"enabled": true})
 	case strings.HasSuffix(p, "/workers/subdomain"):
 		writeResult(w, map[string]string{"subdomain": f.subdomain})
+	case strings.HasSuffix(p, "/workers/scripts"):
+		// The account's script list, which is where the deploy reads the
+		// migration tag from. An account that has never been deployed to
+		// answers an empty list.
+		f.mu.Lock()
+		tag := f.migrationTag
+		f.mu.Unlock()
+		if tag == "" {
+			writeResult(w, []any{})
+			return
+		}
+		writeResult(w, []any{map[string]string{"id": f.script, "migration_tag": tag}})
 	case strings.HasSuffix(p, "/scripts/"+f.script):
 		f.putScript(w, r, body)
 	default:
@@ -272,9 +293,17 @@ func (f *fakeCloudflare) putScript(w http.ResponseWriter, r *http.Request, body 
 
 	f.mu.Lock()
 	f.scriptPuts++
-	repeat := f.migrated && f.meta.Migrations != nil
+	// The precondition the real API enforces: a migration is applied only if
+	// the script's tag is the one the request claims it is. old_tag empty means
+	// "this script has no migration history", which is false the moment one has
+	// been applied.
+	claimed, carried := "", f.migrationTag
 	if f.meta.Migrations != nil {
-		f.migrated = true
+		claimed = f.meta.Migrations.OldTag
+	}
+	repeat := f.meta.Migrations != nil && claimed != carried
+	if f.meta.Migrations != nil && !repeat {
+		f.migrationTag = f.meta.Migrations.NewTag
 	}
 	keepsSecrets := false
 	for _, k := range f.meta.KeepBindings {
@@ -284,12 +313,15 @@ func (f *fakeCloudflare) putScript(w http.ResponseWriter, r *http.Request, body 
 	}
 	f.mu.Unlock()
 	if repeat {
-		// The refusal the real API actually sends on a re-deploy, verbatim
-		// from the first live `flue relay update` (error 10079). An earlier
-		// fake used a "class … already depended on" wording that the real
-		// API apparently reserves for other cases; the matcher missed this
-		// one in production, so the fake now speaks the observed dialect.
-		writeAPIErrorCode(w, 10079, "Actor migration tag precondition failed, got tag '' when expected tag is 'v1'. Please make sure the tags match and try again.")
+		// The refusal the real API actually sends when the precondition does
+		// not hold, verbatim from the first live `flue relay update` (error
+		// 10079). An earlier fake used a "class … already depended on" wording
+		// that the real API apparently reserves for other cases; the matcher
+		// missed this one in production, so the fake speaks the observed
+		// dialect. Both tags are named the way the real message names them.
+		writeAPIErrorCode(w, 10079, fmt.Sprintf(
+			"Actor migration tag precondition failed, got tag '%s' when expected tag is '%s'. Please make sure the tags match and try again.",
+			claimed, carried))
 		return
 	}
 
@@ -489,13 +521,19 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	// running: without the ASSETS binding every /api/* fallthrough calls fetch
 	// on undefined, and without observability there are no logs to find out
 	// with. Both are silent in a deploy that otherwise reports success.
-	var gotAssets, gotHub, gotVersion, gotRate bool
+	var gotAssets, gotHub, gotDirectory, gotVersion, gotRate bool
 	for _, b := range f.meta.Bindings {
 		switch {
 		case b.Type == "assets" && b.Name == "ASSETS":
 			gotAssets = true
 		case b.Type == "durable_object_namespace" && b.Name == "HUB" && b.ClassName == "DaemonHub":
 			gotHub = true
+		case b.Type == "durable_object_namespace" && b.Name == "DIRECTORY" && b.ClassName == "FleetDirectory":
+			// The fleet directory: one object for the whole relay. Without the
+			// binding the Worker answers /directory with 503 by design, which
+			// is a relay that carries every session and no fleet — no machine
+			// discovery, and no revocation reaching a second machine.
+			gotDirectory = true
 		case b.Type == "plain_text" && b.Name == "FLUE_VERSION" && b.Text == deployStamp():
 			// The version stamp: what the Worker reports on /api/health, and
 			// what lets a daemon see a relay older than itself.
@@ -519,6 +557,9 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	if !gotHub {
 		t.Fatalf("no HUB -> DaemonHub durable object binding in %+v", f.meta.Bindings)
 	}
+	if !gotDirectory {
+		t.Fatalf("no DIRECTORY -> FleetDirectory durable object binding in %+v; the deployed relay would answer /directory with 503 and no revocation would ever reach a second machine", f.meta.Bindings)
+	}
 	if !gotRate {
 		t.Fatalf("no CLIENT_RATE ratelimit binding in %+v; the deployed relay would serve its credential-less routes unmetered", f.meta.Bindings)
 	}
@@ -533,15 +574,29 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 		t.Fatalf("keep_bindings = %v, want [secret_text]; this deploy would unbind %s", f.meta.KeepBindings, daemonSecretName)
 	}
 
-	if f.meta.Migrations == nil || len(f.meta.Migrations.Steps) != 1 ||
-		len(f.meta.Migrations.Steps[0].NewSQLiteClasses) != 1 ||
-		f.meta.Migrations.Steps[0].NewSQLiteClasses[0] != "DaemonHub" {
-		t.Fatalf("migrations = %+v, want one step introducing the SQLite class DaemonHub", f.meta.Migrations)
+	// A first deploy into an empty account applies the whole history, in
+	// order, and claims no precondition: the two SQLite classes this relay
+	// runs on (spec/fleet-trust.md gives the second one its own tag, because
+	// v1 is already applied on every relay deployed before the directory
+	// existed and an applied migration cannot be edited).
+	if f.meta.Migrations == nil {
+		t.Fatal("no durable object migration was sent; neither class would exist")
+	}
+	if f.meta.Migrations.OldTag != "" {
+		t.Fatalf("old_tag = %q on a first deploy, want none", f.meta.Migrations.OldTag)
+	}
+	if f.meta.Migrations.NewTag != "v2" {
+		t.Fatalf("new_tag = %q, want v2", f.meta.Migrations.NewTag)
+	}
+	if len(f.meta.Migrations.Steps) != 2 ||
+		!slicesEqual(f.meta.Migrations.Steps[0].NewSQLiteClasses, []string{"DaemonHub"}) ||
+		!slicesEqual(f.meta.Migrations.Steps[1].NewSQLiteClasses, []string{"FleetDirectory"}) {
+		t.Fatalf("migrations = %+v, want v1 introducing DaemonHub then v2 introducing FleetDirectory", f.meta.Migrations)
 	}
 	if f.meta.Assets == nil {
 		t.Fatal("no assets attached to the script")
 	}
-	if got, want := f.meta.Assets.Config.RunWorkerFirst, []string{"/daemon", "/daemon/*", "/client", "/client/*", "/api/*"}; !slicesEqual(got, want) {
+	if got, want := f.meta.Assets.Config.RunWorkerFirst, []string{"/daemon", "/daemon/*", "/client", "/client/*", "/api/*", "/directory", "/directory/*"}; !slicesEqual(got, want) {
 		t.Fatalf("run_worker_first = %v, want %v", got, want)
 	}
 
@@ -603,6 +658,22 @@ func TestRunRelaySetupDeploysTheWorkerAndTheWebApp(t *testing.T) {
 	}
 	if hits := configFilesContaining(t, saved.FleetSeed); len(hits) != 1 || filepath.Base(hits[0]) != "relay.json" {
 		t.Fatalf("the fleet key should be in relay.json and nowhere else, got %v", hits)
+	}
+
+	// And the first thing that key signs: this machine's own certificate,
+	// which the daemon publishes to the relay's fleet directory so the rest of
+	// the fleet's browsers can find it. Setup is where it is minted, because
+	// setup is where the id and the name it asserts are decided.
+	fleetKey, err := fleet.Parse(saved.FleetSeed)
+	if err != nil {
+		t.Fatalf("fleet.Parse: %v", err)
+	}
+	machineCert, err := fleet.Verify(fleetKey.Public(), saved.MachineCert)
+	if err != nil {
+		t.Fatalf("relay.json holds no machine certificate this fleet key signed: %v", err)
+	}
+	if mc, ok := machineCert.(fleet.MachineCert); !ok || mc.ID != saved.MachineID {
+		t.Fatalf("machine certificate = %+v, want one naming %q", machineCert, saved.MachineID)
 	}
 
 	// The URL is the bare host — the /daemon/<machine id> leg is the
@@ -772,11 +843,17 @@ func TestRunRelaySetupIsSafeToRerun(t *testing.T) {
 	if second.URL != first.URL || second.Origin != first.Origin {
 		t.Fatalf("the second run changed the address: %+v then %+v", first, second)
 	}
-	// Three PUTs, not two: the second run's first attempt is the one the
-	// already-applied migration rejects. Two would mean the fake never refused
-	// anything and this test proved nothing about re-running.
-	if f.scriptPuts != 3 {
-		t.Fatalf("script PUTs = %d, want 3 (deploy, refused re-deploy, retry without the migration)", f.scriptPuts)
+	// Two PUTs, one per run, and the second one carries no migration at all:
+	// the deploy reads the tag the account's script already carries and finds
+	// the history applied. This used to be three, the extra one being a
+	// migration sent blind, refused on the tag precondition, and re-sent
+	// without it — a round trip that only ever existed because the client
+	// could not ask.
+	if f.scriptPuts != 2 {
+		t.Fatalf("script PUTs = %d, want 2 (one per run, the second with nothing to migrate)", f.scriptPuts)
+	}
+	if f.meta.Migrations != nil {
+		t.Fatalf("the re-run sent a migration for a script already at its last tag: %+v", f.meta.Migrations)
 	}
 	// f.meta is the retry PUT: the upload that lands on a Worker that already
 	// holds a live secret. Asserted on the decoded request, not on the fake's
@@ -815,7 +892,9 @@ func TestRunRelaySetupRerunLeavesALiveRelayWorking(t *testing.T) {
 	if f.secretText != live.Secret {
 		t.Fatalf("the worker's %s is %q after a failed re-run, want the live relay's unchanged secret", daemonSecretName, f.secretText)
 	}
-	if got := loadSavedRelay(t); got != live {
+	// reflect rather than ==: the record carries the machine certificate now,
+	// and a []byte field is not comparable.
+	if got := loadSavedRelay(t); !reflect.DeepEqual(got, live) {
 		t.Fatalf("relay.json changed under a failed re-run: %+v, want %+v", got, live)
 	}
 }
@@ -973,6 +1052,63 @@ func TestRunRelayJoinWritesTheRelayConfig(t *testing.T) {
 	}
 }
 
+// TestRunRelayJoinMintsThisMachinesFleetCertificate: the join line is where a
+// machine joins the fleet, so it is where the machine's own certificate is
+// signed — the artifact the daemon publishes to the relay's directory, and the
+// only way a browser paired on another machine ever learns that this one
+// exists and which Noise key to pin for it (spec/fleet-trust.md, "New
+// machine").
+//
+// It is minted here, once, rather than at every daemon start, because the
+// directory is content-addressed: a cert re-signed on each boot carries a
+// fresh iat, hashes to a fresh key, and spends one of the directory's 512
+// entries every time the daemon restarts.
+func TestRunRelayJoinMintsThisMachinesFleetCertificate(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out bytes.Buffer
+	if err := runRelayJoin(&out, []string{"wss://r.example", "--secret", "s", "--fleet", testFleetSeed}); err != nil {
+		t.Fatalf("runRelayJoin: %v", err)
+	}
+	saved := loadSavedRelay(t)
+	if len(saved.MachineCert) == 0 {
+		t.Fatal("relay.json carries no machine certificate; this machine would never appear in the fleet directory")
+	}
+
+	key, err := fleet.Parse(testFleetSeed)
+	if err != nil {
+		t.Fatalf("fleet.Parse: %v", err)
+	}
+	cert, err := fleet.Verify(key.Public(), saved.MachineCert)
+	if err != nil {
+		t.Fatalf("the stored machine certificate does not verify under the fleet key: %v", err)
+	}
+	mc, ok := cert.(fleet.MachineCert)
+	if !ok {
+		t.Fatalf("relay.json holds a %s certificate where a machine certificate belongs", cert.Kind())
+	}
+	if mc.ID != saved.MachineID {
+		t.Errorf("the certificate names machine %q, want the id in relay.json %q", mc.ID, saved.MachineID)
+	}
+	if mc.Name != saved.MachineName {
+		t.Errorf("the certificate names %q, want the machine name in relay.json %q", mc.Name, saved.MachineName)
+	}
+	// The load-bearing field: browsers pin this key for this machine, so a
+	// certificate naming anything but the daemon's own static key is a machine
+	// every device dials and none can handshake with.
+	dir, err := config.Dir()
+	if err != nil {
+		t.Fatalf("config.Dir: %v", err)
+	}
+	static, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	if !bytes.Equal(mc.Noise, static.Public) {
+		t.Errorf("the certificate names a static key this machine does not hold")
+	}
+}
+
 // TestRunRelayJoinNormalizesTheAddress: the address arrives however the user
 // came by it — the https origin off a browser's address bar as often as the
 // wss url setup printed, in whatever case a hand retyped it — and every
@@ -1071,11 +1207,16 @@ func TestRunRelayStatusReportsTheConfiguredRelay(t *testing.T) {
 		t.Fatalf("status = %q, want it to say there is no relay", out.String())
 	}
 
+	// A stand-in relay, so this command reads a directory rather than the
+	// internet. Its host is what relay.json points at: `flue relay status`
+	// asks the relay itself about the fleet, which is the one fact no local
+	// file carries.
+	dir := statusDirectory(t)
 	if err := config.SaveRelay(config.Relay{
-		URL:         "wss://flue-relay.karn.workers.dev",
+		URL:         dir.url,
 		Secret:      "s3cret-value",
 		FleetSeed:   testFleetSeed,
-		Origin:      "https://flue-relay.karn.workers.dev",
+		Origin:      strings.Replace(dir.url, "wss://", "https://", 1),
 		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
 		MachineName: "Karn's MacBook Pro",
 	}); err != nil {
@@ -1086,7 +1227,7 @@ func TestRunRelayStatusReportsTheConfiguredRelay(t *testing.T) {
 		t.Fatalf("runRelayStatus: %v", err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "wss://flue-relay.karn.workers.dev") {
+	if !strings.Contains(got, dir.url) {
 		t.Fatalf("status = %q, want the relay's URL", got)
 	}
 	if strings.Contains(got, "s3cret-value") {
@@ -1097,6 +1238,158 @@ func TestRunRelayStatusReportsTheConfiguredRelay(t *testing.T) {
 	// that admits devices everywhere.
 	if strings.Contains(got, testFleetSeed) {
 		t.Fatalf("status printed the fleet key: %q", got)
+	}
+}
+
+// statusDirectory is a relay serving a fleet directory with one entry of each
+// kind under testFleetSeed, plus one blob signed by nobody.
+type fakeStatusRelay struct {
+	url       string
+	machineID string
+}
+
+func statusDirectory(t *testing.T) fakeStatusRelay {
+	t.Helper()
+	key, err := fleet.Parse(testFleetSeed)
+	if err != nil {
+		t.Fatalf("fleet.Parse: %v", err)
+	}
+	sign := func(c fleet.Cert) []byte {
+		blob, err := key.Sign(c)
+		if err != nil {
+			t.Fatalf("signing a %s: %v", c.Kind(), err)
+		}
+		return blob
+	}
+	thirtyTwo := func(fill byte) []byte {
+		b := make([]byte, 32)
+		for i := range b {
+			b[i] = fill
+		}
+		return b
+	}
+	const machineID = "karns-macbook-pro-a1b2-0f9a12cd"
+	blobs := [][]byte{
+		sign(fleet.MachineCert{ID: machineID, Name: "Karn's MacBook Pro", Noise: thirtyTwo(0x01), IAT: 1}),
+		sign(fleet.DeviceCert{Device: thirtyTwo(0x02), Name: "phone", PairedOn: machineID, IAT: 2}),
+		sign(fleet.Revocation{Device: thirtyTwo(0x03), IAT: 3}),
+		// Signed by nothing this fleet key knows: the gap between "entries"
+		// and "verified" is the number worth printing.
+		[]byte("not a certificate at all"),
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/directory" || r.Method != http.MethodGet {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		entries := make([]map[string]any, 0, len(blobs))
+		for _, b := range blobs {
+			entries = append(entries, map[string]any{"key": "k", "blob": b})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"v": 1, "entries": entries})
+	}))
+	t.Cleanup(ts.Close)
+	return fakeStatusRelay{url: "ws" + strings.TrimPrefix(ts.URL, "http"), machineID: machineID}
+}
+
+// TestRunRelayStatusReportsTheFleetDirectory: the second line, and the reason
+// this command talks to the network at all. It reports what the relay is
+// holding, how much of it this fleet key actually signed, and — the one thing
+// an operator most wants to know after adding a machine — whether this machine
+// is in there at all.
+func TestRunRelayStatusReportsTheFleetDirectory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := statusDirectory(t)
+	if err := config.SaveRelay(config.Relay{
+		URL:         dir.url,
+		Secret:      "s",
+		FleetSeed:   testFleetSeed,
+		Origin:      strings.Replace(dir.url, "wss://", "https://", 1),
+		MachineID:   dir.machineID,
+		MachineName: "Karn's MacBook Pro",
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runRelayStatus(&out); err != nil {
+		t.Fatalf("runRelayStatus: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"4 entries",
+		"3 verified",
+		"1 machine, 1 device, 1 revocation",
+		// The entry nobody in this fleet signed, named as such rather than
+		// quietly counted: a relay serving blobs this key did not sign is
+		// either a rotated fleet key or somebody else's relay.
+		"1 entry is signed by something else",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status does not say %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "this machine is not in the directory") {
+		t.Errorf("status says this machine is missing, but its certificate is there:\n%s", got)
+	}
+}
+
+// TestRunRelayStatusSaysWhenThisMachineIsMissing: the failure a new machine
+// actually has — it joined, but nothing published its certificate, so no
+// browser in the fleet can discover it. Silence there looks exactly like
+// health.
+func TestRunRelayStatusSaysWhenThisMachineIsMissing(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := statusDirectory(t)
+	if err := config.SaveRelay(config.Relay{
+		URL:         dir.url,
+		Secret:      "s",
+		FleetSeed:   testFleetSeed,
+		Origin:      strings.Replace(dir.url, "wss://", "https://", 1),
+		MachineID:   "some-other-machine-a1b2-0f9a12cd",
+		MachineName: "Someone Else",
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runRelayStatus(&out); err != nil {
+		t.Fatalf("runRelayStatus: %v", err)
+	}
+	if !strings.Contains(out.String(), "this machine is not in the directory") {
+		t.Errorf("status does not report the missing machine certificate:\n%s", out.String())
+	}
+}
+
+// TestRunRelayStatusSurvivesARelayWithNoDirectory: a relay deployed by a flue
+// older than the directory answers 503 there by design. The status has to name
+// the fix rather than print a bare HTTP code, and must not fail the command —
+// the first line is still true.
+func TestRunRelayStatusSurvivesARelayWithNoDirectory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"directory unavailable"}`))
+	}))
+	t.Cleanup(ts.Close)
+	if err := config.SaveRelay(config.Relay{
+		URL:         "ws" + strings.TrimPrefix(ts.URL, "http"),
+		Secret:      "s",
+		FleetSeed:   testFleetSeed,
+		Origin:      "http" + strings.TrimPrefix(ts.URL, "http"),
+		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
+		MachineName: "Karn's MacBook Pro",
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runRelayStatus(&out); err != nil {
+		t.Fatalf("runRelayStatus on a relay with no directory: %v", err)
+	}
+	if !strings.Contains(out.String(), "flue relay update") {
+		t.Errorf("status does not name the fix for a relay with no directory:\n%s", out.String())
 	}
 }
 

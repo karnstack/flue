@@ -375,3 +375,48 @@ func TestDeviceStoreRemove(t *testing.T) {
 		t.Fatal("second remove reported success")
 	}
 }
+
+// TestRemoveByKeyComparesTheWholeKey is FindByKey's argument applied to the
+// other direction. RemoveByKey is what a fleet revocation reaches — the caller
+// holds 32 bytes off a signed blob — and matching on the id would let a key
+// ground out to collide with a paired device's digest unpair *that* device.
+//
+// The blob is signed, so this is not an attack any stranger can mount; it is
+// an attack one fleet member can mount on another's registry, and the whole
+// point of the fleet key is that its holders are the operator's own machines
+// rather than the operator's own devices.
+func TestRemoveByKeyComparesTheWholeKey(t *testing.T) {
+	dir := t.TempDir()
+	s := NewDeviceStore(dir)
+
+	paired := testKey(t)
+	forged := testKey(t)
+	// The registry holds the paired device's key under the id the forged key
+	// derives: a removal that stops at the id would take it.
+	writeRegistry(t, dir, []Device{planted(DeviceID(forged), paired)})
+
+	if got, ok, err := s.RemoveByKey(forged); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatalf("RemoveByKey unpaired a device on an id collision: %+v", got)
+	}
+	if list, err := s.List(); err != nil || len(list) != 1 {
+		t.Fatalf("registry = %+v, %v after a refused removal, want the device untouched", list, err)
+	}
+
+	// The positive, so the above is not passing by refusing everything.
+	got, ok, err := s.RemoveByKey(paired)
+	if err != nil || !ok {
+		t.Fatalf("RemoveByKey(paired) = %+v, %v, %v; want the entry it holds", got, ok, err)
+	}
+	if list, err := s.List(); err != nil || len(list) != 0 {
+		t.Fatalf("registry = %+v, %v after the removal, want empty", list, err)
+	}
+
+	// And missing is not an error: a revocation for a device this machine
+	// never paired is the common case in a fleet, and it arrives again on
+	// every reconnect.
+	if _, ok, err := s.RemoveByKey(paired); err != nil || ok {
+		t.Fatalf("RemoveByKey of an absent key = %v, %v; want false and no error", ok, err)
+	}
+}
