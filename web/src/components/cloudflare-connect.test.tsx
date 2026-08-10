@@ -118,6 +118,23 @@ describe('CloudflareConnectCard', () => {
     expect(screen.getByLabelText(/API token/)).toBeTruthy()
   })
 
+  it('tells the tab that ran the deploy to reload, and offers the reload', async () => {
+    // The trap this closes. Three facts about this page were settled when the
+    // daemon served it and cannot be revised from here: its connect policy
+    // names no relay (LocalCSPFor), its fleet was told the relay leg was off
+    // and nothing broadcasts a change, and its enrolment was answered 409 by a
+    // machine that then had no fleet key. One reload fixes all three; without
+    // being told, the reader is left on a screen that says a relay exists and
+    // a sessions list that will never show another machine.
+    stubFetch([{ steps: ['worker deployed: flue-relay'], origin: 'https://r.example' }])
+    render(<CloudflareConnectCard info={INFO} setupCommand="flue relay setup" />)
+
+    await typeTokenAndDeploy('cf-token-4')
+
+    expect(await screen.findByText(/loaded before the relay existed/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Reload flue' })).toBeTruthy()
+  })
+
   it('shows the reason instead of the form when the daemon cannot deploy', () => {
     render(
       <CloudflareConnectCard
@@ -252,6 +269,41 @@ describe('the card after an update lands', () => {
     // screen at the instant they arrived.
     expect(screen.getByText('worker deployed: flue-relay')).toBeTruthy()
     expect(screen.getByRole('dialog')).toBeTruthy()
+  })
+
+  it('does not ask for a reload, because this tab was served with the relay', async () => {
+    // The other side of the reload notice. A tab looking at the configured
+    // card was served by a daemon that already had relay.json, so its connect
+    // policy names the relay and its fleet learned the origin from the first
+    // welcome. Telling this reader to reload would be asking for something
+    // that buys them nothing.
+    stubFetch([
+      {
+        configured: true,
+        can_deploy: true,
+        version: '0.3.0',
+        deployed_version: '0.2.0',
+        worker: 'flue-relay',
+        has_token: true,
+      },
+      { steps: ['worker deployed: flue-relay'] },
+      {
+        configured: true,
+        can_deploy: true,
+        version: '0.3.0',
+        deployed_version: '0.3.0',
+        worker: 'flue-relay',
+        has_token: true,
+      },
+    ])
+    render(<LiveConfiguredCard />)
+
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Update relay…' }))
+    await user.click(screen.getByRole('button', { name: 'Update relay' }))
+
+    expect(await screen.findByText('worker deployed: flue-relay')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Reload flue' })).toBeNull()
   })
 })
 

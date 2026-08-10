@@ -22,6 +22,20 @@
  * the relay at boot (it is the page's own origin, passed in by the caller;
  * nothing here reads `location`) and has no loopback at all. Both end in the
  * same place: one source per reachable machine, each id appearing once.
+ *
+ * The loopback tab has two more things to do before any of that means anything,
+ * and both arrive as seams rather than as knowledge this module goes looking
+ * for (see FleetOptions): it has to be enrolled as a device of the fleet, since
+ * it ran no ceremony and holds no certificate to present to a sibling machine,
+ * and it has to read the directory through its own daemon, because the relay
+ * answers a cross-origin fetch without the header a browser needs to hand it
+ * over. fleet/enrol.ts is both, and carries the argument for why a fleet key
+ * may be learned that way when it may not be learned over a connection.
+ *
+ * And the set is not fixed at page load. A machine that joins this afternoon
+ * appears in the directory this afternoon, so the expansion re-runs on an
+ * interval and on focus (`discover`) — additive only, because a read that comes
+ * back short is a relay having a bad minute rather than a machine leaving.
  */
 import { daemonSocketUrl, FlueClient, type ConnStatus } from '@/client/client'
 import type { ErrorMsg, Preview, SessionInfo, Welcome } from '@/client/protocol'
@@ -67,6 +81,34 @@ const POLL_MS = 3_000
  * machines still answers well inside one poll period.
  */
 const STAGGER_MS = 150
+
+/**
+ * How often an open tab asks the fleet directory again.
+ *
+ * The expansion used to be one-shot per epoch, which was right when the only
+ * thing that could change the answer was a record arriving on a welcome. It is
+ * not: a machine that runs the join line this afternoon appears in the
+ * directory this afternoon, and a tab that has been open since this morning
+ * would never hear of it — the fleet's own screens promise "every machine",
+ * and a promise kept only across a reload is not one.
+ *
+ * A minute, and not the three seconds the session poll runs at, because this is
+ * a different question with a different rate of change: sessions come and go
+ * while somebody watches, machines join a fleet a handful of times in their
+ * life. Every read is additive (see `adoptRemotes`), so the cost of being late
+ * is bounded and the cost of a failed read is nothing at all.
+ */
+const DISCOVER_MS = 60_000
+
+/**
+ * The shortest gap between two directory reads, whatever asks for them.
+ *
+ * Focus is the other trigger, and focus is not rationed by anything: a reader
+ * alt-tabbing between a terminal and this tab would otherwise spend a directory
+ * read per switch. The floor is what makes "ask again when the tab is looked
+ * at" safe to offer.
+ */
+const DISCOVER_FLOOR_MS = 5_000
 
 /** One machine the fleet should hold: its id, its label, its built client. */
 export interface FleetSource {
@@ -135,6 +177,36 @@ export interface FleetGaps {
    * the ordinary case — and another ceremony is the whole of the way out.
    */
   pinned: number
+}
+
+/**
+ * The two things only a loopback tab supplies, injected rather than sniffed.
+ *
+ * Both are facts about the *page's* origin rather than about any machine, and
+ * this module deliberately reads no `location` — the relay origin arrives from
+ * the caller on a relay tab and from the daemon's welcome on a loopback one,
+ * and the same discipline applies to these. They travel from src/main.tsx
+ * through the router's context to the provider, which is the one place that
+ * knows which of the two ways this page was served.
+ */
+export interface FleetOptions {
+  /**
+   * How this browser becomes a device of the fleet, on a tab that never ran a
+   * ceremony because it never needed one. Run once per epoch at `connect`; see
+   * fleet/enrol.ts, which is where the whole argument for it lives.
+   *
+   * Absent on a relay tab and in every test that does not say otherwise, which
+   * is the honest default: enrolment is a loopback-only endpoint, and a tab
+   * that reached this app any other way has already paired.
+   */
+  enrol?: () => Promise<boolean>
+  /**
+   * How the default expansion reads the fleet directory. Absent means the
+   * plain cross-origin read straight off the relay, which is what a relay tab
+   * does and always did; a loopback tab passes the daemon's proxy, because the
+   * Worker sends no CORS header and the browser discards its answer.
+   */
+  directoryFetch?: DirectoryFetch
 }
 
 /** What onFleet hands its listeners, on any change to either half. */
@@ -212,6 +284,12 @@ export class FleetClient {
   private errorListeners: ErrorListener[] = []
   private running = false
   private poll: ReturnType<typeof setInterval> | null = null
+  /** The slower interval that re-reads the directory; see DISCOVER_MS. */
+  private discovery: ReturnType<typeof setInterval> | null = null
+  /** When the last directory read was asked for, for DISCOVER_FLOOR_MS. */
+  private lastDiscover = 0
+  /** The focus handler, held so close can take it off the window again. */
+  private readonly onFocus = () => this.discover()
   /** The stagger timers of the current tick, so close leaves none armed. */
   private staggers = new Set<ReturnType<typeof setTimeout>>()
   /** Whether this epoch has already built remotes from a learned origin. */
@@ -223,15 +301,20 @@ export class FleetClient {
    */
   private relayOrigin: string | null = null
   /**
-   * Whether something re-supplied on a welcome has already forced that second
-   * expansion — a fleet key, a certificate, or the two together.
+   * Whether records that arrived mid-epoch have already forced that second
+   * expansion — a fleet key, a certificate, or the two together, off a welcome
+   * or out of an enrolment.
    *
    * Once per epoch: a browser gains machines the first time it holds each of
    * them, and re-running on every later welcome would be a directory read per
-   * reconnect for a set that cannot have changed. One flag covers both because
-   * they cannot arrive apart in a way that would strand the second — a
+   * reconnect for a set that cannot have changed. One flag covers all of them
+   * because they cannot arrive apart in a way that would strand the last — a
    * certificate is verified under the fleet key, so a browser missing both
-   * gains them in that order, on the one welcome, before this is consulted.
+   * gains them in that order, on the one welcome or in the one enrolment
+   * answer, before this is consulted.
+   *
+   * It bounds the *repair*, not discovery: `discover` below re-reads on its own
+   * schedule for machines that join later, and is not gated on this.
    */
   private resupplied = false
   /** The slot id the loopback daemon holds on the relay, once known. */
@@ -252,8 +335,17 @@ export class FleetClient {
    */
   private readonly expand: (relayOrigin: string) => Promise<FleetSource[]>
 
-  constructor(sources: FleetSource[], expand?: (relayOrigin: string) => Promise<FleetSource[]>) {
+  /** This tab's way of becoming a fleet device, or null where there is none
+   *  to be had. See FleetOptions.enrol. */
+  private readonly enrol: (() => Promise<boolean>) | null
+
+  constructor(
+    sources: FleetSource[],
+    expand?: (relayOrigin: string) => Promise<FleetSource[]>,
+    opts: FleetOptions = {},
+  ) {
     this.slots = sources.map(toSlot)
+    this.enrol = opts.enrol ?? null
     // Assigned in the body rather than as a parameter default because the
     // production builder reports back into this instance: what it could not
     // build is as much a part of the fleet as what it could.
@@ -264,6 +356,10 @@ export class FleetClient {
           loopback: false,
           relayOrigin: origin,
           onGaps: (g) => this.noteGaps(g),
+          // Passed through rather than decided down there, because which read
+          // works is a fact about the origin serving this page and fleetSources
+          // is handed a relay origin and nothing else.
+          ...(opts.directoryFetch !== undefined && { directoryFetch: opts.directoryFetch }),
         }))
   }
 
@@ -306,6 +402,17 @@ export class FleetClient {
     for (const slot of slots) this.wire(slot)
     for (const slot of slots) slot.client.connect()
     this.poll = setInterval(() => this.pollTick(), POLL_MS)
+    this.discovery = setInterval(() => this.discover(), DISCOVER_MS)
+    // A background tab's timers are throttled to a crawl, so the interval alone
+    // would mean a machine that joined an hour ago appears some time after the
+    // reader comes back rather than as they arrive. Same trade, same reason, as
+    // useRefetchOnFocus on the sessions screen.
+    if (typeof window !== 'undefined') window.addEventListener('focus', this.onFocus)
+    // Before anything is expanded, and not awaited: the records it may bring
+    // back are what the expansion reads, but the welcome that names a relay has
+    // not arrived either, and the two orders both end in one rebuild — see
+    // `runEnrolment`.
+    if (this.enrol !== null) void this.runEnrolment(this.enrol)
   }
 
   /**
@@ -322,10 +429,16 @@ export class FleetClient {
     this.expanded = false
     this.resupplied = false
     this.relayOrigin = null
+    this.lastDiscover = 0
     if (this.poll !== null) {
       clearInterval(this.poll)
       this.poll = null
     }
+    if (this.discovery !== null) {
+      clearInterval(this.discovery)
+      this.discovery = null
+    }
+    if (typeof window !== 'undefined') window.removeEventListener('focus', this.onFocus)
     for (const t of this.staggers) clearTimeout(t)
     this.staggers.clear()
     for (const slot of this.slots) {
@@ -632,6 +745,10 @@ export class FleetClient {
    */
   private async adoptRemotes(origin: string) {
     const epoch = this.epoch
+    // Every expansion counts against the discovery floor, whoever asked for it:
+    // a tab that has just read the directory on a welcome has no more to learn
+    // from reading it again because somebody clicked back into the window.
+    this.lastDiscover = Date.now()
     let built: FleetSource[]
     try {
       built = await this.expand(origin)
@@ -652,6 +769,85 @@ export class FleetClient {
       changed = true
     }
     if (changed) this.emit()
+  }
+
+  /**
+   * Become a device of this fleet, on the one kind of tab that has to ask.
+   *
+   * The two orders this has to survive, because the enrolment and the daemon's
+   * welcome race and neither wins reliably:
+   *
+   *   - **Records first.** `relayOrigin` is still null — the welcome that names
+   *     it has not landed — so there is nothing to expand into and nothing to
+   *     do. The welcome arrives a moment later and `localWelcome` expands with
+   *     the fleet key and the certificate already in the store.
+   *   - **Welcome first.** The expansion has already run, and ran blind: with
+   *     no fleet key it read no directory at all and built the machines this
+   *     browser had pinned, which on a loopback tab is none. So this rebuilds,
+   *     through the same `resupplied` gate the welcome path uses, which is what
+   *     bounds the pair to one extra directory read per epoch.
+   *
+   * Nothing is retried and nothing is scheduled. A daemon that cannot enrol
+   * this browser — no fleet key, no machine id, a registry it cannot write —
+   * will not be able to a second later either, and the tab it leaves behind is
+   * the tab loopback has always been: this machine, listed and working.
+   */
+  private async runEnrolment(enrol: () => Promise<boolean>) {
+    const epoch = this.epoch
+    let gained: boolean
+    try {
+      gained = await enrol()
+    } catch {
+      // enrolThisBrowser answers rather than throws; a caller's seam might not.
+      return
+    }
+    /*
+     * Nothing gained is the ordinary second load: the expansion read the same
+     * records out of storage by itself, and a rebuild would be a directory read
+     * for a set that cannot have changed.
+     *
+     * The one thing it also swallows is a development-only race. React mounts
+     * this twice, so two enrolments are briefly in flight, and if the first
+     * one's writes land between the second one's read and the expansion in
+     * between, the second is told "already there" about records the fleet has
+     * not seen. What that tab is left with is one machine until the next
+     * discovery tick, which is a minute — and `discover` exists for machines
+     * that arrive late anyway. Not worth a predicate here, and every predicate
+     * tried was wrong in the ordinary case: at the moment this resumes the
+     * expansion is usually still in flight, so "has it found anything yet" is a
+     * question with no answer.
+     */
+    if (!gained || epoch !== this.epoch || !this.running) return
+    if (this.resupplied) return
+    const origin = this.relayOrigin
+    if (origin === null) return
+    this.resupplied = true
+    await this.adoptRemotes(origin)
+  }
+
+  /**
+   * Ask the fleet directory again, for the machines that were not in it last
+   * time.
+   *
+   * **Additive, and that is the whole contract.** `adoptRemotes` adds ids it
+   * does not already hold and removes nothing, so a read that comes back empty,
+   * short, or as a 502 from a relay having a bad minute costs exactly nothing —
+   * every machine already on screen keeps its client, its rows and its status.
+   * A machine that genuinely left the fleet is a slot that goes unreachable,
+   * which is a thing the screens already say, and re-reading a directory is not
+   * where that verdict belongs.
+   *
+   * Silent before a relay origin is known: a tab whose daemon has named no
+   * relay has no directory to read and nothing to discover.
+   */
+  private discover() {
+    if (!this.running) return
+    const origin = this.relayOrigin
+    if (origin === null) return
+    const now = Date.now()
+    if (now - this.lastDiscover < DISCOVER_FLOOR_MS) return
+    this.lastDiscover = now
+    void this.adoptRemotes(origin)
   }
 
   /** Remove one slot outright: unhooked, closed, and out of every next emit. */

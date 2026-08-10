@@ -15,6 +15,7 @@ import { ed25519 } from '@noble/curves/ed25519.js'
 
 import fixture from '../../../testdata/fleet/certs.json'
 import { encodeCert, type Cert } from '@/crypto/cert'
+import type { EnrolPost } from '@/fleet/enrol'
 import type { DirectoryAnswer, DirectoryFetch } from '@/relay/directory'
 
 const unhex = (s: string) => new Uint8Array((s.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)))
@@ -113,6 +114,50 @@ export function directoryFetch(
     })
   }
   return Object.assign(fetch, { calls })
+}
+
+/**
+ * What a daemon holding this fleet's key answers an enrolment with — the four
+ * fields of daemon.enrolAnswer, around whatever certificate a case has minted.
+ *
+ * `deviceId` is a constant because nothing in the browser reads it: the row it
+ * names lives on the machine's Devices screen, and a browser that stored an id
+ * would be keeping a second copy of a fact only the daemon can answer for.
+ */
+export function enrolAnswer(
+  cert: Uint8Array,
+  fleetPub: Uint8Array = FLEET_PUB,
+  machineId = 'blue-mesa-1a2b',
+) {
+  return {
+    deviceId: 'ab12cd34',
+    deviceCert: base64(cert),
+    fleetPub: base64(fleetPub),
+    machineId,
+  }
+}
+
+/**
+ * A stand-in for `POST /api/fleet/enrol`, recording what was posted at it.
+ *
+ * The body is handed over as a string rather than parsed, so a case can assert
+ * the exact document that went on the wire — the endpoint reads one field and
+ * the encoding of it is the thing worth pinning.
+ */
+export function enrolFetch(
+  answer: Record<string, unknown> | string,
+  init: { ok?: boolean; status?: number } = {},
+): EnrolPost & { calls: Array<{ path: string; body: string }> } {
+  const calls: Array<{ path: string; body: string }> = []
+  const post = (path: string, body: string): Promise<DirectoryAnswer> => {
+    calls.push({ path, body })
+    return Promise.resolve({
+      ok: init.ok ?? true,
+      status: init.status ?? 200,
+      text: () => Promise.resolve(typeof answer === 'string' ? answer : JSON.stringify(answer)),
+    })
+  }
+  return Object.assign(post, { calls })
 }
 
 /** The fixture's own device key, for cases that want the committed vectors

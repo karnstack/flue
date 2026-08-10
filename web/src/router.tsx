@@ -56,6 +56,17 @@ export interface FlueRouterOptions {
    * attempt until it has an answer.
    */
   picker?: boolean
+  /**
+   * True when the daemon on this machine served this page: the other side of
+   * the same coin as `client`, and the case where the tab holds a session
+   * cookie and no fleet identity at all.
+   *
+   * The fleet uses it for the two things only that tab does — enrolling itself
+   * as a device of this machine's fleet, and reading the fleet directory
+   * through the daemon, because the relay answers a cross-origin fetch without
+   * the header a browser needs to hand it over. See fleet/enrol.ts.
+   */
+  loopback?: boolean
 }
 
 /**
@@ -93,11 +104,11 @@ export interface FlueRouterOptions {
 const rootRoute = createRootRouteWithContext<FlueRouterOptions>()({
   component: function Root() {
     const pathname = useRouterState({ select: (s) => s.location.pathname })
-    const { client, pinned, picker } = rootRoute.useRouteContext()
+    const { client, pinned, picker, loopback } = rootRoute.useRouteContext()
     if (pathname === PAIR_PATH) return <Outlet />
     if (picker === true) return <MachinesRoute />
     return (
-      <FleetProvider client={client} pinned={pinned}>
+      <FleetProvider client={client} pinned={pinned} loopback={loopback}>
         <Outlet />
       </FleetProvider>
     )
