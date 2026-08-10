@@ -87,6 +87,11 @@ lint: web relay
 	# The dev-tagged build (make run) has no CI job of its own; vetting it
 	# here is what keeps web/dev.go from drifting out of compilability.
 	go vet -tags dev ./...
+	# And the e2e-tagged one, for the same reason and a stronger one: `make
+	# e2e` is not in CI at all, so without this line cmd/flue/e2etrust.go
+	# could stop compiling and nothing would say so until somebody reached
+	# for the suite — which is exactly when they least want to debug it.
+	go vet -tags e2e ./...
 	cd web && pnpm lint
 	cd relay && pnpm lint
 

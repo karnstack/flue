@@ -1,0 +1,55 @@
+name: e2e
+
+# On demand only. There is no `push` and no `pull_request` trigger here, and
+# that is a decision rather than an omission: this job starts workerd and two
+# flue daemons, binds three ports and mints a certificate, and a required check
+# that goes red because a runner was slow or a port was taken teaches people to
+# re-run checks without reading them. The suite is worth having and worth
+# trusting; it is not worth making it the thing standing between a one-line fix
+# and main.
+#
+# So it sits here, free — a workflow with only `workflow_dispatch` costs nothing
+# until somebody presses the button — for the two occasions it earns its keep:
+# before a release that touches the relay or the fleet (docs/RELAY.md's human
+# checklist is the other half of that gate), and when a change to either wants
+# a second machine's worth of evidence that a reviewer's laptop cannot give.
+#
+# Locally it is `make e2e`, which is the same thing and about eight seconds warm.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # Generous against a cold runner — the whole suite is seconds once warm, and
+    # the failure worth reading is an assertion, never the job's own clock.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the toolchain from mise.toml
+        uses: jdx/mise-action@v4
+
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml', 'relay/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
+      # openssl mints the throwaway certificate the local relay is served under;
+      # ubuntu-latest ships one, and naming it here is what turns "missing" into
+      # a line in the log rather than a puzzling failure inside the harness.
+      - name: Show the openssl the harness will use
+        run: openssl version
+
+      - name: End to end
+        run: make e2e
