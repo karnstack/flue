@@ -10,6 +10,7 @@ import {
   RouterProvider,
 } from '@tanstack/react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { IDBFactory } from 'fake-indexeddb'
 
 import type { SessionInfo } from '@/client/protocol'
 import { SidebarProvider } from '@/components/ui/sidebar'
@@ -495,6 +496,35 @@ describe('SessionsRoute', () => {
       await pick(user, 'Grouping', 'State')
 
       expect(screen.getByText(/is unreachable/)).toBeTruthy()
+    })
+
+    it('says the fleet is out of reach instead of quietly listing one machine', async () => {
+      // A browser that pinned no fleet key — paired before fleet trust
+      // existed, or with a daemon that held no key — reaches the machine it
+      // paired with and no other. The fleet builder skipped the rest in
+      // silence, so the reader saw a short list and nothing anywhere to say it
+      // was short, on a screen whose whole subject is "what is running
+      // everywhere". It cannot be repaired over the wire either: a fleet key
+      // learned from a connection is a key that connection chose.
+      vi.stubGlobal('indexedDB', new IDBFactory())
+      localStorage.clear()
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' })])
+
+      // The relay origin is what a loopback tab learns from its daemon, and
+      // what sends the fleet off to build its remote sources.
+      act(() =>
+        sock.emitControl({
+          type: 'welcome',
+          daemonId: 'd1',
+          host: 'mesa.local',
+          ver: '0.1.0',
+          relay: { status: 'connected', origin: 'https://relay.example' },
+        }),
+      )
+
+      await waitFor(() => expect(screen.getByText(/holds\s+no key for the fleet/)).toBeTruthy())
+      expect(screen.getByText(/Pair it again/)).toBeTruthy()
     })
 
     it('reports a lost local daemon rather than showing an empty screen', async () => {

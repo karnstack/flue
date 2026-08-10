@@ -24,7 +24,13 @@ import {
   revocation,
 } from '@/testing/fleet'
 import { responderHandshake } from '@/testing/noise-daemon'
-import { adoptFleetCert, FleetClient, fleetSources, type FleetSource } from './fleet'
+import {
+  adoptFleetCert,
+  FleetClient,
+  fleetSources,
+  type FleetGaps,
+  type FleetSource,
+} from './fleet'
 import { LOCAL_MACHINE_ID, type FleetSession, type MachineState } from './types'
 
 const unhex = (s: string) => new Uint8Array((s.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)))
@@ -809,6 +815,9 @@ describe('fleetSources', () => {
 const LOFT_PRIV = new Uint8Array(32).fill(0x5c)
 const LOFT_PUB = x25519.getPublicKey(LOFT_PRIV)
 
+/** A second such machine, for the cases that count more than one of them. */
+const MESA_PUB = x25519.getPublicKey(new Uint8Array(32).fill(0x33))
+
 describe('fleetSources with a fleet directory', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -1026,6 +1035,47 @@ describe('fleetSources with a fleet directory', () => {
       directoryFetch: directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)]),
     })
     expect(sources).toEqual([])
+  })
+
+  it('counts the machines it skipped instead of only skipping them', async () => {
+    // The skip above is correct and used to be the whole story, which left a
+    // reader looking at a short list with nothing anywhere to say it was
+    // short. The count is what the sessions screen puts on the page.
+    await savePinnedFleetKey(FLEET_PUB)
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+    const gaps: FleetGaps[] = []
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      onGaps: (g) => gaps.push(g),
+      directoryFetch: directoryFetch([
+        machineCert('loft-9f9f', 'Loft', LOFT_PUB),
+        machineCert('blue-mesa-1a2b', 'Blue Mesa', MESA_PUB),
+        machineCert(ATTIC.id, 'Attic Pi', DAEMON_PUB),
+      ]),
+    })
+    expect(sources.map((s) => s.id)).toEqual(['attic-pi'])
+    expect(gaps).toEqual([{ uncertified: 2, fleetKey: true }])
+  })
+
+  it('reports a browser that pinned no fleet key at all', async () => {
+    // The gap nothing can repair over the wire: a fleet key learned from a
+    // connection is a fleet key the connection chose. This browser reaches
+    // the machine it paired with, and pairing again is the way out — which is
+    // worth a sentence on screen, because the alternative is a fleet that
+    // silently consists of one machine.
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+    const gaps: FleetGaps[] = []
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      onGaps: (g) => gaps.push(g),
+      directoryFetch: directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)]),
+    })
+    expect(sources.map((s) => s.id)).toEqual(['attic-pi'])
+    expect(gaps).toEqual([{ uncertified: 0, fleetKey: false }])
   })
 })
 

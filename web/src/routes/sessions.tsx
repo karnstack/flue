@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useSidebar } from '@/components/ui/sidebar'
 import { Skeleton } from '@/components/ui/skeleton'
+import type { FleetGaps } from '@/fleet/fleet'
 import { useFleet } from '@/fleet/provider'
 import { keyOf, LOCAL_MACHINE_ID, type FleetSession, type MachineState } from '@/fleet/types'
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
@@ -166,6 +167,18 @@ export function SessionsRoute() {
   } | null>(null)
 
   /**
+   * What the fleet could not build for this browser: machines it has no
+   * certificate for, and whether it pinned a fleet key at all. Null until an
+   * expansion has run, which is every tab before its welcome names a relay.
+   *
+   * Read off the fleet on each delivery rather than carried in the payload,
+   * because it changes once per expansion and the payload is delivered several
+   * times a second; the fleet emits when it changes, which is what makes this
+   * read enough (FleetClient.noteGaps).
+   */
+  const [gaps, setGaps] = useState<FleetGaps | null>(null)
+
+  /**
    * Whether an online machine has answered its first list. The fleet reports
    * "a machine came up" and "here are its rows" as two deliveries and nothing
    * in the payload tells them apart, so this reads the one difference there
@@ -305,6 +318,7 @@ export function SessionsRoute() {
     const offs = [
       fleet.onFleet((sessions, machines) => {
         setFleetState({ sessions, machines })
+        setGaps(fleet.gaps())
         const prev = lastMachines.current
         if (
           prev !== null &&
@@ -715,6 +729,13 @@ export function SessionsRoute() {
         </p>
       </PageHeader>
 
+      {/*
+        Above the per-machine bands, and unlike them not tied to any row: this
+        is about the machines that are *not* on the screen. It renders under
+        every grouping for the same reason — there is no group it could sit in.
+      */}
+      {gaps !== null && <FleetGapBand gaps={gaps} />}
+
       {view.grouping !== 'machine' && unreachable.length > 0 && (
         <UnreachableBand machines={unreachable} onRetry={retry} />
       )}
@@ -812,6 +833,51 @@ function PlacedBulkBar(props: {
       {...props}
       className={state === 'expanded' ? 'md:left-(--sidebar-width)' : undefined}
     />
+  )
+}
+
+/**
+ * The fleet this browser is not in, in the same muted band the unreachable
+ * machines get — because to the reader it is the same kind of fact, and one
+ * they otherwise have no way of learning at all.
+ *
+ * Two sentences, at most one of which is ever true at a time, and neither with
+ * a button: nothing on this screen can fix either. A browser with no
+ * certificate for a machine cannot be given one from here — it comes from a
+ * daemon, over a connection that machine will not accept without it — and a
+ * browser with no pinned fleet key must not be handed one over a connection at
+ * all, since a key learned that way is a key the connection chose. Pairing
+ * again is the way out of both, and it starts on the machine.
+ *
+ * Silent when there is nothing to say, which is the ordinary case: a browser
+ * that pinned a fleet key and holds a certificate has no gap, and a band
+ * reading "everything is fine" is a band nobody reads.
+ */
+function FleetGapBand({ gaps }: { gaps: FleetGaps }) {
+  if (!gaps.fleetKey) {
+    return (
+      <div className="flex flex-col gap-y-1 rounded-md bg-row-hover px-3 py-2">
+        <p className="text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
+          This browser is pinned to{' '}
+          <span className="font-medium text-zinc-950 dark:text-white">one machine</span> and holds
+          no key for the fleet, so it cannot see the others. Pair it again from any machine on the
+          fleet and they all appear.
+        </p>
+      </div>
+    )
+  }
+  if (gaps.uncertified === 0) return null
+  return (
+    <div className="flex flex-col gap-y-1 rounded-md bg-row-hover px-3 py-2">
+      <p className="text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
+        <span className="font-medium text-zinc-950 dark:text-white">
+          {gaps.uncertified === 1 ? '1 machine' : `${gaps.uncertified} machines`}
+        </span>{' '}
+        in this fleet {gaps.uncertified === 1 ? 'has' : 'have'} no certificate this browser can
+        present, so {gaps.uncertified === 1 ? 'it is' : 'they are'} not listed here. Pair this
+        browser again from any machine on the fleet to be let in.
+      </p>
+    </div>
   )
 }
 

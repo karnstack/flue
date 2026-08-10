@@ -73,6 +73,35 @@ export interface FleetSource {
   client: FlueClient
 }
 
+/**
+ * What an expansion could not build — the fleet this browser is not in.
+ *
+ * Both halves were silent skips, and both are permanent until somebody pairs
+ * again, which is exactly the kind of fact a screen has to state rather than
+ * leave a reader to infer from a short list. They are counts and a flag rather
+ * than machines because there is nothing to act on per row: a machine with no
+ * certificate cannot be dialled, retried or named — it is a line in a signed
+ * directory this browser cannot present anything to.
+ */
+export interface FleetGaps {
+  /**
+   * Machines the fleet directory names that this browser holds neither a
+   * pinned key for nor a certificate to present to. Every one of them is a
+   * machine the reader believes they are on the fleet with.
+   */
+  uncertified: number
+  /**
+   * Whether this browser has a fleet key pinned at all. False is the browser
+   * that paired with a machine holding no fleet key — before fleet trust
+   * existed, or during the window a daemon could be live on a relay and unable
+   * to sign — and it is the one gap nothing can repair over the wire: a fleet
+   * key learned from a connection is a fleet key the connection chose, which
+   * is the trust-on-first-use this design refuses. That browser reaches the
+   * machine it paired with, and pairing again is the whole of the way out.
+   */
+  fleetKey: boolean
+}
+
 /** What onFleet hands its listeners, on any change to either half. */
 type FleetListener = (sessions: FleetSession[], machines: MachineState[]) => void
 
@@ -165,17 +194,53 @@ export class FleetClient {
   /** Bumped by close, so an in-flight expansion can tell it was orphaned. */
   private epoch = 0
 
-  constructor(
-    sources: FleetSource[],
-    /**
-     * How remote sources are built when the loopback welcome names a relay.
-     * The default is the production builder; a test scripts this the way it
-     * scripts a socket factory, because the real one reads storage and dials.
-     */
-    private readonly expand: (relayOrigin: string) => Promise<FleetSource[]> = (origin) =>
-      fleetSources({ loopback: false, relayOrigin: origin }),
-  ) {
+  /**
+   * What the last expansion could not build, or null before one has run.
+   * Held so a screen can say it; see FleetGaps.
+   */
+  private gapsState: FleetGaps | null = null
+
+  /**
+   * How remote sources are built when the loopback welcome names a relay.
+   * The default is the production builder; a test scripts this the way it
+   * scripts a socket factory, because the real one reads storage and dials.
+   */
+  private readonly expand: (relayOrigin: string) => Promise<FleetSource[]>
+
+  constructor(sources: FleetSource[], expand?: (relayOrigin: string) => Promise<FleetSource[]>) {
     this.slots = sources.map(toSlot)
+    // Assigned in the body rather than as a parameter default because the
+    // production builder reports back into this instance: what it could not
+    // build is as much a part of the fleet as what it could.
+    this.expand =
+      expand ??
+      ((origin) =>
+        fleetSources({
+          loopback: false,
+          relayOrigin: origin,
+          onGaps: (g) => this.noteGaps(g),
+        }))
+  }
+
+  /**
+   * What this browser could not reach, as of the last expansion, or null on a
+   * tab that has not run one — a loopback tab before its welcome names a
+   * relay, or a test driving scripted sources.
+   *
+   * Read after an onFleet delivery: noteGaps emits, so a screen holding this
+   * as state is told when it changes for the same reason it is told when a
+   * machine goes offline.
+   */
+  gaps(): FleetGaps | null {
+    return this.gapsState
+  }
+
+  /** Record what the builder skipped, and tell the screens if it changed. */
+  private noteGaps(g: FleetGaps) {
+    const held = this.gapsState
+    if (held !== null && held.uncertified === g.uncertified && held.fleetKey === g.fleetKey) return
+    this.gapsState = g
+    this.emit()
   }
 
   /** Wire every source and start connecting them, and keep polling until `close`. */
@@ -711,11 +776,17 @@ function decodeBase64(text: string): Uint8Array | null {
  * never looks at a certificate. The directory still gets the last word on the
  * machine's *name*, which is its own to state.
  *
- * A row nothing can reach is skipped in silence rather than surfaced: a
- * pairing record whose key is gone and which the fleet does not name, or a
- * fleet machine this device has no certificate to present to. The fleet lists
- * machines that can be reached, and re-pairing is the picker's business, not a
- * status row's.
+ * A row nothing can reach is not built: a pairing record whose key is gone and
+ * which the fleet does not name, or a fleet machine this device has no
+ * certificate to present to. The fleet lists machines that can be reached, and
+ * re-pairing is the picker's business, not a status row's.
+ *
+ * Not built is not the same as not mentioned, and it used to be. The second of
+ * those — a machine the fleet names that this browser cannot present anything
+ * to — is counted and reported through `onGaps`, along with a browser that
+ * pinned no fleet key at all, because both are permanent until somebody pairs
+ * again and a reader cannot tell either of them from a short list. See
+ * FleetGaps.
  */
 export async function fleetSources(opts: {
   loopback: boolean
@@ -724,6 +795,13 @@ export async function fleetSources(opts: {
   /** How the directory is read. Production passes nothing; a test hands over
    *  an answer the way it hands over a socket factory. */
   directoryFetch?: DirectoryFetch
+  /**
+   * Told what this build could *not* reach, once, at the end. Every skip
+   * below used to be silent, and each of them is a machine the reader thinks
+   * they are on a fleet with; see FleetGaps. Not called at all on a tab with
+   * no relay origin, which has no fleet to be missing from.
+   */
+  onGaps?: (gaps: FleetGaps) => void
 }): Promise<FleetSource[]> {
   const sources: FleetSource[] = []
   if (opts.loopback) {
@@ -749,6 +827,10 @@ export async function fleetSources(opts: {
     return deviceKey
   }
 
+  // Whether this browser holds the fleet key at all, asked before the
+  // directory read because that read is the first thing the absence costs:
+  // without the key there is no machine list this browser may believe.
+  const fleetKey = await hasPinnedFleetKey()
   const view = await fleetView(origin, device, opts.directoryFetch)
   // This device's own certificate, from this browser's store rather than from
   // the relay: the machine that minted it handed it over at pairing and hands
@@ -763,6 +845,11 @@ export async function fleetSources(opts: {
   // daemon that had heard, which is a channel that opens and closes.
   const deviceCert = view.revoked ? null : await storedDeviceCert()
 
+  // Machines the fleet names that this browser can present nothing to. Counted
+  // rather than skipped in silence: to the reader they are the machines they
+  // set up and cannot see, and nothing on any screen would otherwise say the
+  // list is short.
+  let uncertified = 0
   for (const machine of mergeMachines(listMachines(), view.machines)) {
     let pinned: Uint8Array | null = null
     try {
@@ -777,7 +864,10 @@ export async function fleetSources(opts: {
     // A machine this browser never paired with admits it on the device
     // certificate and on nothing else (channel.go, rule 2). Without one there
     // is no handshake to attempt, only a row that would sit at unreachable.
-    if (pinned === null && deviceCert === null) continue
+    if (pinned === null && deviceCert === null) {
+      uncertified++
+      continue
+    }
     const key = await device()
     if (key === null) break
     const identity = {
@@ -791,7 +881,18 @@ export async function fleetSources(opts: {
       client: new FlueClient(origin, (o) => relaySocket(o, identity, machine.id, opts.wsFactory)),
     })
   }
+  opts.onGaps?.({ uncertified, fleetKey })
   return sources
+}
+
+/** Whether this browser pinned a fleet key at pairing. A key store that will
+ *  not open answers as no key does: nothing this browser can verify with. */
+async function hasPinnedFleetKey(): Promise<boolean> {
+  try {
+    return (await loadPinnedFleetKey()) !== null
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -799,10 +900,15 @@ export async function fleetSources(opts: {
  *
  * Nothing is the answer for a browser with no pinned fleet key — one that
  * paired before the key existed, or with a daemon that holds none — and it is
- * an ordinary answer: that browser reaches the machines it paired with
- * directly, exactly as it always did. Reading the directory *without* the key
- * would be worse than not reading it, because an unverifiable machine list is
- * a relay naming whatever machines it likes.
+ * a correct answer rather than an error: that browser reaches the machines it
+ * paired with directly, exactly as it always did. Reading the directory
+ * *without* the key would be worse than not reading it, because an unverifiable
+ * machine list is a relay naming whatever machines it likes.
+ *
+ * It is no longer a *silent* answer. The caller reports it (FleetGaps.fleetKey)
+ * and the sessions screen says so, because "this browser is on a fleet of one
+ * and cannot be given the key over the wire" is not something a reader can work
+ * out from a list with one machine in it.
  *
  * Everything else it can go wrong with is inside readDirectory, which never
  * rejects: a relay that has not been updated answers 503 on this route, an
