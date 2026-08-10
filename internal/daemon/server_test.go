@@ -1365,6 +1365,81 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
+// TestLocalCSPAllowsTheRelayThisDaemonDials is the fleet working from a
+// loopback tab at all.
+//
+// A page the daemon served reaches its own daemon over ws://127.0.0.1, and
+// everything else over the relay: wss://<relay>/client/<id> for each sibling
+// machine, and https://<relay>/directory to learn which siblings there are.
+// `connect-src 'self'` covers neither — a different origin is a different
+// origin — so without the relay in the policy the browser blocks both. The
+// socket looks like a machine that will not connect; the fetch looks like
+// nothing at all, because readDirectory answers "no machines" for every fault
+// by design, so a loopback tab would quietly show a fleet of one.
+func TestLocalCSPAllowsTheRelayThisDaemonDials(t *testing.T) {
+	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
+	srv.SetRelayOrigin("https://flue-relay.example.workers.dev")
+
+	csp := get(t, ts, "/api/sessions", "same-origin").Header.Get("Content-Security-Policy")
+	connect := ""
+	for _, d := range strings.Split(csp, ";") {
+		if strings.HasPrefix(strings.TrimSpace(d), "connect-src ") {
+			connect = strings.TrimSpace(d)
+		}
+	}
+	if connect == "" {
+		t.Fatalf("no connect-src in %q", csp)
+	}
+	for _, want := range []string{
+		// The directory read, and every other plain fetch to the relay.
+		"https://flue-relay.example.workers.dev",
+		// The per-machine socket, which is the same origin with the scheme
+		// swapped — exactly how web/src/relay/socket.ts builds it.
+		"wss://flue-relay.example.workers.dev",
+		// And the daemon's own socket, which is what this clause was for.
+		"ws://127.0.0.1:*",
+	} {
+		if !strings.Contains(connect, want) {
+			t.Errorf("connect-src %q does not allow %q", connect, want)
+		}
+	}
+}
+
+// TestLocalCSPNamesNoRelayWithoutOne: the grant is one exact origin this daemon
+// is configured to dial, and a daemon with no relay grants nothing extra.
+func TestLocalCSPNamesNoRelayWithoutOne(t *testing.T) {
+	ts, _ := newTestServer(t)
+	csp := get(t, ts, "/api/sessions", "same-origin").Header.Get("Content-Security-Policy")
+	if csp != LocalCSP {
+		t.Errorf("CSP without a relay = %q, want %q", csp, LocalCSP)
+	}
+	if strings.Contains(csp, "wss://") {
+		t.Errorf("a daemon with no relay granted a wss origin: %q", csp)
+	}
+}
+
+// TestLocalCSPForBuildsTheSocketOriginFromTheHTTPOne pins the scheme swap,
+// including the ws:// form a `pnpm dev` relay is spelled with — a policy that
+// named https and wss for a plain-http origin would allow the wrong thing and
+// forbid the right one.
+func TestLocalCSPForBuildsTheSocketOriginFromTheHTTPOne(t *testing.T) {
+	for _, tc := range []struct{ origin, wantSocket string }{
+		{origin: "https://relay.example", wantSocket: "wss://relay.example"},
+		{origin: "http://localhost:8787", wantSocket: "ws://localhost:8787"},
+	} {
+		got := LocalCSPFor(tc.origin)
+		if !strings.Contains(got, " "+tc.origin+" ") {
+			t.Errorf("LocalCSPFor(%q) does not name the origin: %q", tc.origin, got)
+		}
+		if !strings.Contains(got, tc.wantSocket) {
+			t.Errorf("LocalCSPFor(%q) does not name %q: %q", tc.origin, tc.wantSocket, got)
+		}
+	}
+	if LocalCSPFor("") != LocalCSP {
+		t.Error("LocalCSPFor(\"\") is not the plain policy")
+	}
+}
+
 // --- the pairing page, served to a device that holds no token ---
 
 // getAnon issues the GET the device being paired makes: no cookie, no header,

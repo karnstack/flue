@@ -223,6 +223,10 @@ type Server struct {
 	// the status callbacks do not carry it.
 	relayMachineID   string
 	relayMachineName string
+	// relayConfigured is the origin relay.json names, whether or not the
+	// transport has reached it. It exists for the Content-Security-Policy and
+	// nothing else — see LocalCSPFor.
+	relayConfigured string
 
 	primaryMu sync.Mutex
 	primary   map[string]*conn // session ID -> primary connection
@@ -412,7 +416,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/", s.withAuth(http.NotFoundHandler()))
 	mux.Handle("/", s.withAuth(s.ui))
 
-	return securityHeaders(methodPolicy(mux))
+	return s.securityHeaders(methodPolicy(mux))
 }
 
 // methodPolicy rejects everything but GET and HEAD, plus POST to the named
@@ -483,7 +487,9 @@ const (
 	// is not same-origin under CSP's rules because the scheme differs.
 	cspLoopbackSockets = " ws://127.0.0.1:* ws://localhost:*"
 
-	// LocalCSP is what this daemon serves its own UI under.
+	// LocalCSP is what this daemon serves its own UI under when it has no relay
+	// configured. A daemon that has one serves LocalCSPFor(origin) instead —
+	// see there for why the relay origin has to be in `connect-src`.
 	LocalCSP = cspHead + cspLoopbackSockets + cspTail
 
 	// RelayCSP is what a relay origin serves the same bundle under. It is
@@ -493,10 +499,68 @@ const (
 	RelayCSP = cspHead + cspTail
 )
 
-func securityHeaders(next http.Handler) http.Handler {
+// LocalCSPFor is what this daemon serves its own UI under when relay.json
+// names a relay: LocalCSP, plus that one origin in `connect-src`.
+//
+// It is not a convenience. A page the daemon served on loopback reaches its own
+// daemon over `ws://127.0.0.1:7717`, and everything *else* it reaches is on the
+// relay: `wss://<relay>/client/<id>` for every other machine in the fleet, and
+// now `https://<relay>/directory` to find out which machines those are. Neither
+// is covered by `'self'` — a different origin is a different origin, whatever
+// this daemon's relationship with it — so under the policy without this clause
+// the browser blocks both. The socket failure looks like a machine that will
+// not connect; the fetch failure looks like nothing at all, because
+// `readDirectory` answers "no machines" for every fault by design. A loopback
+// tab would quietly show a fleet of one.
+//
+// One exact origin, and only the two schemes the page uses on it. That is a far
+// narrower grant than the loopback clause beside it — which carries wildcard
+// ports and is the standing item in docs/FOLLOW-UPS.md §6 — and it is the
+// origin this daemon is configured to dial anyway. It comes from relay.json
+// rather than from the live transport because a policy is fixed when the
+// document is served: a tab loaded while the relay was still dialling would
+// otherwise carry a policy that forbids the connection the page makes a second
+// later, and nothing would correct it short of a reload.
+//
+// The relay-served copy of the same bundle keeps RelayCSP, which grants nothing
+// beyond 'self': there the relay *is* the origin.
+func LocalCSPFor(relayOrigin string) string {
+	if relayOrigin == "" {
+		return LocalCSP
+	}
+	// The socket is the https origin with the scheme swapped, which is exactly
+	// how web/src/relay/socket.ts builds it.
+	ws := "wss://" + strings.TrimPrefix(strings.TrimPrefix(relayOrigin, "https://"), "http://")
+	if strings.HasPrefix(relayOrigin, "http://") {
+		ws = "ws://" + strings.TrimPrefix(relayOrigin, "http://")
+	}
+	return cspHead + cspLoopbackSockets + " " + relayOrigin + " " + ws + cspTail
+}
+
+// SetRelayOrigin records the origin relay.json names, for the Content-Security-
+// Policy alone.
+//
+// Deliberately not the same field as the transport's `relayOrigin`, which is
+// socket state and is empty until a dial succeeds. This is configuration: it is
+// true from the moment relay.json is read, and the CSP on a document has to
+// permit the connections that document will make later, including the ones it
+// makes while the relay is still coming up.
+func (s *Server) SetRelayOrigin(origin string) {
+	s.relayMu.Lock()
+	defer s.relayMu.Unlock()
+	s.relayConfigured = origin
+}
+
+func (s *Server) configuredRelayOrigin() string {
+	s.relayMu.RLock()
+	defer s.relayMu.RUnlock()
+	return s.relayConfigured
+}
+
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", LocalCSP)
+		w.Header().Set("Content-Security-Policy", LocalCSPFor(s.configuredRelayOrigin()))
 		next.ServeHTTP(w, r)
 	})
 }

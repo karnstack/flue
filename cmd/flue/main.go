@@ -460,6 +460,15 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 	// rather than socket state, which is why it is set here — once, by the
 	// process that read relay.json — and not by the transport's callbacks.
 	srv.SetRelayMachine(rc.MachineID, rc.MachineName)
+	// And the origin, for the Content-Security-Policy this daemon serves its own
+	// UI under. A loopback tab talks to the relay for everything that is not
+	// this machine — `wss://<relay>/client/<id>` per sibling machine, and
+	// `https://<relay>/directory` to learn which siblings exist — and neither is
+	// covered by `'self'`. Set from relay.json rather than from the transport's
+	// status because a document's policy is fixed when it is served, and a tab
+	// opened while the relay is still dialling still has to be allowed to reach
+	// it (daemon.LocalCSPFor).
+	srv.SetRelayOrigin(rc.Origin)
 	// Before the goroutine, never after it. The transport reports this itself
 	// the moment it starts dialling, and this only covers the window before it
 	// is scheduled — but a seed written *after* the goroutine started races the

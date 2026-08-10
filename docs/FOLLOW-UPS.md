@@ -136,6 +136,17 @@ terminal see a login shell under the login service too.
   `ws://127.0.0.1:7717` from an `http://127.0.0.1:7717` page — narrowing it needs
   the port, which the daemon knows and this constant does not.
 
+  The daemon's policy also names **one** relay origin now (`daemon.LocalCSPFor`,
+  from `relay.json`), and that is a widening worth reading as a separate fact.
+  It is not defence-in-depth slippage: a loopback tab reaches every *other*
+  machine in the fleet over `wss://<relay>/client/<id>` and reads
+  `https://<relay>/directory` to learn they exist, and `'self'` covers neither,
+  so before it the fleet silently collapsed to one machine on a loopback tab —
+  silently because `readDirectory` answers "no machines" for every fault. One
+  exact origin, two schemes, from a file this daemon already dials, is a much
+  narrower grant than the wildcard ports beside it. Narrowing *those* is still
+  the open item.
+
 ## Crypto and pairing
 
 Carried out of the crypto+pairing milestone (Noise IK, the device registry, the
