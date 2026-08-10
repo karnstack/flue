@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,12 +26,17 @@ func uiService(f *fakeCloudflare, rt *relayRuntime) *relayUIService {
 	return &relayUIService{runtime: rt, base: f.srv.URL}
 }
 
+// alwaysStarts is a transport that comes up and can be taken down again, for
+// the cases that care about the deploy rather than the leg. The real one is
+// cmdServe's, which cancels the relay's own context (see forgetRelay).
+func alwaysStarts() (bool, func()) { return true, func() {} }
+
 func TestRelayUIProvisionDeploysAndStartsTheTransport(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	f := newFakeCloudflare(t, oneAccount(), "karn")
 
 	started := 0
-	rt := &relayRuntime{start: func() bool { started++; return true }}
+	rt := &relayRuntime{start: func() (bool, func()) { started++; return true, func() {} }}
 	svc := uiService(f, rt)
 
 	res, err := svc.Provision(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken})
@@ -90,7 +96,7 @@ func TestRelayUIProvisionDeploysAndStartsTheTransport(t *testing.T) {
 func TestRelayUIUpdateUsesTheStoredToken(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	f := newFakeCloudflare(t, twoAccounts(), "karn")
-	svc := uiService(f, &relayRuntime{start: func() bool { return true }})
+	svc := uiService(f, &relayRuntime{start: alwaysStarts})
 
 	// Deploy with a typed token and a chosen account; both get stored.
 	if _, err := svc.Provision(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken, AccountID: twoAccounts()[0].ID}); err != nil {
@@ -114,7 +120,7 @@ func TestRelayUIUpdateUsesTheStoredToken(t *testing.T) {
 func TestRelayUIProvisionAsksWhichAccountAndDeploysNothing(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	f := newFakeCloudflare(t, twoAccounts(), "karn")
-	svc := uiService(f, &relayRuntime{start: func() bool { return true }})
+	svc := uiService(f, &relayRuntime{start: alwaysStarts})
 
 	res, err := svc.Provision(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken})
 	if err != nil {
@@ -143,7 +149,7 @@ func TestRelayUIProvisionAsksWhichAccountAndDeploysNothing(t *testing.T) {
 func TestRelayUIProvisionOnARunningTransportSaysRestart(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	f := newFakeCloudflare(t, oneAccount(), "karn")
-	rt := &relayRuntime{running: true, start: func() bool { t.Fatal("a second transport was started"); return false }}
+	rt := &relayRuntime{running: true, start: func() (bool, func()) { t.Fatal("a second transport was started"); return false, nil }}
 	svc := uiService(f, rt)
 
 	res, err := svc.Provision(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken})
@@ -421,6 +427,117 @@ func TestRelayUIJoinCommandStaysQuietWithoutAFleetKey(t *testing.T) {
 	}
 	if cmd, ok, err := svc.JoinCommand(context.Background()); ok || err != nil {
 		t.Fatalf("JoinCommand without a fleet key = %q ok %v err %v; want quiet false", cmd, ok, err)
+	}
+}
+
+// TestRelayUILeaveStopsTheTransportAndKeepsTheRest is the Remote screen's
+// Disconnect: the file goes, the leg goes with it in this same process, and
+// nothing else does.
+//
+// The stop is the half the CLI cannot do — it deletes a file in another process
+// and has to ask for a restart — and it is the half that makes the screen's
+// claim true. A card that said "you have left the relay" over a live socket
+// would be the one lie this feature is able to tell.
+func TestRelayUILeaveStopsTheTransportAndKeepsTheRest(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	f := newFakeCloudflare(t, oneAccount(), "karn")
+
+	stops := 0
+	rt := &relayRuntime{start: func() (bool, func()) { return true, func() { stops++ } }}
+	svc := uiService(f, rt)
+
+	// Deploy first, so this is a machine that is genuinely on a relay with a
+	// transport up and a stored token — the state Disconnect is offered in.
+	if _, err := svc.Provision(context.Background(), daemon.RelayUIDeployRequest{Token: setupToken}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if !rt.running {
+		t.Fatal("the deploy did not start a transport; there is no stop to test")
+	}
+
+	res, err := svc.Leave(context.Background())
+	if err != nil {
+		t.Fatalf("Leave: %v", err)
+	}
+	if stops != 1 || rt.running {
+		t.Fatalf("transport stops = %d, running = %v; want exactly one stop", stops, rt.running)
+	}
+	if _, ok, _ := config.LoadRelay(); ok {
+		t.Fatal("relay.json survived the leave")
+	}
+	joined := strings.Join(res.Steps, "\n")
+	for _, want := range []string{
+		"relay.json deleted",
+		"relay leg stopped",
+		// The Worker is not this action's to undeploy, and a user who assumes
+		// otherwise is one who thinks they have stopped paying for something.
+		"still deployed in your Cloudflare account",
+		// And the three things a "leave" might be read as taking with it.
+		"paired devices",
+		"Cloudflare token",
+		"new id",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the leave's steps never say %q:\n%s", want, joined)
+		}
+	}
+	// The stored credential is a credential for an account, not for a relay:
+	// it deploys and updates any relay in that account, and the connect card
+	// documents deleting cloudflare.json as the way to forget it. Leaving a
+	// relay takes no view on it.
+	if _, ok, err := config.LoadCloudflare(); !ok || err != nil {
+		t.Fatalf("the stored Cloudflare token did not survive the leave: ok=%v err=%v", ok, err)
+	}
+	// And the screen's answer agrees: nothing configured, no origin, no
+	// problems to report about a file that is not there.
+	if st := svc.Status(context.Background()); st.Configured || st.Origin != "" || len(st.Problems) != 0 {
+		t.Fatalf("status after leaving = %+v; want an unconfigured machine", st)
+	}
+	// Its account is still named, because the token is still stored — that is
+	// what makes deploying a new relay one click rather than a trip to the
+	// token page.
+	if st := svc.Status(context.Background()); !st.HasToken {
+		t.Fatal("status after leaving reports no stored token")
+	}
+}
+
+// TestRelayUILeaveWithNoTransportClaimsNoStop: a daemon that booted without a
+// relay and had one written under it by hand has a file and no leg. Leaving
+// deletes the file and must not report stopping something that was never up.
+func TestRelayUILeaveWithNoTransportClaimsNoStop(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	svc := &relayUIService{runtime: &relayRuntime{}}
+	seedRelayAt(t, "https://flue-relay.karn.workers.dev")
+
+	res, err := svc.Leave(context.Background())
+	if err != nil {
+		t.Fatalf("Leave: %v", err)
+	}
+	if strings.Contains(strings.Join(res.Steps, "\n"), "relay leg stopped") {
+		t.Fatalf("a leave with no transport claimed to have stopped one: %v", res.Steps)
+	}
+	if _, ok, _ := config.LoadRelay(); ok {
+		t.Fatal("relay.json survived the leave")
+	}
+}
+
+// TestRelayUILeaveWithoutARelayIsABadRequest: the same refusal the CLI gives,
+// as a 400 rather than a 502 — the caller asked for something that does not
+// apply, and nothing failed.
+func TestRelayUILeaveWithoutARelayIsABadRequest(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	svc := &relayUIService{runtime: &relayRuntime{running: true, start: alwaysStarts}}
+
+	_, err := svc.Leave(context.Background())
+	if err == nil || !errors.Is(err, daemon.ErrRelayUIBadRequest) {
+		t.Fatalf("Leave with no relay = %v; want a bad request", err)
+	}
+	if !strings.Contains(err.Error(), "nothing to leave") {
+		t.Fatalf("Leave's refusal = %q", err)
+	}
+	// And it changed nothing on the way to refusing.
+	if !svc.runtime.running {
+		t.Fatal("a refused leave stopped the transport anyway")
 	}
 }
 

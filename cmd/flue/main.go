@@ -111,6 +111,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue relay status       show the configured relay
   flue relay update       redeploy this release's relay; secret and pairings kept
   flue relay address URL  repoint this machine at a custom domain on the same relay
+  flue relay leave        take this machine off its relay; the Worker stays deployed
   flue relay reset        empty the relay's fleet directory; the fleet republishes
   flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N] [--open]   run the daemon in the foreground
@@ -271,8 +272,8 @@ func cmdServe(args []string) error {
 	// start function, so a relay deployed from the Remote screen starts
 	// dialling in this same process — and a daemon whose transport is already
 	// up is never handed a second one.
-	rt := &relayRuntime{start: func() bool { return startRelay(ctx, srv, identity) }}
-	rt.running = startRelay(ctx, srv, identity)
+	rt := newRelayRuntime(ctx, srv, identity)
+	rt.startOnce()
 	srv.SetRelayUI(&relayUIService{
 		runtime: rt,
 		log:     logger,
@@ -483,6 +484,66 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 		}
 	}()
 	return true
+}
+
+// newRelayRuntime is the relay leg's start/stop bookkeeping for one daemon
+// process: how cmdServe brings the leg up at boot, how a deploy from the Remote
+// screen brings one up mid-life, and how Disconnect takes it down again.
+//
+// Each start gets a context of its own under the daemon's, which is the whole
+// point of the indirection: cancelling that one ends the relay's two legs and
+// nothing else, while cancelling the daemon's still takes them with it. The
+// teardown pairs the cancel with forgetRelay, so a stopped leg cannot leave the
+// daemon still announcing the relay it is no longer dialling.
+func newRelayRuntime(ctx context.Context, srv *daemon.Server, identity daemon.Identity) *relayRuntime {
+	return &relayRuntime{start: func() (bool, func()) {
+		relayCtx, cancel := context.WithCancel(ctx)
+		if !startRelay(relayCtx, srv, identity) {
+			// Nothing was started, so there is nothing to stop — and the
+			// context is released here rather than leaked for the life of the
+			// daemon.
+			cancel()
+			return false, nil
+		}
+		return true, func() {
+			cancel()
+			forgetRelay(srv)
+		}
+	}}
+}
+
+// forgetRelay takes the relay out of everything the daemon says about itself,
+// once its legs have been cancelled.
+//
+// The cancellation alone is not enough, and each of these is a claim that would
+// otherwise outlive the socket it was about:
+//
+//   - The status, because Transport.Run sets RelayOff on its way out but does
+//     it on its own goroutine, and a welcome sent in between would announce a
+//     relay nothing is dialling. Setting it here makes it true by the time the
+//     caller's answer is written; the transport's own deferred call lands on the
+//     same value moments later.
+//   - The directory counts, because Directory.Run returns on a cancelled
+//     context *before* it marks itself unreachable — so the last snapshot would
+//     keep reading "connected" forever. Nil is the honest answer: this daemon is
+//     not reading a directory at all.
+//   - The publisher, so a revoke minted after this queues nowhere instead of
+//     into a leg that will never dial again.
+//   - The machine identity and the configured origin, which are relay.json's
+//     facts and no longer true of a machine that has left: the identity rides
+//     every welcome, and the origin widens this daemon's own CSP.
+//
+// It is not the reverse of startRelay in one respect, deliberately: the fleet
+// key on daemon.Identity is fixed at construction and stays. It signs device
+// certs and revocations, both of which are local artifacts of pairings this
+// machine already made, and dropping it mid-process would break revoking a
+// device that is still in this machine's registry.
+func forgetRelay(srv *daemon.Server) {
+	srv.SetRelayStatus(daemon.RelayOff, "")
+	srv.SetDirectoryCounts(nil)
+	srv.SetFleetPublisher(nil)
+	srv.SetRelayMachine("", "")
+	srv.SetRelayOrigin("")
 }
 
 // snapshotsDir is where shutdown snapshots live between daemons. An empty

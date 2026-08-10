@@ -1370,6 +1370,92 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 	}
 }
 
+// TestRelayRuntimeStopEndsTheDialling is the half of "leave the relay" that
+// cannot be taken on trust: the daemon's leg actually stops.
+//
+// Everything else about leaving is a file that is no longer there, which is
+// easy to check and easy to believe. This is the part that would let the Remote
+// screen say "you are off the relay" while a socket was still open — so it is
+// pinned against the real wiring (newRelayRuntime, the same constructor cmdServe
+// uses) rather than against a stub that counts calls, and it measures the one
+// thing a live leg cannot stop doing: dialling.
+func TestRelayRuntimeStopEndsTheDialling(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var mu sync.Mutex
+	dials := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		dials++
+		mu.Unlock()
+		// 401 keeps the transport in its reconnect loop, which is exactly the
+		// state a stop has to be able to interrupt.
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer ts.Close()
+	seen := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return dials
+	}
+
+	if err := config.SaveRelay(config.Relay{
+		URL:         "ws" + strings.TrimPrefix(ts.URL, "http"),
+		Secret:      "s3cr3t-daemon-secret",
+		Origin:      "https://r.example",
+		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
+		MachineName: "Karn's MacBook Pro",
+		FleetSeed:   testFleetSeed,
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+	fk, err := fleet.Parse(testFleetSeed)
+	if err != nil {
+		t.Fatalf("fleet.Parse: %v", err)
+	}
+	id := daemon.Identity{Fleet: fk}
+	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth("0123456789abcdef", 0),
+		uiHandler(), version, id)
+	t.Cleanup(srv.Shutdown)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt := newRelayRuntime(ctx, srv, id)
+	if started, already := rt.startOnce(); !started || already {
+		t.Fatalf("startOnce = (%v, %v); want a leg that started", started, already)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for seen() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the relay leg never dialled; there is nothing to stop")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if !rt.stopNow() {
+		t.Fatal("stopNow reported no leg to stop")
+	}
+	if rt.running {
+		t.Fatal("the runtime still calls itself running after a stop")
+	}
+	// A dial already in flight may still land, so the count is taken after a
+	// settle and compared against a window several backoffs wide (the base is
+	// 250 ms). A leg that is still dialling cannot stay quiet through it.
+	time.Sleep(300 * time.Millisecond)
+	after := seen()
+	time.Sleep(1500 * time.Millisecond)
+	if got := seen(); got != after {
+		t.Fatalf("the relay dialled %d more times after being stopped; the leg is still up", got-after)
+	}
+
+	// And stopping again is a no-op rather than a second teardown: leaving is
+	// a thing a user can ask for twice.
+	if rt.stopNow() {
+		t.Fatal("a second stop claimed to have stopped a leg")
+	}
+}
+
 // TestStartRelayIsNeverFatal: every way a relay configuration can be wrong
 // costs remote access and nothing else. The daemon serves loopback regardless,
 // which is why startRelay returns no error to propagate — and why it must not

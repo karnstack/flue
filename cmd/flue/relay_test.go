@@ -1621,6 +1621,241 @@ func TestRunRelayResetNamesTheUpdateForARelayWithNoDirectory(t *testing.T) {
 	}
 }
 
+// --- flue relay leave --------------------------------------------------------
+
+// leaveRelay writes the relay.json of a machine that is on a relay, with every
+// field a real one carries — the two credentials especially, since the point of
+// most of these tests is what happens to them.
+func leaveRelay(t *testing.T) config.Relay {
+	t.Helper()
+	rc := config.Relay{
+		URL:         "wss://flue-relay.karn.workers.dev",
+		Secret:      "the-daemon-secret",
+		FleetSeed:   testFleetSeed,
+		Origin:      "https://flue-relay.karn.workers.dev",
+		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
+		MachineName: "Karn's MacBook Pro",
+		Worker:      "flue-relay",
+	}
+	if err := config.SaveRelay(rc); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+	return rc
+}
+
+// relayJSONExists reports whether this machine still has a relay configured.
+func relayJSONExists(t *testing.T) bool {
+	t.Helper()
+	_, ok, err := config.LoadRelay()
+	if err != nil {
+		t.Fatalf("LoadRelay: %v", err)
+	}
+	return ok
+}
+
+// TestRunRelayLeaveDeletesTheRelayConfig is the whole command: relay.json gone,
+// and an output that says which relay was left.
+func TestRunRelayLeaveDeletesTheRelayConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	rc := leaveRelay(t)
+
+	var out bytes.Buffer
+	if err := runRelayLeave(&out, strings.NewReader("yes\n"), nil); err != nil {
+		t.Fatalf("runRelayLeave: %v", err)
+	}
+	if relayJSONExists(t) {
+		t.Fatal("relay.json survived the leave")
+	}
+	if !strings.Contains(out.String(), "left "+rc.URL) {
+		t.Errorf("the leave does not name the relay it left:\n%s", out.String())
+	}
+}
+
+// TestRunRelayLeaveTellsTheTruthAboutTheBlastRadius. Every line here is
+// something a user will otherwise assume, in whichever direction is wrong for
+// them: that leaving undeployed the Worker (it does not — this command makes no
+// API call at all), that rejoining is a matter of running the command again (it
+// needs the join line, from a machine that still has one), that the machine
+// comes back as itself (a rejoin mints a new id), and that a daemon that is
+// already running notices (it does not, until it restarts).
+func TestRunRelayLeaveTellsTheTruthAboutTheBlastRadius(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	leaveRelay(t)
+
+	var out bytes.Buffer
+	if err := runRelayLeave(&out, strings.NewReader("yes\n"), nil); err != nil {
+		t.Fatalf("runRelayLeave: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		// The Worker, by name, and where to remove it.
+		"the Worker flue-relay",
+		"Cloudflare dashboard",
+		// The way back, and that it is not this command in reverse.
+		"flue relay join",
+		"new id",
+		// A running daemon keeps the socket until it restarts — stated
+		// rather than left to be discovered by a device that still connects.
+		"flue disable && flue enable",
+		// The directory keeps this machine's certificate and this machine
+		// stops re-publishing what it holds.
+		"fleet directory",
+		"revocations",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the leave never mentions %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestRunRelayLeaveKeepsEverythingItIsNotAbout: leaving is about relay
+// membership. The devices this machine paired, the key those pairings pinned,
+// the revocation list and the stored Cloudflare token are four separate things
+// with four separate lifecycles, and a user who leaves a relay to re-join it
+// five minutes later must not find their phones unpaired and their token gone.
+//
+// cloudflare.json is the deliberate one: it is a credential for an account, not
+// for a relay, it deploys and updates any relay in that account, and the connect
+// card already teaches deleting that file as the way to forget it. Leaving takes
+// no view on it — and says so, because "leave the relay" reads like it might.
+func TestRunRelayLeaveKeepsEverythingItIsNotAbout(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	leaveRelay(t)
+
+	cfgDir, err := config.Dir()
+	if err != nil {
+		t.Fatalf("config.Dir: %v", err)
+	}
+	// A paired device, a revocation, the daemon's static key and a stored
+	// Cloudflare credential: the four files leaving must not touch.
+	store := crypto.NewDeviceStore(cfgDir)
+	if _, err := store.Add("Karn's phone", []byte("0123456789abcdef0123456789abcdef"), nil); err != nil {
+		t.Fatalf("Add device: %v", err)
+	}
+	if err := store.AddRevocation([]byte("fedcba9876543210fedcba9876543210"), []byte("a-revocation-blob")); err != nil {
+		t.Fatalf("AddRevocation: %v", err)
+	}
+	key, err := crypto.LoadOrCreateStaticKey(cfgDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	if err := config.SaveCloudflare(config.Cloudflare{Token: setupToken, AccountID: "acct-1", AccountName: "personal"}); err != nil {
+		t.Fatalf("SaveCloudflare: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runRelayLeave(&out, strings.NewReader("yes\n"), nil); err != nil {
+		t.Fatalf("runRelayLeave: %v", err)
+	}
+
+	devices, err := store.List()
+	if err != nil || len(devices) != 1 {
+		t.Fatalf("paired devices after leaving = %v (err %v); want the one that was there", devices, err)
+	}
+	revs, err := store.Revocations()
+	if err != nil || len(revs) != 1 {
+		t.Fatalf("revocations after leaving = %v (err %v); want the one that was there", revs, err)
+	}
+	after, err := crypto.LoadOrCreateStaticKey(cfgDir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey after leaving: %v", err)
+	}
+	if !bytes.Equal(after.Private, key.Private) {
+		t.Fatal("leaving regenerated the daemon's static key; every pairing pins the old one")
+	}
+	cf, ok, err := config.LoadCloudflare()
+	if err != nil || !ok || cf.Token != setupToken {
+		t.Fatalf("stored Cloudflare token after leaving: ok=%v err=%v", ok, err)
+	}
+	// And the output says so, because none of it is checkable from a terminal.
+	if !strings.Contains(out.String(), "paired devices") || !strings.Contains(out.String(), "Cloudflare token") {
+		t.Errorf("the leave does not say what it left alone:\n%s", out.String())
+	}
+}
+
+// TestRunRelayLeaveNeedsConfirmation: relay.json is the only copy this machine
+// has of the fleet key, and on a one-machine relay it is the only copy there is
+// — so the deletion must not be reachable by autocompleting a command.
+func TestRunRelayLeaveNeedsConfirmation(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	leaveRelay(t)
+
+	var out bytes.Buffer
+	if err := runRelayLeave(&out, strings.NewReader("n\n"), nil); err != nil {
+		t.Fatalf("runRelayLeave declined: %v", err)
+	}
+	if !relayJSONExists(t) {
+		t.Fatal("a declined leave still deleted relay.json")
+	}
+	if !strings.Contains(out.String(), "still on the relay") {
+		t.Errorf("a declined leave does not say so:\n%s", out.String())
+	}
+	// And the warning has to have named the unrecoverable half before asking.
+	if !strings.Contains(out.String(), "last machine on the relay") {
+		t.Errorf("the confirmation does not state what cannot be undone:\n%s", out.String())
+	}
+}
+
+// TestRunRelayLeaveYesSkipsThePrompt: the scripted path, which must not hang on
+// a reader nobody is going to type into.
+func TestRunRelayLeaveYesSkipsThePrompt(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	leaveRelay(t)
+
+	var out bytes.Buffer
+	if err := runRelayLeave(&out, strings.NewReader(""), []string{"--yes"}); err != nil {
+		t.Fatalf("runRelayLeave --yes: %v", err)
+	}
+	if relayJSONExists(t) {
+		t.Fatal("--yes did not delete relay.json")
+	}
+	if strings.Contains(out.String(), "type yes to continue") {
+		t.Errorf("--yes still asked:\n%s", out.String())
+	}
+}
+
+// TestRunRelayLeaveWithoutARelayRefuses: "left the relay" printed on a machine
+// that was never on one would be a claim about something that did not happen.
+// It is also the shape every other relay subcommand takes on such a machine.
+func TestRunRelayLeaveWithoutARelayRefuses(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var out bytes.Buffer
+	err := runRelayLeave(&out, strings.NewReader("yes\n"), nil)
+	if err == nil || !strings.Contains(err.Error(), "nothing to leave") {
+		t.Fatalf("leave without a relay: %v", err)
+	}
+	if strings.Contains(out.String(), "✓") {
+		t.Errorf("leave without a relay claimed to have done something:\n%s", out.String())
+	}
+}
+
+// TestRunRelayLeaveNamesTheWorkerItCannotName: a relay.json written by `flue
+// relay join` records no worker name — join deploys nothing and does not know
+// one — so the sentence about what stays deployed falls back to the host. It
+// must still point somewhere a person can act on.
+func TestRunRelayLeaveNamesTheWorkerItCannotName(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := config.SaveRelay(config.Relay{
+		URL:       "wss://relay.example.com",
+		Secret:    "s",
+		FleetSeed: testFleetSeed,
+		Origin:    "https://relay.example.com",
+		MachineID: "karns-macbook-pro-a1b2-0f9a12cd",
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runRelayLeave(&out, strings.NewReader("yes\n"), nil); err != nil {
+		t.Fatalf("runRelayLeave: %v", err)
+	}
+	if !strings.Contains(out.String(), "the Worker behind relay.example.com") {
+		t.Errorf("the leave does not say which Worker stays deployed:\n%s", out.String())
+	}
+}
+
 func TestCmdRelayRejectsAnUnknownSubcommand(t *testing.T) {
 	if err := cmdRelay(nil); err == nil {
 		t.Fatal("cmdRelay with no subcommand should fail")
@@ -1633,7 +1868,7 @@ func TestCmdRelayRejectsAnUnknownSubcommand(t *testing.T) {
 // TestUsageMentionsRelay keeps the relay lines in the help text: a subcommand
 // nobody can discover may as well not exist.
 func TestUsageMentionsRelay(t *testing.T) {
-	for _, want := range []string{"flue relay setup", "flue relay join", "flue relay status", "flue relay reset"} {
+	for _, want := range []string{"flue relay setup", "flue relay join", "flue relay status", "flue relay leave", "flue relay reset"} {
 		if !strings.Contains(usageText, want) {
 			t.Fatalf("usage text does not mention %q:\n%s", want, usageText)
 		}

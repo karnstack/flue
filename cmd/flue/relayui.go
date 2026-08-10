@@ -75,15 +75,29 @@ func (s *relayUIService) logf() *slog.Logger {
 }
 
 // relayRuntime tracks whether this daemon process has a relay transport
-// running, and how to start one. It exists for the first-deploy moment: a
-// daemon that booted with no relay.json should start dialling the relay the
-// user just deployed without being restarted — and a daemon whose transport
-// is already up must NOT be given a second one, so a re-deploy reports
-// RestartNeeded instead.
+// running, and how to start and stop one. It exists for the first-deploy
+// moment: a daemon that booted with no relay.json should start dialling the
+// relay the user just deployed without being restarted — and a daemon whose
+// transport is already up must NOT be given a second one, so a re-deploy
+// reports RestartNeeded instead.
+//
+// The stop half exists for the opposite moment. Disconnecting from the Remote
+// screen deletes relay.json, and a daemon that kept its socket after that
+// would be one telling the user they are off a relay their machine is still
+// answering on — which is the one claim this feature must not make. So start
+// hands back the way to undo itself, rather than the caller keeping a cancel
+// somewhere and hoping the two stay in step.
 type relayRuntime struct {
 	mu      sync.Mutex
 	running bool
-	start   func() bool
+	// start brings the transport up and returns whether it did, together with
+	// the teardown for the leg it just started. A start that returns false
+	// returns no teardown; a stop is only ever called for a leg that ran.
+	start func() (started bool, stop func())
+	// stop is the running leg's teardown, held here so only the goroutine that
+	// owns `running` can ever call it — once, and never for a leg that has
+	// already gone.
+	stop func()
 }
 
 // startOnce starts the transport if none is running. It reports (started,
@@ -97,8 +111,29 @@ func (rt *relayRuntime) startOnce() (bool, bool) {
 	if rt.start == nil {
 		return false, false
 	}
-	rt.running = rt.start()
-	return rt.running, false
+	started, stop := rt.start()
+	rt.running, rt.stop = started, nil
+	if started {
+		rt.stop = stop
+	}
+	return started, false
+}
+
+// stopNow tears the relay leg down and reports whether there was one. Idempotent
+// — a second call finds nothing running and says so — because "leave" is a thing
+// a user can click twice, and because the CLI may have deleted relay.json first.
+func (rt *relayRuntime) stopNow() bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if !rt.running {
+		return false
+	}
+	stop := rt.stop
+	rt.running, rt.stop = false, nil
+	if stop != nil {
+		stop()
+	}
+	return true
 }
 
 func (s *relayUIService) client(token string) *cloudflare.Client {
@@ -473,6 +508,62 @@ func (s *relayUIService) SetAddress(ctx context.Context, address string) (daemon
 		// The transport dialling right now read the old file at startup.
 		RestartNeeded: true,
 	}, nil
+}
+
+// Leave is `flue relay leave` behind the card: relay.json deleted, the relay
+// leg taken down, and nothing else touched.
+//
+// It is the same operation the CLI performs, and it says the same things,
+// because a fact about this machine's Cloudflare account should not have two
+// spellings — relayProblems feeding both `flue status` and this screen is the
+// precedent. The steps below are the CLI's sentences, shortened to the length
+// a checkmark line wants; the parts that must be read *before* the click live
+// in the confirmation the Remote screen puts up (cloudflare-connect.tsx),
+// where the CLI puts its own warning.
+//
+// The one difference between the two surfaces is honest and in this direction:
+// this runs inside the daemon, so it can actually stop the leg, while the CLI
+// can only delete a file and tell the user to restart. Stopping is not a
+// courtesy — a screen that reported "you have left the relay" while the socket
+// was still carrying browsers would be making the single claim this feature
+// cannot get wrong.
+//
+// What it deliberately does not do: call Cloudflare. The Worker is the user's
+// and other machines may still be joined to it, so undeploying it is a
+// fleet-wide act wearing a per-machine name; the fleet directory has no
+// per-entry delete either. Both are said out loud instead.
+func (s *relayUIService) Leave(ctx context.Context) (daemon.RelayUIDeployResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg, ok, err := config.LoadRelay()
+	if err != nil {
+		return daemon.RelayUIDeployResult{}, err
+	}
+	if !ok {
+		return daemon.RelayUIDeployResult{}, fmt.Errorf("%w: no relay is configured on this machine; there is nothing to leave", daemon.ErrRelayUIBadRequest)
+	}
+	// The file first, the socket second, and the order is deliberate: a delete
+	// that failed must leave a machine that is still on the relay in every
+	// sense, rather than one whose leg is down and whose config says it should
+	// be up — which is the state a restart would silently undo.
+	if err := config.DeleteRelay(); err != nil {
+		return daemon.RelayUIDeployResult{}, fmt.Errorf("delete the relay configuration: %w", err)
+	}
+
+	steps := []string{"left " + cfg.URL + " — relay.json deleted"}
+	if s.runtime.stopNow() {
+		steps = append(steps, "relay leg stopped; nothing outside this computer reaches this machine now")
+	}
+	steps = append(steps,
+		relayWorkerLabel(cfg)+" is still deployed in your Cloudflare account; delete it there if you want it gone",
+		"paired devices, this daemon's key and the stored Cloudflare token are untouched",
+		"rejoining needs the join line from a machine still on this relay, and mints this machine a new id",
+	)
+	s.logf().Info("left the relay from the UI", "url", cfg.URL)
+	// No Origin: there is no relay origin any more, and naming the one this
+	// machine just left would put an address on a card that means nothing.
+	return daemon.RelayUIDeployResult{Steps: steps}, nil
 }
 
 // JoinCommand rebuilds the hand-off line from relay.json. The "shown once"

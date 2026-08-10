@@ -255,6 +255,41 @@ describe('the card after an update lands', () => {
   })
 })
 
+describe('RelayDisconnect', () => {
+  const CONFIGURED: RelayUIInfo = {
+    configured: true,
+    can_deploy: true,
+    version: 'dev',
+    worker: 'flue-relay',
+    origin: 'https://flue-relay.karn.workers.dev',
+  }
+
+  it('is nowhere near the deploy form', () => {
+    // The placement is the safeguard. A control that deletes the fleet key
+    // sitting in the same block as "Deploy to Cloudflare" is one mis-aimed
+    // click from a fleet nobody can rejoin, so the card for a machine with no
+    // relay offers it not at all — there is nothing there to leave.
+    render(<CloudflareConnectCard info={INFO} setupCommand="flue relay setup" />)
+
+    expect(screen.queryByRole('button', { name: 'Leave this relay…' })).toBeNull()
+  })
+
+  it('keeps the machine on the relay when the daemon refuses', async () => {
+    stubFetch([new Error('delete the relay configuration: permission denied')])
+    const user = userEvent.setup()
+    render(<CloudflareConfiguredCard info={CONFIGURED} />)
+
+    await user.click(screen.getByRole('button', { name: 'Leave this relay…' }))
+    await user.click(screen.getByRole('button', { name: 'Leave the relay' }))
+
+    // The error is the daemon's own words, and the window stays on the
+    // question: a failed leave must not read like a finished one.
+    expect(await screen.findByText(/permission denied/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Leave the relay' })).toBeTruthy()
+    expect(screen.queryByText('This machine has left the relay')).toBeNull()
+  })
+})
+
 describe('updateAvailable', () => {
   it('is true only for a configured relay reporting a different version', () => {
     expect(updateAvailable(null)).toBe(false)

@@ -241,6 +241,32 @@ func LoadRelay() (Relay, bool, error) {
 	return r, true, nil
 }
 
+// DeleteRelay removes relay.json: this machine's whole membership of a relay,
+// in one file. Absent is success, the same way DeleteCloudflare treats it —
+// leaving a relay this machine is not on is a no-op, not a fault.
+//
+// It deletes exactly one file and touches nothing else in the directory. The
+// static key, devices.json, revocations.json and cloudflare.json are all
+// separate concerns with separate lifecycles: this is "stop being on that
+// relay", not "forget everything the relay ever touched", and `flue relay
+// leave` says so out loud because the difference is not guessable.
+//
+// What goes with the file is worth naming here, because nothing else can put
+// it back: the daemon secret (whose other copy is a Worker binding Cloudflare
+// will not read back out) and the fleet key (whose only other copies are the
+// relay.json files of the machines still on that relay). Rejoining means the
+// join line from one of them.
+func DeleteRelay() error {
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, relayFileName)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // SaveRelay writes relay.json at 0600, replacing whatever was there.
 //
 // It goes through the same write-temp-then-rename path as the token, and for

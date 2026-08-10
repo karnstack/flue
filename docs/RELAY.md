@@ -70,6 +70,7 @@ daemon  ---- wss /daemon/<id> ---->  Worker + one DO per machine  <---- wss /cli
 flue relay setup     # machine 1: paste a Cloudflare API token, watch it deploy
 flue relay join …    # every other machine: the one line setup printed, verbatim
 flue relay status    # what is configured, and what the fleet directory holds
+flue relay leave     # take this machine off; the Worker stays deployed
 ```
 
 Setup needs a token from the **"Edit Cloudflare Workers"** template. It verifies
@@ -259,6 +260,84 @@ refused the same way (which the pair page can only report as a spent
 window). The fix is the front door: open the new address, scan a fresh QR,
 and the browser mints its keys and records under the origin the daemon now
 serves — they live per origin in the browser anyway.
+
+### Leaving a relay
+
+To take **this machine** off the relay it is on:
+
+```sh
+flue relay leave        # asks first; --yes for scripts
+```
+
+or press "Leave this relay…" on the Remote screen's card. Both go through the
+same service, so they do the same thing and say the same things.
+
+It deletes `relay.json` and nothing else. There is no API call in it at all,
+which is the source of every consequence below.
+
+**The relay stays deployed.** Leaving is a local file deletion; the Worker,
+its Durable Objects, its `DAEMON_SECRET` and its `workers.dev` host are all
+exactly as they were, still serving whichever machines are still joined. If
+you want it gone, delete the Worker in the Cloudflare dashboard (Workers &
+Pages) — there is still no `flue relay teardown`, and a per-machine command
+must not become one: on a relay with three machines, two of them did not ask
+to lose it.
+
+**Rejoining needs the join line, from a machine that still has one.**
+`relay.json` is this machine's only copy of the two credentials, and neither
+can be read back from anywhere else: the `DAEMON_SECRET`'s other copy is a
+Worker binding Cloudflare will not hand out, and the fleet key has no copy at
+all outside the `relay.json` files of the machines on that relay. So the way
+back is `flue relay join` with the line from one of them. **If this is the
+last machine on the relay, there is no line left to run**, and a fresh `flue
+relay setup` is the only route — new secret, new fleet key, every machine
+re-joins and every device pairs again.
+
+**A rejoin arrives as a new machine.** The id goes with the file, and ids are
+minted, never re-derived, so the machine comes back in a new slot. A browser's
+records are per id (`flue.machines` and the pinned key beside it), so the old
+row is dead wherever it is held. Devices carrying a certificate this fleet
+signed find the new machine through the fleet directory and attach with no
+ceremony — that is rule 2 of the acceptance order
+([`spec/fleet-trust.md`](../spec/fleet-trust.md)) — so a rejoin to the *same*
+fleet costs a stale row in a picker rather than a round of pairing. A rejoin
+after a re-setup is a different fleet, and everything pairs again.
+
+**Nothing local is touched.** `devices.json`, `revocations.json`, the daemon's
+static key under `keys/` and `cloudflare.json` are four separate concerns with
+four separate lifecycles, and leaving a relay takes a view on none of them: the
+devices this machine paired are still paired, the key those pairings pinned is
+the same key, and the loopback UI never involved a relay in the first place.
+`cloudflare.json` in particular is a credential for an *account*, not for a
+relay — it deploys and updates any relay in that account — so leaving one relay
+is not a reason to forget it. Deleting that file is, and stays, the way to
+forget it.
+
+**What leaving costs the fleet, on the relay side.** Two things stay behind,
+because the directory has no per-entry delete (`DELETE /directory` empties all
+of it, which is `flue relay reset`'s job and a fleet-wide act):
+
+- This machine's **machine certificate** stays in the directory, so the fleet's
+  browsers keep listing a machine that no longer answers, until someone empties
+  it.
+- This machine stops **re-publishing the revocations** it holds. They are still
+  on disk here and still in the directory — nothing removes them — but the
+  fleet's convergence story is "every machine re-publishes everything it holds
+  on every connect", and this machine has left that rota. If the directory is
+  ever reset, a revocation whose only remaining holder was this machine does not
+  come back. Revoke that device again from a machine still on the relay if you
+  are unsure. (It is the same residual risk `flue relay reset` names, arriving
+  from the other end.)
+
+**The CLI needs a restart; the screen does not.** `flue relay leave` runs in
+your shell, not in the daemon, and the daemon's transport holds the secret it
+read at startup — so a daemon that is already up keeps its relay socket, and
+every device on the other end keeps reaching this machine, until it restarts
+(`flue disable && flue enable`, or restart `flue serve`). The command says so
+rather than letting it be discovered. The Remote screen's Disconnect runs
+*inside* the daemon: it cancels the relay's context, which ends both legs, and
+clears the relay out of everything the daemon says about itself — so it is
+finished when the card says it is.
 
 ### One account, several relays
 
@@ -742,3 +821,12 @@ a dev build carries no Worker to deploy.
       and the secret are upserts) and it is a reset: the phone pairs this
       machine again (the fresh machine id abandons the slot its old row
       names), and the second machine re-joins with the newly printed line.
+- [ ] Press "Leave this relay…" on machine B's Remote screen and confirm. The
+      screen stops claiming the machine is reachable **without a restart**, and
+      `curl -si --http1.1 -H 'Upgrade: websocket' https://<relay>/client/<B's
+      id>` answers `503` `{"error":"daemon offline"}` — the socket is really
+      gone, not merely unclaimed. Machine A keeps working throughout, and the
+      Worker is still in the dashboard. Then run B's join line again: it comes
+      back under a **new** id, the phone reaches it with no new pairing (its
+      certificate is this fleet's), and the picker carries one dead row for the
+      old id.

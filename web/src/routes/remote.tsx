@@ -8,6 +8,7 @@ import type { RelayInfo } from '@/client/protocol'
 import {
   CloudflareConfiguredCard,
   CloudflareConnectCard,
+  RelayDisconnect,
   useRelayUIInfo,
   type DirectoryCounts,
   type RelayUIInfo,
@@ -246,6 +247,16 @@ function Unusable({ info }: { info: RelayUIInfo }) {
           re-join and every paired browser has to pair again.
         </p>
         <Command command={STATUS_COMMAND} />
+        {/*
+          The third answer, and the one this screen had none of: throw the
+          file away. It belongs in this state more than anywhere — the daemon
+          is refusing this configuration, so there is nothing to lose by
+          dropping it — and it is deliberately here, in the panel that
+          explains the fault, rather than beside the deploy form below.
+        */}
+        <div className="pt-1">
+          <RelayDisconnect info={info} />
+        </div>
       </StatePanel>
 
       <Integrations>
@@ -506,8 +517,26 @@ export function RemoteRoute() {
    * rendered claim true rather than to handle a state that happens.
    */
   const origin = relay.status === 'connected' ? (relay.origin ?? '') : ''
-  const status: RelayInfo['status'] =
+  const claimed: RelayInfo['status'] =
     relay.status === 'connected' && origin === '' ? 'connecting' : relay.status
+
+  /*
+   * The welcome's snapshot loses to the daemon's own answer in the direction
+   * the poll above does not cover: a relay that went away.
+   *
+   * `useRelayTransport` only ever upgrades a screen to connected, because that
+   * was the only stale direction there was — nothing used to end a relay leg
+   * inside a live daemon. Disconnect does, and without this the tab that
+   * pressed it would go on saying "Reachable from anywhere", with the address,
+   * over a socket that had been closed a second earlier. `transport` is the
+   * daemon's live word for its own leg (SetRelayStatus, read straight off the
+   * Server in handleRelayInfo), so `off` is authoritative in a way the
+   * connection-scoped welcome is not.
+   *
+   * Absent on an older daemon and on a relay origin, where the endpoint is
+   * never asked; both leave the snapshot in charge, exactly as before.
+   */
+  const status: RelayInfo['status'] = relayUI?.transport === 'off' ? 'off' : claimed
 
   /*
    * Whether the daemon is refusing a relay.json it has, rather than having

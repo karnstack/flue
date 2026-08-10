@@ -40,6 +40,11 @@ const (
 	// at a custom domain the user routed to the Worker themselves. No
 	// Cloudflare call, no token; a POST because it mutates.
 	RelayAddressPath = "/api/relay/address"
+	// RelayLeavePath takes this machine off its relay: relay.json deleted and
+	// the relay leg stopped in this process. No body, no token, no Cloudflare
+	// call — the Worker is not this endpoint's to undeploy — and a POST
+	// because it is the most destructive local mutation the screen has.
+	RelayLeavePath = "/api/relay/leave"
 )
 
 // maxRelayUIBodyBytes bounds a deploy request: a token, an account id, a
@@ -163,9 +168,12 @@ type RelayUIDeployRequest struct {
 	Worker    string `json:"worker,omitempty"`
 }
 
-// RelayUIDeployResult is what a deploy or update answers. NeedsAccount is the
-// one non-terminal shape: the token reaches several accounts and the UI must
-// ask which, then POST again with account_id set.
+// RelayUIDeployResult is what one relay mutation answers — a deploy, an
+// update, an address change or a leave. The name is the deploy's because that
+// is where it started; what it actually carries is "what the service did, in
+// the sentences the CLI would have printed", which is the same shape for all
+// four. NeedsAccount is the one non-terminal shape: the token reaches several
+// accounts and the UI must ask which, then POST again with account_id set.
 type RelayUIDeployResult struct {
 	NeedsAccount bool             `json:"needs_account,omitempty"`
 	Accounts     []RelayUIAccount `json:"accounts,omitempty"`
@@ -199,6 +207,12 @@ type RelayUI interface {
 	// custom-domain move. It returns the new origin; the transport follows
 	// on the next daemon start, which the result must say.
 	SetAddress(ctx context.Context, address string) (RelayUIDeployResult, error)
+	// Leave deletes relay.json and stops this process's relay leg. It is the
+	// one mutation here that must not need a restart to be true: the result
+	// says the machine is off the relay, and an implementation that left a
+	// socket up would make that a lie. Deploying is not its business — the
+	// Worker stays where it is, and the steps say so.
+	Leave(ctx context.Context) (RelayUIDeployResult, error)
 }
 
 // ErrRelayUIBadRequest marks a service failure the caller caused — a missing
@@ -284,6 +298,34 @@ func (s *Server) handleRelayAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := ui.SetAddress(r.Context(), req.Address)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, ErrRelayUIBadRequest) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	writeJSON(w, res)
+}
+
+// handleRelayLeave answers POST RelayLeavePath. No body is read at all: the
+// operation has no parameters — which relay is not a choice, it is the one in
+// relay.json — and a request shape with nothing in it is one fewer thing that
+// can be got wrong from a page. The POST is what makes it a mutation rather
+// than something a prefetch could trip.
+func (s *Server) handleRelayLeave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ui := s.currentRelayUI()
+	if ui == nil {
+		http.NotFound(w, r)
+		return
+	}
+	res, err := ui.Leave(r.Context())
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, ErrRelayUIBadRequest) {
