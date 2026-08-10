@@ -1118,6 +1118,13 @@ func TestPairStartURLCarriesTheFleetKey(t *testing.T) {
 		return ok
 	})
 
+	// The literal spelling first, then the parsed value. conn.go splices this
+	// parameter in by hand rather than through url.Values, so the joining `&`
+	// is code rather than a formality: a link that lost it, or grew a second
+	// `?`, parses as a URL and hands the browser no fleet key at all.
+	if !strings.Contains(got.URL, "&f=") {
+		t.Fatalf("pairing url %q carries no &f=; the device cannot learn the fleet", got.URL)
+	}
 	u, err := url.Parse(got.URL)
 	if err != nil {
 		t.Fatalf("pairing url %q does not parse: %v", got.URL, err)
