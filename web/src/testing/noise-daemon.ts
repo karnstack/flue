@@ -121,6 +121,17 @@ export interface ResponderHandshake {
    * how a browser pinning the wrong daemon fails.
    */
   readMessageA(msg: Uint8Array): Uint8Array
+  /**
+   * The payload message A carried, once it has been read: a fleet device
+   * certificate, or empty for a browser that holds none. Null before
+   * `readMessageA`.
+   *
+   * The real daemon does the same thing with it — `admitByFleetCert` reads
+   * exactly these bytes out of exactly this slot — which is what lets a test
+   * assert that the browser presented the certificate it was given rather
+   * than merely that it connected.
+   */
+  payload(): Uint8Array | null
   /** Writes `<- e, ee, se` and splits, returning both the bytes to send and
    *  the transport channel that follows them. */
   messageB(): { msg: Uint8Array; channel: NoiseChannel }
@@ -141,6 +152,7 @@ export function responderHandshake(
 
   let re: Uint8Array | null = null
   let rs: Uint8Array | null = null
+  let handshakePayload: Uint8Array | null = null
 
   return {
     readMessageA(msg) {
@@ -157,8 +169,12 @@ export function responderHandshake(
       rs = ss.decryptAndHash(msg.slice(KEY_LEN, KEY_LEN + KEY_LEN + TAG_LEN))
       // <- ss
       ss.mixKey(x25519.getSharedSecret(s.priv, rs))
-      ss.decryptAndHash(msg.slice(KEY_LEN + KEY_LEN + TAG_LEN)) // empty payload
+      // The payload slot: a fleet device certificate, or empty.
+      handshakePayload = ss.decryptAndHash(msg.slice(KEY_LEN + KEY_LEN + TAG_LEN))
       return rs
+    },
+    payload() {
+      return handshakePayload
     },
     messageB() {
       if (!re || !rs) throw new Error('noise: messageB before messageA')
