@@ -48,6 +48,7 @@ The routes, in one place:
 | `POST /api/pair/<id>` | none | yes | that machine's hub |
 | `PUT /directory` | Bearer daemon secret | no | the directory |
 | `GET /directory` | none | yes | the directory |
+| `DELETE /directory` | Bearer daemon secret | no | the directory |
 | `WS /directory` | Bearer daemon secret | no | the directory |
 | `GET /api/health` | none | no | none — the Worker alone |
 
@@ -191,15 +192,16 @@ it cannot do is mint a machine or a device, because minting needs a key it does
 not hold. The cost of a hostile relay stays availability, and nothing else.
 
 ```
-PUT /directory     Bearer daemon secret; body is one signed blob, raw bytes
-GET /directory     credential-less, rate limited; the whole set
-WS  /directory     Bearer daemon secret; relay → daemon pushes, on write
+PUT    /directory  Bearer daemon secret; body is one signed blob, raw bytes
+GET    /directory  credential-less, rate limited; the whole set
+DELETE /directory  Bearer daemon secret; empties the whole set
+WS     /directory  Bearer daemon secret; relay → daemon pushes, on write
 ```
 
 Nothing lives under the prefix: `/directory/<anything>` is the Worker's own
 `404 {"error":"not found"}` — not the machine 404, because nothing here names a
-machine — and a method other than `GET` or `PUT` is `405` with
-`Allow: GET, PUT`.
+machine — and a method other than `GET`, `PUT` or `DELETE` is `405` with
+`Allow: GET, PUT, DELETE`.
 
 **Entries are content-addressed.** An entry's key is the lowercase hex SHA-256
 of the blob's exact bytes, and there is no other name for it. That is the only
@@ -270,10 +272,33 @@ no room.
 Refusing rather than evicting is deliberate and is a security decision, not a
 capacity one. Every eviction policy can drop a revocation, and a directory that
 silently forgets a revocation re-admits the device it revoked to every machine
-that had not yet heard. Nothing in this leg ever deletes an entry. If pruning is
-ever wanted — a device cert whose key is revoked, say — it has to be a decision
-signed under the fleet key and carried out by something that can read what it is
-deleting. That is not the relay, and it must not become the relay.
+that had not yet heard. Nothing in this leg ever deletes *an* entry. If pruning
+is ever wanted — a device cert whose key is revoked, say — it has to be a
+decision signed under the fleet key and carried out by something that can read
+what it is deleting. That is not the relay, and it must not become the relay.
+
+**The reset**, and why the cap needs one. Refusal is permanent: nothing evicts,
+the object is named by a constant, and Durable Object storage survives every
+redeploy of the script — so a directory that has reached 512 stays there
+forever, and a fleet whose directory is full is a fleet whose *revocations* have
+stopped crossing machines. `DELETE /directory` is the way out. It empties the
+whole set and the entry count, answers `200 {"reset":true,"removed":<n>}`, and
+closes every push socket with `1012` so that each daemon reconnects and
+re-publishes at once rather than at its next half-hourly republish.
+
+All-or-nothing is what makes it a thing a relay may do: a wipe needs no opinion
+about what any blob means, where a prune would need the fleet key. It is gated
+by the daemon secret — the same credential a PUT presents, held by exactly the
+machines that could fill the directory in the first place — and it is
+`flue relay reset` on the operator's side.
+
+Convergence after a reset is the daemons' own: each re-offers everything it
+holds on every connect and every 30 minutes, so the fleet refills the set. The
+residual, which readers of this spec are owed: **a blob whose only remaining
+holder never reconnects is lost by a wipe** — in practice a revocation
+published by a machine that has since been decommissioned. Every machine that
+already ingested it still holds it and re-publishes it, so the window is narrow;
+it is not zero, and re-revoking from any surviving machine closes it.
 
 ## Keepalive
 

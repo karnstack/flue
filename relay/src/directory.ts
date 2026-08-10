@@ -54,15 +54,16 @@ export class FleetDirectory extends DurableObject<Env> {
   }
 
   /**
-   * The three shapes of `/directory`, told apart the way the router told them
-   * apart before forwarding: an upgrade, a PUT, or a GET. Auth happened there
-   * — the daemon legs of this object are secret-gated by `authorizeDaemon` in
-   * src/index.ts, exactly as `/daemon` is, and this object trusts that the way
-   * DaemonHub does.
+   * The four shapes of `/directory`, told apart the way the router told them
+   * apart before forwarding: an upgrade, a PUT, a DELETE, or a GET. Auth
+   * happened there — the daemon legs of this object are secret-gated by
+   * `authorizeDaemon` in src/index.ts, exactly as `/daemon` is, and this object
+   * trusts that the way DaemonHub does.
    */
   async fetch(req: Request): Promise<Response> {
     if (req.headers.get('Upgrade')?.toLowerCase() === 'websocket') return this.acceptDaemon()
     if (req.method === 'PUT') return this.put(req)
+    if (req.method === 'DELETE') return this.reset()
     if (req.method === 'GET') return this.snapshot()
     return new Response('not found', { status: 404 })
   }
@@ -149,6 +150,68 @@ export class FleetDirectory extends DurableObject<Env> {
       entries.push({ key: k.slice(BLOB_PREFIX.length), blob: base64(blob) })
     }
     return new Response(JSON.stringify({ v: 1, entries }), { headers: JSON_NO_STORE })
+  }
+
+  /**
+   * `DELETE /directory`: empty the whole store, and the count with it.
+   *
+   * This is the escape hatch for a full directory, and it exists because
+   * without it a full one is permanent. Nothing here ever deletes a single
+   * entry — see `full()` for why selective pruning must not be the relay's
+   * job — so at 512 entries every later PUT is refused, and a refused PUT of a
+   * *revocation* is the fleet-wide kill switch reaching only the machine it was
+   * typed on. Redeploying does not clear it either: the script name is a
+   * constant, the object is `idFromName("directory")` on another constant, and
+   * Durable Object storage outlives a redeploy. So the only way back is a
+   * deliberate wipe, and this is it.
+   *
+   * **All or nothing, on purpose.** A wipe needs no opinion about what any blob
+   * means, which is what makes it a thing this Worker may do: it deletes the
+   * set, not a member of it. Pruning "the device certificates whose key is
+   * revoked" would need the fleet key, and the whole design turns on that key
+   * never being here.
+   *
+   * **Why it is safe to do this to a store of revocations.** Every daemon
+   * re-offers everything it holds — its machine certificate, the device certs
+   * its ceremonies minted, every revocation it knows — on every connect and
+   * every 30 minutes (internal/transport/relay/directory.go, publishAll), so an
+   * emptied directory refills itself from the fleet. To make that happen in
+   * seconds rather than in half an hour, every daemon socket is closed here:
+   * the reconnect that follows is a snapshot read and a full re-publish.
+   *
+   * **The residual, stated rather than hidden.** A blob whose only remaining
+   * holder never reconnects is gone — and the one that matters is a revocation
+   * published by a machine that has since been decommissioned, wiped or is
+   * simply off for good. Every other machine that had *already* ingested it
+   * still holds it (a revocation is written to that machine's own
+   * revocations.json and re-published from there), so this is a narrow window
+   * rather than a general loss; it is narrow, not empty. Un-revoking is not
+   * what a wipe does — the device stays cut off on every machine that ever
+   * heard — but a machine that never heard, and now never will, is one a
+   * re-revoke from any surviving machine is the answer to.
+   */
+  private async reset(): Promise<Response> {
+    // Read before the wipe, because the wipe takes the counter too. This is
+    // what the object believed it was holding, which is the number the cap was
+    // enforced against and therefore the one an operator is owed.
+    const removed = (await this.ctx.storage.get<number>(COUNT_KEY)) ?? 0
+    // Everything: the blobs and the count, in one call, so no interleaving can
+    // leave a counter that outlives the entries it counted and re-fills the
+    // directory to 512 with nothing in it.
+    await this.ctx.storage.deleteAll()
+    for (const ws of this.ctx.getWebSockets('daemon')) {
+      try {
+        // 1012 (service restart) is the honest code: the store this socket was
+        // subscribed to is gone and the daemon's own reconnect is what refills
+        // it. Nothing on this leg speaks daemon-ward except raw blobs, so there
+        // is no in-band way to say "re-publish" — the close is the message, and
+        // the daemon already knows what to do with one.
+        ws.close(1012, 'the directory was reset; reconnect and republish')
+      } catch {
+        // Already closing; its own close event finishes the teardown.
+      }
+    }
+    return new Response(JSON.stringify({ reset: true, removed }), { headers: JSON_NO_STORE })
   }
 
   /**
@@ -257,10 +320,17 @@ function tooLarge(): Response {
  * re-admits the device it revoked to every machine that had not yet heard.
  * That is a compromise; a refused PUT is an operator with a full directory,
  * who is told so, loudly, at the moment it happens. Nothing in this object
- * ever deletes an entry, and if pruning is ever wanted — a device cert whose
+ * ever deletes *an* entry, and if pruning is ever wanted — a device cert whose
  * key is revoked, say — it has to be a decision signed under the fleet key and
  * carried out by something that can read what it is deleting. That is not the
  * relay, and it must never become the relay.
+ *
+ * What the relay may do, and what `reset` above is, is delete the whole set at
+ * once: that needs no opinion about any blob's meaning, and it is the only way
+ * out of a full directory, because storage survives every redeploy. A daemon
+ * that sees this status has hit a wall an operator has to take down —
+ * `flue relay reset` — and no amount of retrying will move it, which is why
+ * the daemon logs and drops rather than retrying (directory.go, publish).
  */
 function full(): Response {
   return new Response('{"error":"directory full"}', { status: 507, headers: JSON_NO_STORE })

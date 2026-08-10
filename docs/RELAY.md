@@ -333,9 +333,10 @@ the signed blobs the fleet has produced — machine certificates, device
 certificates, revocations.
 
 ```
-PUT /directory     the daemon secret; one signed blob
-GET /directory     no credential at all; the whole set
-WS  /directory     the daemon secret; one push per new entry
+PUT    /directory  the daemon secret; one signed blob
+GET    /directory  no credential at all; the whole set
+DELETE /directory  the daemon secret; empties the whole set (`flue relay reset`)
+WS     /directory  the daemon secret; one push per new entry
 ```
 
 **The relay stores and serves, and verifies nothing.** It holds no fleet key,
@@ -367,12 +368,14 @@ Three things follow that an operator sees:
   same key whatever the timestamps say, on every reader — un-revoking is
   pairing again, under a new key.
 
-**Entries are content-addressed and nothing is ever deleted.** The storage key
-is the SHA-256 of the exact bytes, so a `PUT` can only add, a blob comes back
-byte for byte, and re-publishing costs nothing. Nothing prunes, deliberately:
-every eviction policy can drop a revocation, and a directory that forgets a
-revocation re-admits the device it revoked to every machine that had not yet
-heard.
+**Entries are content-addressed and no single entry is ever deleted.** The
+storage key is the SHA-256 of the exact bytes, so a `PUT` can only add, a blob
+comes back byte for byte, and re-publishing costs nothing. Nothing prunes,
+deliberately: every eviction policy can drop a revocation, and a directory that
+forgets a revocation re-admits the device it revoked to every machine that had
+not yet heard. The whole set can be emptied at once — see the reset below —
+because that needs no opinion about what any one blob means, which is the only
+kind of deletion a relay holding no fleet key is entitled to perform.
 
 Which is why it can fill up. A blob is capped at 4 KiB and the set at **512
 entries**, and at the cap a new blob is refused with
@@ -393,9 +396,37 @@ and `flue relay status` shows the count sitting at 512. 512 is years of
 pair-and-revoke churn for one operator (entries are machines, devices, and one
 revocation per device ever revoked), so reaching it is a signal worth reading:
 either something is publishing in a loop, or the relay is shared with a fleet
-it should not be. The way out is a reset — `flue relay setup` mints a fresh
-secret and fleet key, and the new relay starts empty — because emptying a
-directory selectively is exactly the pruning that must not exist.
+it should not be.
+
+**The way out is `flue relay reset`**, and it is the only way out. Redeploying
+does not clear the directory and neither does re-running setup: the Durable
+Object is named by a constant, its storage outlives every deploy of the script,
+and a fresh fleet key does not delete the blobs it orphans — it just leaves 512
+signatures nobody can verify occupying the cap. So there is one command:
+
+```
+$ flue relay reset
+this empties the relay's fleet directory: every machine certificate,
+every device certificate and every revocation the relay is holding.
+...
+type yes to continue: yes
+  ✓ fleet directory reset (512 entries cleared)
+```
+
+It empties the set — never a chosen part of it, because choosing needs the
+fleet key the relay must never hold — and the fleet then puts itself back:
+every machine re-publishes everything it holds on connect and every 30 minutes,
+and the reset disconnects the push sockets so that reconnect happens in seconds
+rather than at the next half hour. A machine that is switched off republishes
+its share when it next starts.
+
+What a wipe costs, stated rather than buried: **a blob whose only remaining
+holder never reconnects is gone.** The one that matters is a revocation
+published by a machine that has since been decommissioned — every machine that
+already heard it still holds it in its own `revocations.json` and re-publishes
+it from there, so this is a narrow window and not a general loss, but it is not
+an empty one. If you are not sure, revoke the device again from any machine
+after the reset; a revocation is idempotent everywhere it lands.
 
 **What the relay learns from it.** The blobs are opaque to the *code* and not
 to whoever runs the Worker: machine ids and display names, device public keys

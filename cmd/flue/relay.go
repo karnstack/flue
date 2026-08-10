@@ -73,7 +73,7 @@ const (
 // number, and EOF alone is not enough of a guarantee to rely on.
 const accountPromptAttempts = 3
 
-const relayUsage = "usage: flue relay <setup|join|status|update|address>"
+const relayUsage = "usage: flue relay <setup|join|status|update|address|reset>"
 
 func cmdRelay(args []string) error {
 	if len(args) == 0 {
@@ -92,6 +92,8 @@ func cmdRelay(args []string) error {
 		return runRelayUpdate(os.Stdout, os.Stdin, &cloudflare.Client{}, args[1:])
 	case "address":
 		return runRelayAddress(os.Stdout, args[1:])
+	case "reset":
+		return runRelayReset(os.Stdout, os.Stdin, args[1:])
 	default:
 		return fmt.Errorf("unknown relay subcommand %q; %s", args[0], relayUsage)
 	}
@@ -737,6 +739,157 @@ func directoryURL(relayURL string) string {
 		base = "http://" + strings.TrimPrefix(base, "ws://")
 	}
 	return base + "/directory"
+}
+
+// resetDirectory empties the relay's fleet directory: `DELETE /directory` under
+// the daemon secret, which wipes every blob and the entry count with it and
+// closes the push sockets so each daemon reconnects and re-publishes at once.
+//
+// The secret is the whole credential here, as it is on a PUT. The relay holds
+// no fleet key and can judge no blob, so what it can gate is who may *write*,
+// and emptying the store is the largest write there is.
+func resetDirectory(ctx context.Context, rc config.Relay) (removed int, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, directoryURL(rc.URL), nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+rc.Secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized:
+		return 0, errors.New("the relay refused this machine's credential; the secret in relay.json is not the one this Worker holds")
+	case http.StatusServiceUnavailable:
+		// The Worker's own answer for a deploy that predates the directory
+		// binding (relay/src/index.ts), and the same sentence fetchDirectory
+		// gives it: there is nothing to reset because there is nothing there.
+		return 0, errors.New("this relay has no directory; run `flue relay update` to redeploy it")
+	default:
+		return 0, fmt.Errorf("the relay answered HTTP %d", resp.StatusCode)
+	}
+	var doc struct {
+		Reset   bool `json:"reset"`
+		Removed int  `json:"removed"`
+	}
+	// A small, fixed-shape answer, read under a bound for the reason every
+	// other read of this relay is: the far end is a machine on the internet and
+	// this process is not obliged to trust its brevity.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<10)).Decode(&doc); err != nil || !doc.Reset {
+		return 0, errors.New("the relay answered something that is not a directory reset")
+	}
+	return doc.Removed, nil
+}
+
+const relayResetUsage = "usage: flue relay reset [--yes]"
+
+// relayResetWarning is what the command says before it asks. Both halves are
+// load-bearing: the first is why an operator would ever run this, the second is
+// the one thing a wipe can cost that re-publishing does not put back.
+const relayResetWarning = `this empties the relay's fleet directory: every machine certificate,
+every device certificate and every revocation the relay is holding.
+
+every machine re-publishes everything it holds when it reconnects, so a
+fleet that is switched on refills the directory within seconds. what does
+not come back is a blob whose only remaining holder never reconnects —
+in practice a revocation published by a machine that is now gone. every
+machine that already heard that revocation still holds it and re-publishes
+it; if you are unsure, revoke the device again from any machine afterwards.
+
+`
+
+// relayResetDone is the note after the wipe: what happens next, without the
+// user having to know that publishAll runs on every connect.
+const relayResetDone = `
+the directory is empty. every connected machine was disconnected from it and
+re-publishes what it holds on reconnect, so it refills on its own; a machine
+that is switched off refills its share when it next starts.
+`
+
+// runRelayReset empties the relay's fleet directory — the escape hatch for a
+// full one, and the only one there is.
+//
+// It exists because the directory refuses a 513th entry rather than evicting
+// (relay/src/directory.ts, full), nothing there ever deletes a single entry,
+// and Durable Object storage outlives every redeploy: neither `flue relay
+// update` nor a fresh `flue relay setup` against a new script name reaches it.
+// A directory that has filled up therefore stays full forever, and a full
+// directory is a fleet whose *revocations* stop crossing machines — the one
+// failure mode in this design that costs more than visibility. So there has to
+// be a way to empty it, and this is it.
+//
+// It is a wipe rather than a prune, and that is not laziness. Deleting "the
+// device certificates whose key has been revoked" means reading the blobs,
+// which means holding the fleet key, which is the one thing the relay must
+// never do. Deleting all of them needs no opinion about any of them.
+//
+// The confirmation is a typed "yes" rather than a flag alone, because the one
+// unrecoverable case — a revocation whose last holder never reconnects — is not
+// something a person should meet by autocompleting a command. --yes is there
+// for the scripted path.
+//
+// **Why `flue relay setup` does not do this too, having been asked.** It has a
+// claim to: a re-setup mints a fresh fleet key, which turns every blob already
+// in the directory into a signature no machine in the new fleet can verify —
+// dead weight against a 512-entry cap that nothing else ever frees. But setup
+// would have to send this request in the seconds after it enabled the
+// workers.dev subdomain and bound a *new* secret, and neither of those is live
+// at the edge the moment the API accepts it: the reset would be racing two
+// propagations at once, so it would fail often, on the one command a user runs
+// before they have any idea what a fleet directory is, and it would fail
+// loudest on a first deploy where there was nothing to clear. A step that
+// unreliable is worse than a separate command that always works. So this is the
+// separate command, `flue relay status` says when it is needed, and
+// docs/RELAY.md names it as the way out.
+func runRelayReset(w io.Writer, r io.Reader, args []string) error {
+	fs := flag.NewFlagSet("relay reset", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	yes := fs.Bool("yes", false, "do not ask for confirmation")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w; %s", err, relayResetUsage)
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q; %s", fs.Arg(0), relayResetUsage)
+	}
+
+	cfg, ok, err := config.LoadRelay()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("no relay is configured on this machine; `flue relay setup` deploys one first")
+	}
+	if cfg.Secret == "" {
+		// The daemon secret is the whole credential on this route. Said here
+		// rather than met as a 401 from a relay that is not at fault.
+		return errors.New("relay.json carries no daemon secret; re-run the join line printed by `flue relay setup`")
+	}
+
+	if !*yes {
+		fmt.Fprint(w, relayResetWarning)
+		fmt.Fprint(w, "type yes to continue: ")
+		line, readErr := bufio.NewReader(r).ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("read the confirmation: %w", readErr)
+		}
+		if strings.TrimSpace(line) != "yes" {
+			fmt.Fprintln(w, "  nothing was reset")
+			return nil
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), relayStepTimeout)
+	defer cancel()
+	removed, err := resetDirectory(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("reset the fleet directory: %w", err)
+	}
+	fmt.Fprintf(w, "  ✓ fleet directory reset (%s cleared)\n", plural(removed, "entry", "entries"))
+	fmt.Fprint(w, relayResetDone)
+	return nil
 }
 
 const relayUpdateUsage = "usage: flue relay update [--worker <name>]"

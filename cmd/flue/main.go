@@ -111,6 +111,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue relay status       show the configured relay
   flue relay update       redeploy this release's relay; secret and pairings kept
   flue relay address URL  repoint this machine at a custom domain on the same relay
+  flue relay reset        empty the relay's fleet directory; the fleet republishes
   flue open [path]        spawn a session in path and open it in the browser
   flue serve [--port N] [--open]   run the daemon in the foreground
   flue update             download the newest release, swap this binary, restart the daemon

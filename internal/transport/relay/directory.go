@@ -760,10 +760,12 @@ func (d *Directory) publish(ctx context.Context, blob []byte) {
 		// 507: the directory is full and refuses to evict, because every
 		// eviction policy can drop a revocation and a forgotten revocation
 		// re-admits the device it revoked. Loud and dropped, not retried: it
-		// will not fit until the operator does something, and a daemon that
-		// retried would spend the fleet's request budget saying so. Nothing
-		// else is wedged — the socket stays up, and everything already stored
-		// keeps arriving.
+		// will not fit until an operator empties the whole set with `flue relay
+		// reset`, and no redeploy does that for them — the object is named by a
+		// constant and its storage outlives the script. A daemon that retried
+		// would spend the fleet's request budget saying so. Nothing else is
+		// wedged — the socket stays up, and everything already stored keeps
+		// arriving.
 		d.log.Error("the fleet directory is full; this artifact was not published, and no machine that has not already heard of it will learn of it from here",
 			"bytes", len(blob))
 	case http.StatusRequestEntityTooLarge:

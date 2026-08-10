@@ -310,9 +310,9 @@ describe('the directory routes', () => {
   })
 
   it('405s a method the leg does not have', async () => {
-    const res = await SELF.fetch(DIRECTORY, { method: 'DELETE', headers: AUTH })
+    const res = await SELF.fetch(DIRECTORY, { method: 'PATCH', headers: AUTH })
     expect(res.status).toBe(405)
-    expect(res.headers.get('Allow')).toBe('GET, PUT')
+    expect(res.headers.get('Allow')).toBe('GET, PUT, DELETE')
     expect(await res.json()).toEqual({ error: 'method not allowed' })
   })
 
@@ -339,6 +339,105 @@ describe('the directory routes', () => {
     // in the pool for that to mean anything.
     expect(env.DIRECTORY).toBeDefined()
     expect(typeof env.DIRECTORY.idFromName).toBe('function')
+  })
+})
+
+/**
+ * The reset, which is the only way out of a full directory.
+ *
+ * Like the cap below, these run against objects of their own: a wipe of the
+ * shared directory would pull the ground out from under every other test in
+ * this file. The one test here that *is* about the router — who may ask for a
+ * wipe — goes through SELF, and is refused before it reaches any object.
+ */
+describe('DELETE /directory', () => {
+  /** A directory nothing else in this file touches. */
+  function own(): DurableObjectStub {
+    return env.DIRECTORY.get(env.DIRECTORY.idFromName(`reset-${crypto.randomUUID()}`))
+  }
+  const write = (dir: DurableObjectStub, body: Uint8Array): Promise<Response> =>
+    dir.fetch(DIRECTORY, { method: 'PUT', body, headers: AUTH })
+  const wipe = (dir: DurableObjectStub): Promise<Response> =>
+    dir.fetch(DIRECTORY, { method: 'DELETE', headers: AUTH })
+  const read = async (dir: DurableObjectStub): Promise<{ key: string; blob: string }[]> =>
+    ((await (await dir.fetch(DIRECTORY)).json()) as { entries: { key: string; blob: string }[] })
+      .entries
+
+  it('refuses a wipe without the daemon secret: 401', async () => {
+    // The gate is the router's, and it is the same secret PUT and the socket
+    // present. A credential-less caller can read this store; emptying it is a
+    // write, and the largest one there is.
+    expect((await SELF.fetch(DIRECTORY, { method: 'DELETE' })).status).toBe(401)
+    expect(
+      (await SELF.fetch(DIRECTORY, { method: 'DELETE', headers: { Authorization: 'Bearer nope' } }))
+        .status,
+    ).toBe(401)
+  })
+
+  it('empties the store and reports what it removed', async () => {
+    const dir = own()
+    expect((await write(dir, blob('wipe', 'a'))).status).toBe(201)
+    expect((await write(dir, blob('wipe', 'b'))).status).toBe(201)
+    expect((await read(dir)).length).toBe(2)
+
+    const res = await wipe(dir)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(await res.json()).toEqual({ reset: true, removed: 2 })
+    expect(await read(dir)).toEqual([])
+  })
+
+  it('takes the count with the blobs: a re-publish repopulates from zero', async () => {
+    const dir = own()
+    const first = blob('repopulate', 'a')
+    expect((await write(dir, first)).status).toBe(201)
+    await wipe(dir)
+    // 201 rather than 200: the entry is genuinely gone, not merely hidden from
+    // the snapshot, so the daemon that re-offers it is filing it afresh.
+    expect((await write(dir, first)).status).toBe(201)
+    expect((await read(dir)).map((e) => e.key)).toEqual([await digest(first)])
+    // And the counter went with it — a count that survived the wipe would
+    // refuse the 513th write into an empty store.
+    expect((await wipe(dir)).status).toBe(200)
+    expect(await (await wipe(dir)).json()).toEqual({ reset: true, removed: 0 })
+  })
+
+  it('lets a revocation that was refused at the cap be published after a reset', async () => {
+    // The whole point, end to end. A full directory refuses the fleet-wide kill
+    // switch with 507 — and refuses it permanently, because nothing evicts and
+    // Durable Object storage outlives every redeploy. This is the way back.
+    const dir = own()
+    for (let i = 0; i < MAX_ENTRIES; i++) {
+      expect((await write(dir, blob('fullcap', String(i)))).status).toBe(201)
+    }
+    const revocation = blob('fullcap', 'revocation')
+    expect((await write(dir, revocation)).status).toBe(507)
+
+    expect((await wipe(dir)).status).toBe(200)
+
+    const after = await write(dir, revocation)
+    expect(after.status).toBe(201)
+    expect(await after.json()).toEqual({ key: await digest(revocation) })
+    expect((await read(dir)).map((e) => e.key)).toEqual([await digest(revocation)])
+  })
+
+  it('closes every daemon socket, so the fleet re-publishes in seconds not in half an hour', async () => {
+    const dir = own()
+    const res = await dir.fetch(DIRECTORY, { headers: { Upgrade: 'websocket', ...AUTH } })
+    expect(res.status).toBe(101)
+    const ws = res.webSocket!
+    ws.accept()
+    const leg = new Leg(ws)
+
+    expect((await wipe(dir)).status).toBe(200)
+
+    // The close is the message: this leg carries nothing but raw blobs daemon-
+    // ward, so there is no in-band way to say "re-publish" — and a daemon's
+    // reconnect is a snapshot read followed by a full re-offer of everything it
+    // holds, which is exactly what an emptied directory needs.
+    const closed = await within(leg.closed, 'the reset to close the daemon socket')
+    expect(closed.code).toBe(1012)
+    expect(closed.reason).toBe('the directory was reset; reconnect and republish')
   })
 })
 

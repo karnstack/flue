@@ -1393,6 +1393,166 @@ func TestRunRelayStatusSurvivesARelayWithNoDirectory(t *testing.T) {
 	}
 }
 
+// --- flue relay reset --------------------------------------------------------
+
+// fakeResetRelay is a relay that answers the one route `flue relay reset`
+// speaks, and remembers what it was asked.
+type fakeResetRelay struct {
+	url string
+
+	mu      sync.Mutex
+	deletes int
+	auth    string
+	held    int
+}
+
+func resetRelay(t *testing.T, held int) *fakeResetRelay {
+	t.Helper()
+	f := &fakeResetRelay{held: held}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/directory" || r.Method != http.MethodDelete {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		f.mu.Lock()
+		f.deletes++
+		f.auth = r.Header.Get("Authorization")
+		removed := f.held
+		f.held = 0
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"reset": true, "removed": removed})
+	}))
+	t.Cleanup(ts.Close)
+	f.url = "ws" + strings.TrimPrefix(ts.URL, "http")
+	return f
+}
+
+func (f *fakeResetRelay) seen() (deletes int, auth string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deletes, f.auth
+}
+
+func saveResetRelay(t *testing.T, url string) {
+	t.Helper()
+	if err := config.SaveRelay(config.Relay{
+		URL:         url,
+		Secret:      "the-daemon-secret",
+		FleetSeed:   testFleetSeed,
+		Origin:      strings.Replace(url, "wss://", "https://", 1),
+		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
+		MachineName: "Karn's MacBook Pro",
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+}
+
+// TestRunRelayResetEmptiesTheDirectory is the escape hatch working: a full
+// directory refuses every later PUT — including a revocation, which is the
+// fleet-wide kill switch — and nothing else in flue can clear it, because
+// nothing evicts and Durable Object storage outlives every redeploy.
+func TestRunRelayResetEmptiesTheDirectory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	relay := resetRelay(t, 512)
+	saveResetRelay(t, relay.url)
+
+	var out bytes.Buffer
+	if err := runRelayReset(&out, strings.NewReader("yes\n"), nil); err != nil {
+		t.Fatalf("runRelayReset: %v", err)
+	}
+	deletes, auth := relay.seen()
+	if deletes != 1 {
+		t.Fatalf("the reset sent %d DELETEs, want 1", deletes)
+	}
+	// The daemon secret is the whole credential on this route: the relay holds
+	// no fleet key and cannot judge a blob, so what it gates is who may write.
+	if auth != "Bearer the-daemon-secret" {
+		t.Errorf("the reset presented %q, not the daemon secret", auth)
+	}
+	got := out.String()
+	if !strings.Contains(got, "512 entries cleared") {
+		t.Errorf("the reset does not report what it removed:\n%s", got)
+	}
+	// The one thing the count does not say: the fleet puts it back by itself.
+	if !strings.Contains(got, "re-publishes") {
+		t.Errorf("the reset does not say the fleet refills the directory:\n%s", got)
+	}
+}
+
+// TestRunRelayResetNeedsConfirmation: the wipe has one cost re-publishing does
+// not put back — a revocation whose last holder never reconnects — so it must
+// not be reachable by a mistyped command.
+func TestRunRelayResetNeedsConfirmation(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	relay := resetRelay(t, 7)
+	saveResetRelay(t, relay.url)
+
+	var out bytes.Buffer
+	if err := runRelayReset(&out, strings.NewReader("n\n"), nil); err != nil {
+		t.Fatalf("runRelayReset declined: %v", err)
+	}
+	if deletes, _ := relay.seen(); deletes != 0 {
+		t.Fatalf("a declined reset still sent %d DELETEs", deletes)
+	}
+	if !strings.Contains(out.String(), "nothing was reset") {
+		t.Errorf("a declined reset does not say so:\n%s", out.String())
+	}
+	// And the warning has to name the one thing that does not come back.
+	if !strings.Contains(out.String(), "never reconnects") {
+		t.Errorf("the confirmation does not state the residual risk:\n%s", out.String())
+	}
+}
+
+// TestRunRelayResetYesSkipsThePrompt: the scripted path, which must not hang
+// on a reader nobody is going to type into.
+func TestRunRelayResetYesSkipsThePrompt(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	relay := resetRelay(t, 1)
+	saveResetRelay(t, relay.url)
+
+	var out bytes.Buffer
+	if err := runRelayReset(&out, strings.NewReader(""), []string{"--yes"}); err != nil {
+		t.Fatalf("runRelayReset --yes: %v", err)
+	}
+	if deletes, _ := relay.seen(); deletes != 1 {
+		t.Fatalf("--yes sent %d DELETEs, want 1", deletes)
+	}
+	if !strings.Contains(out.String(), "1 entry cleared") {
+		t.Errorf("the reset does not report one entry in the singular:\n%s", out.String())
+	}
+}
+
+// TestRunRelayResetWithoutARelayPointsAtSetup: the same shape every other relay
+// subcommand takes on a machine that has none.
+func TestRunRelayResetWithoutARelayPointsAtSetup(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var out bytes.Buffer
+	err := runRelayReset(&out, strings.NewReader("yes\n"), nil)
+	if err == nil || !strings.Contains(err.Error(), "flue relay setup") {
+		t.Fatalf("reset without a relay: %v", err)
+	}
+}
+
+// TestRunRelayResetNamesTheUpdateForARelayWithNoDirectory: a Worker deployed by
+// a flue older than the directory answers 503 on this route by design, and the
+// fix is a redeploy rather than anything about this machine.
+func TestRunRelayResetNamesTheUpdateForARelayWithNoDirectory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"directory unavailable"}`))
+	}))
+	t.Cleanup(ts.Close)
+	saveResetRelay(t, "ws"+strings.TrimPrefix(ts.URL, "http"))
+
+	var out bytes.Buffer
+	err := runRelayReset(&out, strings.NewReader("yes\n"), []string{"--yes"})
+	if err == nil || !strings.Contains(err.Error(), "flue relay update") {
+		t.Fatalf("reset against a relay with no directory: %v", err)
+	}
+}
+
 func TestCmdRelayRejectsAnUnknownSubcommand(t *testing.T) {
 	if err := cmdRelay(nil); err == nil {
 		t.Fatal("cmdRelay with no subcommand should fail")
@@ -1405,7 +1565,7 @@ func TestCmdRelayRejectsAnUnknownSubcommand(t *testing.T) {
 // TestUsageMentionsRelay keeps the relay lines in the help text: a subcommand
 // nobody can discover may as well not exist.
 func TestUsageMentionsRelay(t *testing.T) {
-	for _, want := range []string{"flue relay setup", "flue relay join", "flue relay status"} {
+	for _, want := range []string{"flue relay setup", "flue relay join", "flue relay status", "flue relay reset"} {
 		if !strings.Contains(usageText, want) {
 			t.Fatalf("usage text does not mention %q:\n%s", want, usageText)
 		}

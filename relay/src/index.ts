@@ -258,9 +258,18 @@ export default {
       // fleet is a handful of machines.
       if (!daemon && !(await allowRate(req, env))) return rateLimited()
       const upgrade = req.headers.get('Upgrade')?.toLowerCase() === 'websocket'
-      if ((upgrade || req.method === 'PUT') && !daemon) return unauthorized()
-      if (!upgrade && req.method !== 'GET' && req.method !== 'PUT') {
-        return methodNotAllowed('GET, PUT')
+      // DELETE is gated exactly as PUT and the socket are, and by the same
+      // secret: it empties the whole directory (src/directory.ts, reset), which
+      // is the only way out of a full one and therefore the only way a fleet
+      // whose kill switch has stopped being distributed gets it back. It is
+      // reachable by whoever holds the daemon secret, which is every machine in
+      // the fleet — the same set that can already PUT, and the same set that
+      // could always fill the directory in the first place.
+      if ((upgrade || req.method === 'PUT' || req.method === 'DELETE') && !daemon) {
+        return unauthorized()
+      }
+      if (!upgrade && req.method !== 'GET' && req.method !== 'PUT' && req.method !== 'DELETE') {
+        return methodNotAllowed('GET, PUT, DELETE')
       }
       // Fail closed on a Worker deployed without the binding — an older
       // `flue relay setup` than this script. Unlike CLIENT_RATE, which is
