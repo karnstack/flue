@@ -350,6 +350,19 @@ export interface Welcome {
    * paired before that key existed.
    */
   fleetCert?: string
+  /**
+   * The fleet's Ed25519 public key, base64 — what every certificate in the
+   * fleet verifies under. Absent from a daemon that holds none.
+   *
+   * The QR is still where a browser learns this key for the first time. This
+   * is the second delivery, and it exists for the browser the first one never
+   * reached: one that paired while its machine could not sign pinned nothing,
+   * and could reach nothing but that machine until somebody ran the ceremony
+   * again. Kept only from a session this browser opened against a daemon key
+   * it pinned itself — see fleet/fleet.ts, adoptFleetKey, which is where that
+   * condition lives and why it is not trust-on-first-use.
+   */
+  fleetPub?: string
 }
 
 export interface Sessions {

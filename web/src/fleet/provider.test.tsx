@@ -58,6 +58,7 @@ function scriptedFleet() {
     id: LOCAL_MACHINE_ID,
     name: 'Mesa',
     client: ride as unknown as FlueClient,
+    pinned: false,
   }
   return { fleet: new FleetClient([source]), ride }
 }

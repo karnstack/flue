@@ -208,6 +208,86 @@ func TestWelcomeCarriesTheDevicesFleetCert(t *testing.T) {
 	}
 }
 
+// TestWelcomeCarriesTheFleetPublicKey is the other half of the re-supply path,
+// and the one that was missing.
+//
+// A browser pins the fleet key from the QR, once, and a browser that paired
+// while its machine could not sign pinned nothing — so it read no directory,
+// listed one machine, and had no way back but another ceremony. The key on the
+// welcome is what ends that: the browser keeps it when the session it arrived
+// on is one it opened against a daemon key it pinned itself, which is a party
+// it already trusts (web/src/fleet/fleet.ts, adoptFleetKey).
+//
+// Read live, like every other use of the key, so a machine joined to a fleet
+// under a running daemon answers with what it can sign under now.
+func TestWelcomeCarriesTheFleetPublicKey(t *testing.T) {
+	dir := t.TempDir()
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	var live FleetIdentity
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
+		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: func() FleetIdentity { return live }})
+	t.Cleanup(srv.Shutdown)
+
+	// Before any fleet exists: nothing is claimed. An empty key would be a
+	// daemon asserting a fleet it is not on.
+	before := newPipeConn()
+	go srv.ServeConn(context.Background(), before, ConnMeta{Peer: "relay", DeviceKey: deviceKey(0x2a)})
+	t.Cleanup(func() { _ = before.Close() })
+	bw, ok := expectControl(t, before).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame was not a welcome")
+	}
+	if len(bw.FleetPub) != 0 {
+		t.Errorf("a daemon with no fleet key named one anyway: %x", bw.FleetPub)
+	}
+
+	// `flue relay join --fleet …`, from another process, under this daemon.
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	live = FleetIdentity{Key: fk, MachineID: "karns-mbp-a1b2-0f9a12cd"}
+
+	p := newPipeConn()
+	go srv.ServeConn(context.Background(), p, ConnMeta{Peer: "relay", DeviceKey: deviceKey(0x2a)})
+	t.Cleanup(func() { _ = p.Close() })
+	w, ok := expectControl(t, p).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame was not a welcome")
+	}
+	if !bytes.Equal(w.FleetPub, fk.Public()) {
+		t.Fatalf("welcome carried fleetPub %x, want the fleet public key %x", w.FleetPub, fk.Public())
+	}
+	// The public half and nothing else. A browser holding the seed could mint
+	// certificates for the whole fleet, which is the one thing the layering
+	// exists to keep out of a tab.
+	seed, err := base64.RawURLEncoding.DecodeString(fk.Seed())
+	if err != nil {
+		t.Fatalf("decoding the fleet seed: %v", err)
+	}
+	if bytes.Contains(w.FleetPub, seed) {
+		t.Fatal("the welcome carried the fleet seed; every browser on this relay can now sign for the fleet")
+	}
+
+	// A loopback connection is told as well. What decides whether a key may be
+	// kept is the channel it arrived on, and the client is the end that knows
+	// which channel that is — so this end does not withhold it (the loopback
+	// tab pins no daemon key, so it keeps nothing; see adoptFleetKey).
+	lo := newPipeConn()
+	go srv.ServeConn(context.Background(), lo, ConnMeta{Peer: "test"})
+	t.Cleanup(func() { _ = lo.Close() })
+	lw, ok := expectControl(t, lo).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame on the loopback conn was not a welcome")
+	}
+	if !bytes.Equal(lw.FleetPub, fk.Public()) {
+		t.Errorf("loopback welcome carried fleetPub %x, want %x", lw.FleetPub, fk.Public())
+	}
+}
+
 // panicConn is a MessageConn whose read panics, standing in for any unhandled
 // failure on the serve path. It writes and closes like the pipe it embeds.
 type panicConn struct{ *pipeConn }

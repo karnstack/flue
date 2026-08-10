@@ -8,6 +8,7 @@ import type { ErrorMsg, SessionInfo, Welcome } from '@/client/protocol'
 import {
   loadOrCreateDeviceKey,
   loadPinnedDeviceCert,
+  loadPinnedFleetKey,
   savePinnedDaemonKeyFor,
   savePinnedDeviceCert,
   savePinnedFleetKey,
@@ -20,12 +21,14 @@ import {
   directoryFetch,
   FLEET_PUB,
   machineCert,
+  OTHER_PUB,
   OTHER_SEED,
   revocation,
 } from '@/testing/fleet'
 import { responderHandshake } from '@/testing/noise-daemon'
 import {
   adoptFleetCert,
+  adoptFleetKey,
   FleetClient,
   fleetSources,
   type FleetGaps,
@@ -128,8 +131,13 @@ function listen<T>(arr: T[], cb: T): () => void {
   }
 }
 
-function src(id: string, name: string, fake: FakeClient): FleetSource {
-  return { id, name, client: fake as unknown as FlueClient }
+/**
+ * A scripted source. `pinned` defaults to false — the safe answer, and the one
+ * that keeps a case that says nothing about pinning from silently exercising
+ * the fleet-key adoption path.
+ */
+function src(id: string, name: string, fake: FakeClient, pinned = false): FleetSource {
+  return { id, name, client: fake as unknown as FlueClient, pinned }
 }
 
 /** All thirteen SessionInfo fields, so a stamped row is checked whole. */
@@ -158,12 +166,15 @@ function welcome(relay?: Welcome['relay']): Welcome {
 function harness(
   entries: Array<[id: string, name: string]>,
   expand?: (origin: string) => Promise<FleetSource[]>,
+  /** Whether the sources are keyed to daemon keys this browser pinned. Off by
+   *  default, so only the cases about that say anything about it. */
+  pinned = false,
 ) {
   const fakes = new Map<string, FakeClient>()
   const sources = entries.map(([id, name]) => {
     const f = new FakeClient()
     fakes.set(id, f)
-    return src(id, name, f)
+    return src(id, name, f, pinned)
   })
   const fleet = new FleetClient(sources, expand)
   const calls: Array<{ sessions: FleetSession[]; machines: MachineState[] }> = []
@@ -1056,15 +1067,15 @@ describe('fleetSources with a fleet directory', () => {
       ]),
     })
     expect(sources.map((s) => s.id)).toEqual(['attic-pi'])
-    expect(gaps).toEqual([{ uncertified: 2, fleetKey: true }])
+    expect(gaps).toEqual([{ uncertified: 2, fleetKey: true, pinned: 1 }])
   })
 
   it('reports a browser that pinned no fleet key at all', async () => {
-    // The gap nothing can repair over the wire: a fleet key learned from a
-    // connection is a fleet key the connection chose. This browser reaches
-    // the machine it paired with, and pairing again is the way out — which is
-    // worth a sentence on screen, because the alternative is a fleet that
-    // silently consists of one machine.
+    // A browser here reads no directory, so it reaches the machine it paired
+    // with and knows of no others — which is worth a sentence on screen,
+    // because the alternative is a fleet that silently consists of one
+    // machine. `pinned` is what says whether anything can still repair it:
+    // one ceremony means one machine that can hand a key over.
     saveMachine(ATTIC)
     await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
     const gaps: FleetGaps[] = []
@@ -1075,7 +1086,48 @@ describe('fleetSources with a fleet directory', () => {
       directoryFetch: directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)]),
     })
     expect(sources.map((s) => s.id)).toEqual(['attic-pi'])
-    expect(gaps).toEqual([{ uncertified: 0, fleetKey: false }])
+    expect(gaps).toEqual([{ uncertified: 0, fleetKey: false, pinned: 1 }])
+  })
+
+  it('reports no ceremonies at all for a tab that pinned nothing', async () => {
+    // The other side of that: a loopback tab, whose pairing links point at the
+    // relay's address rather than its own. Nothing here can be handed a fleet
+    // key, so the screen says something different (routes/sessions.tsx).
+    const gaps: FleetGaps[] = []
+    await fleetSources({
+      loopback: true,
+      relayOrigin: 'https://relay.example',
+      onGaps: (g) => gaps.push(g),
+      directoryFetch: directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)]),
+    })
+    expect(gaps).toEqual([{ uncertified: 0, fleetKey: false, pinned: 0 }])
+  })
+
+  it('marks a source by how it learned the daemon key it dials', async () => {
+    // The security condition adoptFleetKey turns on, recorded at the one place
+    // that knows it. Attic's key came from a ceremony this browser performed;
+    // Loft's came from a machine certificate, which verified under the very
+    // fleet key a welcome would be offering to replace.
+    await savePinnedFleetKey(FLEET_PUB)
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+    await holdCert(await devicePub())
+
+    const sources = await fleetSources({
+      loopback: true,
+      relayOrigin: 'https://relay.example',
+      directoryFetch: directoryFetch([
+        machineCert(ATTIC.id, 'Attic Pi', DAEMON_PUB),
+        machineCert('loft-9f9f', 'Loft', LOFT_PUB),
+      ]),
+    })
+
+    expect(sources.map((s) => ({ id: s.id, pinned: s.pinned }))).toEqual([
+      // The loopback ride authenticates a session cookie and no key at all.
+      { id: LOCAL_MACHINE_ID, pinned: false },
+      { id: ATTIC.id, pinned: true },
+      { id: 'loft-9f9f', pinned: false },
+    ])
   })
 })
 
@@ -1177,5 +1229,234 @@ describe('adoptFleetCert', () => {
       false,
     )
     expect(await adoptFleetCert(welcomeWith(undefined))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// adoptFleetKey: the anchor itself, and the one condition it may be moved
+// under. Every case here is adversarial on purpose — the refusals are the
+// feature, and each of them is a way a browser could be pointed at a fleet
+// somebody else chose.
+// ---------------------------------------------------------------------------
+
+describe('adoptFleetKey', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    vi.stubGlobal('indexedDB', new IDBFactory())
+  })
+
+  /** A welcome offering `pub` as the fleet key, base64, as a daemon sends it. */
+  function offering(pub: Uint8Array | string | undefined): Welcome {
+    return {
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'mbp',
+      ver: 'test',
+      ...(pub !== undefined && { fleetPub: typeof pub === 'string' ? pub : base64(pub) }),
+    }
+  }
+
+  it('keeps a key handed over by a machine this browser pinned', async () => {
+    // The whole point. This session is Noise IK against a static key a user
+    // carried across on a screen they control, so what arrives on it is an
+    // authenticated statement from a party this browser already trusts.
+    expect(await adoptFleetKey(offering(FLEET_PUB), true)).toBe(true)
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB)
+  })
+
+  it('refuses one from a machine this browser never pinned', async () => {
+    // No ceremony, no pin, no standing to name the fleet. This is the case the
+    // parameter exists for: a loopback ride, a scripted client, anything whose
+    // daemon key this browser did not witness.
+    expect(await adoptFleetKey(offering(FLEET_PUB), false)).toBe(false)
+    expect(await loadPinnedFleetKey()).toBeNull()
+  })
+
+  it('refuses one from a machine reached on a certificate alone', async () => {
+    // The circular case, and the reason `pinned` is carried on the source
+    // rather than inferred from the session. A machine whose Noise key came out
+    // of the directory was vouched for *by* the fleet key; letting it hand over
+    // a fleet key would let a certificate move the anchor it hangs from.
+    await savePinnedFleetKey(FLEET_PUB)
+    saveMachine(ATTIC) // a record whose pin is gone; the fleet still names it
+    await savePinnedDeviceCert(deviceCert((await loadOrCreateDeviceKey()).publicKey))
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      directoryFetch: directoryFetch([machineCert(ATTIC.id, 'Attic Pi', DAEMON_PUB)]),
+    })
+    const certified = sources.find((s) => s.id === ATTIC.id)!
+    expect(certified.pinned).toBe(false)
+
+    // Which is exactly what the adoption then refuses, whatever it offers.
+    expect(await adoptFleetKey(offering(OTHER_PUB), certified.pinned)).toBe(false)
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB)
+  })
+
+  it('refuses a key that is not 32 bytes', async () => {
+    // A pin of the wrong width fails closed on every later read (crypto/keys.ts),
+    // so a browser that wrote one would hold no fleet key and have spent the
+    // one chance a welcome gives it to notice.
+    expect(await adoptFleetKey(offering(FLEET_PUB.slice(0, 31)), true)).toBe(false)
+    expect(await adoptFleetKey(offering(new Uint8Array(64).fill(3)), true)).toBe(false)
+    expect(await loadPinnedFleetKey()).toBeNull()
+  })
+
+  it('refuses a key that is not base64 at all, and an empty one', async () => {
+    expect(await adoptFleetKey(offering('not base64 !!'), true)).toBe(false)
+    expect(await adoptFleetKey(offering(''), true)).toBe(false)
+    expect(await adoptFleetKey(offering(undefined), true)).toBe(false)
+    expect(await loadPinnedFleetKey()).toBeNull()
+  })
+
+  it('keeps the pin it already holds when a machine names another fleet', async () => {
+    // Deliberate, not cautious. Two keys differ only if the fleet was set up
+    // again, and this browser's certificate is signed by the old one — so
+    // adopting the new key would leave it listing machines it cannot present
+    // anything to. Pairing again is what mints a certificate, and until then
+    // the old pin is the one that describes what this browser can do.
+    await savePinnedFleetKey(FLEET_PUB)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    expect(await adoptFleetKey(offering(OTHER_PUB), true)).toBe(false)
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB)
+    // Surfaced rather than swallowed: a browser and a fleet disagreeing about
+    // which key signs is not something to discover from a list staying short.
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it('reports nothing for the key it already had, and warns about nothing', async () => {
+    // The ordinary welcome, on every reconnect, from a browser that is already
+    // whole. Nothing is gained, so nothing re-expands.
+    await savePinnedFleetKey(FLEET_PUB)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    expect(await adoptFleetKey(offering(FLEET_PUB), true)).toBe(false)
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB)
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The heal, end to end: the state a real fleet put a real browser in, and what
+// one welcome now does about it.
+// ---------------------------------------------------------------------------
+
+describe('a browser paired before its machine had a fleet key', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    vi.stubGlobal('indexedDB', new IDBFactory())
+  })
+
+  it('sees the whole fleet from one welcome, with no ceremony', async () => {
+    // The maintainer's own tab. It pinned Attic's daemon key at a ceremony
+    // that minted no fleet key and no certificate, because Attic held none at
+    // the time — so it read no directory, listed one machine, and the only
+    // cure was scanning another code.
+    //
+    // Attic has a fleet key now (`flue relay join --fleet`, or the daemon
+    // re-reading relay.json), so its welcome carries both records. Nothing is
+    // stubbed here but the transport and the directory response: the real
+    // builder, the real key store, the real certificate verification.
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+    expect(await loadPinnedFleetKey()).toBeNull()
+
+    const { factory } = recordingFactory()
+    const fetch = directoryFetch([
+      machineCert(ATTIC.id, 'Attic Pi', DAEMON_PUB),
+      machineCert('loft-9f9f', 'Loft', LOFT_PUB),
+      machineCert('blue-mesa-1a2b', 'Blue Mesa', MESA_PUB),
+    ])
+    const expand = vi.fn((origin: string) =>
+      fleetSources({
+        loopback: false,
+        relayOrigin: origin,
+        wsFactory: factory,
+        directoryFetch: fetch,
+      }),
+    )
+
+    // The ride: Attic, over the relay, keyed to the pin — which is what
+    // relayBoot builds and what makes this welcome worth listening to.
+    const h = harness([[LOCAL_MACHINE_ID, '']], expand, true)
+    h.fleet.connect()
+    h.fake(LOCAL_MACHINE_ID).open()
+
+    const key = await loadOrCreateDeviceKey()
+    h.fake(LOCAL_MACHINE_ID).emitWelcome({
+      ...welcome({
+        status: 'connected',
+        origin: 'https://relay.example',
+        machineId: ATTIC.id,
+        machineName: 'Attic Pi',
+      }),
+      fleetPub: base64(FLEET_PUB),
+      fleetCert: base64(deviceCert(key.publicKey, 'phone', ATTIC.id)),
+    })
+
+    // Both siblings appear in this session. Attic itself does not appear twice:
+    // the ride is that machine, reached the way it always was.
+    await vi.waitFor(() =>
+      expect(h.last().machines.map((m) => m.id).sort()).toEqual([
+        'blue-mesa-1a2b',
+        LOCAL_MACHINE_ID,
+        'loft-9f9f',
+      ]),
+    )
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB)
+    h.fleet.close()
+
+    // And the band goes with it. Asked of the real builder in the state this
+    // browser is now in — the same question the fleet asks it on every
+    // expansion — there is no gap left to put on the screen.
+    const gaps: FleetGaps[] = []
+    await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      wsFactory: factory,
+      directoryFetch: fetch,
+      onGaps: (g) => gaps.push(g),
+    })
+    expect(gaps).toEqual([{ uncertified: 0, fleetKey: true, pinned: 1 }])
+  })
+
+  it('stays on its one machine when the ride is not a machine it paired with', async () => {
+    // The same welcome, the same fleet key, a ride this browser never pinned —
+    // a loopback tab, or any client built from a machine certificate. Nothing
+    // is kept and no directory is read, which is the refusal that keeps a fleet
+    // key from being whatever the connection said it was.
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+
+    const fetch = directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)])
+    const expand = vi.fn((origin: string) =>
+      fleetSources({ loopback: false, relayOrigin: origin, directoryFetch: fetch }),
+    )
+    const h = harness([[LOCAL_MACHINE_ID, '']], expand, false)
+    h.fleet.connect()
+    h.fake(LOCAL_MACHINE_ID).open()
+
+    const key = await loadOrCreateDeviceKey()
+    h.fake(LOCAL_MACHINE_ID).emitWelcome({
+      ...welcome({ status: 'connected', origin: 'https://relay.example' }),
+      fleetPub: base64(FLEET_PUB),
+      fleetCert: base64(deviceCert(key.publicKey, 'phone', ATTIC.id)),
+    })
+
+    // The expansion still runs and still builds what this browser pinned by
+    // hand — that is the anchor the negatives below hang on, so they are not
+    // just an assertion made too early.
+    await vi.waitFor(() =>
+      expect(h.last().machines.map((m) => m.id)).toEqual([LOCAL_MACHINE_ID, ATTIC.id]),
+    )
+    expect(await loadPinnedFleetKey()).toBeNull()
+    // No key, so no directory: an unverifiable machine list is a relay naming
+    // whatever machines it likes, and Loft never appears.
+    expect(fetch.calls).toEqual([])
+    h.fleet.close()
   })
 })

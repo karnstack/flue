@@ -14,8 +14,10 @@ import { IDBFactory } from 'fake-indexeddb'
 
 import type { SessionInfo } from '@/client/protocol'
 import { SidebarProvider } from '@/components/ui/sidebar'
+import { savePinnedDaemonKeyFor } from '@/crypto/keys'
 import { FleetClient } from '@/fleet/fleet'
 import { FleetProvider } from '@/fleet/provider'
+import { saveMachine } from '@/relay/machines'
 import { attached, fakeClient, type FakeSocket } from '@/testing/socket'
 import { SessionsRoute } from './sessions'
 
@@ -66,10 +68,10 @@ async function mountSessions({ open = true, strict = false, solo = false } = {})
   // "one machine" by anything else would not be testing the rule.
   const fleet = new FleetClient(
     solo
-      ? [{ id: 'local', name: '', client: local.client }]
+      ? [{ id: 'local', name: '', client: local.client, pinned: false }]
       : [
-          { id: 'local', name: '', client: local.client },
-          { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
+          { id: 'local', name: '', client: local.client, pinned: false },
+          { id: 'attic-pi', name: 'Attic Pi', client: attic.client, pinned: false },
         ],
   )
 
@@ -499,13 +501,15 @@ describe('SessionsRoute', () => {
     })
 
     it('says the fleet is out of reach instead of quietly listing one machine', async () => {
-      // A browser that pinned no fleet key — paired before fleet trust
-      // existed, or with a daemon that held no key — reaches the machine it
-      // paired with and no other. The fleet builder skipped the rest in
-      // silence, so the reader saw a short list and nothing anywhere to say it
-      // was short, on a screen whose whole subject is "what is running
-      // everywhere". It cannot be repaired over the wire either: a fleet key
-      // learned from a connection is a key that connection chose.
+      // A browser that pinned no fleet key reaches the machine it paired with
+      // and no other. The fleet builder skipped the rest in silence, so the
+      // reader saw a short list and nothing anywhere to say it was short, on a
+      // screen whose whole subject is "what is running everywhere".
+      //
+      // This tab has performed no ceremony at all — a loopback tab, where the
+      // pairing link the daemon draws points at the relay's address rather
+      // than this one — so nothing is going to hand it a key and the band says
+      // where to go.
       vi.stubGlobal('indexedDB', new IDBFactory())
       localStorage.clear()
       const { sock } = await mountSessions()
@@ -523,8 +527,35 @@ describe('SessionsRoute', () => {
         }),
       )
 
-      await waitFor(() => expect(screen.getByText(/holds\s+no key for the fleet/)).toBeTruthy())
-      expect(screen.getByText(/Pair it again/)).toBeTruthy()
+      await waitFor(() => expect(screen.getByText(/has\s+paired with none/)).toBeTruthy())
+      expect(screen.getByText(/pair there/)).toBeTruthy()
+    })
+
+    it('does not tell a browser to pair again when a machine is about to hand it a key', async () => {
+      // The same missing fleet key, one ceremony to its name. Telling this
+      // reader to pair again is telling them to redo something that is already
+      // repairing itself: the machine they paired with hands the key over on
+      // its next welcome (fleet.ts, adoptFleetKey). So the band states the one
+      // thing still worth stating — that nothing has answered with one yet.
+      vi.stubGlobal('indexedDB', new IDBFactory())
+      localStorage.clear()
+      saveMachine({ id: 'loft-9f9f', name: 'Loft', pairedAt: 1_700_000_000_000 })
+      await savePinnedDaemonKeyFor('loft-9f9f', new Uint8Array(32).fill(7))
+
+      const { sock } = await mountSessions()
+      listed(sock, [info({ id: 's1' })])
+      act(() =>
+        sock.emitControl({
+          type: 'welcome',
+          daemonId: 'd1',
+          host: 'mesa.local',
+          ver: '0.1.0',
+          relay: { status: 'connected', origin: 'https://relay.example' },
+        }),
+      )
+
+      await waitFor(() => expect(screen.getByText(/as soon as that machine answers/)).toBeTruthy())
+      expect(screen.queryByText(/pair there/)).toBeNull()
     })
 
     it('reports a lost local daemon rather than showing an empty screen', async () => {

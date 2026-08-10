@@ -22,6 +22,13 @@ export interface FleetProviderProps {
    * has always meant "the machine this tab rides", not literally loopback.
    */
   client?: FlueClient
+  /**
+   * Whether that client's channel is keyed to a daemon static key this browser
+   * pinned at a ceremony. See FleetSource.pinned, which is where it lands and
+   * what it decides: a fleet key may be adopted off a welcome from such a
+   * machine and no other.
+   */
+  pinned?: boolean
 }
 
 /**
@@ -38,11 +45,11 @@ export interface FleetProviderProps {
  * That is what lets a test put a scripted fleet above the router and still
  * exercise the real tree.
  */
-export function FleetProvider({ children, fleet, client }: FleetProviderProps) {
+export function FleetProvider({ children, fleet, client, pinned }: FleetProviderProps) {
   const inherited = useContext(FleetContext)
   if (fleet === undefined && inherited !== null) return <>{children}</>
   return (
-    <OwnFleetProvider fleet={fleet} client={client}>
+    <OwnFleetProvider fleet={fleet} client={client} pinned={pinned}>
       {children}
     </OwnFleetProvider>
   )
@@ -74,7 +81,7 @@ export function FleetProvider({ children, fleet, client }: FleetProviderProps) {
  * already holds a socket keeps that one and opens no second, a client waiting
  * out a backoff dials early rather than twice, and both closes close once.
  */
-function OwnFleetProvider({ children, fleet, client }: FleetProviderProps) {
+function OwnFleetProvider({ children, fleet, client, pinned }: FleetProviderProps) {
   const legacy = useContext(FlueClientContext)
   const own = useRef<FleetClient | null>(null)
   let active = fleet
@@ -84,6 +91,12 @@ function OwnFleetProvider({ children, fleet, client }: FleetProviderProps) {
         id: LOCAL_MACHINE_ID,
         name: '',
         client: client ?? legacy ?? new FlueClient(daemonSocketUrl()),
+        // Only ever true of the ride the entry point built, and only when it
+        // said so. The other two rides are a loopback socket and whatever a
+        // test put in context; neither is keyed to a pinned daemon key, and a
+        // flag that travelled without its client would be a claim about the
+        // wrong one. See FleetSource.pinned.
+        pinned: client !== undefined && pinned === true,
       },
     ])
     active = own.current

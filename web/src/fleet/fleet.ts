@@ -27,11 +27,13 @@ import { daemonSocketUrl, FlueClient, type ConnStatus } from '@/client/client'
 import type { ErrorMsg, Preview, SessionInfo, Welcome } from '@/client/protocol'
 import { sameKey, verifyCert } from '@/crypto/cert'
 import {
+  KEY_BYTES,
   loadOrCreateDeviceKey,
   loadPinnedDaemonKeyFor,
   loadPinnedDeviceCert,
   loadPinnedFleetKey,
   savePinnedDeviceCert,
+  savePinnedFleetKey,
   type DeviceKey,
 } from '@/crypto/keys'
 import { readDirectory, type DirectoryFetch, type FleetView } from '@/relay/directory'
@@ -71,17 +73,38 @@ export interface FleetSource {
   id: string
   name: string
   client: FlueClient
+  /**
+   * Whether this client's transport authenticates its daemon against a static
+   * key *this browser pinned at a pairing ceremony* — as opposed to one taken
+   * from a machine certificate, or no key at all.
+   *
+   * It travels with the source because only whoever built the transport knows
+   * it. By the time a welcome arrives, every session looks alike from the
+   * outside: one is Noise against a key a user carried across on a screen they
+   * control, another is Noise against a key the fleet vouched for, a third is a
+   * session cookie on loopback, and nothing in the message says which.
+   *
+   * What turns on it is `adoptFleetKey`, and only that. A fleet key is the
+   * anchor every machine certificate hangs from, so it may be kept from a peer
+   * this browser authenticated out of band and from nobody else. Anything the
+   * fleet key itself vouched for is downstream of that anchor and cannot be
+   * allowed to move it.
+   */
+  pinned: boolean
 }
 
 /**
  * What an expansion could not build — the fleet this browser is not in.
  *
- * Both halves were silent skips, and both are permanent until somebody pairs
- * again, which is exactly the kind of fact a screen has to state rather than
- * leave a reader to infer from a short list. They are counts and a flag rather
- * than machines because there is nothing to act on per row: a machine with no
- * certificate cannot be dialled, retried or named — it is a line in a signed
- * directory this browser cannot present anything to.
+ * Every skip here was silent, which is exactly the kind of fact a screen has
+ * to state rather than leave a reader to infer from a short list. They are
+ * counts and a flag rather than machines because there is nothing to act on per
+ * row: a machine with no certificate cannot be dialled, retried or named — it
+ * is a line in a signed directory this browser cannot present anything to.
+ *
+ * A snapshot of one expansion, not a verdict. The fleet re-expands the moment a
+ * welcome hands over something that changes the answer, so a gap reported at
+ * boot may be gone a heartbeat later; see FleetClient.adoptFromWelcome.
  */
 export interface FleetGaps {
   /**
@@ -94,12 +117,24 @@ export interface FleetGaps {
    * Whether this browser has a fleet key pinned at all. False is the browser
    * that paired with a machine holding no fleet key — before fleet trust
    * existed, or during the window a daemon could be live on a relay and unable
-   * to sign — and it is the one gap nothing can repair over the wire: a fleet
-   * key learned from a connection is a fleet key the connection chose, which
-   * is the trust-on-first-use this design refuses. That browser reaches the
-   * machine it paired with, and pairing again is the whole of the way out.
+   * to sign — and it used to be the one gap nothing could repair over the wire.
+   *
+   * It repairs itself now, from the welcome of any machine this browser paired
+   * with by hand (`adoptFleetKey`), so false is usually a browser mid-repair.
+   * What it means when it *stays* false is what `pinned` is for.
    */
   fleetKey: boolean
+  /**
+   * How many machines this browser holds a pinned daemon key for — the
+   * ceremonies it actually performed.
+   *
+   * It is here because it is what tells a false `fleetKey` apart from a stuck
+   * one. Above zero, some machine can hand this browser the fleet key as soon
+   * as it answers, and a screen has only to say so. At zero there is nobody to
+   * ask: the tab is riding a machine it never paired with — a loopback tab is
+   * the ordinary case — and another ceremony is the whole of the way out.
+   */
+  pinned: number
 }
 
 /** What onFleet hands its listeners, on any change to either half. */
@@ -120,6 +155,10 @@ interface Slot {
   id: string
   name: string
   client: FlueClient
+  /** The source's own; see FleetSource.pinned. Never recomputed here, because
+   *  the fact is about how the transport was built and nothing later can
+   *  observe it. */
+  pinned: boolean
   status: MachineStatus
   rows: SessionInfo[] | null
   /**
@@ -137,6 +176,7 @@ function toSlot(source: FleetSource): Slot {
     id: source.id,
     name: source.name,
     client: source.client,
+    pinned: source.pinned,
     status: 'connecting',
     rows: null,
     revoked: null,
@@ -183,12 +223,17 @@ export class FleetClient {
    */
   private relayOrigin: string | null = null
   /**
-   * Whether a re-supplied certificate has already forced that second
-   * expansion. Once per epoch: a browser gains machines the first time it
-   * holds a certificate at all, and re-running on every later welcome would
-   * be a directory read per reconnect for a set that cannot have changed.
+   * Whether something re-supplied on a welcome has already forced that second
+   * expansion — a fleet key, a certificate, or the two together.
+   *
+   * Once per epoch: a browser gains machines the first time it holds each of
+   * them, and re-running on every later welcome would be a directory read per
+   * reconnect for a set that cannot have changed. One flag covers both because
+   * they cannot arrive apart in a way that would strand the second — a
+   * certificate is verified under the fleet key, so a browser missing both
+   * gains them in that order, on the one welcome, before this is consulted.
    */
-  private certExpanded = false
+  private resupplied = false
   /** The slot id the loopback daemon holds on the relay, once known. */
   private twinId: string | null = null
   /** Bumped by close, so an in-flight expansion can tell it was orphaned. */
@@ -238,7 +283,14 @@ export class FleetClient {
   /** Record what the builder skipped, and tell the screens if it changed. */
   private noteGaps(g: FleetGaps) {
     const held = this.gapsState
-    if (held !== null && held.uncertified === g.uncertified && held.fleetKey === g.fleetKey) return
+    if (
+      held !== null &&
+      held.uncertified === g.uncertified &&
+      held.fleetKey === g.fleetKey &&
+      held.pinned === g.pinned
+    ) {
+      return
+    }
     this.gapsState = g
     this.emit()
   }
@@ -268,7 +320,7 @@ export class FleetClient {
     this.running = false
     this.epoch++
     this.expanded = false
-    this.certExpanded = false
+    this.resupplied = false
     this.relayOrigin = null
     if (this.poll !== null) {
       clearInterval(this.poll)
@@ -416,14 +468,11 @@ export class FleetClient {
       slot.client.onError((err) => this.emitError(slot.id, err)),
       slot.client.onRevoked((reason) => this.slotRevoked(slot, reason)),
     ]
-    // Every welcome may carry this device's own fleet certificate, whichever
-    // machine sent it: the daemon hands one to the device it has just
-    // authenticated, so any machine this browser can still reach re-supplies
-    // the blob it needs for the machines it cannot. Deliberately not gated on
-    // which slot: the local daemon is as good a source as a remote one, and a
-    // browser that has lost its certificate is usually a browser that can only
-    // reach one machine.
-    slot.unsubs.push(slot.client.onWelcome((w) => void this.adoptCert(w)))
+    // Every welcome may carry the two records a browser needs to be on a fleet
+    // rather than on one machine: this device's own certificate, and the fleet
+    // key that verifies it. The slot is passed because the second is gated on
+    // it — see adoptFromWelcome — while the first is not.
+    slot.unsubs.push(slot.client.onWelcome((w) => void this.adoptFromWelcome(slot, w)))
     // The rest of the welcome is the loopback daemon's alone — its host name,
     // its relay slot, the relay origin. A remote source's welcome names the
     // machine the record already names.
@@ -535,32 +584,40 @@ export class FleetClient {
   }
 
   /**
-   * A welcome's certificate, kept — and the machines it unlocks, taken now
-   * rather than on the next page load.
+   * A welcome's fleet key and certificate, kept — and the machines they unlock,
+   * taken now rather than on the next page load.
    *
-   * The order this repairs: a browser that boots holding no certificate builds
-   * sources for the machines it pinned by hand and skips every machine it can
-   * only reach on the fleet's word (`fleetSources` reads the stored
-   * certificate once). The first welcome then hands it one. Without this, that
-   * certificate sits in IndexedDB unused until something reloads the tab —
-   * which is exactly the case the re-supply path exists for, since a browser
-   * that lost its certificate is a browser that is missing machines.
+   * The order this repairs: a browser that boots holding neither builds sources
+   * for the machines it pinned by hand and skips every machine it can only
+   * reach on the fleet's word — without the key it does not even read the
+   * directory that names them. The first welcome then hands both over. Without
+   * this they would sit in IndexedDB unused until something reloaded the tab,
+   * which is exactly the case the re-supply path exists for: a browser missing
+   * either record is a browser missing machines.
    *
-   * Only a certificate this browser did not already hold re-expands, so the
-   * usual welcome — the same blob it has had all along — costs one IndexedDB
-   * read and nothing else. `certExpanded` bounds it to one rebuild per epoch
-   * even if several slots say hello at once.
+   * **The key first, and that ordering is load-bearing.** `adoptFleetCert`
+   * verifies under the pinned fleet key, so a browser holding no key would
+   * refuse the certificate riding the very welcome that brought it one. Taken
+   * in this order, the browser that has been stuck longest — no key, no
+   * certificate, one machine — is whole again from a single welcome.
+   *
+   * Only records this browser did not already hold re-expand, so the usual
+   * welcome — the same blobs it has had all along — costs two IndexedDB reads
+   * and nothing else. `resupplied` bounds it to one rebuild per epoch even if
+   * several slots say hello at once.
    *
    * The rebuild is `adoptRemotes` unchanged, which is why this is safe to run
    * a second time: it is idempotent by id, skips the twin, and discards
    * everything if the fleet closed while it was reading the directory.
    */
-  private async adoptCert(w: Welcome) {
-    if (!(await adoptFleetCert(w))) return
-    if (this.certExpanded || !this.running) return
+  private async adoptFromWelcome(slot: Slot, w: Welcome) {
+    const key = await adoptFleetKey(w, slot.pinned)
+    const cert = await adoptFleetCert(w)
+    if (!key && !cert) return
+    if (this.resupplied || !this.running) return
     const origin = this.relayOrigin
     if (origin === null) return
-    this.certExpanded = true
+    this.resupplied = true
     await this.adoptRemotes(origin)
   }
 
@@ -681,6 +738,85 @@ export class FleetClient {
 }
 
 /**
+ * Keep the fleet's public key when a welcome offers one — but only from a
+ * machine this browser paired with itself.
+ *
+ * **What was wrong with "a fleet key cannot be re-supplied".** The claim used
+ * to be that a key learned from a connection is a key the connection chose, so
+ * pinning it would be trust-on-first-use one level up. That is true of an
+ * arbitrary connection and it was too strong for this one. A browser that
+ * pinned a machine's daemon static key at a ceremony has an authenticated
+ * channel to that machine: the Noise IK session names the pinned key as the
+ * responder's static, so message B only decrypts for a peer holding its private
+ * half (crypto/noise.ts, and internal/crypto/handshake.go on the other side).
+ * A key arriving there is an authenticated statement from a party this browser
+ * already trusts out of band, not an assertion from an unknown peer.
+ *
+ * Three things follow, and they are the whole safety argument:
+ *
+ *   - A hostile relay cannot inject one. It carries ciphertext and cannot forge
+ *     the session; a welcome it wrote never decrypts.
+ *   - A compromised daemon gains nothing. The fleet seed sits in relay.json on
+ *     every machine, so a machine that could lie about this key can already
+ *     mint a device certificate for any key it likes — it holds fleet power
+ *     already, and handing over a wrong key is not an escalation.
+ *   - A browser with no pinned daemon key anywhere still has only the QR, which
+ *     is unchanged and correct.
+ *
+ * Which is why `pinnedDaemon` is a parameter and not an inference. The key may
+ * be taken from a session keyed to a *pinned* daemon key and from no other:
+ * never from one whose daemon key came out of a machine certificate, because
+ * that certificate verified under the very key being replaced and the anchor
+ * cannot be moved by what it anchors; and never from loopback, which
+ * authenticates a session cookie rather than any key at all. FleetSource.pinned
+ * is where the fact is recorded, at the one place that knows it.
+ *
+ * **An existing pin is never overwritten**, and that is a deliberate choice
+ * rather than caution. Two keys can differ only if the fleet was set up again
+ * (`flue relay setup` mints a fresh one), and in that world this browser's
+ * device certificate is signed by a key nothing honours any more: adopting the
+ * new key would leave it verifying machine certificates it still cannot present
+ * anything to, so it would list machines it cannot reach instead of machines it
+ * can. Keeping the old pin leaves it exactly as it was, with the ceremony — the
+ * one thing that mints a certificate — as the way out. The mismatch goes to the
+ * console rather than being swallowed, because a browser and a fleet disagreeing
+ * about which key signs is not something to discover by watching a list stay
+ * short.
+ *
+ * Returns whether this browser gained a key it did not have, which is the one
+ * case the caller can act on: without one it read no directory at all, so it
+ * has every machine on the fleet to gain.
+ */
+export async function adoptFleetKey(w: Welcome, pinnedDaemon: boolean): Promise<boolean> {
+  if (!pinnedDaemon) return false
+  if (w.fleetPub === undefined || w.fleetPub === '') return false
+  const key = decodeBase64(w.fleetPub)
+  // The same width every reader in crypto/keys.ts enforces. A record of any
+  // other length is one that module could never have written, and a verifier
+  // handed it refuses every certificate — a browser listing no machines rather
+  // than one listing the wrong ones, which is a silent version of the state
+  // this whole path exists to end.
+  if (key === null || key.length !== KEY_BYTES) return false
+  try {
+    const held = await loadPinnedFleetKey()
+    if (held !== null) {
+      if (!sameKey(held, key)) {
+        console.warn(
+          'flue: this machine signs under a different fleet key than the one this browser pinned; keeping the pin. Pair again from a machine on the new fleet.',
+        )
+      }
+      return false
+    }
+    await savePinnedFleetKey(key)
+    return true
+  } catch {
+    // A key store that will not open. This browser keeps what it had, which is
+    // the same answer it has for a daemon that offered nothing.
+    return false
+  }
+}
+
+/**
  * Keep this device's fleet certificate when a welcome offers one.
  *
  * This is the re-supply path, and the reason a certificate no longer has to
@@ -692,6 +828,10 @@ export class FleetClient {
  * can still reach that way. A loopback welcome carries none — a session-token
  * connection has named no device key — so this listener earns its keep on the
  * relay sources, and a tab that only ever paired over loopback re-pairs.
+ *
+ * Unlike the fleet key above, this is not gated on which machine sent it. It
+ * does not have to be: a certificate is checked against a signature, so the
+ * sender's standing adds nothing a bad blob could not fail on its own.
  *
  * Verified before it is kept, under the fleet key pinned at pairing and against
  * this browser's own device key — the same three checks the pairing page makes,
@@ -783,9 +923,9 @@ function decodeBase64(text: string): Uint8Array | null {
  *
  * Not built is not the same as not mentioned, and it used to be. The second of
  * those — a machine the fleet names that this browser cannot present anything
- * to — is counted and reported through `onGaps`, along with a browser that
- * pinned no fleet key at all, because both are permanent until somebody pairs
- * again and a reader cannot tell either of them from a short list. See
+ * to — is counted and reported through `onGaps`, along with whether this
+ * browser pinned a fleet key at all and how many ceremonies it has performed,
+ * because a reader cannot tell any of them apart from a short list. See
  * FleetGaps.
  */
 export async function fleetSources(opts: {
@@ -805,7 +945,16 @@ export async function fleetSources(opts: {
 }): Promise<FleetSource[]> {
   const sources: FleetSource[] = []
   if (opts.loopback) {
-    sources.push({ id: LOCAL_MACHINE_ID, name: '', client: new FlueClient(daemonSocketUrl()) })
+    sources.push({
+      id: LOCAL_MACHINE_ID,
+      name: '',
+      client: new FlueClient(daemonSocketUrl()),
+      // A session cookie on the daemon's own origin authenticates this one, and
+      // no key of any kind. Whatever else that is worth, it is not the pinned
+      // ceremony `adoptFleetKey` asks for — so a loopback tab still learns its
+      // fleet key from a pairing link and nowhere else.
+      pinned: false,
+    })
   }
   const origin = opts.relayOrigin
   if (origin === null) return sources
@@ -850,6 +999,9 @@ export async function fleetSources(opts: {
   // set up and cannot see, and nothing on any screen would otherwise say the
   // list is short.
   let uncertified = 0
+  // And how many machines this browser actually paired with, which is who it
+  // could still be handed a fleet key by; see FleetGaps.pinned.
+  let ceremonies = 0
   for (const machine of mergeMachines(listMachines(), view.machines)) {
     let pinned: Uint8Array | null = null
     try {
@@ -858,6 +1010,7 @@ export async function fleetSources(opts: {
       // A key store that will not open answers as a missing pin does, and the
       // fleet's own key may still name this machine.
     }
+    if (pinned !== null) ceremonies++
     const certified = view.machines.find((m) => m.id === machine.id) ?? null
     const daemonPub = pinned ?? certified?.noise ?? null
     if (daemonPub === null) continue
@@ -879,9 +1032,13 @@ export async function fleetSources(opts: {
       id: machine.id,
       name: machine.name,
       client: new FlueClient(origin, (o) => relaySocket(o, identity, machine.id, opts.wsFactory)),
+      // Exactly the distinction two lines up: a key a ceremony pinned, or a key
+      // a machine certificate named. Both dial, and only the first may hand
+      // this browser a fleet key (adoptFleetKey).
+      pinned: pinned !== null,
     })
   }
-  opts.onGaps?.({ uncertified, fleetKey })
+  opts.onGaps?.({ uncertified, fleetKey, pinned: ceremonies })
   return sources
 }
 
@@ -905,10 +1062,13 @@ async function hasPinnedFleetKey(): Promise<boolean> {
  * *without* the key would be worse than not reading it, because an unverifiable
  * machine list is a relay naming whatever machines it likes.
  *
- * It is no longer a *silent* answer. The caller reports it (FleetGaps.fleetKey)
- * and the sessions screen says so, because "this browser is on a fleet of one
- * and cannot be given the key over the wire" is not something a reader can work
- * out from a list with one machine in it.
+ * It is no longer a *silent* answer, nor usually a lasting one. The caller
+ * reports it (FleetGaps.fleetKey) and the sessions screen says so, because "the
+ * fleet is a list this browser cannot read" is not something a reader can work
+ * out from a list with one machine in it. And a browser that pinned a machine's
+ * daemon key is handed a fleet key by that machine's next welcome, which
+ * re-runs this with a key in hand — so the empty view is the answer for now,
+ * not the shape of the tab.
  *
  * Everything else it can go wrong with is inside readDirectory, which never
  * rejects: a relay that has not been updated answers 503 on this route, an

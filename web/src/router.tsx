@@ -40,6 +40,16 @@ export interface FlueRouterOptions {
    */
   client?: FlueClient
   /**
+   * Whether that client authenticates its daemon against a key this browser
+   * pinned at a pairing ceremony. Passed through untouched to the fleet, which
+   * is where it decides something: a fleet key may be taken off a welcome from
+   * a machine this browser paired with and from nowhere else (fleet/fleet.ts,
+   * adoptFleetKey). Absent is false, which is the honest answer for the tab
+   * that passes no client at all — the daemon's own origin, where a session
+   * cookie is the whole of the authentication.
+   */
+  pinned?: boolean
+  /**
    * True when this page came from a relay and no machine is selected — none
    * paired, or several with the choice not yet made. Every screen but /pair is
    * then the machine picker, because there is no handshake for any of them to
@@ -83,11 +93,11 @@ export interface FlueRouterOptions {
 const rootRoute = createRootRouteWithContext<FlueRouterOptions>()({
   component: function Root() {
     const pathname = useRouterState({ select: (s) => s.location.pathname })
-    const { client, picker } = rootRoute.useRouteContext()
+    const { client, pinned, picker } = rootRoute.useRouteContext()
     if (pathname === PAIR_PATH) return <Outlet />
     if (picker === true) return <MachinesRoute />
     return (
-      <FleetProvider client={client}>
+      <FleetProvider client={client} pinned={pinned}>
         <Outlet />
       </FleetProvider>
     )

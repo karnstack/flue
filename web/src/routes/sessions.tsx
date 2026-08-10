@@ -841,27 +841,51 @@ function PlacedBulkBar(props: {
  * machines get — because to the reader it is the same kind of fact, and one
  * they otherwise have no way of learning at all.
  *
- * Two sentences, at most one of which is ever true at a time, and neither with
- * a button: nothing on this screen can fix either. A browser with no
+ * Three sentences, at most one of which is ever true at a time, and none with a
+ * button: nothing on this screen can fix any of them. A browser with no
  * certificate for a machine cannot be given one from here — it comes from a
- * daemon, over a connection that machine will not accept without it — and a
- * browser with no pinned fleet key must not be handed one over a connection at
- * all, since a key learned that way is a key the connection chose. Pairing
- * again is the way out of both, and it starts on the machine.
+ * daemon, over a connection that machine will not accept without it.
+ *
+ * The missing-fleet-key case used to read "pair again from any machine on the
+ * fleet and they all appear", which was true and is not any more: a browser
+ * that paired with a machine by hand is handed the fleet key by that machine's
+ * next welcome, and the list fills in without anybody scanning anything
+ * (fleet/fleet.ts, adoptFleetKey). So what is left to say is why *this* browser
+ * has not been handed one, and there are exactly two answers. Above zero
+ * ceremonies there is a machine that can hand it over and has not yet — it is
+ * out of reach, or it holds no fleet key of its own — and the sentence says so
+ * without pretending to know which; while it is still on its way, that same
+ * sentence is the honest description of a repair in progress. At zero there is
+ * nobody to ask, which is the tab riding a machine it never paired with — a
+ * loopback tab, where the ceremony's link points at the relay's address rather
+ * than this one — and a ceremony is the whole of the way out.
  *
  * Silent when there is nothing to say, which is the ordinary case: a browser
  * that pinned a fleet key and holds a certificate has no gap, and a band
  * reading "everything is fine" is a band nobody reads.
  */
 function FleetGapBand({ gaps }: { gaps: FleetGaps }) {
+  if (!gaps.fleetKey && gaps.pinned === 0) {
+    return (
+      <div className="flex flex-col gap-y-1 rounded-md bg-row-hover px-3 py-2">
+        <p className="text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
+          This tab is talking to{' '}
+          <span className="font-medium text-zinc-950 dark:text-white">one machine</span> and has
+          paired with none, so it holds no key for the fleet and cannot see the rest of it. Open
+          flue at the relay’s own address and pair there.
+        </p>
+      </div>
+    )
+  }
   if (!gaps.fleetKey) {
     return (
       <div className="flex flex-col gap-y-1 rounded-md bg-row-hover px-3 py-2">
         <p className="text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
-          This browser is pinned to{' '}
-          <span className="font-medium text-zinc-950 dark:text-white">one machine</span> and holds
-          no key for the fleet, so it cannot see the others. Pair it again from any machine on the
-          fleet and they all appear.
+          This browser holds{' '}
+          <span className="font-medium text-zinc-950 dark:text-white">no key for the fleet</span>{' '}
+          yet, so it lists only what it paired with. It takes one from a machine it paired with as
+          soon as that machine answers — if this stays, that machine is out of reach or has no
+          fleet key itself.
         </p>
       </div>
     )
