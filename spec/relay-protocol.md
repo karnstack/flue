@@ -209,9 +209,11 @@ exactly true of the revocations, and the difference is worth stating rather
 than rounding off.
 
 For a certificate, omission subtracts: a machine cert the relay hides is a
-machine the browser does not see, a device cert it hides is a device that has
-to pair by hand. The reader ends up with less authority than the fleet granted,
-which is the shape "availability" describes.
+machine the browser does not see, and one it has no way to reach until it pairs
+with that machine by hand. The reader ends up with less authority than the
+fleet granted, which is the shape "availability" describes. (Device certs are
+not in this store to be withheld — they travel to the device that owns them —
+so the only certificate this paragraph is about is a machine's.)
 
 For a revocation, omission *adds*. A revocation only ever removes authority, so
 a machine that never receives one goes on admitting a device the operator cut
@@ -480,15 +482,27 @@ observe is:
 - who is connected, when, and for how long;
 - channel ids, message counts and message sizes — enough for traffic analysis
   of a session, not its content;
-- the whole pairing exchange: the single-use pairing token, the device's public
-  key, and the daemon's;
-- everything in the fleet directory. The blobs are opaque to the *code*, not to
-  the operator of the machine running it: machine ids and display names, device
-  public keys and their names, and who revoked what and when are all in there,
-  signed rather than secret. The relay already routed by machine id; the delta
-  is names and device keys. One operator on their own Worker is why that is
-  acceptable, and `docs/RELAY.md` states it rather than leaving it to be
-  discovered.
+- the whole pairing exchange, when it goes through the relay: the single-use
+  pairing token, the device's public key and the label its owner typed, the
+  daemon's key, and — in the answer — the device certificate the ceremony
+  minted. `POST /api/pair` is parked and forwarded in cleartext by the hub;
+  taking device certificates out of the directory did **not** change this, and
+  nothing else could, since the request is the ceremony;
+- everything in the fleet directory: machine ids and display names, and who
+  revoked what and when. The blobs are opaque to the *code* and not to the
+  operator of the machine running it. The relay already routed by machine id,
+  so the delta is machine names and the revocation history.
+
+**The distinction between those last two is the one the directory's design
+turns on, and it is easy to blur.** A device certificate is seen by the relay
+*operator* either way, because a relayed pairing transits their Worker. What
+keeping it out of the directory removes is a different exposure: `GET
+/directory` needs no credential, so a published certificate was readable by
+anybody who learned the relay's address — a roster of the operator's device
+keys and the human labels beside them, on the open internet, permanently. The
+change is "not published to strangers", not "not seen by the operator". One
+operator on their own Worker is why the operator's own view is acceptable, and
+`docs/RELAY.md` states both halves rather than leaving either to be discovered.
 
 Public-key material is public by design. The **token is not**: a hostile relay
 could spend a live one with a key of its own and register itself as a paired

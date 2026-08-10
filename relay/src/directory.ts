@@ -3,11 +3,19 @@ import { JSON_NO_STORE, readCapped } from './http'
 import type { Env } from './index'
 
 /**
- * FleetDirectory is the relay's store of signed blobs: machine certs, device
+ * FleetDirectory is the relay's store of signed blobs — in practice machine
  * certs and revocations, minted by the daemons under the fleet key
  * (spec/fleet-trust.md, "The fleet directory"). One object per relay —
  * `idFromName("directory")`, because one relay is one fleet — and it is the
  * only Durable Object here that is not per machine.
+ *
+ * "In practice", because this class cannot tell one kind from another and does
+ * not try; what it holds is whatever the daemons PUT. Device certificates are
+ * deliberately not among them — a device is handed its own by the machine that
+ * minted it, in the pairing answer and again in every welcome — which is a
+ * rule the daemons keep and this object could not enforce if it wanted to.
+ * That rule is the reason `GET` below is not a public roster of the operator's
+ * device keys and the labels beside them.
  *
  * **The relay stores and serves; it never verifies.** The fleet key never
  * touches the Worker, by design: not as a secret, not as a binding, not in a
@@ -229,10 +237,10 @@ export class FleetDirectory extends DurableObject<Env> {
    * never being here.
    *
    * **Why it is safe to do this to a store of revocations.** Every daemon
-   * re-offers everything it holds — its machine certificate, the device certs
-   * its ceremonies minted, every revocation it knows — on every connect and
-   * every 30 minutes (internal/transport/relay/directory.go, publishAll), so an
-   * emptied directory refills itself from the fleet. To make that happen in
+   * re-offers everything it holds for this store — its machine certificate and
+   * every revocation it knows — on every connect and every 30 minutes
+   * (internal/transport/relay/directory.go, publishAll), so an emptied
+   * directory refills itself from the fleet. To make that happen in
    * seconds rather than in half an hour, every daemon socket is closed here:
    * the reconnect that follows is a snapshot read and a full re-publish.
    *

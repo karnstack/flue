@@ -93,11 +93,12 @@ describe('reading the fleet directory', () => {
 
 describe('the device certificates a browser no longer reads out of the directory', () => {
   it('counts one as verified and takes nothing from it', async () => {
-    // A device certificate here means an older machine in the fleet is still
-    // publishing them. It verifies, so it is counted — the number is "how much
-    // of this did our fleet key sign" — and it is otherwise ignored: this
-    // browser holds its own certificate (crypto/keys.ts, from the pairing
-    // answer and every welcome) and was never owed anybody else's.
+    // A device certificate here is an anomaly: nothing in a fleet publishes
+    // one, and no released flue has a directory to have published it from. It
+    // verifies, so it is counted — the number is "how much of this did our
+    // fleet key sign" — and it is otherwise ignored: this browser holds its
+    // own certificate (crypto/keys.ts, from the pairing answer and every
+    // relayed welcome) and was never owed anybody else's.
     const view = await read([deviceCert(DEVICE, 'my phone'), deviceCert(OTHER_DEVICE, 'somebody')])
     expect(view.verified).toBe(2)
     expect(view.machines).toEqual([])

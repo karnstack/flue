@@ -7,9 +7,9 @@ package relay
 //
 // Three shapes on one URL, and the daemon uses all three:
 //
-//	PUT  /directory   the blobs this machine holds — its machine cert, the
-//	                  device certs its own ceremonies minted, every revocation
-//	                  it knows — sent under the daemon secret.
+//	PUT  /directory   the blobs this machine holds for the fleet — its machine
+//	                  cert and every revocation it knows — under the daemon
+//	                  secret. Never a device cert; see `mine`.
 //	GET  /directory   the whole set, on every connect, which is how a machine
 //	                  that was switched off catches up.
 //	WS   /directory   one binary message per new entry, which is how a machine
@@ -771,9 +771,10 @@ func (d *Directory) remember(digest [32]byte, kind string) {
 	d.seenKind[digest] = kind
 }
 
-// publishAll offers the directory everything this machine holds: its own
-// machine certificate, the device certs its ceremonies minted, and every
-// revocation it knows about.
+// publishAll offers the directory everything this machine holds for it: its
+// own machine certificate and every revocation it knows about. Not the device
+// certificates its ceremonies minted — those go to the devices themselves; see
+// `mine`, which is where the absence is argued.
 //
 // It runs on every connect, which is what makes the whole leg self-healing —
 // a PUT that failed, a push that was dropped, an artifact minted while the

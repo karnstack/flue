@@ -219,9 +219,12 @@ as many words —
 fleet:    unreachable (this relay has no directory; run `flue relay update` to redeploy it)
 ```
 
-— which is the whole of the flag day. Until it is run, no device certificate
-or revocation is distributed and no browser learns of a machine it did not
-pair with by hand. Nothing else is affected: sessions, pairing and every
+— which is the whole of the flag day. Until it is run, no revocation crosses
+machines and no browser learns of a machine it did not pair with by hand.
+(Device certificates are unaffected either way: they never travel through the
+directory. A device gets its own from the machine that paired it, over the
+pairing answer and every welcome, and that works on a relay of any vintage.)
+Nothing else is affected: sessions, pairing and every
 machine you already paired keep working exactly as before, which is what makes
 this an upgrade rather than an outage. `flue relay update` adds the class (the
 deploy reads the migration tag the account's copy of the script already
@@ -463,15 +466,30 @@ after the reset; a revocation is idempotent everywhere it lands.
 **What the relay learns from it.** The blobs are opaque to the *code* and not
 to whoever runs the Worker: machine ids and display names, and who revoked what
 and when, are in there, signed rather than secret. The relay already routed by
-machine id; the delta is machine names and the revocation history. Device
-public keys and the names you gave your devices are **not** — they reach the
-device that owns them and go no further. None of what is there opens anything
-— reaching a machine still needs the private half of a device key that never
-leaves the browser holding it — but it is a real change in what a relay
-operator can see, and on your own Worker, in front of your own machines, that
-is the trade this document would rather state than leave to be discovered. The
-full list of what a relay sees is in
-[`spec/relay-protocol.md`](../spec/relay-protocol.md), "What the relay sees".
+machine id; the delta is machine names and the revocation history. None of it
+opens anything — reaching a machine still needs the private half of a device
+key that never leaves the browser holding it — but it is a real change in what
+a relay operator can see, and on your own Worker, in front of your own
+machines, that is the trade this document would rather state than leave to be
+discovered.
+
+**What keeping device certificates out of it does and does not buy, precisely.**
+It does *not* hide them from your relay's operator. When you pair through the
+relay, the whole ceremony transits the Worker in cleartext — the token, your
+device's public key, the label you typed, and the certificate that comes back
+in the answer — and no arrangement of the directory changes that, because the
+request *is* the ceremony. What it removes is a different exposure: `GET
+/directory` takes no credential, by design, since what it carries is signed
+rather than secret. A device certificate published there was readable by
+anybody who knew your relay's address, forever — a list of your devices' public
+keys and the names you gave them, on the open internet — and it spent one of
+512 permanent entries every time you paired anything. So: still seen by the
+operator you already trust to route your terminals; no longer readable by
+strangers. If you would rather your operator not see a ceremony either, pair
+over the daemon's own origin, which is the advice
+[`spec/relay-protocol.md`](../spec/relay-protocol.md) gives for the pairing
+token as well. The full list of what a relay sees is in that document, under
+"What the relay sees".
 
 **Reading it.** `flue relay status` asks the relay directly and verifies every
 blob locally, which is why the second number is the one that means anything:
@@ -489,9 +507,10 @@ says when this machine's own certificate is missing from the set, which is the
 one fault a freshly joined machine really has: other devices will not discover
 it; when the directory is past 90% of its 512 entries, so a full one is a
 decision rather than a discovery; and when there are device certificates in
-there at all, which means a machine in your fleet is running a flue old enough
-to still publish them. The same counts ride `GET /api/relay/info`, which is
-where the Remote screen reads them.
+there at all, which nothing in your fleet should be publishing. It does not
+guess how one got there — no released flue has a fleet directory to have
+published it from — but it is worth a look. The same counts ride
+`GET /api/relay/info`, which is where the Remote screen reads them.
 
 ## Cost model
 

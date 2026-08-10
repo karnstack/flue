@@ -210,8 +210,17 @@ Privacy note for `docs/RELAY.md`: the directory makes machine names and ids
 visible to the relay, and to anyone who reads the credential-less route (they
 are signed, not secret). The relay already routes by machine id, so the delta
 is machine *names* and the revocation history — who was cut off and when.
-Device public keys and device labels are **not** in it, per the paragraph
-above. One operator, their own Worker: acceptable, and stated.
+One operator, their own Worker: acceptable, and stated.
+
+State the device-certificate delta precisely, because it is easy to overclaim.
+The relay *operator* still sees every device certificate: a relayed pairing
+posts through the Worker in cleartext and the certificate comes back in the
+answer (`spec/relay-protocol.md`, "What the relay sees"), and no directory
+arrangement changes that, since the request is the ceremony. What keeping them
+out of the directory removes is the **anonymous reader**: `GET /directory`
+takes no credential, so a published certificate was a device public key and its
+owner's label readable by anyone who knew the relay's address, permanently.
+"Not published to strangers", not "not seen by the operator".
 
 Flows, end to end:
 

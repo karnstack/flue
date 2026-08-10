@@ -237,11 +237,12 @@ function ingest(
     }
     case 'device':
       // Nothing. A device certificate reaches the device it belongs to over
-      // the pairing answer and every welcome (internal/daemon), so this
-      // browser already holds its own and no browser was ever owed anybody
-      // else's. Daemons in this fleet no longer publish them at all; one
-      // arriving here means an older machine still does, and it is counted as
-      // verified — it is — and otherwise ignored.
+      // the pairing answer and every relayed welcome (internal/daemon), so
+      // this browser already holds its own and no browser was ever owed
+      // anybody else's. Nothing in a fleet publishes them here — no released
+      // flue even has a directory — so one arriving is an anomaly rather than
+      // an older machine. It is counted as verified, because it is, and
+      // otherwise ignored; the status surfaces are where the count is named.
       break
     case 'revoke':
       revoked.add(keyHex(cert.device))
