@@ -458,6 +458,10 @@ func (s *Server) Handler() http.Handler {
 	// cross-origin read from a loopback tab is discarded before it is read.
 	// GET-only, so methodPolicy needs nothing. See fleet.go.
 	mux.Handle(FleetDirectoryPath, s.withAuth(http.HandlerFunc(s.handleFleetDirectory)))
+	// And the other half of a loopback browser's fleet identity: enrolment.
+	// A POST, so methodPolicy names it; loopback-only and behind withAuth, and
+	// it must never acquire a wire-protocol equivalent — see EnrolPath.
+	mux.Handle(EnrolPath, s.withAuth(http.HandlerFunc(s.handleEnrol)))
 	mux.Handle(ReleasePath, s.withAuth(http.HandlerFunc(s.handleRelease)))
 	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
 	// never the app shell.
@@ -512,7 +516,7 @@ func methodPolicy(next http.Handler) http.Handler {
 		postable := r.URL.Path == MintPath || r.URL.Path == PairPath ||
 			r.URL.Path == RelayDeployPath || r.URL.Path == RelayUpdatePath ||
 			r.URL.Path == RelayAddressPath || r.URL.Path == RelayLeavePath ||
-			r.URL.Path == RelayReloadPath
+			r.URL.Path == RelayReloadPath || r.URL.Path == EnrolPath
 		allowed := r.Method == http.MethodGet || r.Method == http.MethodHead ||
 			(postable && r.Method == http.MethodPost)
 		if !allowed {
