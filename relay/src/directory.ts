@@ -78,7 +78,7 @@ export class FleetDirectory extends DurableObject<Env> {
     if (req.headers.get('Upgrade')?.toLowerCase() === 'websocket') return this.acceptDaemon()
     if (req.method === 'PUT') return this.put(req)
     if (req.method === 'DELETE') return this.reset()
-    if (req.method === 'GET') return this.snapshot()
+    if (req.method === 'GET') return this.snapshot(req)
     return new Response('not found', { status: 404 })
   }
 
@@ -129,21 +129,33 @@ export class FleetDirectory extends DurableObject<Env> {
       return new Response('{"error":"empty blob"}', { status: 400, headers: JSON_NO_STORE })
     }
     const key = await digestKey(blob)
-    // Read both, decide, then write once. Nothing awaits between the read and
-    // the write except the write itself, so the input gate holds a second PUT
-    // at the door and the count cannot drift: two blobs, two entries, always.
-    const have = await this.ctx.storage.get<Uint8Array | number>([BLOB_PREFIX + key, COUNT_KEY])
+    // Read all three, decide, then write once. Nothing awaits between the read
+    // and the write except the write itself, so the input gate holds a second
+    // PUT at the door and neither counter can drift: two blobs, two entries,
+    // always.
+    const have = await this.ctx.storage.get<Uint8Array | number>([
+      BLOB_PREFIX + key,
+      COUNT_KEY,
+      VERSION_KEY,
+    ])
     if (have.has(BLOB_PREFIX + key)) {
       // Already here, byte for byte — that is what sharing a key means. No
-      // write, no push, no second entry: a daemon that re-PUTs on every
-      // reconnect (and one will) costs this object nothing, and a replayed
-      // PUT of a blob captured off the wire changes nothing either.
+      // write, no push, no second entry, and no new version: a daemon that
+      // re-PUTs on every reconnect (and one will) costs this object nothing,
+      // and a replayed PUT of a blob captured off the wire changes nothing
+      // either.
       return stored(key, 200)
     }
     const count = (have.get(COUNT_KEY) as number | undefined) ?? 0
     if (count >= MAX_ENTRIES) return full()
-    // One multi-key put: the blob and the count land together or not at all.
-    await this.ctx.storage.put({ [BLOB_PREFIX + key]: blob, [COUNT_KEY]: count + 1 })
+    const version = (have.get(VERSION_KEY) as number | undefined) ?? 0
+    // One multi-key put: the blob, the count and the version land together or
+    // not at all.
+    await this.ctx.storage.put({
+      [BLOB_PREFIX + key]: blob,
+      [COUNT_KEY]: count + 1,
+      [VERSION_KEY]: version + 1,
+    })
     this.push(blob)
     return stored(key, 201)
   }
@@ -156,14 +168,45 @@ export class FleetDirectory extends DurableObject<Env> {
    * reader that inferred "newest last" from this array would be reading a
    * property of SHA-256. `iat` is inside the blobs, where a reader that has
    * verified a signature can trust it.
+   *
+   * **Conditional.** The answer carries an `ETag` and a matching
+   * `If-None-Match` is answered `304` with no body. The tag is the store's
+   * version counter, bumped by every write that lands and by every reset, so
+   * it changes exactly when the set does — never on a duplicate PUT, which
+   * stores nothing, and never on a wipe-then-refill back to the same contents,
+   * because it counts mutations rather than hashing them.
+   *
+   * It is worth the two storage keys because this document is the largest
+   * thing the relay serves — 512 entries of 4 KiB is about 2.8 MiB of base64 —
+   * and every daemon re-reads the whole of it on every reconnect, where the
+   * usual answer is "nothing has changed since you last asked".
+   *
+   * Two things it deliberately is not. It is not a bound on an anonymous
+   * flood: a caller who wants the bytes simply omits the header, and what
+   * bounds them is the per-IP rate rule in src/index.ts. And it is not a
+   * licence for anything to *hold* this document — `Cache-Control: no-store`
+   * stays, because a directory served from a cache is a revocation served
+   * late, and that is the one staleness this design cannot afford. The tag is
+   * for clients that revalidate on purpose, which is what the daemon's leg
+   * does (internal/transport/relay/directory.go), not for a shared cache
+   * deciding on its own.
    */
-  private async snapshot(): Promise<Response> {
+  private async snapshot(req: Request): Promise<Response> {
+    const version = (await this.ctx.storage.get<number>(VERSION_KEY)) ?? 0
+    const etag = `"${version}"`
+    if (req.headers.get('If-None-Match') === etag) {
+      // No body, and the tag again so a client that revalidates twice has
+      // something to send the second time.
+      return new Response(null, { status: 304, headers: { ...JSON_NO_STORE, ETag: etag } })
+    }
     const rows = await this.ctx.storage.list<Uint8Array>({ prefix: BLOB_PREFIX })
     const entries: { key: string; blob: string }[] = []
     for (const [k, blob] of rows) {
       entries.push({ key: k.slice(BLOB_PREFIX.length), blob: base64(blob) })
     }
-    return new Response(JSON.stringify({ v: 1, entries }), { headers: JSON_NO_STORE })
+    return new Response(JSON.stringify({ v: 1, entries }), {
+      headers: { ...JSON_NO_STORE, ETag: etag },
+    })
   }
 
   /**
@@ -208,11 +251,17 @@ export class FleetDirectory extends DurableObject<Env> {
     // Read before the wipe, because the wipe takes the counter too. This is
     // what the object believed it was holding, which is the number the cap was
     // enforced against and therefore the one an operator is owed.
-    const removed = (await this.ctx.storage.get<number>(COUNT_KEY)) ?? 0
+    const held = await this.ctx.storage.get<number>([COUNT_KEY, VERSION_KEY])
+    const removed = (held.get(COUNT_KEY) as number | undefined) ?? 0
     // Everything: the blobs and the count, in one call, so no interleaving can
     // leave a counter that outlives the entries it counted and re-fills the
     // directory to 512 with nothing in it.
     await this.ctx.storage.deleteAll()
+    // The version survives the wipe and moves forward, which is the one
+    // counter that must not go back to zero: a reader holding the old tag has
+    // to see this as a change, and a directory emptied and refilled to the
+    // same contents would otherwise re-issue a tag that reader already has.
+    await this.ctx.storage.put(VERSION_KEY, ((held.get(VERSION_KEY) as number | undefined) ?? 0) + 1)
     for (const ws of this.ctx.getWebSockets('daemon')) {
       try {
         // 1012 (service restart) is the honest code: the store this socket was
@@ -280,6 +329,19 @@ const BLOB_PREFIX = 'blob:'
  * number, and it survives hibernation for the reason the hub's `nextChannel`
  * does: a wake finds memory empty and storage intact. */
 const COUNT_KEY = 'count'
+
+/**
+ * How many times the set has changed: bumped by every PUT that stores and by
+ * every reset, never by a duplicate PUT, and never reset to zero.
+ *
+ * It is the `ETag` on `GET /directory` and nothing else. A counter rather than
+ * a digest of the contents because the question a conditional GET asks is "has
+ * this changed since version N", which a monotonic counter answers exactly and
+ * for the price of one integer in a write that was already happening. Storage
+ * for the same reason COUNT_KEY is: a wake finds memory back at its
+ * initializer and storage intact.
+ */
+const VERSION_KEY = 'version'
 
 /**
  * The largest single blob. A certificate is a version, a kind, a 32-byte key,

@@ -50,10 +50,13 @@ type fakeDirectory struct {
 	// puts is every blob the daemon offered, in order, duplicates included:
 	// what a test asserts publishing on.
 	puts [][]byte
-	// gets counts credential-less reads.
-	gets  int
-	auths []string
-	socks []*websocket.Conn
+	// gets counts reads that were answered with a body; notModified counts the
+	// ones answered 304 because the caller already had this set.
+	gets        int
+	notModified int
+	ifNoneMatch []string
+	auths       []string
+	socks       []*websocket.Conn
 }
 
 func newFakeDirectory(t *testing.T, secret string) *fakeDirectory {
@@ -100,7 +103,7 @@ func (d *fakeDirectory) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		d.put(w, r)
 	case http.MethodGet:
-		d.get(w)
+		d.get(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -147,9 +150,18 @@ func (d *fakeDirectory) put(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusCreated, map[string]string{"key": key})
 }
 
-func (d *fakeDirectory) get(w http.ResponseWriter) {
+// get answers the snapshot, conditionally.
+//
+// The Worker's ETag is a version counter it bumps on every write (see
+// relay/src/directory.ts); this fake hashes the keys it is about to serve
+// instead, and the difference is deliberate. A counter is right there because
+// only a write changes the answer. Here the answer also changes when a test
+// flips `truncate` or `hideAll` to play a hostile relay, and a counter would go
+// on claiming the set was unchanged while the body moved underneath. Hashing
+// what is served keeps the one promise the daemon leans on — the same tag means
+// the same bytes — under a fake whose whole purpose is to misbehave.
+func (d *fakeDirectory) get(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
-	d.gets++
 	entries := []map[string]any{}
 	limit := len(d.order)
 	if d.hideAll {
@@ -157,13 +169,34 @@ func (d *fakeDirectory) get(w http.ResponseWriter) {
 	} else if d.truncate > 0 && d.truncate < limit {
 		limit = d.truncate
 	}
-	for _, k := range d.order[:limit] {
+	served := d.order[:limit]
+	for _, k := range served {
 		entries = append(entries, map[string]any{"key": k, "blob": d.blobs[k]})
 	}
+	etag := `"` + digestOf([]byte(strings.Join(served, ","))) + `"`
+	cond := r.Header.Get("If-None-Match")
+	d.ifNoneMatch = append(d.ifNoneMatch, cond)
+	if cond != "" && cond == etag {
+		d.notModified++
+		d.mu.Unlock()
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	d.gets++
 	d.mu.Unlock()
+	w.Header().Set("ETag", etag)
 	// encoding/json writes a []byte as standard base64 with padding, which is
 	// the alphabet the Worker's own answer uses.
 	writeJSONStatus(w, http.StatusOK, map[string]any{"v": 1, "entries": entries})
+}
+
+// reads is what the fake was asked for: bodies served, and reads answered 304
+// because the caller already held that set.
+func (d *fakeDirectory) reads() (bodies, notModified int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.gets, d.notModified
 }
 
 // serveSocket accepts a push socket and holds it, answering flue-ping the way
@@ -252,10 +285,15 @@ func (d *fakeDirectory) awaitPublished(t *testing.T, blob []byte, what string) {
 }
 
 // readCount is how many credential-less-shaped reads the directory answered.
+// readCount is how many times the daemon has *asked*, which is the question
+// every caller of awaitRead is really asking. Bodies and 304s both count: a
+// reconnect against an unchanged directory still performed its catch-up read,
+// and answering it cheaply is the point of the conditional GET rather than a
+// read that did not happen.
 func (d *fakeDirectory) readCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.gets
+	return d.gets + d.notModified
 }
 
 // awaitRead waits until at least n reads have been answered, which is how a

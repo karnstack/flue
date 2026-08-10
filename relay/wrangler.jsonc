@@ -66,12 +66,18 @@
     { "tag": "v1", "new_sqlite_classes": ["DaemonHub"] },
     { "tag": "v2", "new_sqlite_classes": ["FleetDirectory"] }
   ],
-  // The per-IP bound on the credential-less routes (/client/*, POST
-  // /api/pair/*): generous enough that a fleet of tabs never sees it, tight
-  // enough that burning the daily request allowance needs a botnet
-  // (spec/fleet-trust.md, "Rate rule"). internal/relaydeploy ships the same
-  // binding — name, namespace, numbers — in the deploy request `flue relay
-  // setup` builds; edit both or neither.
+  // The per-IP bound on the credential-less routes — /client/*, POST
+  // /api/pair/*, and every request to /directory that does not present the
+  // daemon secret, which is the public `GET /directory` and any anonymous
+  // caller waving an Upgrade header at it. Generous enough that a fleet of
+  // tabs never sees it, tight enough that burning the daily request allowance
+  // needs a botnet (spec/fleet-trust.md, "Rate rule"). This is also the only
+  // bound on the size of what an anonymous GET can pull — the snapshot's ETag
+  // makes a *revalidating* client cheap and does nothing about one that simply
+  // asks again. internal/relaydeploy ships the same binding — name, namespace,
+  // numbers — in the deploy request `flue relay setup` builds; edit both or
+  // neither, and internal/relaydeploy/deploy_test.go now fails when they
+  // differ.
   "ratelimits": [
     { "name": "CLIENT_RATE", "namespace_id": "1001", "simple": { "limit": 300, "period": 60 } }
   ],

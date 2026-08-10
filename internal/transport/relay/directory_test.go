@@ -597,6 +597,73 @@ func TestDirectoryRetriesARevocationItCouldNotApply(t *testing.T) {
 	f.sink.awaitApplied(t, 1, "the retried revocation")
 }
 
+// TestDirectoryReadsConditionally: the snapshot is the largest document the
+// relay serves — 512 × 4 KiB of base64, about 2.8 MiB — and a daemon re-reads
+// all of it on every reconnect, where the usual answer is "nothing new". The
+// second read presents the first read's ETag and is answered 304 without a
+// body, and the counts it recorded still stand.
+func TestDirectoryReadsConditionally(t *testing.T) {
+	f := newDirFixture(t)
+	f.fd.store(f.revocation(t, someKey(t, 0xD1)))
+
+	f.run(t)
+	f.fd.awaitRead(t, 1)
+	f.sink.awaitApplied(t, 1, "the first snapshot")
+	before := f.dir.Counts()
+	if before.Entries != 1 || before.Verified != 1 {
+		t.Fatalf("first read counted %+v, want one verified entry", before)
+	}
+
+	// A second read of an unchanged directory.
+	f.dir.ingestSnapshot(context.Background())
+	bodies, notModified := f.fd.reads()
+	if notModified != 1 {
+		t.Errorf("reads: %d with a body, %d not-modified; want the second answered 304", bodies, notModified)
+	}
+	if bodies != 1 {
+		t.Errorf("the relay served %d bodies, want 1: the second read should have cost none", bodies)
+	}
+	// A 304 is not an empty directory. The counts belong to the version the tag
+	// names, and reporting zeroes here would make the Remote screen say this
+	// machine hears nothing.
+	if got := f.dir.Counts(); got != before {
+		t.Errorf("counts after a 304 = %+v, want the ones the tag was issued with %+v", got, before)
+	}
+
+	// And a directory that has changed is served in full again.
+	f.fd.store(f.revocation(t, someKey(t, 0xD2)))
+	f.dir.ingestSnapshot(context.Background())
+	f.sink.awaitApplied(t, 2, "the entry added after the tag was issued")
+	if bodies, _ := f.fd.reads(); bodies != 2 {
+		t.Errorf("the relay served %d bodies, want 2: a changed set cannot be answered 304", bodies)
+	}
+}
+
+// TestDirectoryDoesNotCacheATagOverAnUnappliedRevocation: the conditional read
+// is an optimisation and must never become a way to forget something. A
+// snapshot whose revocation the sink refused is *not* remembered under its
+// ETag, so the next read is unconditional and tries again — otherwise the
+// retry would wait for somebody else to publish, and the artifact it dropped is
+// the fleet-wide kill switch.
+func TestDirectoryDoesNotCacheATagOverAnUnappliedRevocation(t *testing.T) {
+	f := newDirFixture(t)
+	f.sink.fail = errTestSinkDown
+	f.fd.store(f.revocation(t, someKey(t, 0xE1)))
+
+	f.run(t)
+	f.fd.awaitRead(t, 1)
+	f.sink.stayedAt(t, 0, "a sink that refused")
+
+	f.sink.mu.Lock()
+	f.sink.fail = nil
+	f.sink.mu.Unlock()
+	f.dir.ingestSnapshot(context.Background())
+	f.sink.awaitApplied(t, 1, "the retried revocation")
+	if _, notModified := f.fd.reads(); notModified != 0 {
+		t.Errorf("a read was answered 304 after a snapshot that did not fully apply (%d of them)", notModified)
+	}
+}
+
 var errTestSinkDown = &sinkError{}
 
 type sinkError struct{}

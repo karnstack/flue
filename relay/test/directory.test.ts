@@ -23,6 +23,9 @@ const MAX_BLOB_BYTES = 4096
 /** Mirrors MAX_ENTRIES in src/directory.ts. */
 const MAX_ENTRIES = 512
 
+/** Mirrors MAX_DAEMON_SOCKETS in src/directory.ts. */
+const MAX_DAEMON_SOCKETS = 256
+
 const DIRECTORY = `${BASE}/directory`
 
 const AUTH = { Authorization: `Bearer ${TEST_SECRET}` }
@@ -200,6 +203,56 @@ describe('GET /directory', () => {
     for (const e of entries) expect(await digest(decode(e.blob))).toBe(e.key)
   })
 
+  it('carries an ETag and answers a matching If-None-Match with 304', async () => {
+    // The largest document this relay serves — 512 × 4 KiB of base64 is about
+    // 2.8 MiB — re-read by every daemon on every reconnect, where the usual
+    // answer is "nothing has changed".
+    const dir = env.DIRECTORY.get(env.DIRECTORY.idFromName(`etag-${crypto.randomUUID()}`))
+    const write = (body: Uint8Array): Promise<Response> =>
+      dir.fetch(DIRECTORY, { method: 'PUT', body, headers: AUTH })
+    expect((await write(blob('etag', 'a'))).status).toBe(201)
+
+    const first = await dir.fetch(DIRECTORY)
+    const tag = first.headers.get('ETag')
+    expect(tag).toBeTruthy()
+    // no-store stays: a directory served from a cache is a revocation served
+    // late. The tag is for a client that revalidates on purpose.
+    expect(first.headers.get('Cache-Control')).toBe('no-store')
+
+    const again = await dir.fetch(DIRECTORY, { headers: { 'If-None-Match': tag! } })
+    expect(again.status).toBe(304)
+    expect(again.headers.get('ETag')).toBe(tag)
+    expect(await again.text()).toBe('')
+
+    // A duplicate PUT stores nothing, so the set did not change and neither
+    // does the tag.
+    expect((await write(blob('etag', 'a'))).status).toBe(200)
+    expect((await dir.fetch(DIRECTORY, { headers: { 'If-None-Match': tag! } })).status).toBe(304)
+
+    // A PUT that lands does change it.
+    expect((await write(blob('etag', 'b'))).status).toBe(201)
+    const third = await dir.fetch(DIRECTORY, { headers: { 'If-None-Match': tag! } })
+    expect(third.status).toBe(200)
+    expect(third.headers.get('ETag')).not.toBe(tag)
+  })
+
+  it('never reissues a tag a reader already holds, even across a reset', async () => {
+    // The one case a content digest would get wrong and a counter gets right:
+    // empty the directory, put the same blob back, and the contents are
+    // identical while the reader's picture of the world was empty in between.
+    const dir = env.DIRECTORY.get(env.DIRECTORY.idFromName(`etag-reset-${crypto.randomUUID()}`))
+    const body = blob('etag-reset', 'a')
+    await dir.fetch(DIRECTORY, { method: 'PUT', body, headers: AUTH })
+    const tag = (await dir.fetch(DIRECTORY)).headers.get('ETag')
+
+    await dir.fetch(DIRECTORY, { method: 'DELETE', headers: AUTH })
+    await dir.fetch(DIRECTORY, { method: 'PUT', body, headers: AUTH })
+
+    const after = await dir.fetch(DIRECTORY, { headers: { 'If-None-Match': tag! } })
+    expect(after.status).toBe(200)
+    expect(after.headers.get('ETag')).not.toBe(tag)
+  })
+
   it('sits behind the rate rule, like /client and POST /api/pair', async () => {
     const res = await worker.fetch(
       new Request(DIRECTORY),
@@ -272,6 +325,54 @@ describe('the directory socket', () => {
       ...fresh,
     ])
     daemon.ws.close()
+  })
+
+  it('holds MAX_DAEMON_SOCKETS of them and refuses the next with 503', async () => {
+    // Not the DoS cap MAX_CLIENTS is on the hub's credential-less leg — this
+    // one is secret-gated. It bounds what a single PUT costs, which is one
+    // send per socket, against a fleet that has left half-dead sockets behind
+    // or a secret-holder opening them in a loop. Untested until now, and an
+    // untested bound is a number rather than a limit.
+    const dir = env.DIRECTORY.get(env.DIRECTORY.idFromName(`sockets-${crypto.randomUUID()}`))
+    const open = (): Promise<Response> =>
+      dir.fetch(DIRECTORY, { headers: { Upgrade: 'websocket', ...AUTH } })
+
+    const held: WebSocket[] = []
+    for (let i = 0; i < MAX_DAEMON_SOCKETS; i++) {
+      const res = await open()
+      expect(res.status).toBe(101)
+      // Accepted on this side too: an unaccepted pair is not what a real
+      // daemon leaves behind, and the object counts what it accepted.
+      res.webSocket!.accept()
+      held.push(res.webSocket!)
+    }
+
+    const over = await open()
+    expect(over.status).toBe(503)
+    expect(await over.json()).toEqual({ error: 'too many directory sockets' })
+
+    // And there is no reaper: the cap is a ceiling on concurrency, not a
+    // queue, so room appears when a socket closes and not before.
+    held[0]!.close()
+    // The close has to reach the object before the next upgrade is judged; a
+    // fresh request is the fence the pool gives us.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const retry = await open()
+      if (retry.status === 101) {
+        retry.webSocket!.accept()
+        held.push(retry.webSocket!)
+        break
+      }
+      expect(retry.status).toBe(503)
+      await sleep(25)
+    }
+    for (const ws of held) {
+      try {
+        ws.close()
+      } catch {
+        // Already closed by the assertions above.
+      }
+    }
   })
 
   it('closes a daemon that speaks on it: the socket is push-only', async () => {

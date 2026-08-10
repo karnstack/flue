@@ -215,6 +215,29 @@ type Directory struct {
 	// an eviction policy.
 	seenKind map[[32]byte]string
 	counts   DirectoryCounts
+
+	// etag is the `ETag` of the last snapshot this process read *and fully
+	// applied*, and lastCounts is what that snapshot counted. Together they are
+	// the conditional read: the next GET presents the tag, and a 304 means the
+	// set has not changed since — so there is nothing to parse, nothing to
+	// verify, and the counts still stand.
+	//
+	// It is worth having because this is the largest document the relay serves
+	// (512 × 4 KiB of base64, about 2.8 MiB) and a daemon re-reads all of it on
+	// every reconnect, where the usual answer is "nothing new".
+	//
+	// "Fully applied" is the load-bearing half. A snapshot in which a
+	// revocation could not be handed to the sink — a registry that was
+	// unreadable for a moment — leaves the tag *unset*, so the next read is
+	// unconditional and tries again. Caching a tag over a failed apply would
+	// turn "retry on the next connect" into "retry when somebody else next
+	// publishes", and the artifact it dropped is the kill switch.
+	//
+	// Neither field is cleared by markUnreachable: losing the socket does not
+	// make the last read untrue, and a reconnect that answers 304 needs the
+	// counts that went with the tag it presented.
+	etag       string
+	lastCounts DirectoryCounts
 }
 
 // NewDirectory builds the directory leg for a config relay.New has already
@@ -489,12 +512,30 @@ func (d *Directory) ingestSnapshot(ctx context.Context) {
 	// and a fleet of daemons re-reading the directory on every reconnect has no
 	// business spending the per-IP budget that exists to keep browsers working.
 	req.Header.Set("Authorization", "Bearer "+d.cfg.Secret)
+	// The conditional read. The tag is the relay's version counter, so a match
+	// means the set has not changed since this daemon last applied all of it —
+	// nothing to download, nothing to verify. Absent on the first read of a
+	// process and after any snapshot that did not fully apply.
+	if tag := d.snapshotETag(); tag != "" {
+		req.Header.Set("If-None-Match", tag)
+	}
 	resp, err := d.client.Do(req)
 	if err != nil {
 		d.log.Warn("could not read the fleet directory", "url", d.httpURL, "err", err)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotModified {
+		// Unchanged since the tag was issued, and this process applied every
+		// entry of that version — so it is converged, and the counts it
+		// recorded then are still what the directory holds. Anything published
+		// since would have moved the tag and been answered 200; anything
+		// published from here on arrives on the push socket, which was opened
+		// before this read.
+		d.restoreCounts()
+		d.log.Debug("the fleet directory is unchanged since the last read", "etag", d.snapshotETag())
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		d.log.Warn("the fleet directory refused a read", "url", d.httpURL, "status", resp.StatusCode)
 		return
@@ -515,6 +556,12 @@ func (d *Directory) ingestSnapshot(ctx context.Context) {
 	}
 
 	counts := DirectoryCounts{Connected: true, Entries: len(doc.Entries)}
+	// applied stays true only while every entry either meant something or was
+	// refused for a reason that will not change — a blob that does not verify
+	// is not coming back different next time. A revocation the sink could not
+	// take is the one retryable failure, and it is why the tag below is not
+	// always remembered.
+	applied := true
 	// Bounded before the loop and not merely reported: a relay that claims
 	// 100 000 entries gets 512 signature checks out of this daemon, which is
 	// what its own ceiling would have allowed. A *shorter* answer than the
@@ -524,9 +571,17 @@ func (d *Directory) ingestSnapshot(ctx context.Context) {
 		if i >= MaxDirectoryEntries {
 			d.log.Warn("the fleet directory served more entries than it can hold; the rest are ignored",
 				"entries", len(doc.Entries), "ceiling", MaxDirectoryEntries)
+			// A truncated read is not a fully applied one: the entries past the
+			// ceiling were never looked at, so this answer must not be cached
+			// under a tag that would skip them for good.
+			applied = false
 			break
 		}
-		if kind, ok := d.ingest(e.Blob, "snapshot"); ok {
+		kind, ok, retry := d.ingest(e.Blob, "snapshot")
+		if retry {
+			applied = false
+		}
+		if ok {
 			counts.Verified++
 			switch kind {
 			case fleet.KindMachine:
@@ -540,14 +595,52 @@ func (d *Directory) ingestSnapshot(ctx context.Context) {
 	}
 	d.mu.Lock()
 	d.counts = counts
+	if applied {
+		// Remembered together, and only now: the tag is a claim that this
+		// process holds everything that version carried, and lastCounts is what
+		// a 304 against it will report.
+		d.etag, d.lastCounts = resp.Header.Get("ETag"), counts
+	} else {
+		// Something is owed. Drop the tag so the next read is unconditional and
+		// the relay sends the whole set again.
+		d.etag = ""
+	}
 	d.mu.Unlock()
 	d.log.Debug("read the fleet directory",
 		"entries", counts.Entries, "verified", counts.Verified,
 		"machines", counts.Machines, "devices", counts.Devices, "revocations", counts.Revocations)
 }
 
-// ingest verifies one blob and does whatever it means, reporting its kind and
-// whether it verified.
+// snapshotETag is the tag of the last fully applied snapshot, or "" when the
+// next read must be unconditional.
+func (d *Directory) snapshotETag() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.etag
+}
+
+// restoreCounts republishes the last snapshot's numbers as current, which is
+// what a 304 means: the set is what it was, and this daemon still holds all of
+// it. Connected is set here rather than carried, because the socket this read
+// runs under is up by definition.
+func (d *Directory) restoreCounts() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.counts = d.lastCounts
+	d.counts.Connected = true
+}
+
+// ingest verifies one blob and does whatever it means, reporting its kind,
+// whether it verified, and whether it is worth trying again.
+//
+// retry is the narrow one and it exists for the conditional read: it is true
+// only when a *verified* artifact could not be applied for a reason that may
+// not hold next time — a revocation the sink refused because the registry was
+// unreadable for a moment. A blob that fails verification is not retryable, it
+// is simply not a certificate, and it will fail identically forever. The
+// caller uses it to decide whether this snapshot may be remembered under its
+// ETag, because caching a tag over an unapplied revocation would postpone the
+// retry until somebody else happens to publish.
 //
 // The verification is the boundary. Everything above this line is bytes a
 // relay chose; everything below is a statement the fleet key signed. A blob
@@ -586,14 +679,14 @@ func (d *Directory) ingestSnapshot(ctx context.Context) {
 //     carries. Verifying it is still worth the cycles — it is what makes the
 //     machine count on `flue relay status` a count of machines rather than of
 //     blobs.
-func (d *Directory) ingest(blob []byte, via string) (kind string, ok bool) {
+func (d *Directory) ingest(blob []byte, via string) (kind string, ok bool, retry bool) {
 	if len(blob) == 0 || len(blob) > maxBlobBytes {
 		d.log.Warn("dropped a fleet directory entry of an impossible size", "via", via, "bytes", len(blob))
-		return "", false
+		return "", false, false
 	}
 	digest := sha256.Sum256(blob)
 	if k, done := d.alreadySeen(digest); done {
-		return k, true
+		return k, true, false
 	}
 	cert, err := fleet.Verify(d.cfg.FleetPub, blob)
 	if err != nil {
@@ -602,7 +695,7 @@ func (d *Directory) ingest(blob []byte, via string) (kind string, ok bool) {
 		// The blob is not logged: it is bytes of the relay's choosing.
 		d.log.Warn("dropped a fleet directory entry that does not verify under the fleet key",
 			"via", via, "bytes", len(blob), "err", err)
-		return "", false
+		return "", false, false
 	}
 	switch c := cert.(type) {
 	case fleet.Revocation:
@@ -613,7 +706,7 @@ func (d *Directory) ingest(blob []byte, via string) (kind string, ok bool) {
 			// admitted.
 			d.log.Error("could not apply a fleet revocation",
 				"via", via, "device", crypto.DeviceID(c.Device), "err", err)
-			return c.Kind(), false
+			return c.Kind(), false, true
 		}
 		d.log.Info("applied a fleet revocation", "via", via, "device", crypto.DeviceID(c.Device))
 	case fleet.DeviceCert:
@@ -624,7 +717,7 @@ func (d *Directory) ingest(blob []byte, via string) (kind string, ok bool) {
 		d.log.Debug("read a fleet machine certificate", "via", via, "machine", clip(c.ID))
 	}
 	d.remember(digest, cert.Kind())
-	return cert.Kind(), true
+	return cert.Kind(), true, false
 }
 
 func (d *Directory) markHeard() { d.heard.Store(time.Now().UnixNano()) }
