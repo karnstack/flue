@@ -326,10 +326,16 @@ refused here has reached nobody.
 Refusing rather than evicting is deliberate and is a security decision, not a
 capacity one. Every eviction policy can drop a revocation, and a directory that
 silently forgets a revocation re-admits the device it revoked to every machine
-that had not yet heard. Nothing in this leg ever deletes *an* entry. If pruning
-is ever wanted — a device cert whose key is revoked, say — it has to be a
-decision signed under the fleet key and carried out by something that can read
-what it is deleting. That is not the relay, and it must not become the relay.
+that had not yet heard. Nothing in this leg ever deletes *an* entry.
+
+Nor does it need to. The only entry that can ever be superseded is a machine
+certificate a machine re-minted, which is single digits out of 512 in the life
+of a fleet — a revocation is never superseded, and a device certificate is not
+in the store at all. `spec/fleet-trust.md` works the count through and declines
+to build pruning on the strength of it. If it is ever wanted anyway, it has to
+be a decision signed under the fleet key and carried out by something that can
+read what it is deleting. That is not the relay, and it must not become the
+relay.
 
 **The reset**, and why the cap needs one. Refusal is permanent: nothing evicts,
 the object is named by a constant, and Durable Object storage survives every

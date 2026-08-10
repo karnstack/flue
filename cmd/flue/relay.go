@@ -866,10 +866,15 @@ that is switched off refills its share when it next starts.
 // failure mode in this design that costs more than visibility. So there has to
 // be a way to empty it, and this is it.
 //
-// It is a wipe rather than a prune, and that is not laziness. Deleting "the
-// device certificates whose key has been revoked" means reading the blobs,
-// which means holding the fleet key, which is the one thing the relay must
-// never do. Deleting all of them needs no opinion about any of them.
+// It is a wipe rather than a prune, and that is not laziness — nor is it a
+// judgement that a prune would be unsafe. There is next to nothing to prune:
+// a revocation is never superseded, a device certificate is not in the store
+// at all, and what is left is a machine certificate a machine re-minted, which
+// is single digits out of 512 over a fleet's whole life (spec/fleet-trust.md
+// works the count). Removing any *named* entry would mean the relay reading
+// the blobs, or checking a signature over the digests, and both give this leg
+// an opinion about what it holds. Deleting all of them needs no opinion about
+// any of them.
 //
 // The confirmation is a typed "yes" rather than a flag alone, because the one
 // unrecoverable case — a revocation whose last holder never reconnects — is not

@@ -150,23 +150,54 @@ What the directory still owes a stored certificate is the other half of the
 rule: a browser reads the revocations and stops presenting a certificate whose
 key the fleet has cut off.
 
-**Signed pruning of superseded certificates: considered, and not built.** With
-device certificates gone, the only entry that can ever be *superseded* is a
-machine certificate a machine re-minted — which happens when `flue relay
-setup`/`join` runs on it again, a handful of times in the life of a fleet. The
-mechanism to remove them would be a fleet-signed statement naming the digests
-to delete, and the relay would have to check that signature before honouring
-it, which means binding the fleet public key to the Worker and giving this leg
-an opinion about the blobs it holds. That reverses the invariant the whole
-design rests on — the relay stores and serves and verifies nothing — for a
-handful of entries out of 512. The alternative, deleting by digest on the
-daemon secret alone, is worse: it hands anyone who compromises one machine the
-ability to delete *any* entry, and the relay cannot tell a revocation's digest
-from a certificate's, which is the "eviction can drop a revocation" failure
-the no-eviction rule exists to prevent. The bounded, keyless answer to a
-directory that has genuinely filled is `DELETE /directory`
-(`flue relay reset`), which needs no opinion about any blob, and the status
-surfaces warn from 90% of the cap so it is a decision rather than a discovery.
+**Pruning superseded entries: considered, and not built.** The reason is that
+there is almost nothing left to prune, not that a delete would be dangerous.
+
+Count what can ever be *superseded* now. A revocation never is: it is the
+final word about a key and outranks everything, forever. A device certificate
+is not in here at all. That leaves a machine certificate a machine re-minted,
+which happens when `flue relay setup`/`join` runs on that machine again — a
+handful of times in the life of a fleet, and one entry each. Against a cap of
+512, the growth term this would reclaim is single digits. A mechanism, its
+failure modes and its tests, to win back a fraction of a percent of a store
+that no longer grows with use, is not a trade worth making.
+
+The failure it would guard against is already covered, and covered by
+something with no opinion about any blob: `DELETE /directory`
+(`flue relay reset`) empties the store, and every daemon re-publishes
+everything it holds on its next connect and every 30 minutes thereafter, so
+the fleet refills itself. The status surfaces warn from 90% of the cap, so
+arriving at the wall is a decision rather than a discovery. What a wipe
+genuinely costs — a blob whose only remaining holder never reconnects — is
+stated with the route itself in `docs/RELAY.md` rather than hidden here.
+
+Two arguments that would be tempting here are **not** the reason, and are
+written down so nobody re-derives them as one:
+
+- *"A targeted delete on the daemon secret would let one compromised machine
+  delete any entry."* True, and this design already ships `DELETE /directory`
+  on that same secret, which lets that machine delete **every** entry
+  including every revocation. A targeted delete would be strictly weaker than
+  what the secret already buys, and self-healing for the same reason the wipe
+  is. The secret is a fleet-wide credential; a compromised machine holding one
+  is the case `spec/relay-protocol.md` treats under re-setup, not a case
+  pruning would change.
+- *"A signed delete would need the relay to verify."* Also true, and it is a
+  real cost — but it is the cost of the *signed* variant only, so it is an
+  argument about which mechanism, not about whether to have one.
+
+**Future work, deliberately not built: a verify-only deletion gate.** The
+fleet *public* key could be bound to the Worker so that a `DELETE` naming
+digests is honoured only when a fleet-signed statement authorises it. The
+private key still never goes near the relay, so this does not weaken minting.
+It is not built because it makes the Worker a policy engine — today it stores
+bytes and serves them, and every rule about what those bytes mean lives in the
+readers — and because it creates a rotation problem the rest of this design
+does not have: rotating the fleet key would leave a Worker bound to the old
+public half, unable to honour a delete signed by the new one and still willing
+to honour one signed by the old. Either shape of that fix (a rotation
+ceremony, or a Worker that accepts two keys during an overlap) is a bigger
+change than the entries it would reclaim.
 
 The Worker stores blobs it cannot check; every reader verifies every
 signature under the fleet public key and drops what fails. A hostile relay
