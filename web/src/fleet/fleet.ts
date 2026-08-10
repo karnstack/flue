@@ -147,6 +147,19 @@ export class FleetClient {
   private staggers = new Set<ReturnType<typeof setTimeout>>()
   /** Whether this epoch has already built remotes from a learned origin. */
   private expanded = false
+  /**
+   * The relay origin the expansion ran against, kept so a certificate that
+   * arrives after it can ask for a second one. Null on a tab whose welcome
+   * has not named a relay, which is a tab with nothing to expand into.
+   */
+  private relayOrigin: string | null = null
+  /**
+   * Whether a re-supplied certificate has already forced that second
+   * expansion. Once per epoch: a browser gains machines the first time it
+   * holds a certificate at all, and re-running on every later welcome would
+   * be a directory read per reconnect for a set that cannot have changed.
+   */
+  private certExpanded = false
   /** The slot id the loopback daemon holds on the relay, once known. */
   private twinId: string | null = null
   /** Bumped by close, so an in-flight expansion can tell it was orphaned. */
@@ -190,6 +203,8 @@ export class FleetClient {
     this.running = false
     this.epoch++
     this.expanded = false
+    this.certExpanded = false
+    this.relayOrigin = null
     if (this.poll !== null) {
       clearInterval(this.poll)
       this.poll = null
@@ -339,11 +354,11 @@ export class FleetClient {
     // Every welcome may carry this device's own fleet certificate, whichever
     // machine sent it: the daemon hands one to the device it has just
     // authenticated, so any machine this browser can still reach re-supplies
-    // the blob it needs for the machines it cannot. Fire-and-forget, and
-    // deliberately not gated on which slot: the local daemon is as good a
-    // source as a remote one, and a browser that has lost its certificate is
-    // usually a browser that can only reach one machine.
-    slot.unsubs.push(slot.client.onWelcome((w) => void adoptFleetCert(w)))
+    // the blob it needs for the machines it cannot. Deliberately not gated on
+    // which slot: the local daemon is as good a source as a remote one, and a
+    // browser that has lost its certificate is usually a browser that can only
+    // reach one machine.
+    slot.unsubs.push(slot.client.onWelcome((w) => void this.adoptCert(w)))
     // The rest of the welcome is the loopback daemon's alone — its host name,
     // its relay slot, the relay origin. A remote source's welcome names the
     // machine the record already names.
@@ -440,12 +455,48 @@ export class FleetClient {
     }
 
     const origin = w.relay?.origin
-    if (origin !== undefined && !this.expanded) {
-      this.expanded = true
-      void this.adoptRemotes(origin)
+    if (origin !== undefined) {
+      // Remembered whether or not it triggers a build, because the *other*
+      // trigger — a certificate arriving after the expansion already ran —
+      // has no welcome of its own to read an origin from.
+      this.relayOrigin = origin
+      if (!this.expanded) {
+        this.expanded = true
+        void this.adoptRemotes(origin)
+      }
     }
 
     if (changed) this.emit()
+  }
+
+  /**
+   * A welcome's certificate, kept — and the machines it unlocks, taken now
+   * rather than on the next page load.
+   *
+   * The order this repairs: a browser that boots holding no certificate builds
+   * sources for the machines it pinned by hand and skips every machine it can
+   * only reach on the fleet's word (`fleetSources` reads the stored
+   * certificate once). The first welcome then hands it one. Without this, that
+   * certificate sits in IndexedDB unused until something reloads the tab —
+   * which is exactly the case the re-supply path exists for, since a browser
+   * that lost its certificate is a browser that is missing machines.
+   *
+   * Only a certificate this browser did not already hold re-expands, so the
+   * usual welcome — the same blob it has had all along — costs one IndexedDB
+   * read and nothing else. `certExpanded` bounds it to one rebuild per epoch
+   * even if several slots say hello at once.
+   *
+   * The rebuild is `adoptRemotes` unchanged, which is why this is safe to run
+   * a second time: it is idempotent by id, skips the twin, and discards
+   * everything if the fleet closed while it was reading the directory.
+   */
+  private async adoptCert(w: Welcome) {
+    if (!(await adoptFleetCert(w))) return
+    if (this.certExpanded || !this.running) return
+    const origin = this.relayOrigin
+    if (origin === null) return
+    this.certExpanded = true
+    await this.adoptRemotes(origin)
   }
 
   /**
@@ -582,27 +633,41 @@ export class FleetClient {
  * certificate is what reaches *other* machines and its absence costs nothing on
  * the machine that just said hello.
  *
- * The new blob is written even when one is already stored. A certificate is
- * re-minted only by a fresh ceremony, so the usual case is the same bytes
- * again; when it does differ, the machine that just authenticated this device
- * is a better source than whatever a previous connection left behind.
+ * The new blob is written even when one is already stored, and the two are
+ * usually different bytes rather than the same ones. Every machine that has
+ * ever paired this device holds a certificate of its own, all of them equally
+ * valid and differing only in `name` and `pairedOn`, so a browser paired on
+ * two machines keeps whichever welcome landed last. That is not a problem to
+ * solve: any of them admits it everywhere, and the machine that just
+ * authenticated this device is as good a source as any.
+ *
+ * **Returns whether this browser gained a certificate it did not have**, which
+ * is the one case the caller can act on: the set of machines a browser can
+ * reach is computed from the certificate it holds, so a browser that had none
+ * has machines to gain. A replacement changes nothing about reachability, so
+ * it reports false — see FleetClient.adoptCert.
  */
-export async function adoptFleetCert(w: Welcome): Promise<void> {
-  if (w.fleetCert === undefined || w.fleetCert === '') return
+export async function adoptFleetCert(w: Welcome): Promise<boolean> {
+  if (w.fleetCert === undefined || w.fleetCert === '') return false
   try {
     const fleetPub = await loadPinnedFleetKey()
-    if (fleetPub === null) return
+    if (fleetPub === null) return false
     const blob = decodeBase64(w.fleetCert)
-    if (blob === null) return
+    if (blob === null) return false
     const cert = verifyCert(fleetPub, blob)
-    if (cert === null || cert.kind !== 'device') return
+    if (cert === null || cert.kind !== 'device') return false
     const key = await loadOrCreateDeviceKey()
-    if (!sameKey(cert.device, key.publicKey)) return
+    if (!sameKey(cert.device, key.publicKey)) return false
+    // Read before the write, because "was there one before this" is the answer
+    // the caller wants and the write destroys it.
+    const held = await loadPinnedDeviceCert()
     await savePinnedDeviceCert(blob)
+    return held === null
   } catch {
     // A key store that will not open, a welcome that carried nonsense. Both
     // mean this browser keeps whatever it already had, which is the same
     // answer it has for a daemon that offered nothing.
+    return false
   }
 }
 
