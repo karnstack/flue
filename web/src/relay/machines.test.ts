@@ -7,6 +7,7 @@ import {
   forgetMachine,
   listMachines,
   MACHINE_ID,
+  mergeMachines,
   saveMachine,
   SELECTED_KEY,
   type MachineRecord,
@@ -151,5 +152,71 @@ describe('bootMachine', () => {
     saveMachine(ATTIC)
     sessionStorage.setItem(SELECTED_KEY, 'gone-machine')
     expect(bootMachine()).toBeNull()
+  })
+})
+
+describe('mergeMachines', () => {
+  it('lists the stored records when the fleet named none', () => {
+    expect(mergeMachines([MESA, ATTIC], [])).toEqual([
+      { id: 'blue-mesa', name: 'Blue Mesa', via: 'pairing' },
+      { id: 'attic-pi', name: 'Attic Pi', via: 'pairing' },
+    ])
+  })
+
+  it('adds a machine the fleet named and this browser never paired with', () => {
+    // The whole point of the directory: a machine that ran `flue relay join`
+    // last week appears without anybody scanning anything.
+    expect(mergeMachines([MESA], [{ id: 'loft-9f9f', name: 'Loft' }])).toEqual([
+      { id: 'blue-mesa', name: 'Blue Mesa', via: 'pairing' },
+      { id: 'loft-9f9f', name: 'Loft', via: 'directory' },
+    ])
+  })
+
+  it('does not list a machine twice when both know it', () => {
+    const merged = mergeMachines([MESA], [{ id: 'blue-mesa', name: 'Blue Mesa' }])
+    expect(merged).toHaveLength(1)
+    expect(merged[0]!.via).toBe('pairing')
+  })
+
+  it('takes the fleet’s name for a machine that was renamed', () => {
+    // The stored name was copied out of a pairing link at some past moment;
+    // the fleet's is the machine's own word, signed and re-minted when it is
+    // renamed. The machine knows what it is called.
+    const merged = mergeMachines([MESA], [{ id: 'blue-mesa', name: 'Mesa Verde' }])
+    expect(merged[0]).toEqual({ id: 'blue-mesa', name: 'Mesa Verde', via: 'pairing' })
+  })
+
+  it('keeps the stored name when the fleet’s is empty', () => {
+    const merged = mergeMachines([MESA], [{ id: 'blue-mesa', name: '' }])
+    expect(merged[0]!.name).toBe('Blue Mesa')
+  })
+
+  it('falls back to the id for a fleet machine with no name at all', () => {
+    expect(mergeMachines([], [{ id: 'loft-9f9f', name: '' }])[0]).toEqual({
+      id: 'loft-9f9f',
+      name: 'loft-9f9f',
+      via: 'directory',
+    })
+  })
+
+  it('refuses a fleet id outside the grammar the relay routes', () => {
+    // A certificate is signed, not sanitised. An id the Worker answers 404
+    // for is a row that could only ever fail to connect, wherever it came
+    // from — and one carrying a slash would be a path, not an id.
+    expect(
+      mergeMachines([], [
+        { id: 'Loft', name: 'capitals' },
+        { id: 'a/b', name: 'a path' },
+        { id: '', name: 'nothing' },
+        { id: 'loft-9f9f', name: 'Loft' },
+      ]).map((m) => m.id),
+    ).toEqual(['loft-9f9f'])
+  })
+
+  it('holds no key of any kind', () => {
+    // The line this module lives on: what the UI lists, never what the
+    // handshake spends. The `noise` key stays with whoever verified it.
+    const merged = mergeMachines([MESA], [{ id: 'loft-9f9f', name: 'Loft' }])
+    for (const row of merged) expect(Object.keys(row).sort()).toEqual(['id', 'name', 'via'])
   })
 })

@@ -25,8 +25,14 @@
  */
 import { daemonSocketUrl, FlueClient, type ConnStatus } from '@/client/client'
 import type { ErrorMsg, Preview, SessionInfo, Welcome } from '@/client/protocol'
-import { loadOrCreateDeviceKey, loadPinnedDaemonKeyFor, type DeviceKey } from '@/crypto/keys'
-import { listMachines } from '@/relay/machines'
+import {
+  loadOrCreateDeviceKey,
+  loadPinnedDaemonKeyFor,
+  loadPinnedFleetKey,
+  type DeviceKey,
+} from '@/crypto/keys'
+import { readDirectory, type DirectoryFetch, type FleetView } from '@/relay/directory'
+import { listMachines, mergeMachines } from '@/relay/machines'
 import { relaySocket, type RawSocket } from '@/relay/socket'
 import {
   LOCAL_MACHINE_ID,
@@ -549,8 +555,8 @@ export class FleetClient {
 
 /**
  * Build the sources a tab starts from — the production builder behind
- * FleetClient, and the only place fleet code touches storage or constructs a
- * transport.
+ * FleetClient, and the only place fleet code touches storage, reads the
+ * directory or constructs a transport.
  *
  * `loopback` says whether this origin serves /ws at all: true on a page the
  * daemon itself served, where the local source is built nameless and the
@@ -558,17 +564,35 @@ export class FleetClient {
  * own origin on a relay tab, null on a loopback tab that has not heard from
  * its daemon yet (FleetClient learns it there; see `localWelcome`).
  *
- * Each listMachines record with a pinned key becomes a source built exactly
- * as relayBoot builds its client — same identity, same relaySocket, same
- * factory seam — so the wrong-key bug class has one spelling to be tested
- * against. A record without a key is skipped silently rather than surfaced:
- * the fleet lists machines that can be reached, and re-pairing the missing
- * one is the picker's business, not a status row's.
+ * **Two ways a machine gets here, and one way it is reached.** A pairing
+ * record with a pinned key is the original: a ceremony this browser performed,
+ * whose key the user witnessed. A machine certificate out of the fleet
+ * directory is the other, and it is what makes a machine joined last week
+ * appear in this list without anybody scanning anything — verified under the
+ * fleet key pinned at pairing, then trusted for exactly one thing, the `noise`
+ * key to hand the handshake. Either way the source is built as relayBoot
+ * builds its client — same identity shape, same relaySocket, same factory seam
+ * — so the wrong-key bug class has one spelling to be tested against.
+ *
+ * The pinned key wins where a machine has both. It is the stronger fact — a
+ * user carried it across on a screen they physically control — and it outlives
+ * a fleet key that rotates away, which is the same reason the daemon's rule 1
+ * never looks at a certificate. The directory still gets the last word on the
+ * machine's *name*, which is its own to state.
+ *
+ * A row nothing can reach is skipped in silence rather than surfaced: a
+ * pairing record whose key is gone and which the fleet does not name, or a
+ * fleet machine this device has no certificate to present to. The fleet lists
+ * machines that can be reached, and re-pairing is the picker's business, not a
+ * status row's.
  */
 export async function fleetSources(opts: {
   loopback: boolean
   relayOrigin: string | null
   wsFactory?: (url: string) => RawSocket
+  /** How the directory is read. Production passes nothing; a test hands over
+   *  an answer the way it hands over a socket factory. */
+  directoryFetch?: DirectoryFetch
 }): Promise<FleetSource[]> {
   const sources: FleetSource[] = []
   if (opts.loopback) {
@@ -578,32 +602,96 @@ export async function fleetSources(opts: {
   if (origin === null) return sources
 
   // One device key serves every machine — it is this browser's identity, not
-  // a machine's — loaded once and only once a pinned record proves the tab
-  // has any handshake to spend it on.
+  // a machine's — loaded at most once.
   let deviceKey: DeviceKey | null = null
-  for (const record of listMachines()) {
-    let daemonPub: Uint8Array | null
-    try {
-      daemonPub = await loadPinnedDaemonKeyFor(record.id)
-    } catch {
-      // A key store that will not open answers as a missing pin does: this
-      // record cannot be handshaken for, and the fleet lists what it can reach.
-      continue
-    }
-    if (daemonPub === null) continue
+  const device = async (): Promise<DeviceKey | null> => {
     if (deviceKey === null) {
       try {
         deviceKey = await loadOrCreateDeviceKey()
       } catch {
-        break
+        // A key store that will not open is a tab with no identity to spend
+        // on any handshake. Nothing here can be built; the picker's empty
+        // state is the way back.
+        return null
       }
     }
-    const identity = { deviceKey, daemonPub }
+    return deviceKey
+  }
+
+  const view = await fleetView(origin, device, opts.directoryFetch)
+
+  for (const machine of mergeMachines(listMachines(), view.machines)) {
+    let pinned: Uint8Array | null = null
+    try {
+      pinned = await loadPinnedDaemonKeyFor(machine.id)
+    } catch {
+      // A key store that will not open answers as a missing pin does, and the
+      // fleet's own key may still name this machine.
+    }
+    const certified = view.machines.find((m) => m.id === machine.id) ?? null
+    const daemonPub = pinned ?? certified?.noise ?? null
+    if (daemonPub === null) continue
+    // A machine this browser never paired with admits it on the device
+    // certificate and on nothing else (channel.go, rule 2). Without one there
+    // is no handshake to attempt, only a row that would sit at unreachable.
+    if (pinned === null && view.deviceCert === null) continue
+    const key = await device()
+    if (key === null) break
+    const identity = {
+      deviceKey: key,
+      daemonPub,
+      ...(view.deviceCert !== null && { deviceCert: view.deviceCert }),
+    }
     sources.push({
-      id: record.id,
-      name: record.name,
-      client: new FlueClient(origin, (o) => relaySocket(o, identity, record.id, opts.wsFactory)),
+      id: machine.id,
+      name: machine.name,
+      client: new FlueClient(origin, (o) => relaySocket(o, identity, machine.id, opts.wsFactory)),
     })
   }
   return sources
+}
+
+/**
+ * What the fleet directory says, or nothing at all.
+ *
+ * Nothing is the answer for a browser with no pinned fleet key — one that
+ * paired before the key existed, or with a daemon that holds none — and it is
+ * an ordinary answer: that browser reaches the machines it paired with
+ * directly, exactly as it always did. Reading the directory *without* the key
+ * would be worse than not reading it, because an unverifiable machine list is
+ * a relay naming whatever machines it likes.
+ *
+ * Everything else it can go wrong with is inside readDirectory, which never
+ * rejects: a relay that has not been updated answers 503 on this route, an
+ * unreachable one answers nothing, and both mean "no machines learned" rather
+ * than "no fleet".
+ */
+async function fleetView(
+  origin: string,
+  device: () => Promise<DeviceKey | null>,
+  fetch: DirectoryFetch | undefined,
+): Promise<FleetView> {
+  let fleetPub: Uint8Array | null
+  try {
+    fleetPub = await loadPinnedFleetKey()
+  } catch {
+    return EMPTY_FLEET
+  }
+  if (fleetPub === null) return EMPTY_FLEET
+  const key = await device()
+  if (key === null) return EMPTY_FLEET
+  return readDirectory({
+    origin,
+    fleetPub,
+    devicePub: key.publicKey,
+    ...(fetch !== undefined && { fetch }),
+  })
+}
+
+const EMPTY_FLEET: FleetView = {
+  machines: [],
+  deviceCert: null,
+  revoked: false,
+  entries: 0,
+  verified: 0,
 }

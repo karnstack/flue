@@ -10,6 +10,13 @@
  * store, and this module never holds a key — the two stores part ways at
  * exactly the line between "what the UI lists" and "what the handshake spends".
  *
+ * A ceremony is no longer the only way a machine gets onto the list. The fleet
+ * directory names every machine the fleet has vouched for, including ones that
+ * joined long after this browser paired, and `mergeMachines` below is where
+ * the two lists become one. What arrives from there is signed rather than
+ * stored, so it is measured the same way: an id outside the grammar is a row
+ * this module will not list, wherever it came from.
+ *
  * Everything read out of storage is measured rather than believed. localStorage
  * is writable by anything on the origin and survives every deploy, so a corrupt
  * document, a foreign shape or an id the relay would refuse all parse to the
@@ -92,6 +99,70 @@ export function listMachines(): MachineRecord[] {
   return parsed
     .filter(isRecord)
     .map(({ id, name, pairedAt }) => ({ id, name, pairedAt }))
+}
+
+/**
+ * One machine the fleet can offer, whether or not a ceremony ever wrote it
+ * down here.
+ *
+ * `via` is how this browser came to know of it, and it is the difference
+ * between two kinds of row: a `pairing` row is one this browser performed a
+ * ceremony for and holds a pinned key for, and a `directory` row is one the
+ * fleet vouched for — a machine that ran `flue relay join` last week and has
+ * never met this device. Callers need the distinction because the two are
+ * reached differently: the first by the key pinned at its ceremony, the second
+ * by the key inside its machine certificate.
+ *
+ * No `pairedAt`: a directory row has no such moment, and inventing one would
+ * put a date on a screen that nothing on this browser witnessed.
+ */
+export interface FleetMachine {
+  id: string
+  name: string
+  via: 'pairing' | 'directory'
+}
+
+/**
+ * Fold the machines the fleet named into the machines this browser wrote
+ * down.
+ *
+ * Records first, in stored order, so a browser that paired three machines
+ * still lists them in the order it met them; then whatever the directory named
+ * and the records did not, in the order it was given (`readDirectory` sorts by
+ * id, so that is stable across reads).
+ *
+ * **A name from the fleet beats the stored one.** The stored name was copied
+ * out of a pairing link at a moment in the past; the directory's is the
+ * machine's own word, signed under the fleet key and re-minted when the
+ * machine is renamed. It is the same judgement `FleetClient.localWelcome`
+ * makes when the daemon's welcome names the machine it is: the machine knows
+ * what it is called. An empty one is not a rename, and does not win.
+ *
+ * Deliberately key-free. This module lists what a picker can show and never
+ * holds a key — the machine certificate's `noise` key stays with the caller
+ * that verified it, on the far side of exactly the line between "what the UI
+ * lists" and "what the handshake spends".
+ *
+ * Ids from the directory are held to the same grammar the stored ones are:
+ * a certificate is signed, not sanitised, and an id outside the shape the
+ * relay routes would be a row that can only ever 404.
+ */
+export function mergeMachines(
+  records: readonly MachineRecord[],
+  learned: readonly { id: string; name: string }[],
+): FleetMachine[] {
+  const named = new Map(learned.filter((m) => MACHINE_ID.test(m.id)).map((m) => [m.id, m.name]))
+  const out: FleetMachine[] = records.map((r) => ({
+    id: r.id,
+    name: named.get(r.id) || r.name,
+    via: 'pairing',
+  }))
+  const held = new Set(records.map((r) => r.id))
+  for (const [id, name] of named) {
+    if (held.has(id)) continue
+    out.push({ id, name: name || id, via: 'directory' })
+  }
+  return out
 }
 
 /**

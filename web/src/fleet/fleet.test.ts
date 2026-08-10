@@ -5,9 +5,17 @@ import { x25519 } from '@noble/curves/ed25519.js'
 import vectors from '../../../testdata/noise/ik.json'
 import type { ConnStatus, FlueClient } from '@/client/client'
 import type { ErrorMsg, SessionInfo, Welcome } from '@/client/protocol'
-import { savePinnedDaemonKeyFor } from '@/crypto/keys'
+import { loadOrCreateDeviceKey, savePinnedDaemonKeyFor, savePinnedFleetKey } from '@/crypto/keys'
 import { saveMachine } from '@/relay/machines'
 import type { RawSocket } from '@/relay/socket'
+import {
+  deviceCert,
+  directoryFetch,
+  FLEET_PUB,
+  machineCert,
+  OTHER_SEED,
+  revocation,
+} from '@/testing/fleet'
 import { responderHandshake } from '@/testing/noise-daemon'
 import { FleetClient, fleetSources, type FleetSource } from './fleet'
 import { LOCAL_MACHINE_ID, type FleetSession, type MachineState } from './types'
@@ -674,5 +682,231 @@ describe('fleetSources', () => {
     await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
     const sources = await fleetSources({ loopback: true, relayOrigin: 'https://relay.example' })
     expect(sources.map((s) => s.id)).toEqual([LOCAL_MACHINE_ID, 'attic-pi'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fleetSources against the fleet directory: a machine that joined the relay
+// long after this browser paired, appearing without a ceremony.
+// ---------------------------------------------------------------------------
+
+/** The machine nobody here ever paired with, and the key its certificate
+ *  names — the whole of what a browser needs to reach it. */
+const LOFT_PRIV = new Uint8Array(32).fill(0x5c)
+const LOFT_PUB = x25519.getPublicKey(LOFT_PRIV)
+
+describe('fleetSources with a fleet directory', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    vi.stubGlobal('indexedDB', new IDBFactory())
+  })
+
+  /** This browser's own device key, as the pairing ceremony would have made
+   *  it — the key the fleet's device certificate has to name. */
+  const devicePub = async () => (await loadOrCreateDeviceKey()).publicKey
+
+  it('builds a source for a machine it never paired with', async () => {
+    await savePinnedFleetKey(FLEET_PUB)
+    const fetch = directoryFetch([
+      machineCert('loft-9f9f', 'Loft', LOFT_PUB),
+      deviceCert(await devicePub()),
+    ])
+
+    const { urls, raws, factory } = recordingFactory()
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      wsFactory: factory,
+      directoryFetch: fetch,
+    })
+
+    expect(sources.map(({ id, name }) => ({ id, name }))).toEqual([
+      { id: 'loft-9f9f', name: 'Loft' },
+    ])
+
+    // It dials the machine's own slot and seals message A to the key the
+    // certificate named — and carries the device certificate in the payload,
+    // which is the only thing that will admit it there (channel.go, rule 2).
+    const client = sources[0]!.client
+    client.connect()
+    expect(urls).toEqual(['wss://relay.example/client/loft-9f9f'])
+    const raw = raws[0]!
+    raw.open()
+    const msgA = raw.sent.find((d): d is Uint8Array => typeof d !== 'string')
+    const daemon = responderHandshake(LOFT_PRIV)
+    expect(daemon.readMessageA(new Uint8Array(msgA!))).toEqual(await devicePub())
+    expect(daemon.payload()).toEqual(deviceCert(await devicePub()))
+    client.close()
+  })
+
+  it('never builds a source from a machine certificate signed by another key', async () => {
+    // The negative this whole leg turns on. The relay holds blobs it cannot
+    // read, so a hostile one can serve anything; what makes a machine is a
+    // signature under the key pinned at pairing.
+    await savePinnedFleetKey(FLEET_PUB)
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      directoryFetch: directoryFetch([
+        machineCert('loft-9f9f', 'Loft', LOFT_PUB, 1_754_700_000, OTHER_SEED),
+        deviceCert(await devicePub()),
+      ]),
+    })
+    expect(sources).toEqual([])
+  })
+
+  it('builds nothing from the fleet for a device the fleet revoked', async () => {
+    // A revocation outranks the device certificate beside it however much
+    // fresher that is, so the browser has nothing to present — and every
+    // daemon would refuse it anyway. What it keeps is the machine it paired
+    // with directly, whose registry row the revoke on another machine has not
+    // reached.
+    await savePinnedFleetKey(FLEET_PUB)
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+    const pub = await devicePub()
+
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      directoryFetch: directoryFetch([
+        machineCert('loft-9f9f', 'Loft', LOFT_PUB),
+        machineCert(ATTIC.id, 'Attic Pi', DAEMON_PUB),
+        deviceCert(pub, 'phone', 'attic-pi', 1_759_999_999),
+        revocation(pub, 1_754_700_000),
+      ]),
+    })
+
+    expect(sources.map((s) => s.id)).toEqual(['attic-pi'])
+  })
+
+  it('does not send a revoked certificate to a machine it did pair with', async () => {
+    await savePinnedFleetKey(FLEET_PUB)
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+    const pub = await devicePub()
+
+    const { raws, factory } = recordingFactory()
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      wsFactory: factory,
+      directoryFetch: directoryFetch([
+        deviceCert(pub, 'phone', 'attic-pi', 1_759_999_999),
+        revocation(pub, 1_754_700_000),
+      ]),
+    })
+    sources[0]!.client.connect()
+    raws[0]!.open()
+    const msgA = raws[0]!.sent.find((d): d is Uint8Array => typeof d !== 'string')
+    const daemon = responderHandshake(DAEMON_PRIV)
+    daemon.readMessageA(new Uint8Array(msgA!))
+    expect(daemon.payload()).toHaveLength(0)
+    sources[0]!.client.close()
+  })
+
+  it('keeps the key the ceremony pinned when the fleet names another', async () => {
+    // The pin is the stronger fact — a user carried it across on a screen
+    // they physically control — and it outlives a fleet key that rotates
+    // away, which is the same reason the daemon's rule 1 never looks at a
+    // certificate. A stale certificate must not repoint a paired machine.
+    await savePinnedFleetKey(FLEET_PUB)
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+
+    const { raws, factory } = recordingFactory()
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      wsFactory: factory,
+      directoryFetch: directoryFetch([
+        machineCert(ATTIC.id, 'Attic Pi', LOFT_PUB),
+        deviceCert(await devicePub()),
+      ]),
+    })
+
+    sources[0]!.client.connect()
+    raws[0]!.open()
+    const msgA = raws[0]!.sent.find((d): d is Uint8Array => typeof d !== 'string')
+    // Sealed to the pinned key: the responder holding LOFT_PRIV cannot read it.
+    expect(() => responderHandshake(LOFT_PRIV).readMessageA(new Uint8Array(msgA!))).toThrow()
+    expect(responderHandshake(DAEMON_PRIV).readMessageA(new Uint8Array(msgA!))).toHaveLength(32)
+    sources[0]!.client.close()
+  })
+
+  it('takes the fleet’s name for a machine it paired with under another', async () => {
+    await savePinnedFleetKey(FLEET_PUB)
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      directoryFetch: directoryFetch([machineCert(ATTIC.id, 'Attic Pi II', DAEMON_PUB)]),
+    })
+    expect(sources.map(({ id, name }) => ({ id, name }))).toEqual([
+      { id: 'attic-pi', name: 'Attic Pi II' },
+    ])
+  })
+
+  it('reaches a paired machine whose pin has gone missing, on the fleet’s word', async () => {
+    // A record without its key was a row the picker could only offer to pair
+    // again. With a fleet key and a certificate it is a machine that works.
+    await savePinnedFleetKey(FLEET_PUB)
+    saveMachine(ATTIC) // written down, never pinned
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      directoryFetch: directoryFetch([
+        machineCert(ATTIC.id, 'Attic Pi', DAEMON_PUB),
+        deviceCert(await devicePub()),
+      ]),
+    })
+    expect(sources.map((s) => s.id)).toEqual(['attic-pi'])
+  })
+
+  it('reads no directory at all without a pinned fleet key', async () => {
+    // An unverifiable machine list is a relay naming whatever machines it
+    // likes, so a browser with no fleet key does not ask for one.
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+    const fetch = directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)])
+
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      directoryFetch: fetch,
+    })
+
+    expect(fetch.calls).toEqual([])
+    expect(sources.map((s) => s.id)).toEqual(['attic-pi'])
+  })
+
+  it('leaves the paired machines standing when the relay serves nothing', async () => {
+    // A relay that has not run `flue relay update` answers 503 on this route.
+    // The cost is machines this browser does not learn of, never machines it
+    // already had.
+    await savePinnedFleetKey(FLEET_PUB)
+    saveMachine(ATTIC)
+    await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      directoryFetch: directoryFetch([], { ok: false, status: 503 }),
+    })
+    expect(sources.map((s) => s.id)).toEqual(['attic-pi'])
+  })
+
+  it('skips a fleet machine when this device holds no certificate for it', async () => {
+    // Nothing would admit it: rule 2 is the only door for a machine this
+    // browser never paired with, and the certificate is the key to it. A row
+    // here would sit at unreachable forever with nothing on screen to say why.
+    await savePinnedFleetKey(FLEET_PUB)
+    const sources = await fleetSources({
+      loopback: false,
+      relayOrigin: 'https://relay.example',
+      directoryFetch: directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)]),
+    })
+    expect(sources).toEqual([])
   })
 })
