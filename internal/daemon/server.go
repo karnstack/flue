@@ -600,6 +600,22 @@ func LocalCSPFor(relayOrigin string) string {
 	return cspHead + cspLoopbackSockets + " " + relayOrigin + " " + ws + cspTail
 }
 
+// fleetPubKey is the fleet public key this daemon signs under right now, for
+// the welcome to carry, and nil on a daemon that holds no fleet key.
+//
+// Read through fleetIdentity like every other use of the key, so a machine
+// joined to a fleet while it was running answers with the key it can actually
+// sign under rather than the one it booted with (Identity.Fleet). That matters
+// here more than anywhere: the whole point of putting the key on the welcome is
+// to repair browsers paired during exactly that window.
+//
+// The public half. fleet.Key.Public returns nil for the zero key, which is what
+// omits the field, so a daemon with no fleet says nothing about one rather than
+// sending an empty claim.
+func (s *Server) fleetPubKey() []byte {
+	return s.fleetIdentity().Key.Public()
+}
+
 // fleetCertFor is the fleet device certificate belonging to the device this
 // connection authenticated as, for the welcome to carry.
 //

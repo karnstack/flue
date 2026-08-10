@@ -208,6 +208,35 @@ type Welcome struct {
 	// a daemon with no fleet key, and for a device paired before the fleet key
 	// existed. A client that gets none keeps whatever it already had.
 	FleetCert []byte `json:"fleetCert,omitempty"`
+
+	// FleetPub is the fleet's Ed25519 *public* key — what every certificate in
+	// the fleet verifies under — or empty on a daemon that holds none.
+	//
+	// It rides the welcome for the reason FleetCert does, one level up. A
+	// browser pins this key from the QR at pairing time and from nowhere else,
+	// which was right and was also final: a browser that paired while its
+	// machine held no fleet key pinned nothing, and nothing afterwards could
+	// give it one, so it saw the single machine it paired with until somebody
+	// ran the ceremony again. The certificate had the same problem and this
+	// field is the same answer.
+	//
+	// Handing it over here is not trust-on-first-use, because of who is
+	// speaking. A relayed connection is a Noise IK session the browser opened
+	// against a static key it pinned out of band, so a key that arrives on it
+	// is an authenticated statement from a party the browser already trusts,
+	// not an assertion from an unknown peer: a hostile relay cannot forge the
+	// session, and a daemon that could lie about this already holds the fleet
+	// seed (it is in relay.json on every machine) and can therefore already
+	// mint a certificate for any key it likes. The condition is enforced on the
+	// receiving side, which is the only side that knows how it learned the
+	// static key it is talking to: web/src/fleet/fleet.ts, adoptFleetKey, keeps
+	// this only from a machine whose daemon key this browser pinned itself.
+	//
+	// The public half only, and never the seed. The seed rides the join line
+	// between machines; a browser holding it could mint certificates for the
+	// fleet, which is the one thing the layering in spec/fleet-trust.md exists
+	// to keep out of a tab's reach.
+	FleetPub []byte `json:"fleetPub,omitempty"`
 }
 
 // RelayInfo is the state of the daemon's relay leg, as of the moment the

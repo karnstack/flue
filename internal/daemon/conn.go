@@ -351,6 +351,14 @@ func (c *conn) serve() {
 		// no second source for its certificate and re-pairs instead — see
 		// fleetCertFor, and keepDeviceCert in web/src/routes/pair.tsx.
 		FleetCert: c.srv.fleetCertFor(c.deviceKey),
+		// And the fleet's own public key, on the same grounds one level up: a
+		// browser that paired while this machine could not sign pinned no fleet
+		// key, and there was no way back but another ceremony. Sent on every
+		// connection this daemon can sign for, loopback included — what makes
+		// it safe to *keep* is a property of the channel the client is on, and
+		// the client is the only end that knows which channel that is. See
+		// wire.Welcome.FleetPub.
+		FleetPub: c.srv.fleetPubKey(),
 	})
 
 	for {
