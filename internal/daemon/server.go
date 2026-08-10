@@ -292,6 +292,22 @@ type Server struct {
 	// nothing else — see LocalCSPFor.
 	relayConfigured string
 
+	// relayPushMu serialises the relay push and guards the snapshot it last
+	// sent. A lock of its own rather than relayMu, because the push has to
+	// build its message *after* the setter that triggered it has let go — it
+	// reads relay.json to decide NoFleetKey, and no lock this hot belongs
+	// around a file read.
+	//
+	// It covers building the snapshot as well as sending it, which is the
+	// point: two setters racing would otherwise both build, both compare, and
+	// deliver in whichever order the scheduler picked, leaving connections
+	// holding the older of the two states with nothing due to correct it.
+	relayPushMu sync.Mutex
+	// relayPushed is the last state pushed, or nil before the first push. The
+	// comparison against it is what keeps a redialling transport — which
+	// reports every attempt — from waking every tab on the machine each time.
+	relayPushed *wire.RelayInfo
+
 	primaryMu sync.Mutex
 	primary   map[string]*conn // session ID -> primary connection
 	// attached is the connections holding each session, in
@@ -1160,11 +1176,10 @@ const (
 // SetRelayStatus records what the relay transport is doing. It is the only way
 // into that state and the transport is its only caller.
 //
-// Nothing is broadcast. The status decides two things — what a welcome reports
-// and which origin a pairing URL names — and both are read at the moment they
-// are needed rather than pushed: a client that connected before the relay came
-// up learns about it on its next connection, which is also when it could first
-// act on it.
+// Every change is pushed to the connections already open (pushRelayState). A
+// client that connected before the relay came up used to learn of it on its
+// next connection, which on a loopback tab is never — see RelayState in
+// internal/wire for what that cost.
 //
 // Two inputs are refused rather than stored, because both would have something
 // downstream act on a state that cannot be true:
@@ -1192,8 +1207,10 @@ func (s *Server) SetRelayStatus(status, origin string) {
 	}
 
 	s.relayMu.Lock()
-	defer s.relayMu.Unlock()
 	s.relayStatus, s.relayOrigin = status, origin
+	s.relayMu.Unlock()
+
+	s.pushRelayState()
 }
 
 // SetRelayMachine records which machine this daemon is on the relay: the id it
@@ -1210,10 +1227,50 @@ func (s *Server) SetRelayStatus(status, origin string) {
 // things: the status is the socket's, reported by the transport as it dials
 // and loses and regains it; the identity is the configuration's, true from the
 // first welcome even while the transport is still connecting.
+//
+// Pushed like the status, and this is the half that mattered most: which
+// machine this daemon is, is what a pairing link has to name, and the screen
+// that draws that link is the one a human is looking at while the relay comes
+// up underneath it.
 func (s *Server) SetRelayMachine(id, name string) {
 	s.relayMu.Lock()
-	defer s.relayMu.Unlock()
 	s.relayMachineID, s.relayMachineName = id, name
+	s.relayMu.Unlock()
+
+	s.pushRelayState()
+}
+
+// pushRelayState hands the relay leg's current state to every live connection,
+// unless it is the state they were last handed.
+//
+// The snapshot is built here rather than by the caller so that what goes out is
+// the whole of it — status, origin, machine, and whether this daemon can sign
+// for its fleet — however small the change that triggered the push. That is the
+// property the poll it replaces could not have: /api/relay/info answers for the
+// transport, so a screen leaning on it learned that a relay existed and never
+// which machine it was on.
+//
+// A relay that is off is said out loud, unlike on the welcome, which omits the
+// field instead. A push has nothing to omit: the message exists to correct what
+// a tab already believes, and silence corrects nothing. The client folds the two
+// spellings together, and has to anyway (client/protocol.ts, RelayInfo).
+func (s *Server) pushRelayState() {
+	s.relayPushMu.Lock()
+	defer s.relayPushMu.Unlock()
+
+	now := s.relayInfo()
+	if now == nil {
+		now = &wire.RelayInfo{Status: RelayOff}
+	}
+	if s.relayPushed != nil && *s.relayPushed == *now {
+		return
+	}
+	s.relayPushed = now
+
+	msg := wire.RelayState{Relay: *now}
+	for _, c := range s.allConns() {
+		_ = c.sendControl(msg)
+	}
 }
 
 // relayMachine reads the identity SetRelayMachine recorded. The id can be

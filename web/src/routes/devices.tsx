@@ -5,7 +5,6 @@ import { generate } from 'lean-qr'
 
 import type { ConnStatus } from '@/client/client'
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
-import { useRelayTransport } from '@/hooks/use-relay-transport'
 import { useFlueClient } from '@/client/provider'
 import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
 import { PageHeader } from '@/components/page-header'
@@ -122,9 +121,9 @@ function secondsLeft(p: Pairing): number {
  * The link the QR encodes, with the machine the relay carries this daemon as.
  *
  * The daemon writes `?t=` and `?k=` into the URL (internal/daemon/conn.go);
- * *which machine* the link pairs against is appended here, from the welcome's
- * relay snapshot, because the machine id is a fact about the relay leg and
- * this tab holds the freshest copy of it. `d` is the id, spliced raw only
+ * *which machine* the link pairs against is appended here, from what the daemon
+ * last said about its relay leg, because the machine id is a fact about that
+ * leg and this tab holds the freshest copy of it. `d` is the id, spliced raw only
  * once it matches the relay's own grammar — an id the Worker would 404 has no
  * business in a link — and `n` is the display name, which travels encoded and
  * only ever as a query parameter, never as a path. A daemon with no machine
@@ -454,18 +453,10 @@ export function DevicesRoute() {
   // about to end, and a reader may only navigate here afterwards to find out
   // why every control on this screen is shut.
   const [revoked, setRevoked] = useState<string | null>(() => client.revoked)
-  // Seeded for the same reason: the welcome that said what the relay is doing
-  // usually landed before this screen was navigated to.
+  // Seeded for the same reason: what the daemon last said about its relay
+  // usually landed before this screen was navigated to. Kept current by the
+  // listener below, which hears the pushes as well as the greetings.
   const [relay, setRelay] = useState<RelayInfo>(() => client.relay)
-
-  // The welcome's relay snapshot never updates on a stable socket, so a tab
-  // greeted while the daemon was still dialling would hold the Pair gate
-  // shut forever. While the snapshot claims less than connected, the daemon's
-  // live answer is polled and adopted — machine identity kept from the
-  // welcome, which the poll does not carry.
-  useRelayTransport(relay.status !== 'connected', (liveOrigin) =>
-    setRelay((r) => ({ ...r, status: 'connected', origin: liveOrigin })),
-  )
   const [pairing, setPairing] = useState<Pairing | null>(null)
   const [left, setLeft] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
@@ -525,10 +516,11 @@ export function DevicesRoute() {
         showWindow(p)
       }),
 
-      // The relay state is a snapshot each connection's welcome carries, not
-      // a stream — nothing announces a relay that fell over or came back
-      // mid-connection — so every welcome re-answers whether pairing is worth
-      // offering, and a reconnect is exactly when the answer changes.
+      // Every announcement, not only the greeting: this is the screen that
+      // hands out the pairing link, and both of the facts that link is built
+      // from — whether there is an address a phone could reach, and which
+      // machine on it this daemon is — arrive here and change under a tab that
+      // is already open. A relay set up two minutes ago is the ordinary case.
       client.onWelcome(() => setRelay(client.relay)),
 
       client.onStatus((s) => {

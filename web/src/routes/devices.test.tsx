@@ -292,6 +292,29 @@ describe('DevicesRoute', () => {
     ).toBeTruthy()
   })
 
+  it('takes the machine from a relay that came up after the greeting', async () => {
+    // The bug this is here for: a tab greeted while this daemon had no relay
+    // used to learn of a deploy only through a poll that knew the status and
+    // the origin and nothing else. The link went out naming no machine, the
+    // phone that scanned it landed on /pair's refusal, and a reload was the
+    // only cure — on the one screen whose whole job is handing that link over.
+    const { sock } = await mountDevices({ relay: undefined })
+
+    act(() =>
+      sock.emitControl({
+        type: 'relay',
+        relay: { ...RELAY_UP, machineId: 'blue-mesa', machineName: 'Blue Mesa' },
+      }),
+    )
+    await userEvent.click(pairButton())
+
+    offered(sock)
+
+    expect(
+      screen.getByText('http://127.0.0.1:7717/pair?t=zK3tokenzK3&d=blue-mesa&n=Blue%20Mesa'),
+    ).toBeTruthy()
+  })
+
   it('leaves the name off the link when the relay reports none', async () => {
     const { sock } = await mountDevices({
       relay: { ...RELAY_UP, machineId: 'blue-mesa' },

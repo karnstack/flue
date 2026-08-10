@@ -632,36 +632,31 @@ describe('Disconnect', () => {
 
 describe('the welcome gap', () => {
   it('flips to connected when the daemon says the relay came up after the greeting', async () => {
-    // The welcome is a snapshot: a tab greeted mid-dial would say
-    // "connecting" until its socket reconnected, which on stable loopback is
-    // never. The screen polls /api/relay/info while its snapshot claims less
-    // than connected, and adopts the daemon's live answer.
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input)
-      const body =
-        url === '/api/relay/info'
-          ? {
-              configured: true,
-              can_deploy: true,
-              version: 'v',
-              transport: 'connected',
-              transport_origin: 'https://flue-relay.example',
-            }
-          : {}
-      return new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })
-    })
-    vi.stubGlobal('fetch', fetchImpl)
-    try {
-      await mountRemote({ relay: { status: 'connecting' } })
+    // The welcome is a snapshot, and on a stable loopback socket it is the
+    // only one this tab would ever get: a screen greeted mid-dial used to say
+    // "connecting" for the life of the tab. The daemon pushes each change to
+    // its relay leg instead, and this is the change that screen was waiting
+    // for.
+    const { sock } = await mountRemote({ relay: { status: 'connecting' } })
 
-      expect(await screen.findByText('Connected')).toBeTruthy()
-      expect(screen.getByText('https://flue-relay.example')).toBeTruthy()
-      expect(screen.queryByText('Dialling the relay')).toBeNull()
-    } finally {
-      vi.unstubAllGlobals()
-    }
+    act(() => sock.emitControl({ type: 'relay', relay: RELAY_UP }))
+
+    expect(await screen.findByText('Connected')).toBeTruthy()
+    expect(screen.getByText('https://flue-relay.example')).toBeTruthy()
+    expect(screen.queryByText('Dialling the relay')).toBeNull()
+  })
+
+  it('gives the relay up when the daemon says it is gone', async () => {
+    // The other direction, which the poll this replaced could not report at
+    // all: a leg ended under a tab that is still up — Disconnect on this very
+    // screen, or `flue relay leave` in a terminal beside it. Without the push
+    // the screen went on offering an address nothing was listening on.
+    const { sock } = await mountRemote({ relay: RELAY_UP })
+    expect(await screen.findByText('Connected')).toBeTruthy()
+
+    act(() => sock.emitControl({ type: 'relay', relay: { status: 'off' } }))
+
+    expect(await screen.findByText(SETUP)).toBeTruthy()
+    expect(screen.queryByText('https://flue-relay.example')).toBeNull()
   })
 })

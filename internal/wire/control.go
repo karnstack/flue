@@ -239,23 +239,24 @@ type Welcome struct {
 	FleetPub []byte `json:"fleetPub,omitempty"`
 }
 
-// RelayInfo is the state of the daemon's relay leg, as of the moment the
-// connection carrying it was accepted.
+// RelayInfo is the state of the daemon's relay leg.
 //
-// It rides the welcome rather than a message of its own because it is not a
-// stream: a client needs it to decide what to render — a QR that names an
-// address a phone can reach, an honest "remote access is down" — and the
-// connection's own opening frame is when it needs it. A daemon whose relay
-// changes state does not push an update; the next connection carries the truth.
+// It rides the welcome because a client needs it to decide what to render the
+// moment it is greeted — a QR that names an address a phone can reach, an
+// honest "remote access is down" — and the connection's own opening frame is
+// when it needs it. It also rides RelayState, which is how a daemon whose relay
+// leg changed under a tab that was already open says so.
 //
 // A pointer on Welcome, so "no relay configured" is an absent field rather than
 // an object saying "off". The client's type is a union of the three statuses,
 // and a fourth state — present but empty — is one neither side has a meaning
-// for.
+// for. RelayState is a value, because a push has no field to omit and "off" is
+// exactly what it exists to be able to say.
 type RelayInfo struct {
 	// Status is "connecting" while the daemon is dialling and "connected" once
-	// the socket is up. "off" is what a daemon with no relay would say and is
-	// never sent: it is expressed by omitting Relay entirely.
+	// the socket is up. "off" is a daemon with no relay: on a welcome it is
+	// never sent — the whole field is omitted instead — but on a RelayState it
+	// is spelled out, because a push that said nothing would say nothing.
 	Status string `json:"status"`
 	// Origin is the https origin the relay serves browsers on — the address a
 	// pairing URL names while the relay is up. Empty unless Status is
@@ -285,6 +286,26 @@ type RelayInfo struct {
 	// something the client infers — whether a *process* can sign is not
 	// visible from any file the browser can see.
 	NoFleetKey bool `json:"noFleetKey,omitempty"`
+}
+
+// RelayState is the relay leg's state pushed to every live connection, sent
+// whenever it stops matching what was pushed last.
+//
+// The welcome alone was not enough, and the gap was not academic. A tab is
+// greeted once and then holds that snapshot for as long as its socket lives,
+// which on loopback is until it is closed; every relay a daemon gains, loses or
+// re-dials underneath it happened after the only frame that ever mentioned one.
+// Screens papered over the upgrade half by polling /api/relay/info, and that
+// poll knows the transport's status and origin and nothing else — so a tab open
+// across a `flue relay setup` learned it had a relay but never which machine it
+// was on, and handed out pairing links that named no machine at all.
+//
+// Wrapped in a struct rather than being the message, so the payload is `relay`
+// and reads the same as the field it replaces on the welcome. A client applies
+// it over its stored welcome and re-announces that; nothing downstream has to
+// know which of the two frames a fact arrived on.
+type RelayState struct {
+	Relay RelayInfo `json:"relay"`
 }
 
 type Sessions struct {
@@ -444,6 +465,8 @@ func typeName(msg any) (string, bool) {
 		return "pairing", true
 	case Revoked:
 		return "revoked", true
+	case RelayState:
+		return "relay", true
 	}
 	return "", false
 }
@@ -534,6 +557,8 @@ func DecodeControl(b []byte) (any, error) {
 			return *t, nil
 		case *Revoked:
 			return *t, nil
+		case *RelayState:
+			return *t, nil
 		}
 		return nil, fmt.Errorf("wire: unhandled message %T", v)
 	}
@@ -587,6 +612,8 @@ func DecodeControl(b []byte) (any, error) {
 		return deref(into(&Pairing{}))
 	case "revoked":
 		return deref(into(&Revoked{}))
+	case "relay":
+		return deref(into(&RelayState{}))
 	}
 	return nil, fmt.Errorf("wire: unknown control message type %q", probe.Type)
 }

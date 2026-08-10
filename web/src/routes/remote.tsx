@@ -18,7 +18,6 @@ import { PageHeader } from '@/components/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useRelayTransport } from '@/hooks/use-relay-transport'
 import { cn } from '@/lib/utils'
 import { DIRECTORY_WARN_AT, MAX_ENTRIES } from '@/relay/directory'
 
@@ -484,9 +483,10 @@ export function RemoteRoute() {
 
   useEffect(() => {
     const offs = [
-      // Every welcome, not only the first: the relay state is a snapshot each
-      // connection carries, so a reconnect is the only thing that ever
-      // refreshes it — the same reason the Pair gate on Devices listens here.
+      // Every announcement, not only the greeting: this screen's whole subject
+      // is a field that changes under it — a relay deployed from this very
+      // page, one dialling its way up, one disconnected — and the daemon says
+      // so each time (client/protocol.ts, RelayState).
       client.onWelcome(() => {
         setRelay(client.relay)
         setGreeted(true)
@@ -497,16 +497,6 @@ export function RemoteRoute() {
       for (const off of offs) off()
     }
   }, [client])
-
-  // The welcome's snapshot goes stale in exactly one direction that matters:
-  // a tab greeted mid-dial says "connecting" forever, because nothing on a
-  // stable socket ever re-says the relay state. While the snapshot claims
-  // less than connected, poll the daemon's live answer and adopt it —
-  // keeping the machine identity the welcome carried, which the poll does
-  // not know.
-  useRelayTransport(greeted && relay.status !== 'connected', (liveOrigin) =>
-    setRelay((r) => ({ ...r, status: 'connected', origin: liveOrigin })),
-  )
 
   /*
    * A connected relay that named no origin is treated as still dialling, which
@@ -521,20 +511,18 @@ export function RemoteRoute() {
     relay.status === 'connected' && origin === '' ? 'connecting' : relay.status
 
   /*
-   * The welcome's snapshot loses to the daemon's own answer in the direction
-   * the poll above does not cover: a relay that went away.
+   * The daemon's own answer about its leg, kept as a second opinion in the one
+   * direction that is expensive to get wrong: a relay that went away.
    *
-   * `useRelayTransport` only ever upgrades a screen to connected, because that
-   * was the only stale direction there was — nothing used to end a relay leg
-   * inside a live daemon. Disconnect does, and without this the tab that
-   * pressed it would go on saying "Reachable from anywhere", with the address,
-   * over a socket that had been closed a second earlier. `transport` is the
-   * daemon's live word for its own leg (SetRelayStatus, read straight off the
-   * Server in handleRelayInfo), so `off` is authoritative in a way the
-   * connection-scoped welcome is not.
+   * The push says this too, and says it first — Disconnect ends the leg, which
+   * calls SetRelayStatus, which reaches this tab before the request it answers
+   * does. This stays because it is read from a different place (`transport` on
+   * /api/relay/info, straight off the Server) and the claim it guards is one a
+   * stale tab makes loudly: "Reachable from anywhere", with the address, over a
+   * socket that was closed a second ago.
    *
-   * Absent on an older daemon and on a relay origin, where the endpoint is
-   * never asked; both leave the snapshot in charge, exactly as before.
+   * Absent on a relay origin, where the endpoint is never asked; that leaves
+   * what the daemon said in charge, which is now current rather than historical.
    */
   const status: RelayInfo['status'] = relayUI?.transport === 'off' ? 'off' : claimed
 

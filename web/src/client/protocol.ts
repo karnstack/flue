@@ -280,21 +280,21 @@ export type ClientMessage =
 // Server -> client.
 
 /**
- * The state of the daemon's relay leg, as of the moment this connection was
- * accepted.
+ * The state of the daemon's relay leg.
  *
  * `connecting` means the daemon is dialling and nothing is reachable through
  * it yet; `connected` carries the https origin the relay serves browsers on,
  * which is the address a pairing URL names while the relay is up.
  *
- * `off` is in the union because it is the third state the daemon models, but
- * it never arrives: a daemon with no relay omits `welcome.relay` entirely. A
- * consumer must therefore treat an absent `relay` and `status: 'off'` the same
- * way rather than assuming one of the two spellings.
+ * `off` arrives on a `relay` push and never on a welcome, where a daemon with
+ * no relay omits the field entirely. A consumer must treat an absent `relay`
+ * and `status: 'off'` the same way rather than assuming one of the spellings —
+ * which is also what makes the push able to say a relay went away.
  *
- * It is not a stream. Nothing pushes an update when the relay reconnects, so
- * what a client holds is what was true when it arrived — which is also when it
- * decides what to render.
+ * It arrives twice over: on the welcome, because a client has to decide what to
+ * render the moment it is greeted, and on every `relay` message after that, so
+ * a tab open across a `flue relay setup` — or a `leave`, or a socket lost and
+ * regained — is not left holding the greeting forever.
  */
 export interface RelayInfo {
   status: 'off' | 'connecting' | 'connected'
@@ -363,6 +363,26 @@ export interface Welcome {
    * condition lives and why it is not trust-on-first-use.
    */
   fleetPub?: string
+}
+
+/**
+ * The relay leg's state, pushed because it changed under a connection that was
+ * already open.
+ *
+ * It carries the whole of `RelayInfo` rather than the field that moved, so a
+ * client applies it wholesale and cannot end up holding half of one state and
+ * half of another. That is exactly the bug it was written for: the screens used
+ * to poll `/api/relay/info`, which answers for the transport alone, so a tab
+ * that watched a relay come up learned the status and the origin and never the
+ * machine id — and handed out pairing links that named no machine, which is a
+ * link /pair can only refuse.
+ *
+ * The daemon sends one whenever this state stops matching what it last sent, so
+ * a transport redialling in a loop is not a message per attempt.
+ */
+export interface RelayState {
+  type: 'relay'
+  relay: RelayInfo
 }
 
 export interface Sessions {
@@ -489,6 +509,7 @@ export interface Revoked {
 
 export type ServerMessage =
   | Welcome
+  | RelayState
   | Sessions
   | Attached
   | Exit
