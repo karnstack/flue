@@ -267,7 +267,10 @@ entries. At the cap a PUT of a new blob is refused with
 `507 {"error":"directory full"}` — its own status, so a daemon can tell "your
 blob is fine and I will not keep it" from a 413 or a 401 without reading prose
 — while a PUT of a blob already stored still answers 200, because it asks for
-no room.
+no room. The refusal precedes the store and therefore the fan-out: a refused
+blob is not kept and is **not pushed to any connected daemon**, because the
+push socket carries new entries and a refusal creates none. A revocation
+refused here has reached nobody.
 
 Refusing rather than evicting is deliberate and is a security decision, not a
 capacity one. Every eviction policy can drop a revocation, and a directory that

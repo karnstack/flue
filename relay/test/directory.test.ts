@@ -2,7 +2,7 @@ import { env, SELF } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 
 import worker, { type Env } from '../src/index'
-import { BASE, Leg, machineId, TEST_SECRET, within } from './harness'
+import { BASE, Leg, machineId, sleep, TEST_SECRET, within } from './harness'
 
 /**
  * The fleet directory: the relay's store of blobs it cannot read
@@ -476,5 +476,41 @@ describe('the entry cap', () => {
     // asks for no room, so refusing it would strand a daemon that re-announces
     // on every reconnect.
     expect((await write(first)).status).toBe(200)
+  })
+
+  it('pushes nothing at all for a refused blob: the 507 comes before the fan-out', async () => {
+    // The exact failure mode, pinned, because it is the one an operator has to
+    // be told the truth about. A refused blob is not stored, and the push
+    // socket carries *new entries* — so a revocation refused here reaches
+    // nobody, not "everybody who happened to be connected". It has taken effect
+    // on the machine it was typed on and on no other.
+    const full = env.DIRECTORY.get(env.DIRECTORY.idFromName(`nopush-${crypto.randomUUID()}`))
+    const write = (body: Uint8Array): Promise<Response> =>
+      full.fetch(DIRECTORY, { method: 'PUT', body, headers: AUTH })
+    for (let i = 0; i < MAX_ENTRIES; i++) {
+      expect((await write(blob('nopush', String(i)))).status).toBe(201)
+    }
+
+    const res = await full.fetch(DIRECTORY, { headers: { Upgrade: 'websocket', ...AUTH } })
+    expect(res.status).toBe(101)
+    const ws = res.webSocket!
+    ;(ws as unknown as { binaryType: string }).binaryType = 'arraybuffer'
+    ws.accept()
+    const daemon = new Leg(ws)
+
+    let pushed: unknown = null
+    // The caught tail is only to keep the harness's own 2 s deadline from
+    // rejecting into nobody after this test has passed.
+    void daemon
+      .next('a push that must not come')
+      .then((m) => {
+        pushed = m
+      })
+      .catch(() => {})
+
+    expect((await write(blob('nopush', 'revocation'))).status).toBe(507)
+    await sleep(50)
+    expect(pushed).toBeNull()
+    ws.close()
   })
 })

@@ -382,14 +382,24 @@ entries**, and at the cap a new blob is refused with
 `507 {"error":"directory full"}` rather than making room. What that means to
 you: nothing already published stops working — every certificate and every
 revocation in there keeps being served and honoured — but the *next* thing
-your fleet signs is not distributed, so a device paired after that point works
-on the machine that paired it and nowhere else, and, far more seriously, a
-revocation made after that point reaches only the machines that were connected
-to hear the push. The daemon that hit it logs
+your fleet signs **is not stored and is not pushed to anybody**. The refusal
+comes before both: the relay does not keep the blob, so there is no new entry
+to fan out, and the push socket carries new entries and nothing else. Nobody is
+notified, including the machines that are connected right now.
+
+So a device paired after that point works on the machine that paired it and
+nowhere else. And, far more seriously, a revocation made after that point takes
+effect **only on the machine it was typed on** — that machine drops the key
+from its own registry and closes that device's channels, because a revoke is
+local first — while every other machine in the fleet goes on admitting the
+device on the certificate it already holds. Re-publishing does not rescue it
+either: the machine re-offers that revocation on every reconnect and every half
+hour, and is answered 507 every time. The daemon that hit it logs
 
 ```
-the fleet directory is full; this artifact was not published, and no machine
-that has not already heard of it will learn of it from here
+the fleet directory is full; this artifact was not stored and was not pushed
+to anyone, so no machine will learn of it from here — run `flue relay reset`
+to empty the directory
 ```
 
 and `flue relay status` shows the count sitting at 512. 512 is years of

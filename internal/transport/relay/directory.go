@@ -766,7 +766,16 @@ func (d *Directory) publish(ctx context.Context, blob []byte) {
 		// would spend the fleet's request budget saying so. Nothing else is
 		// wedged — the socket stays up, and everything already stored keeps
 		// arriving.
-		d.log.Error("the fleet directory is full; this artifact was not published, and no machine that has not already heard of it will learn of it from here",
+		//
+		// The line is exact about what did not happen, because the difference
+		// matters when the artifact is a revocation. The refusal comes before
+		// the store *and* before the fan-out (relay/src/directory.ts, put), and
+		// the push socket carries new entries and nothing else — so this blob
+		// reached nobody at all, not "everybody who happened to be connected".
+		// A revoke that lands here has therefore taken effect on this machine
+		// and on no other, and re-offering it changes nothing: every reconnect
+		// and every republish is answered 507 until the directory is emptied.
+		d.log.Error("the fleet directory is full; this artifact was not stored and was not pushed to anyone, so no machine will learn of it from here — run `flue relay reset` to empty the directory",
 			"bytes", len(blob))
 	case http.StatusRequestEntityTooLarge:
 		// 413: this daemon minted something larger than the directory will
