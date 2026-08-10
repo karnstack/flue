@@ -787,6 +787,22 @@ export class FleetClient {
       // enrolThisBrowser answers rather than throws; a caller's seam might not.
       return
     }
+    /*
+     * Nothing gained is the ordinary second load: the expansion read the same
+     * records out of storage by itself, and a rebuild would be a directory read
+     * for a set that cannot have changed.
+     *
+     * The one thing it also swallows is a development-only race. React mounts
+     * this twice, so two enrolments are briefly in flight, and if the first
+     * one's writes land between the second one's read and the expansion in
+     * between, the second is told "already there" about records the fleet has
+     * not seen. What that tab is left with is one machine until the next
+     * discovery tick, which is a minute — and `discover` exists for machines
+     * that arrive late anyway. Not worth a predicate here, and every predicate
+     * tried was wrong in the ordinary case: at the moment this resumes the
+     * expansion is usually still in flight, so "has it found anything yet" is a
+     * question with no answer.
+     */
     if (!gained || epoch !== this.epoch || !this.running) return
     if (this.resupplied) return
     const origin = this.relayOrigin

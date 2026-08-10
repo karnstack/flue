@@ -1705,6 +1705,27 @@ describe('a loopback tab that never ran a ceremony', () => {
     h.fleet.close()
   })
 
+  it('costs no second read on the load that gains nothing', async () => {
+    // The ordinary second load, and what keeps enrolment from being a directory
+    // read per page load: the browser held both records all along, so the
+    // expansion built everything from storage on its own and an enrolment that
+    // gained nothing has nothing to add.
+    const loft = new FakeClient()
+    const expand = vi.fn(() => Promise.resolve([src('loft-9f9f', 'Loft', loft)]))
+    const local = new FakeClient()
+    const fleet = new FleetClient([src(LOCAL_MACHINE_ID, '', local)], expand, {
+      enrol: () => Promise.resolve(false),
+    })
+    fleet.connect()
+    local.open()
+    local.emitWelcome(loopbackWelcome())
+
+    await vi.waitFor(() => expect(fleet.clientFor('loft-9f9f')).not.toBeNull())
+    await flush()
+    expect(expand).toHaveBeenCalledTimes(1)
+    fleet.close()
+  })
+
   it('reads the relay’s own origin when nothing hands it a fetch', async () => {
     // The relay tab's half of the same seam, asserted where it is decided: with
     // no directoryFetch the expansion makes the plain cross-origin read it
