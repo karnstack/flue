@@ -64,6 +64,32 @@ const DAEMON_RECORD = 'daemon-static'
  */
 const DEVICE_RECORD_PREFIX = 'daemon-static:'
 
+/**
+ * Where the fleet public key is pinned: one record, because one relay origin
+ * is one fleet (spec/fleet-trust.md, "The fleet directory").
+ *
+ * This is the anchor the whole of auto-pairing hangs from. A machine
+ * certificate that verifies under this key is a machine this browser will
+ * dial, pinning the `noise` key that certificate names — so a record that
+ * could be replaced silently would be every machine's static key, decided
+ * once and never asked about again. It is written from the pairing ceremony
+ * and from nowhere else, with a value that arrived in the QR: the one leg no
+ * intermediary can sit in.
+ *
+ * The Ed25519 *public* half only. The seed rides the join line between
+ * machines and never reaches a browser — a browser holding it could mint
+ * certificates for the fleet, which is the one thing the layering in
+ * spec/fleet-trust.md exists to keep out of Cloudflare's reach and out of a
+ * tab's.
+ *
+ * Per origin rather than per machine, unlike `DEVICE_RECORD_PREFIX`, and the
+ * difference is not an inconsistency: a daemon's static key is a fact about
+ * one machine, and the fleet key is a fact about the relay in front of all of
+ * them. IndexedDB is already scoped to the origin, so one record here is one
+ * fleet key per relay.
+ */
+const FLEET_RECORD = 'fleet-public'
+
 const openDb = (factory: IDBFactory) =>
   new Promise<IDBDatabase>((resolve, reject) => {
     const req = factory.open(DB_NAME, 1)
@@ -178,6 +204,57 @@ export async function loadPinnedDaemonKeyFor(
 }
 
 /**
+ * Pin the fleet this browser has just joined, from the `f=` in the pairing
+ * link.
+ *
+ * Called from the same moment, and on the same evidence, as
+ * `savePinnedDaemonKeyFor`: the user carried a code across from a screen they
+ * physically control, and both keys were read out of it. What this one buys is
+ * every *other* machine — the directory names them, this key is what makes
+ * their certificates mean anything, and neither the relay nor anything sitting
+ * in front of it can produce one.
+ *
+ * Overwrites, for the reason the daemon pin does: re-pairing is how a browser
+ * moves to another fleet, and re-setup (`flue relay setup`) mints a fresh
+ * fleet key that every device then pairs against. A browser that refused the
+ * overwrite would be stranded on a key nothing signs under any more, with
+ * clearing site data as the only way back.
+ *
+ * Which puts the same weight on the caller: only a key that arrived in the
+ * link may be written here. A fleet key taken from an answer over the wire
+ * would be the trust-on-first-use the pinning exists to end, one level up —
+ * whoever supplied it could then mint a machine certificate for every machine
+ * this browser will ever dial.
+ */
+export async function savePinnedFleetKey(
+  publicKey: Uint8Array,
+  factory: IDBFactory = indexedDB,
+): Promise<void> {
+  const db = await openDb(factory)
+  try {
+    await tx(db, 'readwrite', (s) => s.put({ publicKey }, FLEET_RECORD))
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * The pinned fleet public key, or null in a browser that has never paired
+ * with a fleet.
+ *
+ * Null is an ordinary answer, not a fault: a browser paired before the fleet
+ * key existed, or with a daemon that holds none, reaches every machine it
+ * paired with directly and learns of no others. What it must never do is read
+ * the directory without one — an unverifiable machine list is a relay naming
+ * whatever machines it likes.
+ */
+export async function loadPinnedFleetKey(
+  factory: IDBFactory = indexedDB,
+): Promise<Uint8Array | null> {
+  return read(FLEET_RECORD, factory)
+}
+
+/**
  * Drop the key pinned for one machine.
  *
  * The other half of forgetting a machine (relay/machines.ts): a record without
@@ -215,6 +292,11 @@ async function read(record: string, factory: IDBFactory): Promise<Uint8Array | n
     // Absent is the honest reading of a record this module could never have
     // written: the boot fails closed into the picker, where pairing again is
     // on offer, instead of open into a loop nothing on screen explains.
+    //
+    // The fleet key is the same 32 bytes and fails the same way closed: a
+    // verifier handed a key of the wrong width refuses every certificate,
+    // which is a browser that lists no machines rather than one that trusts
+    // the wrong ones.
     return key.length === KEY_BYTES ? key : null
   } finally {
     db.close()

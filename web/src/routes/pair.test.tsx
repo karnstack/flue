@@ -4,7 +4,12 @@ import { RouterProvider } from '@tanstack/react-router'
 import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { loadOrCreateDeviceKey, loadPinnedDaemonKey, loadPinnedDaemonKeyFor } from '@/crypto/keys'
+import {
+  loadOrCreateDeviceKey,
+  loadPinnedDaemonKey,
+  loadPinnedDaemonKeyFor,
+  loadPinnedFleetKey,
+} from '@/crypto/keys'
 import { listMachines } from '@/relay/machines'
 import { createFlueRouter } from '@/router'
 
@@ -22,6 +27,10 @@ const DAEMON_PUB_PARAM = urlSafe(DAEMON_PUB)
 /** Some other daemon's key — 32 bytes that are not the ones in the QR. */
 const OTHER_PUB_BYTES = Uint8Array.from({ length: 32 }, (_, i) => 200 - i)
 const OTHER_PUB = btoa(String.fromCharCode(...OTHER_PUB_BYTES))
+
+/** The fleet public key, as `?f=` carries it: 32 bytes, unpadded URL-safe. */
+const FLEET_PUB_BYTES = Uint8Array.from({ length: 32 }, (_, i) => 100 + i)
+const FLEET_PUB_PARAM = urlSafe(btoa(String.fromCharCode(...FLEET_PUB_BYTES)))
 
 /** A whole pairing link, as the QR encodes it: the token and the key. */
 const LINK = `?t=${TOKEN}&k=${DAEMON_PUB_PARAM}`
@@ -507,6 +516,61 @@ describe('PairRoute on a relay origin', () => {
     expect(machines).toHaveLength(1)
     expect(machines[0]).toMatchObject({ id: 'blue-mesa', name: 'Blue Mesa' })
     expect(machines[0]!.pairedAt).toBeGreaterThan(0)
+  })
+
+  it('pins the fleet key the link carried, and only from the link', async () => {
+    // The anchor for every machine this browser has not paired with: a
+    // certificate that verifies under this key is a machine it will dial.
+    // So it comes out of the QR — the one leg no intermediary can sit in —
+    // and never out of the answer to the POST.
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&f=${FLEET_PUB_PARAM}&d=blue-mesa&n=Blue%20Mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB_BYTES)
+    // The machine's own pin is unaffected: two facts, two records.
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('pairs the machine alone when the link carries no fleet key', async () => {
+    // A relay from before the fleet key, or a daemon that holds none. The
+    // ceremony is the one it always was, and nothing fleet-wide is pinned.
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&d=blue-mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedFleetKey()).toBeNull()
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('pins no fleet key from an `f` that is not 32 bytes', async () => {
+    // Nothing writes a short `f` but something that rewrote the link. It is
+    // refused as no fleet key rather than rounded off into one, and this
+    // machine still pairs — a browser that trusted it would be verifying
+    // every machine certificate under bytes a stranger chose.
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&f=c2hvcnQ&d=blue-mesa`)
+
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+
+    expect(await loadPinnedFleetKey()).toBeNull()
+    expect(await loadPinnedDaemonKeyFor('blue-mesa')).toEqual(DAEMON_PUB_BYTES)
+  })
+
+  it('scrubs the fleet key out of the address bar with the rest', async () => {
+    fetchMock.mockResolvedValue(paired())
+    await renderRelayPair(`${LINK}&f=${FLEET_PUB_PARAM}&d=blue-mesa`)
+    await waitFor(() => expect(document.location.search).toBe('?d=blue-mesa'))
+
+    // And the ceremony still runs on what the first render captured.
+    await userEvent.click(await armedPairButton())
+    await screen.findByRole('heading', { name: 'Paired' })
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB_BYTES)
   })
 
   it('scrubs the secrets but keeps the machine the link names', async () => {
