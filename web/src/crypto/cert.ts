@@ -61,11 +61,34 @@ const KIND_REVOKE = 3
 const MAX_STRING_BYTES = 512
 
 /**
- * The ceiling on `iat`, matching Go's `maxIAT` exactly so the two accept the
- * same set of blobs. Unix seconds do not reach 2^62; anything at or above it
- * is not a time.
+ * The ceiling on `iat` when *reading*, matching Go's `maxIAT` exactly so the
+ * two decoders accept the same set of blobs. Unix seconds do not reach 2^62;
+ * anything at or above it is not a time.
  */
 const MAX_IAT = 1n << 62n
+
+/**
+ * The ceiling on `iat` when *writing*, which is lower than the one above — and
+ * deliberately, rather than by omission.
+ *
+ * The two decoders agree exactly at 2^62. The two encoders do not: Go's
+ * `appendIAT` will sign anything up to 2^62, and this one refuses above 2^53.
+ * The asymmetry is real and it is the safe direction, because it is a fact
+ * about the language rather than about the format. A `number` cannot hold an
+ * integer above 2^53 exactly, so an `iat` of 2^60 + 1 arriving here is already
+ * a different value from the one the caller meant, and encoding it would put
+ * bytes under a signature that nobody asked for. Throwing is the only honest
+ * answer; silently writing the rounded value is the bug this refusal exists to
+ * make impossible.
+ *
+ * Nothing is lost by it. This encoder exists only so the decoder is tested
+ * against something other than itself (see `encodeCert`), the browser holds no
+ * fleet private key and signs nothing, and no honest `iat` will come within
+ * nine million years of 2^53 seconds. The reading path is where agreement
+ * matters — a reader that refused what a daemon accepts would drop real
+ * certificates — and there the ceilings are identical.
+ */
+const MAX_ENCODABLE_IAT = Number.MAX_SAFE_INTEGER
 
 /** An X25519 public key — the only kind of key a certificate names. */
 const KEY_BYTES = 32
@@ -233,8 +256,16 @@ function key32(field: string, key: Uint8Array): Uint8Array {
 }
 
 function u64(field: string, value: number): Uint8Array {
-  if (!Number.isSafeInteger(value) || value < 0) {
+  if (!Number.isInteger(value) || value < 0) {
     throw new Error(`fleet: ${field} is not a unix time`)
+  }
+  if (value > MAX_ENCODABLE_IAT) {
+    // Go's encoder takes this and this one will not — see MAX_ENCODABLE_IAT.
+    // The value is already inexact by the time it arrives here, so encoding it
+    // would sign bytes the caller did not name.
+    throw new Error(
+      `fleet: ${field} is ${value}, past 2^53 — a JavaScript number cannot carry it exactly, and this encoder will not sign a rounded one`,
+    )
   }
   const out = new Uint8Array(8)
   new DataView(out.buffer).setBigUint64(0, BigInt(value))

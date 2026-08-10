@@ -1,6 +1,8 @@
+import { ed25519 } from '@noble/curves/ed25519.js'
 import { describe, expect, it } from 'vitest'
 
 import fixture from '../../../testdata/fleet/certs.json'
+import { FLEET_SEED } from '@/testing/fleet'
 import { encodeCert, keyHex, verifyCert, type Cert } from './cert'
 
 const unhex = (s: string) => new Uint8Array((s.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)))
@@ -181,5 +183,62 @@ describe('the encoder refuses what it cannot faithfully sign', () => {
     expect(() =>
       encodeCert({ kind: 'machine', id: 'm', name: '\uD800', noise: key, iat: 1 }),
     ).toThrow()
+  })
+
+  it('a timestamp past 2^53, which Go would sign and a number cannot carry', () => {
+    // The one place the two encoders deliberately disagree. Go's appendIAT
+    // takes anything up to 2^62; a JavaScript number stops being exact at
+    // 2^53, so a value above it has already been rounded by the time it
+    // arrives here and signing it would cover bytes nobody named. Refusing is
+    // the safe direction, and it costs nothing: the browser signs nothing, and
+    // 2^53 seconds is nine million years out.
+    expect(() =>
+      encodeCert({ kind: 'revoke', device: key, iat: Number.MAX_SAFE_INTEGER + 2 }),
+    ).toThrow(/2\^53/)
+    // The boundary itself still encodes.
+    expect(() =>
+      encodeCert({ kind: 'revoke', device: key, iat: Number.MAX_SAFE_INTEGER }),
+    ).not.toThrow()
+  })
+})
+
+describe('the reader and Go agree about iat exactly', () => {
+  // The asymmetry above is in the *encoders* only. The decoders share one
+  // ceiling — 2^62, Go's maxIAT — and they have to: a reader that refused what
+  // a daemon accepts would drop real certificates off the directory, and one
+  // that accepted more would hand a caller a value Go's own Verify rejects.
+  //
+  // Signed properly, because this is about what a reader *accepts*, and a blob
+  // that fails the signature would answer null for the wrong reason. The
+  // canonical bytes are built with a placeholder iat and the field overwritten
+  // before signing, which is the only way to reach values this module's own
+  // encoder refuses to write.
+  const key = new Uint8Array(32).fill(7)
+
+  function signedWithIAT(raw: bigint): Uint8Array {
+    const canonical = encodeCert({ kind: 'revoke', device: key, iat: 1 })
+    new DataView(canonical.buffer, canonical.byteOffset, canonical.length).setBigUint64(
+      canonical.length - 8,
+      raw,
+    )
+    const sig = ed25519.sign(canonical, FLEET_SEED)
+    const blob = new Uint8Array(canonical.length + sig.length)
+    blob.set(canonical)
+    blob.set(sig, canonical.length)
+    return blob
+  }
+
+  it('accepts an iat far above 2^53, which the encoder here would not write', () => {
+    const cert = verifyCert(FLEET_PUB, signedWithIAT(1n << 60n))
+    expect(cert?.kind).toBe('revoke')
+    // Read back as a Number, which is lossy above 2^53 and documented to be:
+    // iat is display, never precedence — a revocation outranks a device
+    // certificate whatever either one says.
+    expect(cert?.iat).toBe(Number(1n << 60n))
+  })
+
+  it('accepts exactly 2^62 and refuses one more, as Go does', () => {
+    expect(verifyCert(FLEET_PUB, signedWithIAT(1n << 62n))?.kind).toBe('revoke')
+    expect(verifyCert(FLEET_PUB, signedWithIAT((1n << 62n) + 1n))).toBeNull()
   })
 })
