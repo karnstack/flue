@@ -132,6 +132,16 @@ var Migrations = []cloudflare.Migration{
 	{Tag: "v2", NewSQLiteClasses: []string{DirectoryClass}},
 }
 
+// DOBindings is the Durable Object binding table every deploy sends: the name
+// the Worker reads the namespace off `env` under, and the class behind it.
+//
+// A package-level var rather than a literal inside Deploy so that the drift
+// guard in deploy_test.go can compare *what is sent* against
+// `durable_objects.bindings` in relay/wrangler.jsonc, rather than against a
+// second hand-typed copy that would agree with the file and disagree with the
+// deploy. Twinned with that file; edit both or neither.
+var DOBindings = map[string]string{DOBinding: DOClass, DirectoryBinding: DirectoryClass}
+
 // Input is one deploy's worth of decisions, all made by the caller.
 type Input struct {
 	// API carries the user's token. It is used for the calls below and goes
@@ -194,7 +204,7 @@ func Deploy(in Input) error {
 			// on the tag precondition and then upload a script binding a class
 			// that was never created.
 			Migrations:           Migrations,
-			DOBindings:           map[string]string{DOBinding: DOClass, DirectoryBinding: DirectoryClass},
+			DOBindings:           DOBindings,
 			Assets:               in.Assets,
 			AssetsRunWorkerFirst: RunWorkerFirst,
 			// Without this the relay serves the same bundle the daemon does,

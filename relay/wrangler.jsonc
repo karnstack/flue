@@ -40,7 +40,7 @@
   // Two classes: DaemonHub is one object per machine, FleetDirectory is one
   // object for the relay (spec/fleet-trust.md, "The fleet directory").
   //
-  // internal/relaydeploy is now level with this file on all three counts the
+  // internal/relaydeploy is level with this file on all three counts the
   // directory needs — this binding (DirectoryBinding/DirectoryClass), the v2
   // migration below (Migrations), and the two "/directory" entries above
   // (RunWorkerFirst) — so `flue relay setup` and `pnpm dev` deploy the same
@@ -49,6 +49,13 @@
   // that the *tags* are part of the contract: Cloudflare records the tag
   // against the deployed script, so a wrangler deploy and a flue deploy of one
   // Worker have to name the same migration history.
+  //
+  // That is no longer prose alone: internal/relaydeploy/deploy_test.go parses
+  // this file and fails when the two disagree. It is worth the test because a
+  // `v3` added here and not there would leave every `flue relay update`
+  // sending nothing — the account reports v2, the client's history ends at v2
+  // — and the class would never be created, silently, on a deploy that
+  // succeeds.
   "durable_objects": {
     "bindings": [
       { "name": "HUB", "class_name": "DaemonHub" },
