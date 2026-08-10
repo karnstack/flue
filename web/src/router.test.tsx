@@ -60,8 +60,8 @@ async function renderFleet(path: string) {
   const local = fakeClient()
   const attic = fakeClient()
   const fleet = new FleetClient([
-    { id: 'local', name: '', client: local.client },
-    { id: 'attic-pi', name: 'Attic Pi', client: attic.client },
+    { id: 'local', name: '', client: local.client, pinned: false },
+    { id: 'attic-pi', name: 'Attic Pi', client: attic.client, pinned: false },
   ])
   // The same async act as renderAt, for the same post-mount load.
   let view!: ReturnType<typeof render>
@@ -376,8 +376,8 @@ describe('createFlueRouter', () => {
     const local = fakeClient()
     const attic = fakeClient()
     const fleet = new FleetClient(
-      [{ id: 'local', name: '', client: local.client }],
-      () => Promise.resolve([{ id: 'attic-pi', name: 'Attic Pi', client: attic.client }]),
+      [{ id: 'local', name: '', client: local.client, pinned: false }],
+      () => Promise.resolve([{ id: 'attic-pi', name: 'Attic Pi', client: attic.client, pinned: false }]),
     )
     // The same async act as renderAt, for the same post-mount load. The fleet
     // has not been welcomed yet, so nothing here settles the adoption early.

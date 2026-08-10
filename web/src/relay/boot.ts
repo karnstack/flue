@@ -29,8 +29,19 @@ import { loadOrCreateDeviceKey, loadPinnedDaemonKeyFor } from '@/crypto/keys'
 import { bootMachine } from './machines'
 import { relaySocket, type RawSocket } from './socket'
 
-/** What the boot decided: a client for the chosen machine, or the picker. */
-export type RelayBoot = { client: FlueClient } | { picker: true }
+/**
+ * What the boot decided: a client for the chosen machine, or the picker.
+ *
+ * `pinned` says how that client knows its daemon, and it is always true here
+ * because this function has exactly one way of building one — the key pinned
+ * under the machine's id at a ceremony this browser performed. It is stated
+ * rather than assumed downstream because it is a security condition, not a
+ * detail: `adoptFleetKey` takes a fleet key off a welcome only from a session
+ * keyed that way. Anything that later teaches this function a second way to
+ * reach a machine — a machine certificate, say — has to say so here, and the
+ * type is what makes that unmissable.
+ */
+export type RelayBoot = { client: FlueClient; pinned: true } | { picker: true }
 
 /**
  * Decide what a relay-served tab mounts.
@@ -52,6 +63,7 @@ export async function relayBoot(
     const identity = { deviceKey: await loadOrCreateDeviceKey(), daemonPub }
     return {
       client: new FlueClient(origin, (o) => relaySocket(o, identity, machine.id, wsFactory)),
+      pinned: true,
     }
   } catch {
     return { picker: true }

@@ -25,8 +25,18 @@ const DB_NAME = 'flue'
 const STORE = 'keys'
 const DEVICE_RECORD = 'device-static'
 
-/** An X25519 key, in bytes. Anything else is not one. */
-const KEY_BYTES = 32
+/**
+ * An X25519 key, in bytes. Anything else is not one — and the Ed25519 fleet
+ * public key is the same width, which is why one constant serves both.
+ *
+ * Exported because the check moved out of this module's reach. A key arriving
+ * on a connection (fleet/fleet.ts, adoptFleetKey) has to be measured before it
+ * is written, not only when it is read back: `read` below refuses a record of
+ * the wrong width, so a bad write would be a browser that silently holds no
+ * fleet key at all rather than one that fails at the moment it was handed
+ * nonsense.
+ */
+export const KEY_BYTES = 32
 
 /**
  * Where the daemon's static public key is pinned, once pairing has handed one
@@ -72,9 +82,18 @@ const DEVICE_RECORD_PREFIX = 'daemon-static:'
  * certificate that verifies under this key is a machine this browser will
  * dial, pinning the `noise` key that certificate names — so a record that
  * could be replaced silently would be every machine's static key, decided
- * once and never asked about again. It is written from the pairing ceremony
- * and from nowhere else, with a value that arrived in the QR: the one leg no
- * intermediary can sit in.
+ * once and never asked about again.
+ *
+ * **Two writers, and the second is narrower than the first.** The pairing
+ * ceremony writes the value that arrived in the QR — the one leg no
+ * intermediary can sit in — and that is still where a browser meets a fleet.
+ * The other is fleet/fleet.ts's adoptFleetKey, for the browser the QR reached
+ * before its machine had a key to put in one: it keeps a key off a welcome,
+ * and only from a session this browser opened against a daemon static key it
+ * pinned at a ceremony of its own. That is an authenticated statement from a
+ * party it already trusts rather than an assertion from an unknown peer — the
+ * relay cannot forge the Noise session, and a daemon that could lie holds the
+ * fleet seed already. It refuses to overwrite; see below.
  *
  * The Ed25519 *public* half only. The seed rides the join line between
  * machines and never reaches a browser — a browser holding it could mint
@@ -211,15 +230,16 @@ export async function loadPinnedDaemonKeyFor(
 }
 
 /**
- * Pin the fleet this browser has just joined, from the `f=` in the pairing
- * link.
+ * Pin the fleet this browser has just joined: from the `f=` in the pairing
+ * link, or from a welcome that came in over a pinned daemon key.
  *
- * Called from the same moment, and on the same evidence, as
- * `savePinnedDaemonKeyFor`: the user carried a code across from a screen they
- * physically control, and both keys were read out of it. What this one buys is
- * every *other* machine — the directory names them, this key is what makes
- * their certificates mean anything, and neither the relay nor anything sitting
- * in front of it can produce one.
+ * The link is the original and the stronger of the two. The user carried a code
+ * across from a screen they physically control and both keys were read out of
+ * it, which is the same moment and the same evidence as
+ * `savePinnedDaemonKeyFor`. What this one buys is every *other* machine — the
+ * directory names them, this key is what makes their certificates mean
+ * anything, and neither the relay nor anything sitting in front of it can
+ * produce one.
  *
  * Overwrites, for the reason the daemon pin does: re-pairing is how a browser
  * moves to another fleet, and re-setup (`flue relay setup`) mints a fresh
@@ -227,11 +247,16 @@ export async function loadPinnedDaemonKeyFor(
  * overwrite would be stranded on a key nothing signs under any more, with
  * clearing site data as the only way back.
  *
- * Which puts the same weight on the caller: only a key that arrived in the
- * link may be written here. A fleet key taken from an answer over the wire
- * would be the trust-on-first-use the pinning exists to end, one level up —
- * whoever supplied it could then mint a machine certificate for every machine
- * this browser will ever dial.
+ * Which puts the weight on the caller, and the two callers carry it
+ * differently. The ceremony writes what the QR said, unconditionally. The other
+ * — fleet/fleet.ts's adoptFleetKey — writes only into an empty record, and only
+ * a key that reached this browser over a Noise session keyed to a daemon static
+ * key it pinned at a ceremony of its own. Neither is trust-on-first-use: the
+ * first learned the key out of band, and the second learned it from a party it
+ * had already authenticated out of band. What would be is a key taken off a
+ * connection to a peer this browser never pinned — whoever supplied it could
+ * then mint a machine certificate for every machine this browser will ever
+ * dial — and there is no path here that does that.
  */
 export async function savePinnedFleetKey(
   publicKey: Uint8Array,
@@ -254,6 +279,13 @@ export async function savePinnedFleetKey(
  * paired with directly and learns of no others. What it must never do is read
  * the directory without one — an unverifiable machine list is a relay naming
  * whatever machines it likes.
+ *
+ * Nor is null necessarily the last word any more. A browser that pinned a
+ * daemon key takes a fleet key off that machine's next welcome
+ * (fleet/fleet.ts, adoptFleetKey), so null here often means "not yet, and this
+ * tab is about to fix it" rather than "not ever". Every reader must go on
+ * treating it as the answer for now — the callers are all `await`ed at the
+ * moment they ask, and a fleet re-read after adoption is what turns the corner.
  */
 export async function loadPinnedFleetKey(
   factory: IDBFactory = indexedDB,
