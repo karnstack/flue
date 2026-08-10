@@ -624,10 +624,20 @@ func directoryLine(rc config.Relay) string {
 	}
 	line := fmt.Sprintf("fleet:    %s, %d verified under this fleet key",
 		plural(counts.Entries, "entry", "entries"), counts.Verified)
-	line += fmt.Sprintf(" (%s, %s, %s)",
+	// Machines and revocations, which is what the directory carries. Device
+	// certificates are not published to it — they go to the device that owns
+	// them (spec/fleet-trust.md) — so a count of them here would read as "this
+	// fleet has no devices" when it means "the directory does not list them",
+	// which are different claims and only the second is true. It is still
+	// *counted*, because a non-zero value is a real signal worth naming: an
+	// older machine in this fleet is still publishing them.
+	line += fmt.Sprintf(" (%s, %s)",
 		plural(counts.Machines, "machine", "machines"),
-		plural(counts.Devices, "device", "devices"),
 		plural(counts.Revocations, "revocation", "revocations"))
+	if counts.Devices > 0 {
+		line += fmt.Sprintf("\n          %s in the directory; a machine in this fleet is running a flue that still publishes them",
+			plural(counts.Devices, "device certificate", "device certificates"))
+	}
 	if counts.Entries != counts.Verified {
 		line += fmt.Sprintf("\n          %s signed by something else; this relay may belong to another fleet",
 			plural(counts.Entries-counts.Verified, "entry is", "entries are"))

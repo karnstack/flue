@@ -1321,7 +1321,11 @@ func TestRunRelayStatusReportsTheFleetDirectory(t *testing.T) {
 	for _, want := range []string{
 		"4 entries",
 		"3 verified",
-		"1 machine, 1 device, 1 revocation",
+		"1 machine, 1 revocation",
+		// Device certificates are not published to the directory any more, so
+		// one that is there is worth naming as the anomaly it is rather than
+		// counting silently beside the machines.
+		"1 device certificate in the directory",
 		// The entry nobody in this fleet signed, named as such rather than
 		// quietly counted: a relay serving blobs this key did not sign is
 		// either a rotated fleet key or somebody else's relay.

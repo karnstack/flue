@@ -150,6 +150,24 @@ What the directory still owes a stored certificate is the other half of the
 rule: a browser reads the revocations and stops presenting a certificate whose
 key the fleet has cut off.
 
+**Signed pruning of superseded certificates: considered, and not built.** With
+device certificates gone, the only entry that can ever be *superseded* is a
+machine certificate a machine re-minted — which happens when `flue relay
+setup`/`join` runs on it again, a handful of times in the life of a fleet. The
+mechanism to remove them would be a fleet-signed statement naming the digests
+to delete, and the relay would have to check that signature before honouring
+it, which means binding the fleet public key to the Worker and giving this leg
+an opinion about the blobs it holds. That reverses the invariant the whole
+design rests on — the relay stores and serves and verifies nothing — for a
+handful of entries out of 512. The alternative, deleting by digest on the
+daemon secret alone, is worse: it hands anyone who compromises one machine the
+ability to delete *any* entry, and the relay cannot tell a revocation's digest
+from a certificate's, which is the "eviction can drop a revocation" failure
+the no-eviction rule exists to prevent. The bounded, keyless answer to a
+directory that has genuinely filled is `DELETE /directory`
+(`flue relay reset`), which needs no opinion about any blob, and the status
+surfaces warn from 90% of the cap so it is a decision rather than a discovery.
+
 The Worker stores blobs it cannot check; every reader verifies every
 signature under the fleet public key and drops what fails. A hostile relay
 can serve a stale or truncated directory — it always could refuse to route —

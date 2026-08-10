@@ -198,7 +198,11 @@ describe('RemoteRoute', () => {
       },
       async () => {
         await mountRemote({ relay: RELAY_UP })
-        expect(await screen.findByText(/2 machines, 3 devices, 2 revocations/)).toBeTruthy()
+        expect(await screen.findByText(/2 machines, 2 revocations/)).toBeTruthy()
+        // Device certificates are not published to the directory any more, so
+        // three of them there is an older machine in the fleet, named rather
+        // than counted silently beside the machines.
+        expect(screen.getByText(/3 device certificates in the directory/)).toBeTruthy()
       },
     )
   })
@@ -301,7 +305,7 @@ describe('RemoteRoute', () => {
       },
       async () => {
         await mountRemote({ relay: RELAY_UP })
-        expect(await screen.findByText(/2 machines, 400 devices, 57 revocations/)).toBeTruthy()
+        expect(await screen.findByText(/2 machines, 57 revocations/)).toBeTruthy()
         expect(screen.queryByText(/flue relay reset/)).toBeNull()
       },
     )

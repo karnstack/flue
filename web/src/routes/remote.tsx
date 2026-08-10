@@ -362,10 +362,20 @@ function FleetLine({ directory }: { directory?: DirectoryCounts }) {
   const unsigned = directory.entries - directory.verified
   return (
     <>
+      {/*
+        Machines and revocations, which is what the directory carries. Device
+        certificates go to the device that owns them and are not published
+        here, so a count of them would read as "this fleet has no devices"
+        when it means "the directory does not list them" — two different
+        claims, and only the second is true. A non-zero one is still worth
+        naming: it means a machine in this fleet is running an older flue.
+      */}
       <p className={cn(NOTE, 'max-w-[65ch]')}>
-        Fleet: {count(directory.machines, 'machine')}, {count(directory.devices, 'device')},{' '}
+        Fleet: {count(directory.machines, 'machine')},{' '}
         {count(directory.revocations, 'revocation')} — everything this machine's fleet key could
         check.
+        {directory.devices > 0 &&
+          ` ${count(directory.devices, 'device certificate')} in the directory: a machine in this fleet is running a flue that still publishes them.`}
         {unsigned > 0 &&
           ` ${count(unsigned, 'entry', 'entries')} in the directory ${
             unsigned === 1 ? 'was' : 'were'
