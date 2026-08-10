@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1337,7 +1338,7 @@ func TestStartRelayDialsAConfiguredRelay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fleet.Parse: %v", err)
 	}
-	id := daemon.Identity{Fleet: fk}
+	id := daemon.Identity{Fleet: daemon.StaticFleet(fk, "karns-macbook-pro-a1b2-0f9a12cd")}
 
 	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth("0123456789abcdef", 0),
 		uiHandler(), version, id)
@@ -1413,7 +1414,7 @@ func TestRelayRuntimeStopEndsTheDialling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fleet.Parse: %v", err)
 	}
-	id := daemon.Identity{Fleet: fk}
+	id := daemon.Identity{Fleet: daemon.StaticFleet(fk, "karns-macbook-pro-a1b2-0f9a12cd")}
 	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth("0123456789abcdef", 0),
 		uiHandler(), version, id)
 	t.Cleanup(srv.Shutdown)
@@ -1506,6 +1507,65 @@ func TestStartRelayIsNeverFatal(t *testing.T) {
 	}
 }
 
+// TestLoadIdentityReadsTheFleetKeyWhenItIsUsed: the identity a serving daemon
+// holds must answer with the relay.json that exists *now*, not the one that
+// existed when it booted.
+//
+// The window this closes is the ordinary one, not an exotic one: the daemon
+// starts at login, and `flue relay setup` runs later, in a terminal, in a
+// process of its own. Nothing tells the daemon. An identity that had parsed
+// the file at construction went on signing with what it found there — nothing
+// — while the relay leg (which re-reads the file) came up live, so the machine
+// was on the relay and unable to mint a single certificate for it.
+func TestLoadIdentityReadsTheFleetKeyWhenItIsUsed(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	id, err := loadIdentity(slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("loadIdentity: %v", err)
+	}
+	if got := id.Fleet(); got.Key.Valid() || got.MachineID != "" {
+		t.Fatalf("a daemon with no relay.json holds %+v, want no fleet identity at all", got)
+	}
+
+	// `flue relay setup`, in the other terminal, after this daemon started.
+	const machineID = "karns-macbook-pro-a1b2-0f9a12cd"
+	if err := config.SaveRelay(config.Relay{
+		URL:       "wss://r.example",
+		Secret:    "s3cr3t-daemon-secret",
+		Origin:    "https://r.example",
+		MachineID: machineID,
+		FleetSeed: testFleetSeed,
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+
+	want, err := fleet.Parse(testFleetSeed)
+	if err != nil {
+		t.Fatalf("fleet.Parse: %v", err)
+	}
+	got := id.Fleet()
+	if !got.Key.Valid() {
+		t.Fatal("the identity still holds no fleet key after relay.json was written; every pairing from here is fleet-blind and permanently so")
+	}
+	if got.Key.Seed() != want.Seed() {
+		t.Errorf("fleet key = %q, want the seed relay.json holds %q", got.Key.Seed(), want.Seed())
+	}
+	if got.MachineID != machineID {
+		t.Errorf("machine id = %q, want %q — a cert naming no machine is one no reader can attribute", got.MachineID, machineID)
+	}
+
+	// And a file rewritten into nonsense under a running daemon costs the fleet
+	// half and nothing else: this is remote access, not the terminal in the
+	// tab, and refusing to pair at all would trade the second for the first.
+	if err := config.SaveRelay(config.Relay{URL: "wss://r.example", FleetSeed: "not-a-seed"}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+	if got := id.Fleet(); got.Key.Valid() {
+		t.Errorf("a seed that does not parse produced a usable key %v", got.Key.Seed())
+	}
+}
+
 // TestStatusReportsAnIncompleteRelayConfig: a relay.json missing a field is one
 // relay.New refuses, so the daemon never dials it. Reporting it as "configured"
 // would make the one report someone reads to find out why nothing works say
@@ -1531,6 +1591,13 @@ func TestStatusReportsAnIncompleteRelayConfig(t *testing.T) {
 		// `flue status`, `flue relay status` and /api/relay/info all called it
 		// configured and fine.
 		{"no fleet key", config.Relay{URL: "wss://r.example", Secret: secret, Origin: "https://r.example", MachineID: "m-0001"}, "no fleet key"},
+		// A seed that is present and unusable — a hand-edited file, a
+		// half-pasted join line. It reads differently from the case above,
+		// because the file looks configured, and it is the line that answers
+		// "can this process sign": the daemon parses this same value at the
+		// moment it mints a device certificate, so a seed named here is a
+		// daemon that will pair devices onto no fleet at all.
+		{"unusable fleet key", config.Relay{URL: "wss://r.example", Secret: secret, Origin: "https://r.example", MachineID: "m-0001", FleetSeed: "not-a-seed"}, "a fleet key this daemon cannot use"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())

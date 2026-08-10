@@ -99,6 +99,14 @@ const EXPLAINER =
   "Remote devices can't reach 127.0.0.1. Run flue relay setup to give this daemon an address, then pair."
 
 /**
+ * The second gate's words, pinned for the same reason: they are the whole
+ * account of why a reachable machine still will not draw a QR, and the fault
+ * they describe is the one that used to happen silently.
+ */
+const FLEET_BLIND =
+  'This daemon holds no fleet key, so a device paired now would reach this machine and nothing else — permanently, because pairing is where both of those records are written. Run flue relay status to see what its relay.json is missing.'
+
+/**
  * A 2D context good enough for lean-qr, since jsdom ships none.
  *
  * Stubbed rather than skipped: without it jsdom reports "not implemented" and
@@ -527,6 +535,32 @@ describe('DevicesRoute', () => {
     expect(
       screen.getByRole('link', { name: /set up remote access/i }).getAttribute('href'),
     ).toBe('/remote')
+  })
+
+  it('refuses a QR the daemon could not sign, rather than minting a fleet-blind device', async () => {
+    // The relay is up, so the address is reachable — and the daemon says it
+    // holds no fleet key. A pairing completed now writes neither of the two
+    // records that put a browser on a fleet: no `f=` for it to pin, no
+    // certificate for it to present. Both are written once, by that ceremony,
+    // so the device would reach this machine and nothing else for as long as
+    // the pairing lasted, with no reconnect or later fix able to repair it.
+    const { sock } = await mountDevices({ relay: { ...RELAY_UP, noFleetKey: true } })
+    listed(sock, [])
+
+    expect(pairButton().hasAttribute('disabled')).toBe(true)
+    const describedBy = pairButton().getAttribute('aria-describedby')
+    expect(document.getElementById(describedBy as string)?.textContent).toContain(FLEET_BLIND)
+  })
+
+  it('reads a welcome that says nothing about the fleet key as no refusal', async () => {
+    // Absent is what a daemon from before the field says, and a relay-served
+    // tab talks to whichever build each machine is running. Refusing on
+    // silence would break pairing against every one of them.
+    const { sock } = await mountDevices({ relay: RELAY_UP })
+    listed(sock, [])
+
+    expect(pairButton().hasAttribute('disabled')).toBe(false)
+    expect(screen.queryByText(FLEET_BLIND)).toBeNull()
   })
 
   it('offers pairing while the relay is connected, and says nothing else about it', async () => {

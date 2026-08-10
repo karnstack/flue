@@ -75,11 +75,9 @@ func (s *relayUIService) logf() *slog.Logger {
 }
 
 // relayRuntime tracks whether this daemon process has a relay transport
-// running, and how to start and stop one. It exists for the first-deploy
-// moment: a daemon that booted with no relay.json should start dialling the
-// relay the user just deployed without being restarted — and a daemon whose
-// transport is already up must NOT be given a second one, so a re-deploy
-// reports RestartNeeded instead.
+// running, and how to start, stop and replace one. It exists for the
+// first-deploy moment: a daemon that booted with no relay.json should start
+// dialling the relay the user just deployed without being restarted.
 //
 // The stop half exists for the opposite moment. Disconnecting from the Remote
 // screen deletes relay.json, and a daemon that kept its socket after that
@@ -87,6 +85,13 @@ func (s *relayUIService) logf() *slog.Logger {
 // answering on — which is the one claim this feature must not make. So start
 // hands back the way to undo itself, rather than the caller keeping a cancel
 // somewhere and hoping the two stay in step.
+//
+// Restart is the two together, and it is what a *second* deploy needs. A
+// daemon whose leg is already up used to be told to restart itself: the leg
+// dialled the old relay.json, the file had just been replaced, and nothing in
+// the process could reconcile the two. It can now — stop that leg, start
+// another, and the new one reads the file that is there — so "restart the
+// daemon" stops being an answer this program gives.
 type relayRuntime struct {
 	mu      sync.Mutex
 	running bool
@@ -125,6 +130,10 @@ func (rt *relayRuntime) startOnce() (bool, bool) {
 func (rt *relayRuntime) stopNow() bool {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	return rt.stopLocked()
+}
+
+func (rt *relayRuntime) stopLocked() bool {
 	if !rt.running {
 		return false
 	}
@@ -134,6 +143,35 @@ func (rt *relayRuntime) stopNow() bool {
 		stop()
 	}
 	return true
+}
+
+// restart replaces whatever leg is running with one built from the relay.json
+// that exists now, and reports whether a leg is dialling when it returns.
+//
+// One lock for both halves, deliberately: a stop and a start that could
+// interleave with another caller's would be two legs on one relay, which is the
+// state the Durable Object resolves by closing the incumbent — the working
+// socket — on the newcomer's behalf. It is also why the whole operation is
+// here rather than assembled from stopNow and startOnce at the call sites.
+//
+// Called by every path that rewrites relay.json under a running daemon: a
+// deploy or an address change from the Remote screen, and Reload, which is
+// what `flue relay setup`/`join`/`address`/`leave` in a terminal reach for.
+// A false answer means there is nothing to dial — relay.json is gone, or
+// carries a configuration relay.New refuses — and the daemon serves loopback
+// exactly as it would have.
+func (rt *relayRuntime) restart() bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.stopLocked()
+	if rt.start == nil {
+		return false
+	}
+	started, stop := rt.start()
+	if started {
+		rt.running, rt.stop = true, stop
+	}
+	return started
 }
 
 func (s *relayUIService) client(token string) *cloudflare.Client {
@@ -413,16 +451,14 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 	if certErr != nil {
 		steps = append(steps, "could not mint this machine's fleet certificate ("+certErr.Error()+"); other devices will not discover this machine")
 	}
-	// Said out loud because the transport this deploy is about to start does
-	// not cover it. daemon.Identity is fixed at construction, so the fleet key
-	// this process signs with is whatever relay.json held when it booted —
-	// nothing, usually, and never the key minted three lines up. The dialling
-	// half picks the new key up immediately (startRelay reads the file), so
-	// this machine verifies its fleet's certs from now; the signing half —
-	// minting a device cert at pairing, a revocation at revoke — waits for a
-	// restart. A user who pairs a phone in between gets a phone that works
-	// here and cannot roam to the machines they add next.
-	steps = append(steps, "restart the daemon to sign with the new fleet key (until then it verifies fleet certs but mints none)")
+	// What used to stand here was a warning: the fleet key this process signed
+	// with was whatever relay.json held when the daemon booted — never the key
+	// minted three lines up — so a phone paired between this deploy and the
+	// next restart got a phone that worked here and could never roam. Both
+	// halves now read the file: the dialling half at every start, and the
+	// signing half at every signature (cmd/flue.fleetOnDisk). There is nothing
+	// left to warn about, so the line says what is true instead.
+	steps = append(steps, "this daemon signs with the new fleet key from now on")
 
 	if fromRequest {
 		// Stored by product decision — one 0600 file beside relay.json — so
@@ -440,19 +476,22 @@ func (s *relayUIService) Provision(ctx context.Context, req daemon.RelayUIDeploy
 		Origin:      "https://" + host,
 		JoinCommand: joinCommand(host, secret, fleetKey.Seed()),
 	}
-	if started, already := s.runtime.startOnce(); already {
-		// A transport is already up, dialling whatever relay.json said when it
-		// started. The new file wins on the next daemon start, and saying so
-		// beats silently running against the old relay.
-		res.RestartNeeded = true
-	} else if started {
+	// Restart rather than start-if-idle. A daemon that already had a leg was
+	// dialling whatever relay.json said when that leg began, which this deploy
+	// has just replaced — secret, machine id, fleet key and all — so the leg
+	// has to be replaced with it. The stop waits for the old one to be gone
+	// before the new one dials (newRelayRuntime), so nothing here has to
+	// reconcile two legs' claims about one daemon.
+	if s.runtime.restart() {
 		res.Steps = append(res.Steps, "daemon connecting to the relay")
+	} else {
+		res.Steps = append(res.Steps, "the daemon could not start a relay leg for this configuration; `flue relay status` says which field is missing")
 	}
 	// Remember what shipped and where: Status answers from this while the
 	// edge catches up, instead of trusting a health read that briefly still
 	// says the previous deploy.
 	s.recordShipped(res.Origin)
-	s.logf().Info("relay deployed from the UI", "worker", worker, "host", host, "restartNeeded", res.RestartNeeded)
+	s.logf().Info("relay deployed from the UI", "worker", worker, "host", host)
 	return res, nil
 }
 
@@ -470,14 +509,17 @@ func joinCommand(host, secret, fleetSeed string) string {
 // SetAddress is `flue relay address` behind the card: the user routed a
 // custom domain to the Worker in the Cloudflare dashboard, and this repoints
 // relay.json at it. URL and origin only; worker, secret and machine id stay,
-// because the Worker behind the name is the same one. What does not stay is
+// because the Worker behind the name is the same one. The leg is restarted
+// onto the new name in this process, so the daemon dials the address the card
+// now shows rather than the one it was started with. What does not stay is
 // any existing pairing — the daemon serves exactly the origin it dials, so
 // every browser paired on the old one must pair again on the new address
 // (see runRelayAddress), and the second step line carries that truth to the
-// card. The shipped-deploy memory keys on the origin, so a repoint sends
-// Status back to asking the relay itself: the Worker behind the new name
-// should be the same one, but that is the health read's fact to confirm,
-// not memory's to assume.
+// card. That one is not a restart in disguise and no restart fixes it: a
+// pairing lives in a browser, keyed to the origin it was made on. The
+// shipped-deploy memory keys on the origin, so a repoint sends Status back to
+// asking the relay itself: the Worker behind the new name should be the same
+// one, but that is the health read's fact to confirm, not memory's to assume.
 func (s *relayUIService) SetAddress(ctx context.Context, address string) (daemon.RelayUIDeployResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -498,15 +540,15 @@ func (s *relayUIService) SetAddress(ctx context.Context, address string) (daemon
 	if err := config.SaveRelay(cfg); err != nil {
 		return daemon.RelayUIDeployResult{}, fmt.Errorf("save the relay configuration: %w", err)
 	}
+	steps := []string{"relay address is now wss://" + host}
+	if s.runtime.restart() {
+		steps = append(steps, "the daemon is dialling the new address now")
+	}
+	steps = append(steps, "every browser paired on the old origin must pair again on the new address")
 	s.logf().Info("relay address changed from the UI", "host", host)
 	return daemon.RelayUIDeployResult{
-		Steps: []string{
-			"relay address is now wss://" + host,
-			"every browser paired on the old origin must pair again on the new address",
-		},
+		Steps:  steps,
 		Origin: "https://" + host,
-		// The transport dialling right now read the old file at startup.
-		RestartNeeded: true,
 	}, nil
 }
 
@@ -564,6 +606,57 @@ func (s *relayUIService) Leave(ctx context.Context) (daemon.RelayUIDeployResult,
 	// No Origin: there is no relay origin any more, and naming the one this
 	// machine just left would put an address on a card that means nothing.
 	return daemon.RelayUIDeployResult{Steps: steps}, nil
+}
+
+// Reload makes this process's relay leg match the relay.json that is on disk
+// right now, and reports what it did.
+//
+// It is the hook the *other* process needs. `flue relay setup`, `join`,
+// `address` and `leave` are terminal commands: they rewrite relay.json and
+// exit, and the daemon they configure has been running since login with no
+// idea any of it happened. Everything a daemon signs already follows the file
+// by itself (fleetOnDisk), but a socket cannot be read out of a file on
+// demand — so the CLI knocks here, over loopback, with the token it already
+// holds, and the leg is replaced in place. That is the whole reason
+// `flue relay setup` no longer ends with "now restart the daemon".
+//
+// It takes no parameters and cannot be told which relay to dial: the answer is
+// always "whatever relay.json says", which is what makes it safe to expose to
+// a command that has just written that file. A machine with no relay.json gets
+// its leg stopped, which is `flue relay leave` completing itself.
+func (s *relayUIService) Reload(ctx context.Context) (daemon.RelayUIDeployResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg, ok, err := config.LoadRelay()
+	if err != nil {
+		return daemon.RelayUIDeployResult{}, err
+	}
+	if !ok {
+		// Nothing to dial. Stopping is the honest half of `flue relay leave`,
+		// and a daemon that had no leg either way says so in one line.
+		if s.runtime.stopNow() {
+			s.logf().Info("relay leg stopped after relay.json was removed")
+			return daemon.RelayUIDeployResult{Steps: []string{"relay leg stopped; nothing outside this computer reaches this machine now"}}, nil
+		}
+		return daemon.RelayUIDeployResult{Steps: []string{"no relay is configured on this machine; nothing to dial"}}, nil
+	}
+	if !s.runtime.restart() {
+		// The file is there and the leg refused it. That is a fault worth a
+		// sentence rather than a silence, and relayProblems is the one place
+		// that names such faults for every surface flue has.
+		steps := []string{"the daemon could not dial " + cfg.URL}
+		if problems := relayProblems(cfg); len(problems) > 0 {
+			steps = append(steps, "relay.json is not usable ("+strings.Join(problems, ", ")+")")
+		}
+		s.logf().Warn("relay leg not started on reload", "url", cfg.URL)
+		return daemon.RelayUIDeployResult{Steps: steps, Origin: cfg.Origin}, nil
+	}
+	s.logf().Info("relay leg restarted from the current relay.json", "url", cfg.URL)
+	return daemon.RelayUIDeployResult{
+		Steps:  []string{"the running daemon picked up the new configuration and is dialling " + cfg.URL},
+		Origin: cfg.Origin,
+	}, nil
 }
 
 // JoinCommand rebuilds the hand-off line from relay.json. The "shown once"

@@ -312,6 +312,20 @@ export interface RelayInfo {
    * titles, never for URLs — that is what `machineId` is for.
    */
   machineName?: string
+  /**
+   * This daemon is on a relay and cannot sign for its fleet: no fleet key in
+   * its relay.json, one it cannot parse, or no machine id for a certificate
+   * to name.
+   *
+   * A device paired while it is true pins no fleet key and is minted no
+   * certificate, so it reaches that one machine for the life of the pairing —
+   * both records are written once, by the ceremony, and nothing repairs them.
+   * Devices refuses to draw a QR in that state (routes/devices.tsx).
+   *
+   * Absent means the daemon said nothing about it, which is what a build from
+   * before this field says, so absent is never read as a refusal.
+   */
+  noFleetKey?: boolean
 }
 
 export interface Welcome {

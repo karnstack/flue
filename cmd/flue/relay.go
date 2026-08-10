@@ -25,6 +25,7 @@ import (
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/relaydeploy"
+	"github.com/karnstack/flue/internal/transport/local"
 	"github.com/karnstack/flue/internal/transport/relay"
 	relaybundle "github.com/karnstack/flue/relay"
 	"github.com/karnstack/flue/web"
@@ -140,21 +141,26 @@ func runRelayAddress(w io.Writer, args []string) error {
 		return fmt.Errorf("save the relay configuration: %w", err)
 	}
 	fmt.Fprintf(w, "  ✓ relay address is now wss://%s\n", host)
+	tellTheDaemon(w)
 	fmt.Fprint(w, relayAddressDone)
 	return nil
 }
 
-// relayAddressDone is relayJoinDone's restart note plus the one consequence
-// the ✓ line does not carry: the daemon serves exactly the origin it dials,
-// so every browser paired on the old one is refused from here on — a tab
-// left there reconnects forever — and each must pair again on the new
-// address. Said here because nothing else will say it: the old origin keeps
-// routing, so the stranding looks like a network fault, not a config change.
+// relayAddressDone is the one consequence the ✓ lines do not carry, and the
+// one thing about this command no restart ever fixed: the daemon serves
+// exactly the origin it dials, so every browser paired on the old one is
+// refused from here on — a tab left there reconnects forever — and each must
+// pair again on the new address. Said here because nothing else will say it:
+// the old origin keeps routing, so the stranding looks like a network fault
+// rather than a config change.
+//
+// What used to lead this note was "restart the daemon to dial it". The daemon
+// is told directly now (tellTheDaemon), and a restart is named only in the one
+// case where the telling failed.
 const relayAddressDone = `
-relay address changed. restart the daemon (flue disable && flue enable, or
-restart flue serve) to dial it. every browser paired on the old origin must
-open the new address and pair again — pairings are pinned to the origin
-they were made on, and a tab on the old one will only ever reconnect.
+every browser paired on the old origin must open the new address and pair
+again — pairings are pinned to the origin they were made on, and a tab on
+the old one will only ever reconnect.
 `
 
 const relaySetupUsage = "usage: flue relay setup [--worker <name>]"
@@ -181,11 +187,16 @@ Token: `
 // that is the one thing a user cannot check for themselves: stored, in one
 // 0600 file, so `flue relay update` and the Remote screen's update button
 // need no re-paste — and deleting that file is the whole undo.
+//
+// It no longer opens with "restart the daemon to connect", because a daemon
+// no longer has to be restarted to connect: tellTheDaemon has already told the
+// running one, and the fleet key this setup minted is read from relay.json at
+// every signature rather than at boot. Pair a phone in the next breath and it
+// gets a certificate for the fleet, which is the whole of what the restart
+// used to buy.
 const relaySetupDone = `
-relay configured. restart the daemon (flue disable && flue enable, or
-restart flue serve) to connect. the token is stored in cloudflare.json
-(0600, beside relay.json) so updates need no re-paste; delete that file to
-forget it.
+relay configured. the token is stored in cloudflare.json (0600, beside
+relay.json) so updates need no re-paste; delete that file to forget it.
 `
 
 // runRelaySetup deploys the relay Worker and the web app into the user's own
@@ -366,6 +377,8 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 	// their fleet up. Its weight changed when the fleet key came aboard:
 	// leaking this line used to buy disruption, and now it buys the fleet —
 	// docs/RELAY.md says so where it teaches the line.
+	tellTheDaemon(w)
+
 	fmt.Fprintf(w, "\nto add another machine, run this on it:\n\n  %s\n", joinCommand(host, secret, fleetKey.Seed()))
 
 	fmt.Fprint(w, relaySetupDone)
@@ -376,6 +389,82 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 // humans — never part of a URL — so the only limit it needs is one that keeps
 // a machine list rendering as a list.
 const machineNameMaxRunes = 64
+
+// tellTheDaemon hands the running daemon, if there is one, the news that
+// relay.json has changed, and prints what it did about it.
+//
+// This is the other half of "no restarts". Everything the daemon *signs* now
+// follows relay.json by itself, read at the moment of signing (fleetOnDisk),
+// but a socket is not a file read: a daemon dialling the relay it was
+// configured with an hour ago cannot notice a new one, and one dialling
+// nothing cannot notice that there is now something to dial. So the command
+// that wrote the file knocks on the daemon's loopback door — the same
+// identified daemon `flue open` and `flue status` talk to, the same token
+// header, a POST with no body — and the daemon replaces its relay leg in
+// place (relayUIService.Reload).
+//
+// It prints and never fails. Every outcome here is either "the daemon caught
+// up" or "there is no daemon to catch up", and neither is a reason to fail a
+// setup that has already deployed a Worker and written a config. The only case
+// that costs the user anything is a daemon that is running and could not be
+// reached, which is the one case that still names a restart — the honest
+// remainder, rather than the blanket instruction this used to print for
+// everyone.
+func tellTheDaemon(w io.Writer) {
+	port, ok := ourDaemon()
+	if !ok {
+		// Nothing is running, so nothing is stale: whatever starts next reads
+		// the file that is now on disk.
+		fmt.Fprintln(w, "  ✓ no daemon is running; the next one to start reads relay.json as it is now")
+		return
+	}
+	steps, err := reloadRelayLeg(port)
+	if err != nil {
+		fmt.Fprintf(w, "  ! the daemon on 127.0.0.1:%d could not be told (%v)\n", port, err)
+		fmt.Fprintln(w, "    restart it to pick this up: flue disable && flue enable, or restart flue serve")
+		return
+	}
+	for _, step := range steps {
+		fmt.Fprintf(w, "  ✓ %s\n", step)
+	}
+}
+
+// reloadRelayLeg is the request half of the above: POST RelayReloadPath with
+// the session token in the header — never a URL, never a cookie, for the
+// reasons mintHandoff spells out — and the steps the daemon answers with.
+func reloadRelayLeg(port int) ([]string, error) {
+	token, err := loadToken()
+	if err != nil {
+		return nil, err
+	}
+	u := &url.URL{
+		Scheme: "http",
+		Host:   fmt.Sprintf("127.0.0.1:%d", port),
+		Path:   daemon.RelayReloadPath,
+	}
+	req, err := http.NewRequest(http.MethodPost, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(local.HeaderName, token)
+	resp, err := probeClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		// The body is plain text on every refusal this endpoint has, and it
+		// carries no credential — but it is the daemon's own words about the
+		// user's own machine, so the status alone is what gets reported.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("answered %s", resp.Status)
+	}
+	var body daemon.RelayUIDeployResult
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMintBytes)).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body.Steps, nil
+}
 
 // mintMachineCert signs this machine's fleet machine certificate: the id it
 // holds on the relay, its display name, and the Noise static key every device
@@ -420,12 +509,14 @@ func mintMachineCert(key fleet.Key, machineID, machineName string) ([]byte, erro
 
 const relayJoinUsage = "usage: flue relay join <url> --secret <secret> --fleet <fleet key> [--name <label>]"
 
-// relayJoinDone mirrors relaySetupDone's restart note without the token line:
-// join never saw a Cloudflare credential, so there is nothing to tell the user
-// to delete.
+// relayJoinDone mirrors relaySetupDone without the token line: join never saw
+// a Cloudflare credential, so there is nothing to tell the user to delete —
+// and, like setup, nothing to tell them to restart. The running daemon has
+// been told (tellTheDaemon) and signs under the fleet key this join line
+// carried from the moment the file was written.
 const relayJoinDone = `
-relay configured. restart the daemon (flue disable && flue enable, or
-restart flue serve) to connect.
+relay configured. this machine is on the fleet now: pair a browser here and
+it reaches every machine on this relay.
 `
 
 // runRelayJoin points this machine at a relay another machine already
@@ -530,6 +621,7 @@ func runRelayJoin(w io.Writer, args []string) error {
 	}
 
 	fmt.Fprintf(w, "  ✓ this machine joined wss://%s as %s (%s)\n", host, machineName, machineID)
+	tellTheDaemon(w)
 	fmt.Fprint(w, relayJoinDone)
 	return nil
 }
@@ -608,14 +700,24 @@ func runRelayStatus(w io.Writer) error {
 // gap between the two numbers is worth seeing — it is a rotated fleet key, or
 // a relay that is not the one this machine thinks it is.
 func directoryLine(rc config.Relay) string {
+	// The two ways this machine holds no usable fleet key, and the same
+	// consequence under both — said out loud, because it is invisible from
+	// everywhere else and permanent for every device paired while it lasts.
+	// The daemon signs with this file, read when it signs (fleetOnDisk), so
+	// what is unusable here is unusable in the running daemon too.
+	const cannotSign = "\n          this daemon signs nothing for a fleet: a browser paired here" +
+		"\n          pins no fleet key and gets no certificate, and no reload or" +
+		"\n          reconnect repairs that — it must pair again once this is fixed"
 	if rc.FleetSeed == "" {
 		// relayLine already names this as the fault that stops the daemon
 		// dialling at all; there is nothing this line could verify.
-		return "fleet:    unknown (this relay.json carries no fleet key)"
+		return "fleet:    unknown (this relay.json carries no fleet key)" + cannotSign +
+			"\n          fix: re-run `flue relay setup`, or `flue relay join --fleet ...` from a machine that has the key"
 	}
 	key, err := fleet.Parse(rc.FleetSeed)
 	if err != nil {
-		return "fleet:    unknown (the fleet key in relay.json cannot be parsed)"
+		return "fleet:    unknown (the fleet key in relay.json cannot be parsed)" + cannotSign +
+			"\n          fix: re-run `flue relay join --fleet ...` with the line from a machine still on this relay"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), relayStepTimeout)
 	defer cancel()
@@ -889,23 +991,17 @@ the revocation list, the stored Cloudflare token and the browser tab on
 `, relayWorkerLabel(cfg))
 }
 
-// relayLeaveDone is the part that only makes sense once the file is gone: what
-// is still true of a daemon that has not restarted, and the two facts about the
-// relay this machine just walked away from.
+// relayLeaveDone is the part that only makes sense once the file is gone: the
+// two facts about the relay this machine just walked away from that deleting a
+// local file does not change.
 //
-// The restart note is the same admission `flue relay join` and `flue relay
-// address` make, and it matters more here: those leave a daemon dialling the
-// *wrong* relay, and this leaves one dialling a relay the user believes they
-// are off. The transport holds the secret it read at startup, so it keeps the
-// socket — and keeps serving every browser on it — until the process ends. The
-// Remote screen's Disconnect is named because it is the one path that does both
-// halves at once: it runs inside the daemon and can stop the leg.
+// The restart note that used to open it is gone with the restart. This command
+// deleted relay.json and then told the running daemon (tellTheDaemon), which
+// stops the leg — so "you have left" is true of the socket as well as of the
+// file by the time this prints. The one case that still names a restart is a
+// daemon that could not be reached, and tellTheDaemon names it there rather
+// than warning everybody.
 const relayLeaveDone = `
-restart the daemon to make it stop dialling: flue disable && flue enable, or
-restart flue serve. until then a daemon that is already running keeps its
-relay socket, and every device on the other end keeps reaching this machine.
-(the Remote screen's Disconnect does both halves at once, no restart.)
-
 two things stay behind on the relay itself. this machine's certificate is
 still in the fleet directory — nothing there deletes a single entry, so the
 fleet's browsers keep listing this machine until somebody runs "flue relay
@@ -976,6 +1072,7 @@ func runRelayLeave(w io.Writer, r io.Reader, args []string) error {
 		return fmt.Errorf("delete the relay configuration: %w", err)
 	}
 	fmt.Fprintf(w, "  ✓ left %s (relay.json deleted)\n", cfg.URL)
+	tellTheDaemon(w)
 	fmt.Fprint(w, relayLeaveDone)
 	return nil
 }

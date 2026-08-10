@@ -107,7 +107,6 @@ interface DeployResult {
   steps?: string[]
   origin?: string
   join_command?: string
-  restart_needed?: boolean
 }
 
 /**
@@ -306,12 +305,6 @@ function DeployFlow({
             </p>
             <Copyable text={result.join_command} />
           </div>
-        )}
-        {result.restart_needed && (
-          <p className={PROSE}>
-            This daemon was already connected to a relay, so the new one takes over on its next
-            start: restart it (flue disable && flue enable, or restart flue serve).
-          </p>
         )}
       </div>
     )
@@ -623,9 +616,9 @@ function AddressChange({ origin }: { origin?: string }) {
         body: JSON.stringify({ address }),
       })
       if (!res.ok) throw new Error((await res.text()).trim() || `the daemon answered ${res.status}`)
-      const body = (await res.json()) as { origin?: string; restart_needed?: boolean }
+      const body = (await res.json()) as { origin?: string }
       setSaid(
-        `The relay address is now ${body.origin ?? address}. Restart the daemon (flue disable && flue enable, or restart flue serve) to dial it, then pair every browser again on the new address — pairings are pinned to the origin they were made on, so tabs paired on the old one will only ever reconnect.`,
+        `The relay address is now ${body.origin ?? address}, and the daemon is dialling it. Pair every browser again on the new address — pairings are pinned to the origin they were made on, so tabs paired on the old one will only ever reconnect.`,
       )
       setEditing(false)
     } catch (err) {

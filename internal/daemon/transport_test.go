@@ -137,7 +137,7 @@ func TestWelcomeCarriesTheDevicesFleetCert(t *testing.T) {
 	}
 	devices := crypto.NewDeviceStore(dir)
 	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
-		Identity{Key: key, Devices: devices, Fleet: fk})
+		Identity{Key: key, Devices: devices, Fleet: StaticFleet(fk, "karns-mbp-a1b2-0f9a12cd")})
 	t.Cleanup(srv.Shutdown)
 	srv.SetRelayMachine("karns-mbp-a1b2-0f9a12cd", "Karn's MacBook Pro")
 
@@ -379,6 +379,207 @@ func TestServeConnServesADeviceTheRegistryCannotStamp(t *testing.T) {
 		t.Fatal("a device whose last-seen could not be written was not served")
 	}
 	waitForLog(t, buf, "could not record")
+}
+
+// TestWelcomeBackFillsACertificateADevicePairedWithout is the repair path for
+// everyone the restart trap already caught.
+//
+// A device paired while this machine held no fleet key has an entry with no
+// certificate, and nothing used to fill it in: the ceremony writes the cert
+// exactly once, and the other door into the registry (AddFromFleetCert) wants
+// a certificate the device already holds. So that browser reached this machine
+// and no other, permanently, and the re-supply path every welcome documents
+// had nothing to supply.
+//
+// Now the machine mints one the first time that device connects after the
+// fleet key arrives — which is also the first moment it could. No re-pairing,
+// no restart, and the browser is on the fleet from that welcome onward.
+func TestWelcomeBackFillsACertificateADevicePairedWithout(t *testing.T) {
+	const machineID = "karns-mbp-a1b2-0f9a12cd"
+	dir := t.TempDir()
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	devices := crypto.NewDeviceStore(dir)
+
+	// What relay.json says, as the daemon reads it at the moment it signs:
+	// nothing at all, to begin with.
+	var live FleetIdentity
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
+		Identity{Key: key, Devices: devices, Fleet: func() FleetIdentity { return live }})
+	t.Cleanup(srv.Shutdown)
+
+	// The ceremony, on a machine with no fleet: a paired device and no cert.
+	token, _ := srv.pairing.start(time.Now())
+	devPub := deviceKey(0x2a)
+	if out := srv.PairDevice(pairBody(t, token, base64.StdEncoding.EncodeToString(devPub), "phone"), "relay"); out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200", out.Status, out.Body)
+	}
+	paired, ok, err := devices.FindByKey(devPub)
+	if err != nil || !ok {
+		t.Fatalf("FindByKey after pairing = %v, %v", ok, err)
+	}
+	if len(paired.Cert) != 0 {
+		t.Fatal("a daemon with no fleet key minted a certificate it could not have signed")
+	}
+
+	// `flue relay setup`, later, from another process.
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	live = FleetIdentity{Key: fk, MachineID: machineID}
+
+	p := newPipeConn()
+	go srv.ServeConn(context.Background(), p, ConnMeta{
+		Peer: "relay", DeviceID: crypto.DeviceID(devPub), DeviceKey: devPub,
+	})
+	t.Cleanup(func() { _ = p.Close() })
+	w, ok := expectControl(t, p).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame was not a welcome")
+	}
+	if len(w.FleetCert) == 0 {
+		t.Fatal("the welcome carried no certificate, so a device paired before its machine had a fleet key stays stuck on that machine forever")
+	}
+	cert, err := fleet.VerifyDevice(fk.Public(), w.FleetCert)
+	if err != nil {
+		t.Fatalf("the back-filled cert does not verify under this fleet key: %v", err)
+	}
+	if !bytes.Equal(cert.Device, devPub) {
+		t.Error("the back-filled cert names another device's key")
+	}
+	if cert.PairedOn != machineID {
+		t.Errorf("cert names pairedOn %q, want this machine %q", cert.PairedOn, machineID)
+	}
+	// The ceremony's own time, not this moment: `iat` is when the device joined
+	// the fleet, and it is what every other machine's Devices screen shows
+	// (crypto.AddFromFleetCert takes pairedAt from here).
+	if cert.IAT != paired.PairedAt.Unix() {
+		t.Errorf("cert iat = %d, want the pairing's own time %d", cert.IAT, paired.PairedAt.Unix())
+	}
+
+	// Persisted, so this is one mint per device rather than one per
+	// connection — and so the Devices screen and any later welcome agree.
+	stored, ok, err := devices.FindByKey(devPub)
+	if err != nil || !ok {
+		t.Fatalf("FindByKey after the back-fill = %v, %v", ok, err)
+	}
+	if !bytes.Equal(stored.Cert, w.FleetCert) {
+		t.Error("the registry did not keep the certificate the welcome handed over")
+	}
+
+	// A second connection offers the same bytes: a certificate is one artifact
+	// for the life of a pairing, which is what lets a browser compare what it
+	// holds against what it is offered.
+	again := newPipeConn()
+	go srv.ServeConn(context.Background(), again, ConnMeta{
+		Peer: "relay", DeviceID: crypto.DeviceID(devPub), DeviceKey: devPub,
+	})
+	t.Cleanup(func() { _ = again.Close() })
+	w2, ok := expectControl(t, again).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame on the second conn was not a welcome")
+	}
+	if !bytes.Equal(w2.FleetCert, w.FleetCert) {
+		t.Error("the second welcome offered different bytes; a re-mint per connection is not a certificate")
+	}
+}
+
+// TestWelcomeBackFillsNothingWithoutAPlaceOnTheRelay: a fleet key and no
+// machine id mints nothing, here as at the ceremony. `pairedOn` is what a
+// reader attributes a certificate to, and a cert naming the empty machine is
+// one nothing can line up against the machine certs beside it.
+func TestWelcomeBackFillsNothingWithoutAPlaceOnTheRelay(t *testing.T) {
+	dir := t.TempDir()
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	devices := crypto.NewDeviceStore(dir)
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
+		Identity{Key: key, Devices: devices, Fleet: StaticFleet(fk, "")})
+	t.Cleanup(srv.Shutdown)
+
+	devPub := deviceKey(0x2a)
+	if _, err := devices.Add("phone", devPub, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	p := newPipeConn()
+	go srv.ServeConn(context.Background(), p, ConnMeta{
+		Peer: "relay", DeviceID: crypto.DeviceID(devPub), DeviceKey: devPub,
+	})
+	t.Cleanup(func() { _ = p.Close() })
+	w, ok := expectControl(t, p).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame was not a welcome")
+	}
+	if len(w.FleetCert) != 0 {
+		t.Errorf("a machine with no id on the relay minted a certificate naming nobody: %x", w.FleetCert)
+	}
+}
+
+// TestWelcomeSaysWhenThisDaemonCannotSignForItsFleet: the backstop behind the
+// Devices screen's second gate.
+//
+// A daemon on a relay that holds no fleet key can still draw a pairing QR, and
+// a device that completes that ceremony pins no fleet key and is minted no
+// certificate — it reaches this machine and nothing else, for the life of the
+// pairing, silently. The welcome carries the fact so the screen can refuse
+// instead, the way it refuses a QR that could only name loopback.
+func TestWelcomeSaysWhenThisDaemonCannotSignForItsFleet(t *testing.T) {
+	dir := t.TempDir()
+	key, err := crypto.LoadOrCreateStaticKey(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateStaticKey: %v", err)
+	}
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	var live FleetIdentity
+	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
+		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: func() FleetIdentity { return live }})
+	t.Cleanup(srv.Shutdown)
+	srv.SetRelayStatus(RelayConnected, "https://flue-relay.example")
+
+	welcome := func() wire.Welcome {
+		t.Helper()
+		p := newPipeConn()
+		go srv.ServeConn(context.Background(), p, ConnMeta{Peer: "test"})
+		t.Cleanup(func() { _ = p.Close() })
+		w, ok := expectControl(t, p).(wire.Welcome)
+		if !ok {
+			t.Fatal("first frame was not a welcome")
+		}
+		return w
+	}
+
+	w := welcome()
+	if w.Relay == nil || !w.Relay.NoFleetKey {
+		t.Fatalf("relay = %+v; a daemon on a relay with no fleet key must say so", w.Relay)
+	}
+
+	// A fleet key and no place on the relay is the same answer: `pairedOn` is
+	// what makes a certificate attributable, and one naming the empty machine
+	// is one no reader can line up against the machine certs beside it.
+	live = FleetIdentity{Key: fk}
+	if w := welcome(); w.Relay == nil || !w.Relay.NoFleetKey {
+		t.Fatalf("relay = %+v; a daemon with no machine id mints no cert and must say so", w.Relay)
+	}
+
+	// And a machine that can sign says nothing at all — the field is the
+	// fault, not the capability, so silence is what an older daemon says too.
+	live = FleetIdentity{Key: fk, MachineID: "karns-mbp-a1b2-0f9a12cd"}
+	if w := welcome(); w.Relay == nil || w.Relay.NoFleetKey {
+		t.Fatalf("relay = %+v; a daemon that can sign must not report the fault", w.Relay)
+	}
 }
 
 func TestServeConnRegistersTheDevice(t *testing.T) {

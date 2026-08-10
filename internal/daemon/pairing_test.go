@@ -587,7 +587,7 @@ func newFleetPairServer(t *testing.T, machineID string) (*Server, fleet.Key) {
 		t.Fatalf("fleet.Mint: %v", err)
 	}
 	srv := New(session.NewRegistry(time.Now), nil, http.NotFoundHandler(), "test",
-		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: fk})
+		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: StaticFleet(fk, machineID)})
 	t.Cleanup(srv.Shutdown)
 	if machineID != "" {
 		srv.SetRelayMachine(machineID, "Karn's MacBook Pro")
@@ -1118,6 +1118,13 @@ func TestPairStartURLCarriesTheFleetKey(t *testing.T) {
 		return ok
 	})
 
+	// The literal spelling first, then the parsed value. conn.go splices this
+	// parameter in by hand rather than through url.Values, so the joining `&`
+	// is code rather than a formality: a link that lost it, or grew a second
+	// `?`, parses as a URL and hands the browser no fleet key at all.
+	if !strings.Contains(got.URL, "&f=") {
+		t.Fatalf("pairing url %q carries no &f=; the device cannot learn the fleet", got.URL)
+	}
 	u, err := url.Parse(got.URL)
 	if err != nil {
 		t.Fatalf("pairing url %q does not parse: %v", got.URL, err)
@@ -1141,7 +1148,7 @@ func TestPairStartURLCarriesTheFleetKey(t *testing.T) {
 	if strings.Contains(got.URL, fk.Seed()) {
 		t.Fatal("the pairing url carries the fleet seed; it must carry the public key alone")
 	}
-	if !bytes.Equal(raw, srv.identity.Fleet.Public()) {
+	if !bytes.Equal(raw, srv.fleetIdentity().Key.Public()) {
 		t.Error("f is not this daemon's own fleet public key")
 	}
 }
@@ -1150,6 +1157,7 @@ func TestPairStartURLCarriesTheFleetKey(t *testing.T) {
 // relay — what a machine that has run `flue relay join` looks like.
 func newFleetPairHTTPServer(t *testing.T) (*httptest.Server, *Server, fleet.Key) {
 	t.Helper()
+	const machineID = "karns-mbp-a1b2-0f9a12cd"
 	dir := t.TempDir()
 	key, err := crypto.LoadOrCreateStaticKey(dir)
 	if err != nil {
@@ -1160,11 +1168,11 @@ func newFleetPairHTTPServer(t *testing.T) (*httptest.Server, *Server, fleet.Key)
 		t.Fatalf("fleet.Mint: %v", err)
 	}
 	srv := New(session.NewRegistry(time.Now), nil, http.NotFoundHandler(), "test",
-		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: fk})
+		Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: StaticFleet(fk, machineID)})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	srv.SetAuth(local.NewAuth(tok, portOf(t, ts)))
-	srv.SetRelayMachine("karns-mbp-a1b2-0f9a12cd", "Karn's MacBook Pro")
+	srv.SetRelayMachine(machineID, "Karn's MacBook Pro")
 	return ts, srv, fk
 }
 
@@ -1218,4 +1226,88 @@ func TestPairStartWithoutAnIdentityErrors(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// TestPairingSignsWithTheFleetKeyOfTheMoment is the no-restart property at the
+// layer that signs.
+//
+// The fleet key arrives in relay.json, and relay.json is written by another
+// process — `flue relay setup` in a terminal, while the daemon it configures
+// has been running since login. A daemon that read the key once at
+// construction had no fleet key for every ceremony after that write, and no
+// path back: the pairing link is what pins the fleet key in the browser and
+// the ceremony is what mints the device's certificate, each written exactly
+// once, so a device paired in that window was fleet-blind forever.
+//
+// The source here stands in for that file, changing under a server that is
+// already up. Both records must follow it: the `f=` in the link, and the
+// certificate in the registry, naming the machine id the same source reports.
+func TestPairingSignsWithTheFleetKeyOfTheMoment(t *testing.T) {
+	const machineID = "karns-mbp-a1b2-0f9a12cd"
+	ts, srv := newPairServer(t)
+
+	// What relay.json says right now, as the daemon reads it: nothing, until
+	// setup runs.
+	var live FleetIdentity
+	srv.identity.Fleet = func() FleetIdentity { return live }
+
+	// Before: the link carries no fleet key, which is the honest answer for a
+	// machine that is on no relay.
+	if got := srv.fleetPubParam(); got != "" {
+		t.Fatalf("fleetPubParam on a fleet-less daemon = %q, want empty", got)
+	}
+
+	fk, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	// `flue relay setup`, in the other terminal. Nothing tells this process.
+	live = FleetIdentity{Key: fk, MachineID: machineID}
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.PairStart{})
+	var got wire.Pairing
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		p, ok := msg.(wire.Pairing)
+		if ok {
+			got = p
+		}
+		return ok
+	})
+
+	u, err := url.Parse(got.URL)
+	if err != nil {
+		t.Fatalf("pairing url %q does not parse: %v", got.URL, err)
+	}
+	f := u.Query().Get("f")
+	if f == "" {
+		t.Fatalf("pairing url %q carries no f=; this browser would pin no fleet key and could never be given one", got.URL)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(f)
+	if err != nil {
+		t.Fatalf("f = %q is not unpadded URL-safe base64: %v", f, err)
+	}
+	if !bytes.Equal(raw, fk.Public()) {
+		t.Errorf("f decodes to %x, want the fleet key relay.json now holds %x", raw, fk.Public())
+	}
+
+	key := deviceKey(0x2a)
+	if out := srv.PairDevice(pairBody(t, got.Token, base64.StdEncoding.EncodeToString(key), "phone"), "relay"); out.Status != http.StatusOK {
+		t.Fatalf("PairDevice = %d (%s), want 200", out.Status, out.Body)
+	}
+	dev, ok, err := srv.identity.Devices.FindByKey(key)
+	if err != nil || !ok {
+		t.Fatalf("FindByKey after pairing = %v, %v", ok, err)
+	}
+	cert, err := fleet.VerifyDevice(fk.Public(), dev.Cert)
+	if err != nil {
+		t.Fatalf("the ceremony minted no usable device cert: %v", err)
+	}
+	// The machine id comes from the same read as the key, so a daemon whose
+	// relay leg has not started yet still signs a certificate somebody can
+	// attribute — the leg's SetRelayMachine was never called here.
+	if cert.PairedOn != machineID {
+		t.Errorf("cert names pairedOn %q, want the machine id relay.json now holds %q", cert.PairedOn, machineID)
+	}
 }

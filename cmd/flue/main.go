@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -220,7 +221,7 @@ func cmdServe(args []string) error {
 	// authentication ceremony: this is the process that read the token file, so
 	// it is by construction the principal CheckMint exists to identify.
 	auth := local.NewAuth(token, *port)
-	identity, err := loadIdentity()
+	identity, err := loadIdentity(logger)
 	if err != nil {
 		return err
 	}
@@ -307,17 +308,20 @@ func cmdServe(args []string) error {
 }
 
 // loadIdentity reads the daemon's static keypair and its paired-device
-// registry out of the config directory, creating the key on first run.
+// registry out of the config directory, creating the key on first run, and
+// installs the source the daemon reads its fleet key through.
 //
-// Threaded the same way as the auth token: read here, once, by the process
-// that is about to serve, and handed to the daemon at construction — the
-// daemon never reaches into the config directory itself. Failures are fatal
+// The static key is threaded the same way as the auth token: read here, once,
+// by the process that is about to serve, and handed to the daemon at
+// construction — the daemon never reaches into the config directory itself.
+// That is right for a key that cannot change under a running daemon, and
+// wrong for the fleet key, which is exactly what fleetOnDisk is. Failures are fatal
 // rather than degraded. A daemon that could not load its static key would come
 // up unable to prove it is the daemon its already-paired devices trust, and
 // starting anyway would present the user with a working-looking flue whose
 // pairing silently does nothing; crypto.LoadOrCreateStaticKey refuses to
 // regenerate over a key it cannot parse for the same reason.
-func loadIdentity() (daemon.Identity, error) {
+func loadIdentity(logger *slog.Logger) (daemon.Identity, error) {
 	dir, err := config.Dir()
 	if err != nil {
 		return daemon.Identity{}, fmt.Errorf("locate the config directory: %w", err)
@@ -326,27 +330,70 @@ func loadIdentity() (daemon.Identity, error) {
 	if err != nil {
 		return daemon.Identity{}, fmt.Errorf("load the daemon static key: %w", err)
 	}
-	id := daemon.Identity{Key: key, Devices: crypto.NewDeviceStore(dir)}
+	id := daemon.Identity{Key: key, Devices: crypto.NewDeviceStore(dir), Fleet: fleetOnDisk(logger)}
 
-	// The fleet key rides relay.json (spec/fleet-trust.md), so it is read
-	// here beside the other identity material rather than by the relay
-	// startup: pairing mints device certs and revocation mints revocations
-	// whether or not the transport ever comes up. An unreadable or absent
-	// relay.json leaves the identity fleet-less — startRelay reports the
-	// unreadable case, and a daemon without a fleet key pairs exactly as it
-	// always did. A relay.json that parses but carries a seed this daemon
-	// cannot use is fatal, by the same reasoning as the static key above: a
-	// daemon that started anyway would sign nothing and verify nothing while
-	// looking perfectly healthy, and a corrupted credential file is a thing
-	// to say out loud, not to route around.
+	// The fleet key rides relay.json (spec/fleet-trust.md), and unlike the
+	// static key above it is not loaded here — it is loaded on every use, by
+	// the source installed a line up. What happens here is the boot-time
+	// *check*: a relay.json that parses but carries a seed this daemon cannot
+	// use is fatal, by the same reasoning as the static key above. A daemon
+	// that started anyway would sign nothing and verify nothing while looking
+	// perfectly healthy, and a corrupted credential file is a thing to say out
+	// loud, not to route around. An unreadable or absent relay.json is the
+	// ordinary fleet-less daemon and starts as it always did — startRelay
+	// reports the unreadable case.
 	if rc, ok, err := config.LoadRelay(); err == nil && ok && rc.FleetSeed != "" {
-		fk, err := fleet.Parse(rc.FleetSeed)
-		if err != nil {
+		if _, err := fleet.Parse(rc.FleetSeed); err != nil {
 			return daemon.Identity{}, fmt.Errorf("relay.json carries a fleet seed this daemon cannot use: %w", err)
 		}
-		id.Fleet = fk
 	}
 	return id, nil
+}
+
+// fleetOnDisk is the daemon's live fleet identity: relay.json, read at the
+// moment something needs to sign with it.
+//
+// Read-on-use rather than a value handed over at boot, and rather than an
+// update hook the writers call, because the writers are not in this process.
+// `flue relay setup` and `flue relay join` are terminal commands: they write
+// relay.json and exit, and the daemon they configure has been running since
+// login. Nothing in this address space is told. The relay leg already
+// concluded exactly this and re-reads the file on every start (see startRelay,
+// which spells out the deploy-from-the-Remote-screen case); the split — a leg
+// reading the file and an identity remembering a boot-time copy of it — is
+// what left a daemon live on the relay and silently unable to sign for it.
+//
+// The cost is one read of one small file per signature: a pairing window
+// opening, a ceremony completing, a revoke, a certificate being filled in for
+// a device that has none. All four have a human waiting on them, so no cache
+// is worth the staleness it would reintroduce, and a filesystem watcher would
+// be a goroutine and an OS handle to answer a question a read already answers.
+//
+// Every fault is the fleet-less answer plus a log line, which is the same
+// shape startRelay's faults take and for the same reason: this is remote
+// access, not the terminal in the tab, and a daemon that refused to pair
+// because relay.json had been edited under it would be trading a working local
+// flue for a fleet feature. The boot-time parse in loadIdentity is where a bad
+// seed is refused outright, and a seed that stops parsing *after* boot is a
+// file somebody rewrote while the daemon ran — named here, and named again by
+// `flue relay status` and the Remote screen (relayProblems).
+func fleetOnDisk(log *slog.Logger) daemon.FleetSource {
+	return func() daemon.FleetIdentity {
+		rc, ok, err := config.LoadRelay()
+		if err != nil {
+			log.Warn("cannot read relay.json for the fleet key; nothing will be signed for the fleet", "err", err)
+			return daemon.FleetIdentity{}
+		}
+		if !ok || rc.FleetSeed == "" {
+			return daemon.FleetIdentity{}
+		}
+		fk, err := fleet.Parse(rc.FleetSeed)
+		if err != nil {
+			log.Warn("relay.json carries a fleet seed this daemon cannot use; nothing will be signed for the fleet", "err", err)
+			return daemon.FleetIdentity{}
+		}
+		return daemon.FleetIdentity{Key: fk, MachineID: rc.MachineID}
+	}
 }
 
 // startRelay dials the configured relay, if there is one, and keeps it dialled
@@ -366,7 +413,17 @@ func loadIdentity() (daemon.Identity, error) {
 // It reports whether a transport was actually started — false for the
 // ordinary no-relay.json case and for every logged failure — so the caller's
 // bookkeeping (relayRuntime) knows whether a later deploy may start one.
-func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identity) bool {
+//
+// The second return is how a caller waits for the leg it started to be gone:
+// it blocks until both goroutines below have returned, and it is nil whenever
+// started is false. Cancelling the context alone is not enough for anyone who
+// means to start *another* leg — Transport.Run reports the relay off from a
+// deferred call on a goroutine of its own, and that line, landing a moment
+// after a replacement leg has said "connecting", would leave every welcome
+// announcing a relay this daemon is in fact dialling and every pairing URL
+// naming loopback. relayRuntime.restart is the caller that needs it, and the
+// reason it exists.
+func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identity) (bool, func()) {
 	// The same sink and format the daemon's own default logger uses, which
 	// launchd and systemd already capture.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -376,10 +433,10 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 		// Configured and unreadable is worth a line: "no relay" is the ordinary
 		// state, but this is a file somebody wrote and this daemon cannot use.
 		logger.Warn("relay not started", "err", err)
-		return false
+		return false, nil
 	}
 	if !ok {
-		return false
+		return false, nil
 	}
 
 	// The public half only: signing stays with the daemon (pairing,
@@ -394,13 +451,14 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 	// hand relay.New a nil public key, have it refuse the relay the user had
 	// just deployed, and leave one log line behind.
 	//
-	// What still waits for a restart is the *signing* half: Identity is fixed
-	// at construction, so a daemon that deployed a relay from the screen
-	// verifies its fleet's certs from this moment and mints none of its own
-	// until it comes back. relayUIService.Provision says so in its steps; a
-	// nil Public() here, meanwhile, means relay.json carries no fleet key at
-	// all, which relay.New refuses by name (spec/fleet-trust.md keeps no
-	// compatibility with pre-fleet files, deliberately).
+	// The signing half is read from the same file and is no longer the
+	// exception this comment used to record: daemon.Identity asks fleetOnDisk
+	// at the moment it signs, so the key that verifies here and the key that
+	// mints a device cert at pairing are one file read apart rather than one
+	// daemon restart apart. A nil Public() here, meanwhile, means relay.json
+	// carries no fleet key at all, which relay.New refuses by name
+	// (spec/fleet-trust.md keeps no compatibility with pre-fleet files,
+	// deliberately).
 	//
 	// A seed that does not parse costs remote access and nothing else, like
 	// every other fault here. loadIdentity is the one that refuses a bad seed
@@ -410,7 +468,7 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 		fleetKey, err = fleet.Parse(rc.FleetSeed)
 		if err != nil {
 			logger.Warn("relay not started", "err", err)
-			return false
+			return false, nil
 		}
 	}
 	cfg := relay.Config{
@@ -424,8 +482,10 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 	t, err := relay.New(cfg, srv, identity.Key, identity.Devices, logger)
 	if err != nil {
 		logger.Warn("relay not started", "err", err)
-		return false
+		return false, nil
 	}
+	// Both legs are joined, so a caller can wait for this start to be undone.
+	var legs sync.WaitGroup
 	// The directory leg, beside the hub leg and independent of it: one keeps
 	// this machine's browsers connected, the other keeps this machine's idea
 	// of who the fleet trusts up to date (spec/fleet-trust.md, "The fleet
@@ -450,7 +510,9 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 			c := dir.Counts()
 			return daemon.DirectoryCounts(c)
 		})
+		legs.Add(1)
 		go func() {
+			defer legs.Done()
 			if err := dir.Run(ctx); err != nil {
 				logger.Warn("fleet directory stopped", "err", err)
 			}
@@ -478,12 +540,14 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 	// dropped: welcomes would announce a dead relay and pairing URLs would go
 	// back to naming loopback while the relay was carrying traffic.
 	srv.SetRelayStatus(daemon.RelayConnecting, "")
+	legs.Add(1)
 	go func() {
+		defer legs.Done()
 		if err := t.Run(ctx); err != nil {
 			logger.Warn("relay stopped", "err", err)
 		}
 	}()
-	return true
+	return true, legs.Wait
 }
 
 // newRelayRuntime is the relay leg's start/stop bookkeeping for one daemon
@@ -495,10 +559,17 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 // nothing else, while cancelling the daemon's still takes them with it. The
 // teardown pairs the cancel with forgetRelay, so a stopped leg cannot leave the
 // daemon still announcing the relay it is no longer dialling.
+//
+// The teardown also *waits* for the legs it cancelled, which is what makes
+// relayRuntime.restart honest rather than hopeful: the old leg has stopped
+// speaking for this daemon before the new one starts. The wait is bounded, so a
+// leg that somehow ignored its context costs a deploy a second rather than
+// hanging the request that asked for it.
 func newRelayRuntime(ctx context.Context, srv *daemon.Server, identity daemon.Identity) *relayRuntime {
 	return &relayRuntime{start: func() (bool, func()) {
 		relayCtx, cancel := context.WithCancel(ctx)
-		if !startRelay(relayCtx, srv, identity) {
+		started, wait := startRelay(relayCtx, srv, identity)
+		if !started {
 			// Nothing was started, so there is nothing to stop — and the
 			// context is released here rather than leaked for the life of the
 			// daemon.
@@ -507,9 +578,33 @@ func newRelayRuntime(ctx context.Context, srv *daemon.Server, identity daemon.Id
 		}
 		return true, func() {
 			cancel()
+			awaitLegs(wait, legStopTimeout)
 			forgetRelay(srv)
 		}
 	}}
+}
+
+// legStopTimeout bounds how long a stop waits for the legs it cancelled.
+// Both return on a cancelled context by construction, so this is the backstop
+// for a bug rather than a budget for ordinary work; past it the stop proceeds
+// and the worst case is the stale status line forgetRelay describes.
+const legStopTimeout = 5 * time.Second
+
+func awaitLegs(wait func(), within time.Duration) {
+	if wait == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wait()
+	}()
+	timer := time.NewTimer(within)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
 }
 
 // forgetRelay takes the relay out of everything the daemon says about itself,
@@ -533,11 +628,12 @@ func newRelayRuntime(ctx context.Context, srv *daemon.Server, identity daemon.Id
 //     facts and no longer true of a machine that has left: the identity rides
 //     every welcome, and the origin widens this daemon's own CSP.
 //
-// It is not the reverse of startRelay in one respect, deliberately: the fleet
-// key on daemon.Identity is fixed at construction and stays. It signs device
-// certs and revocations, both of which are local artifacts of pairings this
-// machine already made, and dropping it mid-process would break revoking a
-// device that is still in this machine's registry.
+// It says nothing about the fleet key, deliberately, and there is nothing here
+// it could say: the daemon reads that from relay.json when it signs
+// (fleetOnDisk), so a machine that has left the relay stops signing the moment
+// the file is gone, and one that has only stopped its leg — a restart between
+// two deploys — keeps signing for the fleet it is still a member of. Both are
+// the file's answer rather than this function's, which is the point.
 func forgetRelay(srv *daemon.Server) {
 	srv.SetRelayStatus(daemon.RelayOff, "")
 	srv.SetDirectoryCounts(nil)
@@ -1501,6 +1597,21 @@ func relayProblems(rc config.Relay) []string {
 		// by `flue relay setup` on a machine that has it, or re-run setup
 		// itself, which mints a fresh fleet key with the fresh secret.
 		problems = append(problems, "no fleet key")
+	} else if _, err := fleet.Parse(rc.FleetSeed); err != nil {
+		// A seed that is present and unusable, which a hand-edited file or a
+		// half-pasted join line produces. It is listed separately from "no
+		// fleet key" because it reads differently to whoever is looking: the
+		// file *looks* configured.
+		//
+		// This is also the line that answers "can this process sign", which
+		// used to be a different question from "what does the file say". It
+		// no longer is: the daemon reads its fleet key from this same file at
+		// the moment it signs (cmd/flue.fleetOnDisk), so a file this function
+		// accepts is a process that can sign, and one it refuses here is a
+		// process that mints nothing — no device certificate at a pairing, no
+		// `f=` in the link the browser scans, and no way to repair either
+		// afterwards.
+		problems = append(problems, "a fleet key this daemon cannot use")
 	}
 	return problems
 }

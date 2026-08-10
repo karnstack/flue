@@ -122,13 +122,69 @@ type Identity struct {
 	Key     noise.DHKey
 	Devices *crypto.DeviceStore
 
-	// Fleet is the fleet key from relay.json (spec/fleet-trust.md), and the
-	// zero value means this daemon has none — a daemon that never joined a
-	// relay, or joined one from before the key existed. With it, a pairing
-	// ceremony also mints a fleet device cert and a revocation also mints
-	// the signed record that keeps the key dead fleet-wide; without it,
-	// both paths run exactly as they always did, minus the signing.
-	Fleet fleet.Key
+	// Fleet is asked — every time, at the moment of signing — what this
+	// process may sign for its fleet. Nil is a daemon that signs nothing,
+	// which is what a test and any embedder without a config directory
+	// construct.
+	//
+	// A function rather than a value, and that is the whole of the fix this
+	// field carries. The key rides relay.json, and relay.json is written by
+	// *another process*: `flue relay setup` and `flue relay join` are a
+	// terminal command, and the daemon they configure is already running. A
+	// key read once at construction is therefore a key that is right until
+	// the first time it matters — and the daemon in that window is the worst
+	// possible shape of wrong, because the relay leg re-reads the file
+	// (cmd/flue's startRelay says why) and comes up live: the machine is on
+	// the relay, publishing a machine cert that verifies, and silently unable
+	// to sign the device certs and pairing links that make a fleet a fleet.
+	// Both of those records are written once, by the pairing ceremony, and
+	// nothing repairs them afterwards, so every device paired in that window
+	// was permanently fleet-blind. See spec/fleet-trust.md and
+	// StaticFleet for the value form tests want.
+	Fleet FleetSource
+}
+
+// FleetIdentity is everything a signature under the fleet key asserts about
+// where it came from: the key itself, and the machine id its certificates name
+// as `pairedOn`. They travel together because they are read together — one
+// relay.json — and because either one alone signs nothing worth having: a key
+// with no machine id mints a certificate no reader can attribute, and a machine
+// id with no key mints nothing at all.
+type FleetIdentity struct {
+	Key       fleet.Key
+	MachineID string
+}
+
+// FleetSource answers "what may this process sign right now".
+//
+// Called on the paths that sign and on no other: opening a pairing window,
+// completing a ceremony, revoking a device, and filling in a certificate for a
+// device that was paired without one. All four are rare — a human is at the
+// other end of each — which is why the production implementation simply reads
+// relay.json again (cmd/flue.fleetOnDisk) rather than watching it. A file this
+// small, read this seldom, needs no cache to go stale.
+type FleetSource func() FleetIdentity
+
+// StaticFleet is a FleetSource that always answers the same thing: the value
+// form, for tests, for an embedder that holds its own key, and for anything
+// whose fleet identity genuinely cannot change under it.
+//
+// Nothing in cmd/flue uses it. A daemon reading a config directory that other
+// processes write must never be given one — that is precisely the bug the
+// function form exists to rule out — and having the value form spelled here,
+// once, keeps every such construction visibly a choice.
+func StaticFleet(key fleet.Key, machineID string) FleetSource {
+	return func() FleetIdentity { return FleetIdentity{Key: key, MachineID: machineID} }
+}
+
+// fleetIdentity is the one way into Identity.Fleet: every signing path reads
+// the key through here, at the moment it signs, so no caller can accidentally
+// re-introduce a copy that was right at boot and wrong since.
+func (s *Server) fleetIdentity() FleetIdentity {
+	if s.identity.Fleet == nil {
+		return FleetIdentity{}
+	}
+	return s.identity.Fleet()
 }
 
 // Server serves the flue API and the embedded UI on loopback.
@@ -141,6 +197,10 @@ type Server struct {
 	// identity is fixed at construction: it is read from the config directory
 	// once, by whoever starts the daemon, and a running daemon never changes
 	// the key its paired devices know it by.
+	//
+	// The static key and the registry, that is. The fleet half of it is a
+	// question rather than an answer — see Identity.Fleet — because that one
+	// lives in a file another process rewrites while this one runs.
 	identity Identity
 
 	// pairing is the one open pairing window, if any. Its own lock; see
@@ -388,6 +448,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle(RelayJoinPath, s.withAuth(http.HandlerFunc(s.handleRelayJoin)))
 	mux.Handle(RelayAddressPath, s.withAuth(http.HandlerFunc(s.handleRelayAddress)))
 	mux.Handle(RelayLeavePath, s.withAuth(http.HandlerFunc(s.handleRelayLeave)))
+	mux.Handle(RelayReloadPath, s.withAuth(http.HandlerFunc(s.handleRelayReload)))
 	mux.Handle(ReleasePath, s.withAuth(http.HandlerFunc(s.handleRelease)))
 	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
 	// never the app shell.
@@ -441,7 +502,8 @@ func methodPolicy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		postable := r.URL.Path == MintPath || r.URL.Path == PairPath ||
 			r.URL.Path == RelayDeployPath || r.URL.Path == RelayUpdatePath ||
-			r.URL.Path == RelayAddressPath || r.URL.Path == RelayLeavePath
+			r.URL.Path == RelayAddressPath || r.URL.Path == RelayLeavePath ||
+			r.URL.Path == RelayReloadPath
 		allowed := r.Method == http.MethodGet || r.Method == http.MethodHead ||
 			(postable && r.Method == http.MethodPost)
 		if !allowed {
@@ -555,16 +617,16 @@ func LocalCSPFor(relayOrigin string) string {
 //
 // Empty for every connection with no device identity, which is every loopback
 // one: a certificate is a statement about a device key, and a session-token
-// connection has not named one. Empty too when the registry cannot be read, or
-// when the device was paired before this machine held a fleet key — there is no
-// certificate to hand over, and inventing one here would mean minting under the
-// fleet key for a device whose ceremony never earned it.
+// connection has not named one. Empty too when the registry cannot be read.
 //
-// It re-mints nothing. The blob is the one this machine's ceremony signed and
-// devices.json has held ever since, or the one the device itself presented in
-// its handshake after pairing elsewhere (AddFromFleetCert). Handing back the
-// same bytes keeps a certificate one artifact for the life of a pairing, which
-// is what lets a browser compare what it holds against what it is offered.
+// It re-mints nothing for a device that has one. The blob is the one this
+// machine's ceremony signed and devices.json has held ever since, or the one
+// the device itself presented in its handshake after pairing elsewhere
+// (AddFromFleetCert). Handing back the same bytes keeps a certificate one
+// artifact for the life of a pairing, which is what lets a browser compare
+// what it holds against what it is offered.
+//
+// A device with none is the one case that does mint: see backfillFleetCert.
 func (s *Server) fleetCertFor(deviceKey []byte) []byte {
 	if len(deviceKey) == 0 || s.identity.Devices == nil {
 		return nil
@@ -580,10 +642,85 @@ func (s *Server) fleetCertFor(deviceKey []byte) []byte {
 			"device", crypto.DeviceID(deviceKey), "err", err)
 		return nil
 	}
-	if !ok || len(dev.Cert) == 0 {
+	if !ok {
 		return nil
 	}
+	if len(dev.Cert) == 0 {
+		return s.backfillFleetCert(dev)
+	}
 	return dev.Cert
+}
+
+// backfillFleetCert mints the certificate a device's own ceremony could not,
+// on the first connection where this machine can.
+//
+// Who this is for: every device paired while this machine held no fleet key.
+// Devices from before the key existed, and — the reason this was written —
+// devices paired in the window between a relay being set up and a daemon being
+// restarted, which was a window this program used to require and no longer
+// has. Their registry entries carry no cert, Add writes one only at the
+// ceremony, and AddFromFleetCert needs a cert the device already holds, so
+// nothing repaired them: the browser reached the machine it paired with, could
+// present nothing to any sibling, and re-pairing was the only way out. That is
+// also what made the re-supply path in web/src/fleet/fleet.ts a promise the
+// daemon could not keep — "a browser paired before its machine had a fleet key
+// picks one up from any machine it can still reach" needs a machine with one to
+// hand over.
+//
+// Lazily, at the welcome, rather than in a sweep at startup, and the reason is
+// the same one that put the fleet key on a live read: this daemon may acquire
+// a fleet key at any moment, from a file another process writes. A sweep would
+// have to be re-run to be correct — on a timer, or on a watcher, or on the
+// restart this whole change exists to remove — while the welcome is exactly the
+// moment the answer is needed and the moment the device is present to receive
+// it. It costs one relay.json read per connection for devices that have no
+// cert, and none at all once they do: the mint is persisted, so this runs once
+// per device, not once per connection.
+//
+// Every failure is silent to the device and loud in the log. The connection is
+// established, the device is admitted, and a welcome without a certificate is
+// the answer this daemon has been giving that device all along.
+//
+// What it does not do is publish. Device certificates are deliberately absent
+// from the fleet directory (PairDevice says why), and this changes nothing
+// about that: the cert goes to the one party it is about.
+func (s *Server) backfillFleetCert(dev crypto.Device) []byte {
+	fi := s.fleetIdentity()
+	if !fi.Key.Valid() || fi.MachineID == "" {
+		return nil
+	}
+	// The ceremony's own timestamp, not this moment: `iat` is when the device
+	// joined the fleet, which is the fact the Devices screen shows on every
+	// other machine (AddFromFleetCert takes pairedAt from the cert). A registry
+	// entry from before that field was written falls back to now, which is at
+	// worst late and never a claim about a pairing that did not happen.
+	iat := dev.PairedAt
+	if iat.IsZero() {
+		iat = time.Now()
+	}
+	blob, err := fi.Key.Sign(fleet.DeviceCert{
+		Device:   dev.PublicKey,
+		Name:     dev.Label,
+		PairedOn: fi.MachineID,
+		IAT:      iat.Unix(),
+	})
+	if err != nil {
+		s.logger().Error("could not mint the fleet certificate a device was paired without",
+			"device", dev.ID, "err", err)
+		return nil
+	}
+	if _, err := s.identity.Devices.SetCert(dev.PublicKey, blob); err != nil {
+		// The blob is good and the device is here, so it is handed over
+		// anyway: the welcome is what the device actually needs, and a
+		// registry write that failed costs this machine its own copy, not the
+		// device its certificate. The next connection tries again.
+		s.logger().Warn("could not record a back-filled fleet certificate; the device has it, this machine does not",
+			"device", dev.ID, "err", err)
+		return blob
+	}
+	s.logger().Info("minted the fleet certificate a device was paired without; it can reach the rest of the fleet now",
+		"device", dev.ID, "pairedOn", fi.MachineID)
+	return blob
 }
 
 // SetRelayOrigin records the origin relay.json names, for the Content-Security-
@@ -1067,6 +1204,10 @@ func (s *Server) relayMachine() (m struct{ id, name string }) {
 // and "present but off" is a third shape neither the Go encoder nor the client
 // has a meaning for.
 func (s *Server) relayInfo() *wire.RelayInfo {
+	// Read before the lock, because it reads relay.json and no lock here has
+	// any business being held across a file read.
+	blind := !s.canSignForTheFleet()
+
 	s.relayMu.RLock()
 	defer s.relayMu.RUnlock()
 	if s.relayStatus == "" || s.relayStatus == RelayOff {
@@ -1077,7 +1218,24 @@ func (s *Server) relayInfo() *wire.RelayInfo {
 		Origin:      s.relayOrigin,
 		MachineID:   s.relayMachineID,
 		MachineName: s.relayMachineName,
+		NoFleetKey:  blind,
 	}
+}
+
+// canSignForTheFleet reports whether a pairing performed right now would give
+// the device what a fleet membership is made of: the fleet key in the link it
+// scans, and a certificate minted at the ceremony.
+//
+// Both need the same two things — a usable fleet key and a machine id to name
+// — so this is one question rather than two, and it is asked of the same live
+// source the ceremony will ask (Identity.Fleet). After the read went live this
+// should be false only for a machine whose relay.json is genuinely incomplete;
+// it is reported anyway, because the consequence of pairing while it is true is
+// silent and permanent, and "nearly unreachable" is not a reason to leave a
+// trapdoor unmarked.
+func (s *Server) canSignForTheFleet() bool {
+	fi := s.fleetIdentity()
+	return fi.Key.Valid() && fi.MachineID != ""
 }
 
 // pairingOrigin is the origin a pairing URL should name, given the origin the
@@ -1321,12 +1479,12 @@ func (s *Server) removeDevice(id string) (crypto.Device, bool, error) {
 	if s.identity.Devices == nil {
 		return crypto.Device{}, false, errNoDeviceRegistry
 	}
-	if s.identity.Fleet.Valid() {
+	if fk := s.fleetIdentity().Key; fk.Valid() {
 		dev, ok, err := s.identity.Devices.FindByID(id)
 		if err != nil || !ok {
 			return crypto.Device{}, ok, err
 		}
-		blob, err := s.identity.Fleet.Sign(fleet.Revocation{Device: dev.PublicKey, IAT: time.Now().Unix()})
+		blob, err := fk.Sign(fleet.Revocation{Device: dev.PublicKey, IAT: time.Now().Unix()})
 		if err == nil {
 			err = s.identity.Devices.AddRevocation(dev.PublicKey, blob)
 		}
