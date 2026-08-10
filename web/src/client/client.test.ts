@@ -2009,6 +2009,72 @@ describe('FlueClient control messages', () => {
     expect(c.relay).toStrictEqual({ status: 'off' })
   })
 
+  it('folds a relay push into the welcome it holds, and re-announces it', () => {
+    // The push exists because the greeting goes stale under a socket that
+    // stays up: a relay set up, torn down or re-dialled mid-connection is a
+    // fact the welcome could never carry. Folded rather than delivered on an
+    // event of its own, so a consumer that already listens for the daemon's
+    // word about itself hears this without knowing there are two frames.
+    const { c, sock } = connected()
+    const seen: Welcome[] = []
+    c.onWelcome((w) => seen.push(w))
+
+    sock.emitControl({ type: 'welcome', daemonId: 'local', host: 'mb', ver: '0.1.0' })
+    sock.emitControl({
+      type: 'relay',
+      relay: { status: 'connected', origin: 'https://r.example', machineId: 'blue-mesa' },
+    })
+
+    expect(c.relay).toStrictEqual({
+      status: 'connected',
+      origin: 'https://r.example',
+      machineId: 'blue-mesa',
+    })
+    // The rest of the welcome survives: the push replaces one field, not the
+    // daemon's account of itself.
+    expect(seen).toHaveLength(2)
+    expect(seen[1]).toStrictEqual({
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'mb',
+      ver: '0.1.0',
+      relay: { status: 'connected', origin: 'https://r.example', machineId: 'blue-mesa' },
+    })
+  })
+
+  it('reads a pushed off as the relay going away', () => {
+    // The one spelling the welcome never uses. A push has nothing to omit —
+    // it is here to correct what this tab already believes — so `off` is said
+    // out loud, and the getter folds it into the same shape as an absent field.
+    const { c, sock } = connected()
+    sock.emitControl({
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'mb',
+      ver: '0.1.0',
+      relay: { status: 'connected', origin: 'https://r.example' },
+    })
+
+    sock.emitControl({ type: 'relay', relay: { status: 'off' } })
+
+    expect(c.relay).toStrictEqual({ status: 'off' })
+  })
+
+  it('ignores a relay push that arrives before any welcome', () => {
+    // Unreachable against a real daemon, which sends the greeting as the first
+    // frame of every connection it accepts. The alternative is inventing the
+    // rest of a welcome — this daemon's host, its version — out of nothing, and
+    // a made-up version string outlives the moment far longer than not knowing.
+    const { c, sock } = connected()
+    const seen: Welcome[] = []
+    c.onWelcome((w) => seen.push(w))
+
+    sock.emitControl({ type: 'relay', relay: { status: 'connected', origin: 'https://r.example' } })
+
+    expect(seen).toEqual([])
+    expect(c.relay).toStrictEqual({ status: 'off' })
+  })
+
   it('holds only the latest welcome, so a reconnect can change the answer', async () => {
     // The welcome is a snapshot taken as each connection is accepted, so the
     // one from the connection before it is exactly the stale claim to drop.

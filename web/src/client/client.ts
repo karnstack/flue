@@ -345,13 +345,19 @@ export class FlueClient {
   }
 
   /**
-   * The daemon's greeting, one per connection.
+   * What this daemon says about itself: its greeting, and every later
+   * correction to it.
    *
-   * What it carries — and why anyone listens — is the state of the daemon's
-   * relay leg, which is a snapshot taken as the connection was accepted, not
-   * a stream: nothing pushes an update when the relay drops or comes back, so
-   * a reconnect's welcome is the only event that ever refreshes it. Anything
-   * gating on the relay re-evaluates here, or it is gating on history.
+   * One per connection is the greeting. The corrections are `relay` pushes: the
+   * relay leg is the one part of a welcome that goes stale under a live socket,
+   * and rather than give it a second event for consumers to remember to also
+   * listen to, the client folds each push into the welcome it holds and
+   * announces the result here. So a listener sees whole, current welcomes and
+   * nothing else — which is what every one of them wanted from the start, since
+   * they listen precisely because the relay decides what they render.
+   *
+   * The cost of the fold is that a call is not proof of a new connection.
+   * Nothing here counts them; `onStatus` is where connections are.
    */
   onWelcome(cb: (w: Welcome) => void) {
     return this.welcomeListeners.add(cb)
@@ -368,13 +374,15 @@ export class FlueClient {
   }
 
   /**
-   * The relay leg of the last welcome — `onWelcome`'s counterpart for a
-   * consumer that mounts between welcomes, as `status` is for `onStatus`.
+   * The relay leg as this daemon last described it — `onWelcome`'s counterpart
+   * for a consumer that mounts between announcements, as `status` is for
+   * `onStatus`.
    *
-   * A daemon with no relay omits `welcome.relay` entirely and `off` never
-   * arrives on the wire, so the absent field and a client no welcome has
-   * reached yet both land on the same `{ status: 'off' }` here, rather than
-   * every consumer folding three spellings of "no relay" into one.
+   * A daemon with no relay omits `welcome.relay` entirely, and a `relay` push
+   * spells the same thing `off`, so the absent field, the explicit `off` and a
+   * client no welcome has reached yet all land on the same `{ status: 'off' }`
+   * here, rather than every consumer folding three spellings of "no relay" into
+   * one.
    */
   get relay(): RelayInfo {
     return this.lastWelcome?.relay ?? { status: 'off' }
@@ -953,6 +961,23 @@ export class FlueClient {
         this.lastWelcome = msg
         this.welcomeListeners.emit(msg)
         break
+
+      case 'relay': {
+        // The relay leg moved under a socket that stays up. Folded into the
+        // stored welcome and announced as one, for the reason `onWelcome`
+        // gives: this is a correction to what the daemon already said about
+        // itself, and every listener is here for that field anyway.
+        //
+        // Dropped when no welcome has arrived, which cannot happen against a
+        // real daemon — the greeting is the first frame of every connection it
+        // accepts — but the alternative is inventing the rest of a welcome
+        // (this daemon's host, its version) out of nothing, and a fabricated
+        // version string is worse than a moment of not knowing.
+        if (this.lastWelcome === null) break
+        this.lastWelcome = { ...this.lastWelcome, relay: msg.relay }
+        this.welcomeListeners.emit(this.lastWelcome)
+        break
+      }
 
       // Anything newer is ignored rather than raised, so a daemon may add a
       // message type without breaking an older tab.

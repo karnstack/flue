@@ -3131,9 +3131,10 @@ func TestPairingURLPrefersTheRelayOrigin(t *testing.T) {
 	})
 }
 
-// TestWelcomeReportsTheRelay: the status is not broadcast, so a client learns
-// it from the welcome its own connection opens with — which means the welcome
-// has to carry whatever was true at the moment that connection was accepted.
+// TestWelcomeReportsTheRelay: a client learns the relay from the welcome its
+// own connection opens with, so the welcome has to carry whatever was true at
+// the moment that connection was accepted. What happens to it afterwards is
+// TestRelayStateIsPushedToOpenConnections.
 func TestWelcomeReportsTheRelay(t *testing.T) {
 	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
 
@@ -3188,6 +3189,93 @@ func TestWelcomeReportsTheRelay(t *testing.T) {
 		}
 		if w.Relay.MachineID != "karns-macbook-pro-a1b2" || w.Relay.MachineName != "Karn's MacBook Pro" {
 			t.Fatalf("relay = %+v, want the machine id and name from the configuration", *w.Relay)
+		}
+		return true
+	})
+}
+
+// TestRelayStateIsPushedToOpenConnections: the welcome is a snapshot, and a
+// loopback tab holds one socket for as long as it is open, so every relay this
+// daemon gains, loses or re-dials happens after the only frame that ever
+// mentioned one. The push is what keeps that tab current.
+//
+// The bug it was written for is the machine id. Screens used to paper over the
+// gap by polling /api/relay/info, which answers for the transport alone — so a
+// tab open across a `flue relay setup` learned it had a relay and never which
+// machine it was on, and the pairing links it drew named no machine at all,
+// which is a link /pair can only refuse.
+func TestRelayStateIsPushedToOpenConnections(t *testing.T) {
+	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
+
+	// A tab greeted before any of this: no relay, and nothing on the wire since
+	// but what the daemon pushes.
+	c := dial(t, ts)
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		w, ok := msg.(wire.Welcome)
+		if ok && w.Relay != nil {
+			t.Fatalf("a daemon with no relay sent relay = %+v, want nothing", *w.Relay)
+		}
+		return ok
+	})
+
+	// The relay comes up under it, in the order cmd/flue brings a leg up:
+	// identity from relay.json first, then the transport's own report.
+	srv.SetRelayMachine("karns-macbook-pro-a1b2", "Karn's MacBook Pro")
+	srv.SetRelayStatus(RelayConnecting, "")
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		rs, ok := msg.(wire.RelayState)
+		if !ok {
+			return false
+		}
+		if rs.Relay.Status != RelayConnecting {
+			// The push before this one is the identity's, which lands while the
+			// status is still empty and so says "off". Skip it rather than fail:
+			// it is honest, and the state under test is the next one.
+			return false
+		}
+		if rs.Relay.MachineID != "karns-macbook-pro-a1b2" || rs.Relay.MachineName != "Karn's MacBook Pro" {
+			t.Fatalf("pushed relay = %+v, want the machine from the configuration", rs.Relay)
+		}
+		return true
+	})
+
+	srv.SetRelayStatus(RelayConnected, "https://r.example")
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		rs, ok := msg.(wire.RelayState)
+		if !ok {
+			return false
+		}
+		if rs.Relay.Status != RelayConnected || rs.Relay.Origin != "https://r.example" {
+			t.Fatalf("pushed relay = %+v, want {connected https://r.example}", rs.Relay)
+		}
+		// The whole state, not the field that moved: a client applies this
+		// wholesale, so a push that dropped the machine would undo the one
+		// before it.
+		if rs.Relay.MachineID != "karns-macbook-pro-a1b2" {
+			t.Fatalf("pushed relay = %+v, want the machine carried along with the status", rs.Relay)
+		}
+		return true
+	})
+
+	// A transport that redials reports every attempt, and a state equal to the
+	// last one pushed is not news. The leave below is how that is proved: if the
+	// repeat had gone out, it is what this read would find first.
+	srv.SetRelayStatus(RelayConnected, "https://r.example")
+	srv.SetRelayStatus(RelayOff, "")
+	srv.SetRelayMachine("", "")
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		rs, ok := msg.(wire.RelayState)
+		if !ok {
+			return false
+		}
+		// "off" is spelled out here, unlike on the welcome, which omits the
+		// field instead. A push exists to correct what a tab already believes,
+		// and silence corrects nothing.
+		if rs.Relay.Status != RelayOff {
+			t.Fatalf("pushed relay = %+v, want the relay reported gone", rs.Relay)
+		}
+		if rs.Relay.Origin != "" || rs.Relay.MachineID != "" {
+			t.Fatalf("pushed relay = %+v, want nothing left of the relay that went away", rs.Relay)
 		}
 		return true
 	})
