@@ -145,6 +145,57 @@ honours — so adopting the new one would trade a browser that lists what it can
 reach for one that lists what it cannot. Pairing again is what mints a
 certificate, and it stays the way out of that state.
 
+### The third delivery: a machine's own browser
+
+Neither delivery above reaches the tab a user opened on
+`http://127.0.0.1:7717`. It ran no ceremony because it never needed one — the
+session cookie is its credential and it was only ever talking to the machine it
+is on — so it holds no device cert to present to a sibling; and the rule above
+excludes it by name, because a session cookie authenticates no key. Nor can it
+be sent to the QR: a pairing link lands on the *relay's* origin, which is a
+different storage partition, so the ceremony would admit a browser that is not
+this one. Before this the fleet silently collapsed to one machine on a fully
+joined laptop, and nothing on any screen said why.
+
+The daemon that served the page answers instead, on its loopback HTTP surface,
+behind the same session token as everything else there:
+
+```
+POST /api/fleet/enrol       body {publicKey} → {deviceId, deviceCert, fleetPub, machineId}
+GET  /api/fleet/directory   the relay's own answer, byte for byte
+```
+
+**Enrolment grants no authority that the caller does not already hold.** A
+client that can open `/ws` on loopback can spawn a shell, and a shell can read
+`relay.json`, which holds the fleet *seed* — so it could already mint a cert for
+any key it liked, valid on every machine. The endpoint collapses three steps
+into one for the honest case and changes nothing for the dishonest one. For the
+same reason it is HTTP on loopback and **must never acquire a wire-protocol
+equivalent**: a relay-origin device cannot read `relay.json`, so a `wire.Enrol`
+*would* be an escalation — admission to one machine becoming the power to
+manufacture admission to every machine, for keys nobody has proved they hold.
+It is idempotent by lookup, so a browser asks on every load rather than
+remembering.
+
+**Why the browser may pin a fleet key here.** The rule above is about a
+connection to a *peer*, and the danger it guards against is an intermediary or
+an unknown party choosing the anchor every machine cert hangs from. On loopback
+there is no such party: the socket goes to one process on this computer, the one
+that owns the key and served the page. The pin *is* replaced here, unlike
+above, and for a reason that is the mirror of the one given there — the cert
+arrives with the key, from the process that minted both, so the pair is coherent
+on arrival; and a loopback tab has no ceremony to be sent back to.
+
+**The directory route is transport and not trust.** It exists because the relay
+answers `GET /directory` without an `Access-Control-Allow-Origin` header, so a
+loopback tab's cross-origin fetch is discarded before it can be read — and
+`readDirectory` reports every fault as "no machines", so the tab showed a fleet
+of one. The daemon forwards the bytes unchanged and the browser verifies every
+blob under the pinned fleet key exactly as it does when it reads the relay
+directly. A directory the daemon had "checked" would be one the browser could be
+tempted to trust on the daemon's say-so, which is the property the fleet key
+exists to keep out of every intermediary's reach.
+
 ## The fleet directory
 
 Auto-pair needs one piece of distribution: a device paired on machine A must
