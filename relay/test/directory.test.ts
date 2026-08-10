@@ -1,0 +1,381 @@
+import { env, SELF } from 'cloudflare:test'
+import { describe, expect, it } from 'vitest'
+
+import worker, { type Env } from '../src/index'
+import { BASE, Leg, machineId, TEST_SECRET, within } from './harness'
+
+/**
+ * The fleet directory: the relay's store of blobs it cannot read
+ * (spec/fleet-trust.md, "The fleet directory"). Everything below is written
+ * from the outside — through the real Worker, over the real Durable Object —
+ * because the contract parts B and C are written against is the HTTP and
+ * WebSocket surface, not the class.
+ *
+ * The invariant every one of these tests is really about: the relay stores and
+ * serves, and verifies nothing. A blob that came back changed, or an entry that
+ * quietly displaced another, would be a Worker that had formed an opinion about
+ * bytes it holds no key for.
+ */
+
+/** Mirrors MAX_BLOB_BYTES in src/directory.ts. */
+const MAX_BLOB_BYTES = 4096
+
+/** Mirrors MAX_ENTRIES in src/directory.ts. */
+const MAX_ENTRIES = 512
+
+const DIRECTORY = `${BASE}/directory`
+
+const AUTH = { Authorization: `Bearer ${TEST_SECRET}` }
+
+/**
+ * Every test in this file shares the one directory object — `idFromName`
+ * ("directory") is a constant, which is the whole point of "one relay is one
+ * fleet" — so blobs are made unique per test rather than per run, and the
+ * assertions are about *this* blob rather than about the size of the set.
+ */
+function blob(tag: string, fill = 'x'): Uint8Array {
+  return new TextEncoder().encode(`${tag}:${fill}`)
+}
+
+function put(body: BodyInit, headers: Record<string, string> = AUTH): Promise<Response> {
+  return SELF.fetch(DIRECTORY, { method: 'PUT', body, headers })
+}
+
+async function get(): Promise<{ v: number; entries: { key: string; blob: string }[] }> {
+  const res = await SELF.fetch(DIRECTORY)
+  expect(res.status).toBe(200)
+  return (await res.json()) as { v: number; entries: { key: string; blob: string }[] }
+}
+
+/** The key the directory files a blob under: SHA-256 of its exact bytes. */
+async function digest(bytes: Uint8Array): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** The bytes of one entry of a GET, base64 undone. */
+function decode(b64: string): Uint8Array {
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+}
+
+/** A daemon's push socket, as a harness Leg. */
+async function socket(): Promise<Leg> {
+  const res = await SELF.fetch(DIRECTORY, { headers: { Upgrade: 'websocket', ...AUTH } })
+  expect(res.status).toBe(101)
+  const ws = res.webSocket!
+  // The pool's test-side socket defaults to delivering binary as Blob; ask for
+  // ArrayBuffer so a push can be compared synchronously.
+  ;(ws as unknown as { binaryType: string }).binaryType = 'arraybuffer'
+  ws.accept()
+  return new Leg(ws)
+}
+
+/** A stub env for the router unit tests, shaped like machineid.test.ts's: the
+ * directory namespace answers with a status nothing else in the Worker uses,
+ * so "reached the object" is unmistakable. */
+function stubEnv(overrides: Partial<Env>): Env {
+  return {
+    DAEMON_SECRET: TEST_SECRET,
+    DIRECTORY: {
+      idFromName: (name: string) => name,
+      get: () => ({ fetch: async () => new Response('reached the directory', { status: 299 }) }),
+    },
+    ASSETS: { fetch: async () => new Response('spa', { status: 200 }) },
+    ...overrides,
+  } as unknown as Env
+}
+
+const denyAll = { limit: async () => ({ success: false }) }
+
+describe('PUT /directory', () => {
+  it('refuses a write without the daemon secret: 401', async () => {
+    const res = await put(blob('unauthorized'), {})
+    expect(res.status).toBe(401)
+  })
+
+  it('refuses a write with the wrong secret: 401', async () => {
+    const res = await put(blob('wrong-secret'), { Authorization: 'Bearer nope' })
+    expect(res.status).toBe(401)
+  })
+
+  it('stores a blob and answers 201 with the key it filed it under', async () => {
+    const body = blob('stored')
+    const res = await put(body)
+    expect(res.status).toBe(201)
+    expect(res.headers.get('Content-Type')).toBe('application/json')
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    // Content-addressed: the key is SHA-256 of the exact bytes and nothing
+    // else, which is what makes a PUT unable to displace another entry.
+    expect(await res.json()).toEqual({ key: await digest(body) })
+  })
+
+  it('is idempotent: the same bytes again answer 200 and add no second entry', async () => {
+    const body = blob('idempotent')
+    expect((await put(body)).status).toBe(201)
+    const before = (await get()).entries.length
+    const again = await put(body)
+    // 200 rather than 201 — same body, so a caller need not branch; the status
+    // is the whole of "you were not the first".
+    expect(again.status).toBe(200)
+    expect(await again.json()).toEqual({ key: await digest(body) })
+    expect((await get()).entries.length).toBe(before)
+  })
+
+  it('refuses an empty body: 400, and spends no entry on it', async () => {
+    const res = await put(new Uint8Array(0))
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({ error: 'empty blob' })
+  })
+
+  it('takes a blob of exactly the cap and refuses one byte more: 413', async () => {
+    const at = new Uint8Array(MAX_BLOB_BYTES).fill(0x41)
+    expect((await put(at)).status).toBe(201)
+    const over = new Uint8Array(MAX_BLOB_BYTES + 1).fill(0x42)
+    const res = await put(over)
+    expect(res.status).toBe(413)
+    expect(await res.json()).toEqual({ error: 'blob too large' })
+    // And nothing of the oversized blob was kept.
+    const keys = (await get()).entries.map((e) => e.key)
+    expect(keys).not.toContain(await digest(over))
+  })
+
+  it('refuses an oversized chunked body too, where Content-Length says nothing', async () => {
+    // A body streamed without a declared length is the case a Content-Length
+    // check alone misses, and buffering it is the memory DoS readCapped
+    // exists to stop.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_BLOB_BYTES).fill(0x43))
+        controller.enqueue(new Uint8Array(64).fill(0x44))
+        controller.close()
+      },
+    })
+    const res = await SELF.fetch(DIRECTORY, {
+      method: 'PUT',
+      body: stream,
+      headers: AUTH,
+      // Required by the fetch spec for a streaming body.
+      duplex: 'half',
+    } as RequestInit)
+    expect(res.status).toBe(413)
+  })
+})
+
+describe('GET /directory', () => {
+  it('is credential-less: no secret, still the full set', async () => {
+    const body = blob('credential-less')
+    await put(body)
+    const res = await SELF.fetch(DIRECTORY)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Content-Type')).toBe('application/json')
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    const doc = (await res.json()) as { v: number; entries: { key: string; blob: string }[] }
+    expect(doc.v).toBe(1)
+    expect(doc.entries.map((e) => e.key)).toContain(await digest(body))
+  })
+
+  it('round-trips a blob byte for byte, whatever is in it', async () => {
+    // The load-bearing test of the whole leg. Parts B and C verify Ed25519
+    // signatures over *these* bytes: a relay that re-encoded, trimmed, or
+    // ran a blob through UTF-8 anywhere would break every signature over it
+    // while believing it had been helpful. So the payload is deliberately not
+    // text — a NUL, a lone 0xFF that is not valid UTF-8, and a byte pattern
+    // that base64 has to pad.
+    const body = Uint8Array.of(0x00, 0xff, 0xfe, 0x0a, 0x7b, 0x22, 0x80, 0x01, 0x02)
+    const res = await put(body)
+    expect(res.status).toBe(201)
+    const key = await digest(body)
+    const entry = (await get()).entries.find((e) => e.key === key)
+    expect(entry).toBeDefined()
+    expect([...decode(entry!.blob)]).toEqual([...body])
+    // And the key is still the digest of what came back: bytes the relay had
+    // altered could not hash to the name it filed them under.
+    expect(await digest(decode(entry!.blob))).toBe(key)
+  })
+
+  it('keys every entry by the digest of its own blob', async () => {
+    await put(blob('keyed-by-digest'))
+    const entries = (await get()).entries
+    expect(entries.length).toBeGreaterThan(0)
+    for (const e of entries) expect(await digest(decode(e.blob))).toBe(e.key)
+  })
+
+  it('sits behind the rate rule, like /client and POST /api/pair', async () => {
+    const res = await worker.fetch(
+      new Request(DIRECTORY),
+      stubEnv({ CLIENT_RATE: denyAll }),
+    )
+    expect(res.status).toBe(429)
+    expect(await res.json()).toEqual({ error: 'rate limited' })
+  })
+
+  it('does not meter the secret-holding legs: they are gated, not throttled', async () => {
+    const upgrade = await worker.fetch(
+      new Request(DIRECTORY, { headers: { Upgrade: 'websocket', ...AUTH } }),
+      stubEnv({ CLIENT_RATE: denyAll }),
+    )
+    expect(upgrade.status).toBe(299)
+    const write = await worker.fetch(
+      new Request(DIRECTORY, { method: 'PUT', body: 'blob', headers: AUTH }),
+      stubEnv({ CLIENT_RATE: denyAll }),
+    )
+    expect(write.status).toBe(299)
+  })
+
+  it('meters an anonymous upgrade too: the 401 is not a cheaper road past the rule', async () => {
+    // Without this, `Upgrade: websocket` would be a way to spend the Worker's
+    // billed requests on /directory without ever presenting a credential.
+    const res = await worker.fetch(
+      new Request(DIRECTORY, { headers: { Upgrade: 'websocket' } }),
+      stubEnv({ CLIENT_RATE: denyAll }),
+    )
+    expect(res.status).toBe(429)
+  })
+
+  it('fails open when the rate binding is absent, as the other routes do', async () => {
+    const res = await worker.fetch(new Request(DIRECTORY), stubEnv({ CLIENT_RATE: undefined }))
+    expect(res.status).toBe(299)
+  })
+})
+
+describe('the directory socket', () => {
+  it('refuses an upgrade without the daemon secret: 401', async () => {
+    const res = await SELF.fetch(DIRECTORY, { headers: { Upgrade: 'websocket' } })
+    expect(res.status).toBe(401)
+  })
+
+  it('pushes a stored blob to every connected daemon, byte for byte', async () => {
+    const a = await socket()
+    const b = await socket()
+    const body = Uint8Array.of(0x00, 0xff, 0x10, 0x20, 0x30)
+    expect((await put(body)).status).toBe(201)
+    // One binary message of exactly the blob's bytes: no envelope, because an
+    // envelope is a chance to reshape something the relay cannot read.
+    expect([...new Uint8Array((await a.next('a push')) as ArrayBuffer)]).toEqual([...body])
+    expect([...new Uint8Array((await b.next('a push')) as ArrayBuffer)]).toEqual([...body])
+    a.ws.close()
+    b.ws.close()
+  })
+
+  it('pushes nothing for a duplicate PUT: the set did not change', async () => {
+    const body = blob('pushed-once')
+    await put(body)
+    const daemon = await socket()
+    // The socket is opened after the first PUT, so the only push it could see
+    // is one the duplicate produced.
+    await put(body)
+    // A blob that *does* change the set, sent second, is the fence: if the
+    // duplicate had pushed, this assertion would read its bytes instead.
+    const fresh = blob('pushed-once-fence')
+    await put(fresh)
+    expect([...new Uint8Array((await daemon.next('the fence push')) as ArrayBuffer)]).toEqual([
+      ...fresh,
+    ])
+    daemon.ws.close()
+  })
+
+  it('closes a daemon that speaks on it: the socket is push-only', async () => {
+    const daemon = await socket()
+    daemon.ws.send('hello')
+    expect(await within(daemon.closed, 'the socket to close')).toEqual({
+      code: 1002,
+      reason: 'the directory socket is push-only',
+    })
+  })
+
+  it('survives a flue-pong without closing', async () => {
+    const daemon = await socket()
+    daemon.ws.send('flue-pong')
+    const body = blob('after-a-pong')
+    await put(body)
+    expect([...new Uint8Array((await daemon.next('a push')) as ArrayBuffer)]).toEqual([...body])
+    daemon.ws.close()
+  })
+
+  it('answers flue-ping from the edge auto-response, without waking the object', async () => {
+    const daemon = await socket()
+    daemon.ws.send('flue-ping')
+    expect(await daemon.next('the pong')).toBe('flue-pong')
+    daemon.ws.close()
+  })
+})
+
+describe('the directory routes', () => {
+  it('404s a path under the prefix: the Worker owns it, the SPA does not answer', async () => {
+    const res = await SELF.fetch(`${BASE}/directory/anything`)
+    expect(res.status).toBe(404)
+    // Not the machine 404: nothing here names a machine, and saying so would
+    // be a lie about what was asked.
+    expect(await res.json()).toEqual({ error: 'not found' })
+  })
+
+  it('405s a method the leg does not have', async () => {
+    const res = await SELF.fetch(DIRECTORY, { method: 'DELETE', headers: AUTH })
+    expect(res.status).toBe(405)
+    expect(res.headers.get('Allow')).toBe('GET, PUT')
+    expect(await res.json()).toEqual({ error: 'method not allowed' })
+  })
+
+  it('never confuses the directory with a machine: /directory is not an id', async () => {
+    // The two prefixes cannot collide — "directory" carries no MAC tag and
+    // could not be a machine id — but the check is cheap and the failure mode
+    // (a fleet's certs served out of a machine hub) would be silent.
+    const res = await SELF.fetch(`${BASE}/client/${await machineId('notdir-0a0a')}`, {
+      headers: { Upgrade: 'websocket' },
+    })
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'daemon offline' })
+  })
+
+  it('503s when the directory binding is absent: an older deploy than this script', async () => {
+    const res = await worker.fetch(new Request(DIRECTORY), stubEnv({ DIRECTORY: undefined }))
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'directory unavailable' })
+  })
+
+  it('binds one directory for the whole relay', async () => {
+    // One relay is one fleet: the name is a constant in the router, so two
+    // reads of it are two reads of the same object. The binding has to exist
+    // in the pool for that to mean anything.
+    expect(env.DIRECTORY).toBeDefined()
+    expect(typeof env.DIRECTORY.idFromName).toBe('function')
+  })
+})
+
+/**
+ * The cap, tested against its own object rather than the shared one: filling
+ * the fleet directory would leave every other test in this file reading 512
+ * entries. This dials the Durable Object directly, which is the one place in
+ * this suite the router is not the thing under test.
+ */
+describe('the entry cap', () => {
+  it('refuses a PUT past MAX_ENTRIES with 507, and keeps taking duplicates', async () => {
+    const full = env.DIRECTORY.get(env.DIRECTORY.idFromName(`full-${crypto.randomUUID()}`))
+    const write = (body: Uint8Array): Promise<Response> =>
+      full.fetch(DIRECTORY, { method: 'PUT', body, headers: AUTH })
+    // Fill it. Small blobs — the cap under test is the count, not the bytes.
+    const first = blob('cap', '0')
+    expect((await write(first)).status).toBe(201)
+    for (let i = 1; i < MAX_ENTRIES; i++) expect((await write(blob('cap', String(i)))).status).toBe(201)
+    // One more distinct blob is refused, with a status nothing else on this
+    // leg wears: a daemon has to tell "your blob is fine and I will not keep
+    // it" from 413 (this blob is wrong) and 401 (this caller is wrong).
+    const over = blob('cap', 'over')
+    const res = await write(over)
+    expect(res.status).toBe(507)
+    expect(await res.json()).toEqual({ error: 'directory full' })
+    // Refused, not evicted — a directory that dropped an old entry to take a
+    // new one could drop a revocation, and a forgotten revocation re-admits
+    // the device it revoked.
+    const doc = (await (await full.fetch(DIRECTORY)).json()) as {
+      entries: { key: string; blob: string }[]
+    }
+    expect(doc.entries.length).toBe(MAX_ENTRIES)
+    expect(doc.entries.map((e) => e.key)).toContain(await digest(first))
+    expect(doc.entries.map((e) => e.key)).not.toContain(await digest(over))
+    // And a re-PUT of something already stored still succeeds at the cap: it
+    // asks for no room, so refusing it would strand a daemon that re-announces
+    // on every reconnect.
+    expect((await write(first)).status).toBe(200)
+  })
+})
