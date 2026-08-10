@@ -187,6 +187,16 @@ type conn struct {
 	// bucket, and nothing else consults it.
 	device string
 
+	// deviceKey is the static public key that connection authenticated with —
+	// the 32 bytes the handshake proved, rather than the 48-bit digest of them
+	// above. Nil for a connection with no device identity.
+	//
+	// Set at construction and never written again, which is why it needs no
+	// lock where `device` does: it is the transport's finding about a
+	// connection that does not exist yet, not registry state that a revoke on
+	// another goroutine can change.
+	deviceKey []byte
+
 	// origin is the absolute origin this connection's upgrade arrived on, and
 	// the only thing pairing can honestly build a URL from: the second device
 	// has to open an address this daemon is really reachable at. It is carried
@@ -208,16 +218,17 @@ type conn struct {
 	attach  map[uint32]*attachment
 }
 
-func newConn(ctx context.Context, cancel context.CancelFunc, mc MessageConn, srv *Server, peer, origin string) *conn {
+func newConn(ctx context.Context, cancel context.CancelFunc, mc MessageConn, srv *Server, peer, origin string, deviceKey []byte) *conn {
 	return &conn{
-		ctx:    ctx,
-		cancel: cancel,
-		mc:     mc,
-		srv:    srv,
-		peer:   peer,
-		origin: origin,
-		out:    make(chan frame, outboxDepth),
-		attach: map[uint32]*attachment{},
+		ctx:       ctx,
+		cancel:    cancel,
+		mc:        mc,
+		srv:       srv,
+		peer:      peer,
+		origin:    origin,
+		deviceKey: deviceKey,
+		out:       make(chan frame, outboxDepth),
+		attach:    map[uint32]*attachment{},
 	}
 }
 
@@ -339,7 +350,7 @@ func (c *conn) serve() {
 		// could know to be its. A tab that only ever paired over loopback has
 		// no second source for its certificate and re-pairs instead — see
 		// fleetCertFor, and keepDeviceCert in web/src/routes/pair.tsx.
-		FleetCert: c.srv.fleetCertFor(c.device),
+		FleetCert: c.srv.fleetCertFor(c.deviceKey),
 	})
 
 	for {

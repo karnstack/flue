@@ -422,6 +422,12 @@ func TestRelayChannelServesAPairedDevice(t *testing.T) {
 // over by the time the connection is served. The device id is what revocation
 // finds, the origin is what a pairing URL is built from, and the peer is what
 // the audit log names.
+//
+// The static key rides along with the id, and it is the one the handshake
+// proved rather than the one the registry row happens to hold. Everything on
+// the far side that has to look this device up again resolves on these bytes
+// (daemon.fleetCertFor), because an id is a 48-bit digest and two devices are
+// permitted to share one.
 func TestRelayChannelCarriesTheDeviceIdentity(t *testing.T) {
 	t.Parallel()
 	r := newFakeRelay(t, "s")
@@ -441,8 +447,14 @@ func TestRelayChannelCarriesTheDeviceIdentity(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	got := srv.served()[0]
-	want := daemon.ConnMeta{Peer: "relay:" + id.device.ID, Origin: testOrigin, DeviceID: id.device.ID}
-	if got != want {
+	want := daemon.ConnMeta{
+		Peer:      "relay:" + id.device.ID,
+		Origin:    testOrigin,
+		DeviceID:  id.device.ID,
+		DeviceKey: id.deviceKey.Public,
+	}
+	if got.Peer != want.Peer || got.Origin != want.Origin || got.DeviceID != want.DeviceID ||
+		!bytes.Equal(got.DeviceKey, want.DeviceKey) {
 		t.Errorf("ConnMeta = %+v, want %+v", got, want)
 	}
 }

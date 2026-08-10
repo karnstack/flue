@@ -540,6 +540,18 @@ func LocalCSPFor(relayOrigin string) string {
 // fleetCertFor is the fleet device certificate belonging to the device this
 // connection authenticated as, for the welcome to carry.
 //
+// Resolved by the key bytes and not by the id, which is the same discipline
+// crypto.FindByKey keeps and for the same reason: an id is hex(sha256(key))
+// truncated to 48 bits, and Add deliberately permits two devices to hold
+// colliding ids, so a lookup by id alone can name a device that is not this
+// one. The consequence here would be handing a browser somebody else's
+// certificate — recoverable, because the browser checks the subject against
+// its own key before storing it and every machine checks it again at the
+// handshake, but "the other end will notice" is not a reason for this end to
+// answer the wrong question. FindByKey also refuses a revoked key inside the
+// same critical section as the read, so a revocation that landed since the
+// handshake costs this welcome its certificate, which is the right answer.
+//
 // Empty for every connection with no device identity, which is every loopback
 // one: a certificate is a statement about a device key, and a session-token
 // connection has not named one. Empty too when the registry cannot be read, or
@@ -552,16 +564,19 @@ func LocalCSPFor(relayOrigin string) string {
 // its handshake after pairing elsewhere (AddFromFleetCert). Handing back the
 // same bytes keeps a certificate one artifact for the life of a pairing, which
 // is what lets a browser compare what it holds against what it is offered.
-func (s *Server) fleetCertFor(deviceID string) []byte {
-	if deviceID == "" || s.identity.Devices == nil {
+func (s *Server) fleetCertFor(deviceKey []byte) []byte {
+	if len(deviceKey) == 0 || s.identity.Devices == nil {
 		return nil
 	}
-	dev, ok, err := s.identity.Devices.FindByID(deviceID)
+	dev, ok, err := s.identity.Devices.FindByKey(deviceKey)
 	if err != nil {
 		// The socket is up and the device is admitted; a registry that cannot
 		// be read right now costs this device its certificate on this
-		// connection and nothing else. The next one carries it.
-		s.logger().Warn("could not read a device's fleet certificate for the welcome", "device", deviceID, "err", err)
+		// connection and nothing else. The next one carries it. Logged by id,
+		// because that is the identity every other line about this device —
+		// and the Devices screen — speaks in.
+		s.logger().Warn("could not read a device's fleet certificate for the welcome",
+			"device", crypto.DeviceID(deviceKey), "err", err)
 		return nil
 	}
 	if !ok || len(dev.Cert) == 0 {

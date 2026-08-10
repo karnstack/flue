@@ -2054,7 +2054,7 @@ func TestShutdownClosesEstablishedWebSockets(t *testing.T) {
 func TestEnqueueNeverBlocksAndDropsABackloggedClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	c := newConn(ctx, cancel, nil, nil, "", "")
+	c := newConn(ctx, cancel, nil, nil, "", "", nil)
 
 	// Fill the outbox with no writer draining it, i.e. a client that has
 	// stopped reading its socket.
@@ -2098,7 +2098,7 @@ func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	newPeer := func() *conn {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		c := newConn(ctx, cancel, nil, srv, "", "")
+		c := newConn(ctx, cancel, nil, srv, "", "", nil)
 		c.attach[1] = &attachment{ref: 1, s: s, sub: s.Subscribe(0), done: make(chan struct{})}
 		srv.claimPrimaryIfUnset(s.ID(), c)
 		return c
@@ -2909,7 +2909,7 @@ func TestDeviceListBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	newPeer := func() *conn {
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		c := newConn(ctx, cancel, nil, srv, "", "")
+		c := newConn(ctx, cancel, nil, srv, "", "", nil)
 		srv.addConn(c, "")
 		return c
 	}
@@ -2978,7 +2978,7 @@ func TestADeviceConnJoinsBothRegistriesAtOnce(t *testing.T) {
 	srv := New(session.NewRegistry(time.Now), local.NewAuth(tok, 0), nil, "test", Identity{})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	c := newConn(ctx, cancel, nil, srv, "relay", "")
+	c := newConn(ctx, cancel, nil, srv, "relay", "", nil)
 
 	// Admission is one step, so a revoke can only observe both registries or
 	// neither.

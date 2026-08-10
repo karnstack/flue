@@ -400,9 +400,15 @@ func (t *Transport) serveChannel(s *socket, ch *channel, origin string) {
 	// including out of a panic — and that close is what tells the relay to drop
 	// the browser's socket.
 	t.srv.ServeConn(s.ctx, cc, daemon.ConnMeta{
-		Peer:     relayPeer + ":" + dev.ID,
-		Origin:   origin,
-		DeviceID: dev.ID,
+		Peer:   relayPeer + ":" + dev.ID,
+		Origin: origin,
+		// Both identities: the id for the log lines and the connection
+		// buckets, and the key the handshake actually proved for anything
+		// that has to look a device up. `peerStatic` rather than
+		// `dev.PublicKey` — they are equal, both lookups compared them — and
+		// this says which of the two the far end demonstrated it holds.
+		DeviceID:  dev.ID,
+		DeviceKey: peerStatic,
 	})
 	t.log.Debug("relay channel ended", "channel", ch.id, "device", dev.ID)
 }

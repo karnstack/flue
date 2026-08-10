@@ -38,6 +38,20 @@ type ConnMeta struct {
 	Peer     string // resolved peer identity, for the audit log
 	Origin   string // absolute origin pairing URLs may be built from
 	DeviceID string // paired device id; "" on the local transport
+
+	// DeviceKey is the device's static public key — the thing the handshake
+	// actually proved, and the identity every registry lookup that decides
+	// something should be made against. Nil on the local transport, which
+	// authenticates a machine-local session token rather than a device.
+	//
+	// It rides alongside DeviceID rather than replacing it because the two
+	// answer different questions. The id is a 48-bit digest of these bytes and
+	// is what the log lines, the Devices screen and the connection buckets
+	// speak in; the bytes are what crypto.FindByKey compares, for the reason
+	// that function spells out at length — Add deliberately permits two
+	// devices with colliding digests, so an id alone can name more than one
+	// key.
+	DeviceKey []byte
 }
 
 // ServeConn serves one established, authenticated connection until it ends.
@@ -65,7 +79,7 @@ func (s *Server) ServeConn(ctx context.Context, mc MessageConn, meta ConnMeta) {
 	// out is unharmed.
 	defer func() { _ = mc.Close() }()
 
-	c := newConn(connCtx, cancel, mc, s, meta.Peer, meta.Origin)
+	c := newConn(connCtx, cancel, mc, s, meta.Peer, meta.Origin, meta.DeviceKey)
 	// Registered before it is served and forgotten however it ends, so the
 	// broadcast set is exactly the set of connections that can be written to.
 	// The device it authenticated as is part of that one registration rather

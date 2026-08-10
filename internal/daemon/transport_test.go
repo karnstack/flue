@@ -151,9 +151,12 @@ func TestWelcomeCarriesTheDevicesFleetCert(t *testing.T) {
 	}
 
 	// A connection that authenticated as that device — which is what the relay
-	// transport hands over after a handshake.
+	// transport hands over after a handshake: the id for the log lines and the
+	// key the handshake proved, which is what the certificate is looked up on.
 	p := newPipeConn()
-	go srv.ServeConn(context.Background(), p, ConnMeta{Peer: "relay", DeviceID: crypto.DeviceID(devPub)})
+	go srv.ServeConn(context.Background(), p, ConnMeta{
+		Peer: "relay", DeviceID: crypto.DeviceID(devPub), DeviceKey: devPub,
+	})
 	t.Cleanup(func() { _ = p.Close() })
 
 	w, ok := expectControl(t, p).(wire.Welcome)
@@ -183,6 +186,25 @@ func TestWelcomeCarriesTheDevicesFleetCert(t *testing.T) {
 	}
 	if len(lw.FleetCert) != 0 {
 		t.Errorf("a loopback welcome carried a fleet cert: %x", lw.FleetCert)
+	}
+
+	// And the lookup is on the key, not on the id. The id is
+	// hex(sha256(key))[:12] — 48 bits — and crypto.Add deliberately permits two
+	// devices to hold colliding ones, so a welcome resolved by id would hand
+	// the wrong device's certificate to whichever of them connected. Here the
+	// id is the paired device's and the key is not, which is exactly what a
+	// collision looks like from this function's side.
+	other := newPipeConn()
+	go srv.ServeConn(context.Background(), other, ConnMeta{
+		Peer: "relay", DeviceID: crypto.DeviceID(devPub), DeviceKey: deviceKey(0x5b),
+	})
+	t.Cleanup(func() { _ = other.Close() })
+	ow, ok := expectControl(t, other).(wire.Welcome)
+	if !ok {
+		t.Fatal("first frame on the colliding-id conn was not a welcome")
+	}
+	if len(ow.FleetCert) != 0 {
+		t.Errorf("a welcome offered another device's certificate to a key it does not name: %x", ow.FleetCert)
 	}
 }
 
