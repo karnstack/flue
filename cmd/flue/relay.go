@@ -275,6 +275,9 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 		AssetHeaders: relayAssetHeaders,
 		Version:      deployStamp(),
 		OnStep:       func(line string) { fmt.Fprintf(w, "  ✓ %s\n", line) },
+		// No tick: a note is something the deploy could not fix, and the same
+		// two-space indent every soft failure in this file already wears.
+		OnNote: func(line string) { fmt.Fprintf(w, "  %s\n", line) },
 	})
 	if err != nil {
 		return err
@@ -1010,6 +1013,12 @@ func runRelayUpdate(w io.Writer, r io.Reader, api *cloudflare.Client, args []str
 		Assets:       assets,
 		AssetHeaders: relayAssetHeaders,
 		Version:      deployStamp(),
+		// OnStep is deliberately unset — this command prints its own ✓ lines
+		// in its own words — but a note must not go with it: this is the
+		// command that meets a relay deployed by a newer flue, and the whole
+		// point of the note is that the 10061 which follows says nothing about
+		// why.
+		OnNote: func(line string) { fmt.Fprintf(w, "  %s\n", line) },
 	}); err != nil {
 		return err
 	}

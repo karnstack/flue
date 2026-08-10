@@ -386,6 +386,18 @@ type DeployInput struct {
 	// rather than about this binary.
 	Migrations []Migration
 
+	// OnNote, when set, hears the conditions this client can detect and cannot
+	// fix — one line, already a whole sentence, for the caller to show a human.
+	// It is not progress: nothing routine reaches it, and a deploy that has
+	// nothing to say says nothing.
+	//
+	// It exists for one case today and that case used to be silent: a script
+	// carrying a migration tag this binary has never heard of. Deploy then
+	// sends no migration at all, deliberately, and if the upload is refused the
+	// user is left with a 10061 about a Durable Object class and no hint that
+	// the relay was deployed by a newer flue than the one they are running.
+	OnNote func(line string)
+
 	DOBindings           map[string]string // name -> class: {"HUB": "DaemonHub"}
 	Assets               []Asset
 	AssetsRunWorkerFirst []string // ["/daemon", "/client", "/api/*"]
@@ -756,6 +768,17 @@ func (c *Client) Deploy(ctx context.Context, in DeployInput) error {
 	if len(in.Migrations) > 0 {
 		tag, known := c.deployedMigrationTag(ctx, in.AccountID, in.ScriptName)
 		meta.Migrations = pendingMigrations(in.Migrations, tag, known)
+		// The one silent branch in pendingMigrations, given a voice. A tag this
+		// binary has never heard of means the account's relay was deployed by a
+		// *newer* flue, and sending an older history over it would undo a
+		// migration this binary does not know about — so nothing is sent, which
+		// is right and looks like nothing happening. If that newer Worker
+		// introduced a class this module does not export, the upload that
+		// follows is refused with a 10061 naming a Durable Object, and without
+		// this line there is nothing anywhere connecting the two.
+		if known && tag != "" && !slices.ContainsFunc(in.Migrations, func(m Migration) bool { return m.Tag == tag }) && in.OnNote != nil {
+			in.OnNote(fmt.Sprintf("this relay is at migration %s, which this flue does not know: it was deployed by a newer flue. no migration is being applied, and the upload will be refused if that flue's worker had Durable Object classes this one does not carry — update flue first", tag))
+		}
 	}
 
 	if in.Observability {

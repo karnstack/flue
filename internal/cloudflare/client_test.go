@@ -1522,6 +1522,63 @@ func TestDeployLeavesANewerScriptAlone(t *testing.T) {
 	}
 }
 
+// TestDeploySaysWhenTheRelayIsFromANewerFlue: leaving a newer script's
+// migrations alone is right, and it used to be indistinguishable from nothing
+// happening. If that newer Worker carried a Durable Object class this module
+// does not, the upload is refused with a 10061 naming the class — and nothing
+// anywhere connected that to "you are running an older flue than the one that
+// deployed this relay".
+func TestDeploySaysWhenTheRelayIsFromANewerFlue(t *testing.T) {
+	var notes []string
+	in := deployFixture()
+	in.OnNote = func(line string) { notes = append(notes, line) }
+
+	f := deployServer(t, nil, func(w http.ResponseWriter, _ []part) {
+		writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+	})
+	f.deployedTag = "v7"
+
+	if err := f.client().Deploy(context.Background(), in); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("notes = %v, want exactly one about the unknown tag", notes)
+	}
+	// The tag is in the line: it is the one fact the user can act on, and
+	// "newer flue" without it is a claim they cannot check.
+	if !strings.Contains(notes[0], "v7") {
+		t.Errorf("the note does not name the tag: %q", notes[0])
+	}
+	if !strings.Contains(notes[0], "newer flue") {
+		t.Errorf("the note does not say what an unknown tag means: %q", notes[0])
+	}
+}
+
+// TestDeploySaysNothingWhenThereIsNothingToSay: a note is not progress, and a
+// deploy that goes to plan must not produce one — an ordinary run, and an
+// upgrade from a tag this binary does know.
+func TestDeploySaysNothingWhenThereIsNothingToSay(t *testing.T) {
+	for _, tag := range []string{"", "v1", "v2"} {
+		t.Run("tag="+tag, func(t *testing.T) {
+			var notes []string
+			in := deployFixture()
+			in.OnNote = func(line string) { notes = append(notes, line) }
+
+			f := deployServer(t, nil, func(w http.ResponseWriter, _ []part) {
+				writeEnvelope(t, w, http.StatusOK, map[string]any{"id": "flue-relay"})
+			})
+			f.deployedTag = tag
+
+			if err := f.client().Deploy(context.Background(), in); err != nil {
+				t.Fatalf("Deploy: %v", err)
+			}
+			if len(notes) != 0 {
+				t.Errorf("notes on an ordinary deploy: %v", notes)
+			}
+		})
+	}
+}
+
 // TestDeployOmitsMigrationsWithNoHistory: a caller with nothing to migrate
 // sends no migration object at all, and asks the account nothing.
 func TestDeployOmitsMigrationsWithNoHistory(t *testing.T) {

@@ -167,11 +167,28 @@ type Input struct {
 	// OnStep, when set, hears one line per completed step — "worker deployed:
 	// x" — in the order they happen. Callers own the formatting.
 	OnStep func(line string)
+
+	// OnNote, when set, hears the conditions a deploy can detect and cannot
+	// fix. Separate from OnStep because it is not progress and should not be
+	// dressed as it: a caller printing "  ✓ %s" for every step would put a tick
+	// on a warning. Unset falls back to OnStep, so a caller that has not
+	// thought about it still shows the line rather than swallowing it.
+	OnNote func(line string)
 }
 
 func (in Input) step(format string, args ...any) {
 	if in.OnStep != nil {
 		in.OnStep(fmt.Sprintf(format, args...))
+	}
+}
+
+func (in Input) note(line string) {
+	if in.OnNote != nil {
+		in.OnNote(line)
+		return
+	}
+	if in.OnStep != nil {
+		in.OnStep(line)
 	}
 }
 
@@ -203,7 +220,11 @@ func Deploy(in Input) error {
 			// say "introduce these classes" would have its migration refused
 			// on the tag precondition and then upload a script binding a class
 			// that was never created.
-			Migrations:           Migrations,
+			Migrations: Migrations,
+			// The client's one way of saying something a deploy cannot act on
+			// — today, a relay deployed by a newer flue than this one, whose
+			// migration history this binary must not replay over.
+			OnNote:               in.note,
 			DOBindings:           DOBindings,
 			Assets:               in.Assets,
 			AssetsRunWorkerFirst: RunWorkerFirst,
