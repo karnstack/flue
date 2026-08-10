@@ -225,6 +225,10 @@ type Server struct {
 	// screen's status. Under the same lock as the publisher because it is the
 	// same object installed at the same moment.
 	directoryCounts func() DirectoryCounts
+	// directorySnapshot fetches the directory itself, for this machine's own
+	// UI to read (fleet.go). Same lock, same object, same moment as the two
+	// above.
+	directorySnapshot DirectorySnapshot
 
 	// release is the update checker behind ReleasePath, injected the same way
 	// and nil by default. See release.go.
@@ -449,6 +453,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle(RelayAddressPath, s.withAuth(http.HandlerFunc(s.handleRelayAddress)))
 	mux.Handle(RelayLeavePath, s.withAuth(http.HandlerFunc(s.handleRelayLeave)))
 	mux.Handle(RelayReloadPath, s.withAuth(http.HandlerFunc(s.handleRelayReload)))
+	// The fleet directory, fetched by this daemon for its own UI because the
+	// browser cannot fetch it itself: the relay serves no CORS header, so the
+	// cross-origin read from a loopback tab is discarded before it is read.
+	// GET-only, so methodPolicy needs nothing. See fleet.go.
+	mux.Handle(FleetDirectoryPath, s.withAuth(http.HandlerFunc(s.handleFleetDirectory)))
 	mux.Handle(ReleasePath, s.withAuth(http.HandlerFunc(s.handleRelease)))
 	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
 	// never the app shell.

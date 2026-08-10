@@ -631,6 +631,62 @@ func (d *Directory) ingestSnapshot(ctx context.Context) {
 		"machines", counts.Machines, "devices", counts.Devices, "revocations", counts.Revocations)
 }
 
+// Snapshot reads the directory and returns the relay's answer body unchanged,
+// for a caller that has to hand those bytes to somebody else.
+//
+// The one caller is the daemon's own loopback UI (daemon.FleetDirectoryPath).
+// A browser on http://127.0.0.1:7717 cannot make this read for itself: the
+// relay is another origin and the Worker sends no `Access-Control-Allow-Origin`
+// on any route, so the fetch is discarded by the browser before a byte of it is
+// readable. This daemon already holds the leg, so it makes the read and passes
+// the body through.
+//
+// **Verbatim, and nothing here interprets it.** This is deliberately not
+// ingestSnapshot: it does not verify, does not count, does not touch the sink,
+// does not remember an ETag, and returns bytes rather than facts. The reader at
+// the far end verifies every blob under the fleet public key it pinned, exactly
+// as it would against the relay directly — so this function must stay incapable
+// of changing what that reader concludes. Parsing here would create a second
+// opinion about the same document, and the whole design turns on there being
+// only one: the signature.
+//
+// No conditional read either. The caller needs a body every time, and the ETag
+// this leg caches is a claim about what *this process* has applied, which is a
+// different question from what the browser has seen.
+//
+// The secret rides along for the reason ingestSnapshot's does: the route takes
+// no credential, but the Worker meters exactly the callers that present none,
+// and a daemon's read has no business spending the per-IP budget that exists to
+// keep browsers working.
+func (d *Directory) Snapshot(ctx context.Context) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, directoryStepTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.httpURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("relay: building the fleet directory read: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+d.cfg.Secret)
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("relay: reading the fleet directory: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		// Drained so the connection can be reused, and not read: a refusal's
+		// body is the relay's prose and nothing downstream has a use for it.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
+		return nil, fmt.Errorf("relay: the fleet directory answered %d", resp.StatusCode)
+	}
+	// The same ceiling ingestSnapshot reads under: without it this is an
+	// unbounded read from a machine on the internet, into a buffer this daemon
+	// then hands to a browser.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDirectorySnapshot))
+	if err != nil {
+		return nil, fmt.Errorf("relay: reading the fleet directory: %w", err)
+	}
+	return body, nil
+}
+
 // snapshotETag is the tag of the last fully applied snapshot, or "" when the
 // next read must be unconditional.
 func (d *Directory) snapshotETag() string {

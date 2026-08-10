@@ -1,8 +1,10 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"sync"
@@ -862,5 +864,134 @@ func TestDirectoryDoesNotRegisterDeviceCerts(t *testing.T) {
 	// But both were verified, which is what the counts report.
 	if c := f.dir.Counts(); c.Verified != 2 || c.Devices != 1 || c.Machines != 1 {
 		t.Errorf("counts = %+v, want 2 verified: 1 device, 1 machine", c)
+	}
+}
+
+// --- the snapshot this machine's own UI reads ---
+
+// TestDirectorySnapshotReturnsTheRelaysBytes: the pass-through this leg grew
+// for the browser on 127.0.0.1, which cannot make this read for itself — the
+// relay is another origin and the Worker sends no CORS header, so the fetch is
+// discarded before the browser can read a byte of it.
+//
+// The assertion is on the blob because that is the contract. The reader at the
+// far end verifies every entry under the fleet public key it pinned, and it
+// can only do that if what it verifies is what the fleet key signed.
+func TestDirectorySnapshotReturnsTheRelaysBytes(t *testing.T) {
+	f := newDirFixture(t)
+	blob := f.revocation(t, someKey(t, 0xD1))
+	f.fd.store(blob)
+
+	ctx, cancel := contextWithTimeout(waitFor)
+	defer cancel()
+	body, err := f.dir.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	var doc struct {
+		V       int `json:"v"`
+		Entries []struct {
+			Key  string `json:"key"`
+			Blob []byte `json:"blob"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("the snapshot is not a directory document: %v (%s)", err, body)
+	}
+	if doc.V != 1 || len(doc.Entries) != 1 {
+		t.Fatalf("snapshot = %s, want the one entry the relay holds", body)
+	}
+	if !bytes.Equal(doc.Entries[0].Blob, blob) {
+		t.Error("the blob in the snapshot is not the blob the relay stored")
+	}
+	// Nothing was ingested, and nothing may be: this is transport. A verified
+	// revocation reaching the sink from here would mean the pass-through had
+	// grown an opinion about a document it is only carrying.
+	if f.sink.count() != 0 {
+		t.Errorf("Snapshot applied %d revocations, want 0 — it is a read, not an ingest", f.sink.count())
+	}
+}
+
+// TestDirectorySnapshotCarriesTheDaemonSecret: the route takes no credential,
+// but the Worker meters exactly the callers that present none. A daemon
+// spending the per-IP budget that exists to keep browsers working would be
+// this endpoint's own users paying for it.
+func TestDirectorySnapshotCarriesTheDaemonSecret(t *testing.T) {
+	f := newDirFixture(t)
+	ctx, cancel := contextWithTimeout(waitFor)
+	defer cancel()
+	if _, err := f.dir.Snapshot(ctx); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	f.fd.mu.Lock()
+	auths := append([]string(nil), f.fd.auths...)
+	f.fd.mu.Unlock()
+	if len(auths) != 1 || auths[0] != "Bearer "+dirSecret {
+		t.Errorf("Snapshot sent Authorization %q, want the daemon secret", auths)
+	}
+}
+
+// TestDirectorySnapshotIsUnconditional: the caller needs a body every time.
+//
+// The ETag this leg caches is a claim about what *this process* has applied,
+// which is a different question from what the browser has seen — so presenting
+// it here would answer a browser 304 with nothing in it because some other
+// goroutine had already converged.
+func TestDirectorySnapshotIsUnconditional(t *testing.T) {
+	f := newDirFixture(t)
+	f.fd.store(f.revocation(t, someKey(t, 0xD2)))
+	// The convergence loop runs first, and caches a tag.
+	f.run(t)
+	f.fd.awaitRead(t, 1)
+
+	ctx, cancel := contextWithTimeout(waitFor)
+	defer cancel()
+	body, err := f.dir.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !strings.Contains(string(body), `"entries"`) {
+		t.Fatalf("snapshot = %q, want the whole document however converged this process is", body)
+	}
+	f.fd.mu.Lock()
+	conds := append([]string(nil), f.fd.ifNoneMatch...)
+	f.fd.mu.Unlock()
+	// The convergence loop's own reads may be conditional; the last one — this
+	// Snapshot — must not be.
+	if len(conds) == 0 || conds[len(conds)-1] != "" {
+		t.Errorf("Snapshot sent If-None-Match %q, want none", conds)
+	}
+}
+
+// TestDirectorySnapshotReportsARefusal: a relay that says no is an error the
+// caller can act on, never an empty document.
+//
+// The difference matters all the way up: the daemon turns this into a 502 and
+// the browser keeps the machines it already knows, where a fabricated empty
+// answer would tell it every sibling had gone.
+func TestDirectorySnapshotReportsARefusal(t *testing.T) {
+	f := newDirFixture(t)
+	// The fake answers a GET whatever credential it carries, so the refusal
+	// under test is a route it does not serve at all.
+	f.dir.httpURL = f.fd.ts.URL + "/nothing-here"
+
+	ctx, cancel := contextWithTimeout(waitFor)
+	defer cancel()
+	if _, err := f.dir.Snapshot(ctx); err == nil {
+		t.Fatal("Snapshot succeeded against a route the relay does not serve")
+	}
+}
+
+// TestDirectorySnapshotFailsWhenTheRelayIsGone: an unreachable relay is an
+// error rather than a hang or an empty set.
+func TestDirectorySnapshotFailsWhenTheRelayIsGone(t *testing.T) {
+	f := newDirFixture(t)
+	f.fd.ts.Close()
+
+	ctx, cancel := contextWithTimeout(waitFor)
+	defer cancel()
+	if _, err := f.dir.Snapshot(ctx); err == nil {
+		t.Fatal("Snapshot succeeded against a relay that is not listening")
 	}
 }

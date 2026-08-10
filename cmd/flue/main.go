@@ -510,6 +510,11 @@ func startRelay(ctx context.Context, srv *daemon.Server, identity daemon.Identit
 			c := dir.Counts()
 			return daemon.DirectoryCounts(c)
 		})
+		// And the directory itself, for this machine's own UI. The browser on
+		// loopback cannot read `GET /directory` for itself — it is another
+		// origin and the Worker sends no CORS header — so the daemon reads it
+		// and hands the bytes over unchanged (daemon.FleetDirectoryPath).
+		srv.SetDirectorySnapshot(dir.Snapshot)
 		legs.Add(1)
 		go func() {
 			defer legs.Done()
@@ -622,6 +627,10 @@ func awaitLegs(wait func(), within time.Duration) {
 //     context *before* it marks itself unreachable — so the last snapshot would
 //     keep reading "connected" forever. Nil is the honest answer: this daemon is
 //     not reading a directory at all.
+//   - The directory snapshot this machine's own UI reads, for the plainer
+//     version of the same reason: the leg is cancelled, so a read through it
+//     would dial a relay this machine has left. A 404 is what the endpoint
+//     should answer once there is no fleet here.
 //   - The publisher, so a revoke minted after this queues nowhere instead of
 //     into a leg that will never dial again.
 //   - The machine identity and the configured origin, which are relay.json's
@@ -637,6 +646,7 @@ func awaitLegs(wait func(), within time.Duration) {
 func forgetRelay(srv *daemon.Server) {
 	srv.SetRelayStatus(daemon.RelayOff, "")
 	srv.SetDirectoryCounts(nil)
+	srv.SetDirectorySnapshot(nil)
 	srv.SetFleetPublisher(nil)
 	srv.SetRelayMachine("", "")
 	srv.SetRelayOrigin("")
