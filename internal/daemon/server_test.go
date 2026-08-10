@@ -3624,7 +3624,7 @@ func TestPairingPublishesNothingToTheFleet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.identity.Fleet = fk
+	srv.identity.Fleet = StaticFleet(fk, "sibling-mac-a1b2-0f9a12cd")
 	srv.SetRelayMachine("sibling-mac-a1b2-0f9a12cd", "sibling")
 	pub := &recordingPublisher{}
 	srv.SetFleetPublisher(pub)
@@ -3678,7 +3678,7 @@ func TestRevokePublishesTheRevocationToTheFleet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.identity.Fleet = fk
+	srv.identity.Fleet = StaticFleet(fk, "sibling-mac-a1b2-0f9a12cd")
 	pub := &recordingPublisher{}
 	srv.SetFleetPublisher(pub)
 	phone := addDevice(t, srv, "phone", 0x2a)

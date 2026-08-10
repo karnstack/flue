@@ -118,7 +118,7 @@ func newChannelTransport(t *testing.T, r *fakeRelay, srv Server, id *identity, l
 func newDaemonServer(t *testing.T, id *identity) (*daemon.Server, *httptest.Server) {
 	t.Helper()
 	srv := daemon.New(session.NewRegistry(time.Now), nil, nil, "test",
-		daemon.Identity{Key: id.key, Devices: id.devices, Fleet: id.fleet})
+		daemon.Identity{Key: id.key, Devices: id.devices, Fleet: daemon.StaticFleet(id.fleet, testMachineID)})
 	t.Cleanup(srv.Shutdown)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

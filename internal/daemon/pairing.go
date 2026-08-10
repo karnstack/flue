@@ -261,12 +261,14 @@ func (s *Server) daemonPubParam() string {
 // in relay.json, and a browser that held it could mint certificates for the
 // fleet. Same encoding as `k` — unpadded URL-safe base64, spliced raw.
 //
-// Empty is a real answer, not a fault. A daemon whose relay.json predates the
-// fleet key, or one deployed from the Remote screen in a process that booted
-// without one (Identity is fixed at construction), pairs exactly as it always
-// did: the browser pins this machine and learns of no others.
+// Empty is a real answer, not a fault: a daemon whose relay.json predates the
+// fleet key pairs exactly as it always did, and the browser pins this machine
+// and learns of no others. It is no longer the answer for a daemon that was
+// running when its relay was deployed — the key is read at the moment this
+// window opens (Identity.Fleet), not at the moment the process started, so a
+// setup in one terminal and a pairing in the next breath carry the same key.
 func (s *Server) fleetPubParam() string {
-	pub := s.identity.Fleet.Public()
+	pub := s.fleetIdentity().Key.Public()
 	if len(pub) == 0 {
 		return ""
 	}
@@ -397,20 +399,27 @@ func (s *Server) PairDevice(body []byte, peer string) PairOutcome {
 	// sign that, this mints nothing — the honest half of a half-configured
 	// relay.
 	//
-	// The state is reachable, narrowly: relayMachine's id is set by whoever
-	// starts the transport, and only once relay.New has accepted the config,
-	// so a relay.json carrying a fleet seed but missing (say) a machine id
-	// leaves this daemon holding a fleet key and no place on the relay. Such
-	// a machine is not on the relay at all, so a device paired here could not
-	// have reached a sibling on this cert's strength anyway: what the refusal
-	// costs is nothing the device had. `flue status` names the missing field;
-	// fixing it, restarting, and pairing again mints the cert.
+	// The state is reachable, narrowly: a relay.json carrying a fleet seed but
+	// missing a machine id leaves this daemon holding a fleet key and no place
+	// on the relay. Such a machine is not on the relay at all, so a device
+	// paired here could not have reached a sibling on this cert's strength
+	// anyway: what the refusal costs is nothing the device had. `flue status`
+	// names the missing field, and fixing it is enough — the id below is read
+	// from relay.json at this moment, so pairing again mints the cert with no
+	// restart in between.
+	//
+	// Both halves come from Identity.Fleet rather than from the relay leg's
+	// SetRelayMachine, which is the same fix the key itself needed: the leg
+	// records what relay.json said when it was started, and the ceremony has
+	// to sign what relay.json says now. A daemon whose relay was deployed
+	// under it holds a machine id in the file and no leg that has read it yet.
 	var cert []byte
-	if s.identity.Fleet.Valid() {
-		if pairedOn := s.relayMachine().id; pairedOn == "" {
+	fi := s.fleetIdentity()
+	if fi.Key.Valid() {
+		if pairedOn := fi.MachineID; pairedOn == "" {
 			s.logger().Warn("not minting a fleet device cert: this daemon holds a fleet key but has no machine id on the relay; the device is paired to this machine only",
 				"peer", peer)
-		} else if blob, err := s.identity.Fleet.Sign(fleet.DeviceCert{
+		} else if blob, err := fi.Key.Sign(fleet.DeviceCert{
 			Device:   key,
 			Name:     label,
 			PairedOn: pairedOn,

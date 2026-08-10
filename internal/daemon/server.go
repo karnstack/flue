@@ -122,13 +122,69 @@ type Identity struct {
 	Key     noise.DHKey
 	Devices *crypto.DeviceStore
 
-	// Fleet is the fleet key from relay.json (spec/fleet-trust.md), and the
-	// zero value means this daemon has none — a daemon that never joined a
-	// relay, or joined one from before the key existed. With it, a pairing
-	// ceremony also mints a fleet device cert and a revocation also mints
-	// the signed record that keeps the key dead fleet-wide; without it,
-	// both paths run exactly as they always did, minus the signing.
-	Fleet fleet.Key
+	// Fleet is asked — every time, at the moment of signing — what this
+	// process may sign for its fleet. Nil is a daemon that signs nothing,
+	// which is what a test and any embedder without a config directory
+	// construct.
+	//
+	// A function rather than a value, and that is the whole of the fix this
+	// field carries. The key rides relay.json, and relay.json is written by
+	// *another process*: `flue relay setup` and `flue relay join` are a
+	// terminal command, and the daemon they configure is already running. A
+	// key read once at construction is therefore a key that is right until
+	// the first time it matters — and the daemon in that window is the worst
+	// possible shape of wrong, because the relay leg re-reads the file
+	// (cmd/flue's startRelay says why) and comes up live: the machine is on
+	// the relay, publishing a machine cert that verifies, and silently unable
+	// to sign the device certs and pairing links that make a fleet a fleet.
+	// Both of those records are written once, by the pairing ceremony, and
+	// nothing repairs them afterwards, so every device paired in that window
+	// was permanently fleet-blind. See spec/fleet-trust.md and
+	// StaticFleet for the value form tests want.
+	Fleet FleetSource
+}
+
+// FleetIdentity is everything a signature under the fleet key asserts about
+// where it came from: the key itself, and the machine id its certificates name
+// as `pairedOn`. They travel together because they are read together — one
+// relay.json — and because either one alone signs nothing worth having: a key
+// with no machine id mints a certificate no reader can attribute, and a machine
+// id with no key mints nothing at all.
+type FleetIdentity struct {
+	Key       fleet.Key
+	MachineID string
+}
+
+// FleetSource answers "what may this process sign right now".
+//
+// Called on the paths that sign and on no other: opening a pairing window,
+// completing a ceremony, revoking a device, and filling in a certificate for a
+// device that was paired without one. All four are rare — a human is at the
+// other end of each — which is why the production implementation simply reads
+// relay.json again (cmd/flue.fleetOnDisk) rather than watching it. A file this
+// small, read this seldom, needs no cache to go stale.
+type FleetSource func() FleetIdentity
+
+// StaticFleet is a FleetSource that always answers the same thing: the value
+// form, for tests, for an embedder that holds its own key, and for anything
+// whose fleet identity genuinely cannot change under it.
+//
+// Nothing in cmd/flue uses it. A daemon reading a config directory that other
+// processes write must never be given one — that is precisely the bug the
+// function form exists to rule out — and having the value form spelled here,
+// once, keeps every such construction visibly a choice.
+func StaticFleet(key fleet.Key, machineID string) FleetSource {
+	return func() FleetIdentity { return FleetIdentity{Key: key, MachineID: machineID} }
+}
+
+// fleetIdentity is the one way into Identity.Fleet: every signing path reads
+// the key through here, at the moment it signs, so no caller can accidentally
+// re-introduce a copy that was right at boot and wrong since.
+func (s *Server) fleetIdentity() FleetIdentity {
+	if s.identity.Fleet == nil {
+		return FleetIdentity{}
+	}
+	return s.identity.Fleet()
 }
 
 // Server serves the flue API and the embedded UI on loopback.
@@ -141,6 +197,10 @@ type Server struct {
 	// identity is fixed at construction: it is read from the config directory
 	// once, by whoever starts the daemon, and a running daemon never changes
 	// the key its paired devices know it by.
+	//
+	// The static key and the registry, that is. The fleet half of it is a
+	// question rather than an answer — see Identity.Fleet — because that one
+	// lives in a file another process rewrites while this one runs.
 	identity Identity
 
 	// pairing is the one open pairing window, if any. Its own lock; see
@@ -1321,12 +1381,12 @@ func (s *Server) removeDevice(id string) (crypto.Device, bool, error) {
 	if s.identity.Devices == nil {
 		return crypto.Device{}, false, errNoDeviceRegistry
 	}
-	if s.identity.Fleet.Valid() {
+	if fk := s.fleetIdentity().Key; fk.Valid() {
 		dev, ok, err := s.identity.Devices.FindByID(id)
 		if err != nil || !ok {
 			return crypto.Device{}, ok, err
 		}
-		blob, err := s.identity.Fleet.Sign(fleet.Revocation{Device: dev.PublicKey, IAT: time.Now().Unix()})
+		blob, err := fk.Sign(fleet.Revocation{Device: dev.PublicKey, IAT: time.Now().Unix()})
 		if err == nil {
 			err = s.identity.Devices.AddRevocation(dev.PublicKey, blob)
 		}

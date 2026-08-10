@@ -137,7 +137,7 @@ func TestWelcomeCarriesTheDevicesFleetCert(t *testing.T) {
 	}
 	devices := crypto.NewDeviceStore(dir)
 	srv := New(session.NewRegistry(time.Now), local.NewAuth("tok", 0), nil, "test",
-		Identity{Key: key, Devices: devices, Fleet: fk})
+		Identity{Key: key, Devices: devices, Fleet: StaticFleet(fk, "karns-mbp-a1b2-0f9a12cd")})
 	t.Cleanup(srv.Shutdown)
 	srv.SetRelayMachine("karns-mbp-a1b2-0f9a12cd", "Karn's MacBook Pro")
 
