@@ -47,7 +47,7 @@
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -60,6 +60,10 @@ export const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 /** The e2e-tagged binary. `make e2e` builds it; a run without it says so. */
 const FLUE = join(REPO, 'bin', 'flue-e2e')
+
+/** relay/'s own wrangler, run directly rather than through `pnpm exec`, so the
+ *  process this holds a handle to is the one that owns the port. */
+const WRANGLER = join(REPO, 'relay', 'node_modules', '.bin', 'wrangler')
 
 /**
  * The ports. Fixed rather than found, and deliberately odd numbers well away
@@ -182,10 +186,11 @@ function mintCert(dir: string): { keyPath: string; certPath: string; ca: string 
     ],
     { encoding: 'utf8' },
   )
-  if (res.status !== 0) {
+  if (res.error !== undefined || res.status !== 0) {
     throw new Error(
-      `could not mint a TLS certificate for the local relay; openssl said:\n${res.stderr}\n` +
-        'the e2e harness needs openssl on PATH (macOS and Ubuntu both ship one).',
+      'could not mint a TLS certificate for the local relay. The harness needs ' +
+        'openssl on PATH (macOS and Ubuntu both ship one); it said:\n' +
+        String(res.error ?? res.stderr),
     )
   }
   return { keyPath, certPath, ca: readFileSync(certPath, 'utf8') }
@@ -266,6 +271,15 @@ export async function startFleet(): Promise<Fleet> {
   }
 
   try {
+    // Everything this run cannot proceed without, checked before a single
+    // process starts. Each of these fails as a timeout somewhere in the middle
+    // otherwise, and a timeout is the least informative failure there is.
+    if (!existsSync(FLUE)) {
+      throw new Error(`no ${FLUE}; build it with \`make e2e\`, which is how this suite is meant to be run`)
+    }
+    if (!existsSync(WRANGLER)) {
+      throw new Error(`no ${WRANGLER}; run \`pnpm install\` in relay/ (\`make e2e\` does)`)
+    }
     for (const [what, port] of Object.entries(PORTS)) {
       if (await portTaken(port)) {
         throw new Error(`port ${port} (${what}) is already in use; stop whatever holds it and re-run`)
@@ -279,10 +293,8 @@ export async function startFleet(): Promise<Fleet> {
     const relayOrigin = `https://127.0.0.1:${PORTS.relay}`
 
     const relayLog: string[] = []
-    // The binary directly rather than through `pnpm exec`, so the process this
-    // holds a handle to is the one that owns the port.
     const relay = spawn(
-      join(REPO, 'relay', 'node_modules', '.bin', 'wrangler'),
+      WRANGLER,
       [
         'dev',
         '--config', join(REPO, 'relay', 'wrangler.jsonc'),
