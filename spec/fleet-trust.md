@@ -114,6 +114,37 @@ and accepts any machine whose machine cert verifies under it, pinning the
 cert's `noise` key for the IK handshake. One ceremony, and the directory
 (below) tells it who the fleet is.
 
+### The second delivery of the fleet public key
+
+The QR is where a browser meets a fleet, and it cannot be the only place. A
+ceremony run while the machine held no fleet key — before this document
+existed, or in the window between a relay being set up and the daemon reading
+the file — pins nothing, and that browser then reads no directory and sees the
+single machine it paired with, permanently. The device cert has the same
+failure and the welcome is already its answer; the fleet public key rides the
+same welcome, under one condition:
+
+> A browser may keep a fleet public key off a welcome **only** when the session
+> carrying it is authenticated by a daemon static key that browser pinned at a
+> ceremony of its own, and only into an empty record.
+
+That is not trust on first use, and the distinction is the pinning. IK names
+the pinned key as the responder's static, so message B decrypts only for the
+peer holding its private half: the relay cannot forge the session, and a
+machine that could lie about the fleet key holds the fleet seed already (it is
+in every machine's `relay.json`) and can therefore mint a device cert for any
+key it likes — a wrong fleet key is not an escalation of anything it lacks. The
+condition excludes the two channels where it would be: a machine reached on a
+machine cert, whose Noise key was vouched for by the very fleet key being
+supplied, and a loopback connection, which authenticates a session cookie and no
+key at all.
+
+An existing pin is never replaced. Two fleet keys differ only if the fleet was
+set up again, and the browser's own device cert is then signed by a key nothing
+honours — so adopting the new one would trade a browser that lists what it can
+reach for one that lists what it cannot. Pairing again is what mints a
+certificate, and it stays the way out of that state.
+
 ## The fleet directory
 
 Auto-pair needs one piece of distribution: a device paired on machine A must
@@ -236,6 +267,12 @@ Flows, end to end:
   stored certificate is what those machines admit it on. Any machine it can
   reach re-offers the same certificate in its welcome, so losing it is not
   losing the fleet.
+- **A device the QR reached too early.** A browser paired while its machine
+  held no fleet key holds neither record, so it sees one machine. The first
+  welcome from a machine it paired with carries both — the key first, since the
+  certificate verifies under it — and the fleet fills in without a ceremony.
+  See "The second delivery of the fleet public key" for the condition on that,
+  which is the whole of why it is safe.
 - **Revoke.** The Devices screen on any machine revokes any fleet device: PUT
   the revocation, push to every daemon, each drops the key from its local
   registry and closes its channels — the existing `revoked{reason}` flow, now
