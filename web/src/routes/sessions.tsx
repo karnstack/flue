@@ -855,14 +855,19 @@ function PlacedBulkBar(props: {
  * ceremonies there is a machine that can hand it over and has not yet — it is
  * out of reach, or it holds no fleet key of its own — and the sentence says so
  * without pretending to know which; while it is still on its way, that same
- * sentence is the honest description of a repair in progress. At zero there is
- * nobody to ask, which is the tab riding a machine it never paired with — a
- * loopback tab, where the ceremony's link points at the relay's address rather
- * than this one — and a ceremony is the whole of the way out.
+ * sentence is the honest description of a repair in progress.
  *
- * Silent when there is nothing to say, which is the ordinary case: a browser
- * that pinned a fleet key and holds a certificate has no gap, and a band
- * reading "everything is fine" is a band nobody reads.
+ * At zero ceremonies the tab is riding a machine it never paired with, which in
+ * practice is the loopback tab: a relay tab boots from a pinned key and cannot
+ * get here. That case used to be told to go and pair at the relay's address,
+ * and it is now the one case with a local answer — the machine's own daemon
+ * enrols its browser on every load (fleet/enrol.ts), so a browser still without
+ * a key is one whose machine has none to give. The sentence names that, because
+ * it is the only thing anybody can act on: join the relay from this machine.
+ *
+ * Silent when there is nothing to say, which is now the ordinary case
+ * everywhere — including on loopback, where enrolment is what closes the last
+ * two gaps. A band reading "everything is fine" is a band nobody reads.
  */
 function FleetGapBand({ gaps }: { gaps: FleetGaps }) {
   if (!gaps.fleetKey && gaps.pinned === 0) {
@@ -870,9 +875,10 @@ function FleetGapBand({ gaps }: { gaps: FleetGaps }) {
       <div className="flex flex-col gap-y-1 rounded-md bg-row-hover px-3 py-2">
         <p className="text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
           This tab is talking to{' '}
-          <span className="font-medium text-zinc-950 dark:text-white">one machine</span> and has
-          paired with none, so it holds no key for the fleet and cannot see the rest of it. Open
-          flue at the relay’s own address and pair there.
+          <span className="font-medium text-zinc-950 dark:text-white">one machine</span> and holds
+          no key for the fleet, so it cannot see the rest of it. A machine hands its own browser
+          one as soon as it has joined a relay — check <code className="font-mono">flue status</code>{' '}
+          on this machine, then reload.
         </p>
       </div>
     )
@@ -891,6 +897,18 @@ function FleetGapBand({ gaps }: { gaps: FleetGaps }) {
     )
   }
   if (gaps.uncertified === 0) return null
+  /*
+    The way back used to be one sentence — pair again from any machine on the
+    fleet — and it is the wrong instruction for half the readers now. A tab on a
+    machine's own address cannot act on it at all: a pairing link points at the
+    relay, which is another origin and another storage partition, so the
+    ceremony would admit a browser that is not this one. What that tab has
+    instead is enrolment on every load, and reaching this band despite it means
+    the certificate this machine signed has been taken away — a revocation,
+    which is permanent for the key it names. Hence the clearing: a fresh key is
+    what gets enrolled next time. Both doors are named because the band cannot
+    see which side of it the reader is on.
+  */
   return (
     <div className="flex flex-col gap-y-1 rounded-md bg-row-hover px-3 py-2">
       <p className="text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
@@ -898,8 +916,9 @@ function FleetGapBand({ gaps }: { gaps: FleetGaps }) {
           {gaps.uncertified === 1 ? '1 machine' : `${gaps.uncertified} machines`}
         </span>{' '}
         in this fleet {gaps.uncertified === 1 ? 'has' : 'have'} no certificate this browser can
-        present, so {gaps.uncertified === 1 ? 'it is' : 'they are'} not listed here. Pair this
-        browser again from any machine on the fleet to be let in.
+        present, so {gaps.uncertified === 1 ? 'it is' : 'they are'} not listed here. On this
+        machine’s own address, clearing this site’s storage and reloading gets a fresh one. From
+        anywhere else, pair this browser again from a machine on the fleet.
       </p>
     </div>
   )

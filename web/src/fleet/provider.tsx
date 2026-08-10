@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, type ReactNode } from 're
 
 import { daemonSocketUrl, FlueClient } from '@/client/client'
 import { FlueClientContext } from '@/client/provider'
+import { enrolThisBrowser, readDirectoryViaDaemon } from './enrol'
 import { FleetClient } from './fleet'
 import { LOCAL_MACHINE_ID } from './types'
 
@@ -29,6 +30,22 @@ export interface FleetProviderProps {
    * machine and no other.
    */
   pinned?: boolean
+  /**
+   * Whether this page was served by the daemon on its own loopback origin.
+   *
+   * It unlocks the two things only such a tab can do, and only such a tab needs
+   * (fleet/enrol.ts): asking this machine to enrol it as a device of the fleet,
+   * and reading the fleet directory through the daemon rather than making a
+   * cross-origin fetch the relay answers without a CORS header.
+   *
+   * Passed in from src/main.tsx through the router's context rather than worked
+   * out here, because it is the same one fact `client` and `pinned` describe —
+   * how this page was served — and the entry point is where that is known. It
+   * is deliberately not `client === undefined`: a test putting a scripted
+   * client in context is not a loopback tab, and would post a device key at
+   * whatever answered.
+   */
+  loopback?: boolean
 }
 
 /**
@@ -45,11 +62,11 @@ export interface FleetProviderProps {
  * That is what lets a test put a scripted fleet above the router and still
  * exercise the real tree.
  */
-export function FleetProvider({ children, fleet, client, pinned }: FleetProviderProps) {
+export function FleetProvider({ children, fleet, client, pinned, loopback }: FleetProviderProps) {
   const inherited = useContext(FleetContext)
   if (fleet === undefined && inherited !== null) return <>{children}</>
   return (
-    <OwnFleetProvider fleet={fleet} client={client} pinned={pinned}>
+    <OwnFleetProvider fleet={fleet} client={client} pinned={pinned} loopback={loopback}>
       {children}
     </OwnFleetProvider>
   )
@@ -81,24 +98,34 @@ export function FleetProvider({ children, fleet, client, pinned }: FleetProvider
  * already holds a socket keeps that one and opens no second, a client waiting
  * out a backoff dials early rather than twice, and both closes close once.
  */
-function OwnFleetProvider({ children, fleet, client, pinned }: FleetProviderProps) {
+function OwnFleetProvider({ children, fleet, client, pinned, loopback }: FleetProviderProps) {
   const legacy = useContext(FlueClientContext)
   const own = useRef<FleetClient | null>(null)
   let active = fleet
   if (!active) {
-    own.current ??= new FleetClient([
-      {
-        id: LOCAL_MACHINE_ID,
-        name: '',
-        client: client ?? legacy ?? new FlueClient(daemonSocketUrl()),
-        // Only ever true of the ride the entry point built, and only when it
-        // said so. The other two rides are a loopback socket and whatever a
-        // test put in context; neither is keyed to a pinned daemon key, and a
-        // flag that travelled without its client would be a claim about the
-        // wrong one. See FleetSource.pinned.
-        pinned: client !== undefined && pinned === true,
-      },
-    ])
+    own.current ??= new FleetClient(
+      [
+        {
+          id: LOCAL_MACHINE_ID,
+          name: '',
+          client: client ?? legacy ?? new FlueClient(daemonSocketUrl()),
+          // Only ever true of the ride the entry point built, and only when it
+          // said so. The other two rides are a loopback socket and whatever a
+          // test put in context; neither is keyed to a pinned daemon key, and a
+          // flag that travelled without its client would be a claim about the
+          // wrong one. See FleetSource.pinned.
+          pinned: client !== undefined && pinned === true,
+        },
+      ],
+      // The production expansion, which the fleet builds for itself so it can
+      // hear what that build could not reach.
+      undefined,
+      // And the two seams a loopback tab needs it to use, from the one place
+      // that knows this page came off the daemon's own origin.
+      loopback === true
+        ? { enrol: enrolThisBrowser, directoryFetch: readDirectoryViaDaemon }
+        : {},
+    )
     active = own.current
   }
 

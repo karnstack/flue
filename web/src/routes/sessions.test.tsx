@@ -508,8 +508,11 @@ describe('SessionsRoute', () => {
       //
       // This tab has performed no ceremony at all — a loopback tab, where the
       // pairing link the daemon draws points at the relay's address rather
-      // than this one — so nothing is going to hand it a key and the band says
-      // where to go.
+      // than this one, so the ceremony the band used to name could never have
+      // admitted *this* browser. What such a tab has instead is enrolment on
+      // every load (fleet/enrol.ts), and reaching this band despite it means
+      // the machine itself holds no fleet key — which is what the band now
+      // says, because it is the only thing anybody can act on.
       vi.stubGlobal('indexedDB', new IDBFactory())
       localStorage.clear()
       const { sock } = await mountSessions()
@@ -527,8 +530,8 @@ describe('SessionsRoute', () => {
         }),
       )
 
-      await waitFor(() => expect(screen.getByText(/has\s+paired with none/)).toBeTruthy())
-      expect(screen.getByText(/pair there/)).toBeTruthy()
+      await waitFor(() => expect(screen.getByText(/holds\s+no key for the fleet/)).toBeTruthy())
+      expect(screen.getByText(/then reload/)).toBeTruthy()
     })
 
     it('does not tell a browser to pair again when a machine is about to hand it a key', async () => {

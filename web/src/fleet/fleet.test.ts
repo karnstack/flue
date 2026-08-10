@@ -13,12 +13,14 @@ import {
   savePinnedDeviceCert,
   savePinnedFleetKey,
 } from '@/crypto/keys'
-import { saveMachine } from '@/relay/machines'
+import { listMachines, saveMachine } from '@/relay/machines'
 import type { RawSocket } from '@/relay/socket'
 import {
   base64,
   deviceCert,
   directoryFetch,
+  enrolAnswer,
+  enrolFetch,
   FLEET_PUB,
   machineCert,
   OTHER_PUB,
@@ -26,6 +28,7 @@ import {
   revocation,
 } from '@/testing/fleet'
 import { responderHandshake } from '@/testing/noise-daemon'
+import { enrolThisBrowser } from './enrol'
 import {
   adoptFleetCert,
   adoptFleetKey,
@@ -1457,6 +1460,407 @@ describe('a browser paired before its machine had a fleet key', () => {
     // No key, so no directory: an unverifiable machine list is a relay naming
     // whatever machines it likes, and Loft never appears.
     expect(fetch.calls).toEqual([])
+    h.fleet.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The loopback tab, end to end. This is the case every piece above exists for:
+// a browser that never ran a ceremony, on the machine's own address, ending up
+// with the whole fleet — no QR, no link, nothing carried across a screen.
+// ---------------------------------------------------------------------------
+
+/** The slot this machine holds on the relay: the twin, and what the daemon's
+ *  own welcome and enrolment answer both name. */
+const MESA_SLOT = 'blue-mesa-1a2b'
+
+/** Every WebSocket the app would have opened, and what it sent on each. */
+class RecordingWebSocket {
+  static instances: RecordingWebSocket[] = []
+  binaryType = ''
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onmessage: ((e: { data: unknown }) => void) | null = null
+  sent: Array<string | ArrayBuffer | Uint8Array> = []
+  constructor(readonly url: string) {
+    RecordingWebSocket.instances.push(this)
+  }
+  send(data: string | ArrayBuffer | Uint8Array) {
+    this.sent.push(data)
+  }
+  close() {}
+}
+
+/** The loopback welcome: this machine's name, its relay slot, and the origin
+ *  a loopback tab can learn nowhere else. */
+const loopbackWelcome = (): Welcome =>
+  welcome({
+    status: 'connected',
+    origin: 'https://relay.example',
+    machineId: MESA_SLOT,
+    machineName: 'Blue Mesa',
+  })
+
+describe('a loopback tab that never ran a ceremony', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    RecordingWebSocket.instances = []
+    vi.stubGlobal('WebSocket', RecordingWebSocket)
+  })
+
+  /** The fleet a loopback tab builds: one local source, and the two seams only
+   *  that tab is given (FleetOptions). Nothing else is scripted — the
+   *  expansion, the key store and the certificate checks are the real ones. */
+  function loopbackFleet(
+    enrol: () => Promise<boolean>,
+    directory: ReturnType<typeof directoryFetch>,
+  ) {
+    const local = new FakeClient()
+    const fleet = new FleetClient([src(LOCAL_MACHINE_ID, '', local)], undefined, {
+      enrol,
+      directoryFetch: directory,
+    })
+    const seen: Array<{ sessions: FleetSession[]; machines: MachineState[] }> = []
+    fleet.onFleet((sessions, machines) => seen.push({ sessions, machines }))
+    return { fleet, local, seen, last: () => seen[seen.length - 1]! }
+  }
+
+  it('ends up holding every machine in the fleet, from a store with nothing in it', async () => {
+    // The whole point, in one case. Mac A has flue, a relay and a phone paired
+    // against it; Mac B ran the join line. The user opens flue on A's own
+    // address, where this browser has never paired with anything and every
+    // pairing link points at the relay — a different origin and a different
+    // storage partition, so nothing it could click would help.
+    expect(listMachines()).toEqual([])
+    expect(await loadPinnedFleetKey()).toBeNull()
+    expect(await loadPinnedDeviceCert()).toBeNull()
+
+    const key = await loadOrCreateDeviceKey()
+    const cert = deviceCert(key.publicKey, 'mesa — this machine’s browser', MESA_SLOT)
+    const post = enrolFetch(enrolAnswer(cert, FLEET_PUB, MESA_SLOT))
+    const directory = directoryFetch([
+      machineCert(MESA_SLOT, 'Blue Mesa', DAEMON_PUB), // this machine: the twin
+      machineCert('loft-9f9f', 'Loft', LOFT_PUB), // Mac B, joined this morning
+    ])
+
+    const h = loopbackFleet(() => enrolThisBrowser(post), directory)
+    h.fleet.connect()
+    h.local.open()
+    // The welcome lands while the enrolment is still going through IndexedDB,
+    // which is the real order and the one that used to leave the tab empty: the
+    // expansion it triggers reads no directory, because there is no fleet key
+    // yet. What repairs it is the enrolment's own rebuild.
+    h.local.emitWelcome(loopbackWelcome())
+
+    await vi.waitFor(() => expect(h.fleet.clientFor('loft-9f9f')).not.toBeNull())
+
+    // The two records, kept: pinned as they are by every other path.
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB)
+    expect(await loadPinnedDeviceCert()).toEqual(cert)
+    // Mac B is a machine of this fleet now, and Mac A appears once — as the
+    // loopback ride, not a second time through the relay.
+    expect(h.last().machines.map((m) => m.id)).toEqual([LOCAL_MACHINE_ID, 'loft-9f9f'])
+    expect(h.last().machines[0]!.name).toBe('Blue Mesa')
+
+    // And it reaches B the way B admits a device it never met: its own relay
+    // slot, sealed to the key B's certificate names, carrying the certificate
+    // this machine just signed (channel.go, rule 2). Clicking a row of B's on
+    // this screen is exactly this client, resolved by machine id.
+    expect(RecordingWebSocket.instances.map((w) => w.url)).toEqual([
+      'wss://relay.example/client/loft-9f9f',
+    ])
+    const ws = RecordingWebSocket.instances[0]!
+    ws.onopen?.()
+    const msgA = ws.sent.find((d): d is Uint8Array => typeof d !== 'string')
+    const loft = responderHandshake(LOFT_PRIV)
+    expect(loft.readMessageA(new Uint8Array(msgA!))).toEqual(key.publicKey)
+    expect(loft.payload()).toEqual(cert)
+
+    // Nothing left for the sessions screen to apologise for.
+    expect(h.fleet.gaps()).toEqual({ uncertified: 0, fleetKey: true, pinned: 0 })
+    h.fleet.close()
+  })
+
+  it('gets there too when the enrolment lands before the welcome', async () => {
+    // The other side of the race, and the reason the enrolment does not expand
+    // on its own: with no relay origin yet there is nothing to expand into, and
+    // the welcome that brings one finds both records already in the store.
+    const key = await loadOrCreateDeviceKey()
+    const cert = deviceCert(key.publicKey, 'mesa', MESA_SLOT)
+    const directory = directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)])
+    const post = enrolFetch(enrolAnswer(cert, FLEET_PUB, MESA_SLOT))
+
+    const h = loopbackFleet(() => enrolThisBrowser(post), directory)
+    h.fleet.connect()
+    h.local.open()
+    await vi.waitFor(async () => expect(await loadPinnedDeviceCert()).toEqual(cert))
+    expect(directory.calls).toEqual([]) // no origin, so nothing was read
+
+    h.local.emitWelcome(loopbackWelcome())
+
+    await vi.waitFor(() =>
+      expect(h.last().machines.map((m) => m.id)).toEqual([LOCAL_MACHINE_ID, 'loft-9f9f']),
+    )
+    // One read of the directory, not two: the welcome's expansion had the
+    // records in hand, so nothing had to be repaired afterwards.
+    expect(directory.calls).toHaveLength(1)
+    h.fleet.close()
+  })
+
+  it('enrols once per epoch and asks again on the next load', async () => {
+    // Idempotent on the daemon's side by lookup, so the browser asks on each
+    // load rather than remembering; what it must not do is ask on a loop, which
+    // is what a tab that treated 409 as retryable would become.
+    const key = await loadOrCreateDeviceKey()
+    const cert = deviceCert(key.publicKey, 'mesa', MESA_SLOT)
+    const post = enrolFetch(enrolAnswer(cert, FLEET_PUB, MESA_SLOT))
+    const directory = directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)])
+
+    const h = loopbackFleet(() => enrolThisBrowser(post), directory)
+    h.fleet.connect()
+    h.local.open()
+    h.local.emitWelcome(loopbackWelcome())
+    await vi.waitFor(() => expect(h.fleet.clientFor('loft-9f9f')).not.toBeNull())
+    const reads = directory.calls.length
+    expect(post.calls).toHaveLength(1)
+
+    // A reconnect replays the welcome. Nothing is gained by it, so nothing is
+    // asked and nothing is rebuilt.
+    h.local.emitWelcome(loopbackWelcome())
+    await flush()
+    expect(post.calls).toHaveLength(1)
+    expect(directory.calls).toHaveLength(reads)
+
+    // The next page load is a second epoch: it asks again, is told the same
+    // thing, and gains nothing — so it does not re-read the directory either.
+    h.fleet.close()
+    h.fleet.connect()
+    await flush()
+    expect(post.calls).toHaveLength(2)
+    h.fleet.close()
+  })
+
+  it('is a working one-machine tab when this machine holds no fleet key', async () => {
+    // 409: the machine has not joined a relay, or joined one before fleet keys
+    // existed. Nothing is stored, nothing is retried, and the tab is the tab
+    // loopback has always been — which is the failure mode this whole path had
+    // to keep intact.
+    const post = enrolFetch('this machine holds no fleet key', { ok: false, status: 409 })
+    const directory = directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)])
+
+    const h = loopbackFleet(() => enrolThisBrowser(post), directory)
+    h.fleet.connect()
+    h.local.open()
+    h.local.emitWelcome(loopbackWelcome())
+    await vi.waitFor(() => expect(h.fleet.gaps()).not.toBeNull())
+
+    expect(await loadPinnedFleetKey()).toBeNull()
+    // No fleet key, so no directory read at all: an unverifiable machine list
+    // is a relay naming whatever machines it likes.
+    expect(directory.calls).toEqual([])
+    expect(post.calls).toHaveLength(1)
+    expect(h.fleet.gaps()).toEqual({ uncertified: 0, fleetKey: false, pinned: 0 })
+
+    // And this machine's own sessions are exactly where they were.
+    h.local.emitSessions([info('s1')])
+    expect(h.last().sessions).toEqual([
+      { ...info('s1'), machineId: LOCAL_MACHINE_ID, machineName: 'Blue Mesa' },
+    ])
+    expect(h.last().machines).toEqual([
+      { id: LOCAL_MACHINE_ID, name: 'Blue Mesa', status: 'online' },
+    ])
+    h.fleet.close()
+  })
+
+  it('keeps the machine it is on when the relay cannot be read', async () => {
+    // 502 from the daemon's proxy: the fault is upstream of this machine — the
+    // relay is down, or the leg is mid-dial — and the tab is told so rather
+    // than being handed a fabricated empty directory. The cost is machines this
+    // browser does not learn of; the machine it is sitting on is untouched.
+    const key = await loadOrCreateDeviceKey()
+    const cert = deviceCert(key.publicKey, 'mesa', MESA_SLOT)
+    const post = enrolFetch(enrolAnswer(cert, FLEET_PUB, MESA_SLOT))
+    const directory = directoryFetch([], { ok: false, status: 502 })
+
+    const h = loopbackFleet(() => enrolThisBrowser(post), directory)
+    h.fleet.connect()
+    h.local.open()
+    h.local.emitWelcome(loopbackWelcome())
+    await vi.waitFor(() => expect(directory.calls.length).toBeGreaterThan(0))
+
+    expect(h.last().machines).toEqual([
+      { id: LOCAL_MACHINE_ID, name: 'Blue Mesa', status: 'online' },
+    ])
+    // Enrolment still landed, so the next read — a tick from now, or the next
+    // load — has everything it needs.
+    expect(await loadPinnedFleetKey()).toEqual(FLEET_PUB)
+    expect(await loadPinnedDeviceCert()).toEqual(cert)
+
+    h.local.emitSessions([info('s1')])
+    expect(h.last().sessions).toEqual([
+      { ...info('s1'), machineId: LOCAL_MACHINE_ID, machineName: 'Blue Mesa' },
+    ])
+    h.fleet.close()
+  })
+
+  it('reads the relay’s own origin when nothing hands it a fetch', async () => {
+    // The relay tab's half of the same seam, asserted where it is decided: with
+    // no directoryFetch the expansion makes the plain cross-origin read it
+    // always made, at the relay's address. A loopback tab is the only one that
+    // goes through its daemon, and only because the Worker answers a
+    // cross-origin fetch without the header a browser needs to hand it over.
+    await savePinnedFleetKey(FLEET_PUB)
+    const key = await loadOrCreateDeviceKey()
+    await savePinnedDeviceCert(deviceCert(key.publicKey))
+    const urls: string[] = []
+    vi.stubGlobal('fetch', (url: string) => {
+      urls.push(url)
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('{"v":1,"entries":[]}'),
+      })
+    })
+
+    const local = new FakeClient()
+    const fleet = new FleetClient([src(LOCAL_MACHINE_ID, '', local)])
+    fleet.connect()
+    local.open()
+    local.emitWelcome(loopbackWelcome())
+
+    await vi.waitFor(() => expect(urls).toEqual(['https://relay.example/directory']))
+    fleet.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Live discovery: a fleet is not a set fixed at page load, and a tab left open
+// for a day should not be the last to know.
+// ---------------------------------------------------------------------------
+
+describe('discovery', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    vi.stubGlobal('indexedDB', new IDBFactory())
+  })
+
+  it('picks up a machine that joined after the tab was opened', async () => {
+    vi.useFakeTimers()
+    const loft = new FakeClient()
+    const mesa = new FakeClient()
+    let answer: FleetSource[] = [src('loft-9f9f', 'Loft', loft)]
+    const expand = vi.fn(() => Promise.resolve([...answer]))
+    const h = harness([[LOCAL_MACHINE_ID, '']], expand)
+    h.fleet.connect()
+    h.fake(LOCAL_MACHINE_ID).open()
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(
+      welcome({ status: 'connected', origin: 'https://relay.example' }),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.last().machines.map((m) => m.id)).toEqual([LOCAL_MACHINE_ID, 'loft-9f9f'])
+
+    // Somebody runs the join line on a second machine. Nothing tells this tab;
+    // the directory is where it turns up, and something has to read it again.
+    answer = [src('loft-9f9f', 'Loft', loft), src('blue-mesa-1a2b', 'Blue Mesa', mesa)]
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(expand).toHaveBeenCalledTimes(2)
+    expect(h.last().machines.map((m) => m.id)).toEqual([
+      LOCAL_MACHINE_ID,
+      'loft-9f9f',
+      'blue-mesa-1a2b',
+    ])
+    // Adopted whole: dialled once, and the one already held was not dialled a
+    // second time.
+    expect(mesa.connects).toBe(1)
+    expect(loft.connects).toBe(1)
+    h.fleet.close()
+  })
+
+  it('drops nothing when a read comes back empty or fails outright', async () => {
+    // The contract that makes re-reading safe at all. A relay having a bad
+    // minute, a directory that answered 502, a key store that would not open —
+    // none of them is evidence that a machine left the fleet, and a screen that
+    // emptied itself on one would be worse than a screen that was late.
+    vi.useFakeTimers()
+    const loft = new FakeClient()
+    let answer: FleetSource[] = [src('loft-9f9f', 'Loft', loft)]
+    const expand = vi.fn(() => Promise.resolve([...answer]))
+    const h = harness([[LOCAL_MACHINE_ID, '']], expand)
+    h.fleet.connect()
+    h.fake(LOCAL_MACHINE_ID).open()
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(
+      welcome({ status: 'connected', origin: 'https://relay.example' }),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    loft.open()
+    loft.emitSessions([info('r1')])
+    const held = h.last().machines
+
+    answer = []
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(h.last().machines).toEqual(held)
+
+    expand.mockRejectedValueOnce(new Error('the key store would not open'))
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(h.last().machines).toEqual(held)
+    // And its rows are still on the screen: nothing was closed, so nothing was
+    // asked to reconnect.
+    expect(h.last().sessions.map((s) => s.machineId)).toEqual(['loft-9f9f'])
+    expect(loft.closes).toBe(0)
+    h.fleet.close()
+  })
+
+  it('asks again when the tab is looked at, but not on every glance', async () => {
+    // Background tabs are throttled to a crawl, so the interval alone would
+    // mean the reader comes back to a stale fleet and waits. The floor is what
+    // keeps alt-tabbing from being a directory read per switch.
+    vi.useFakeTimers()
+    const expand = vi.fn(() => Promise.resolve([] as FleetSource[]))
+    const h = harness([[LOCAL_MACHINE_ID, '']], expand)
+    h.fleet.connect()
+    h.fake(LOCAL_MACHINE_ID).open()
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(
+      welcome({ status: 'connected', origin: 'https://relay.example' }),
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(expand).toHaveBeenCalledTimes(1)
+
+    // Straight back to the tab: the expansion it just ran is the answer.
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(expand).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(6_000)
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(expand).toHaveBeenCalledTimes(2)
+
+    // And a closed fleet hears nothing: no interval, no listener left on the
+    // window, nothing dialled by a tab on its way out.
+    h.fleet.close()
+    await vi.advanceTimersByTimeAsync(120_000)
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(expand).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads nothing on a tab whose daemon has named no relay', async () => {
+    vi.useFakeTimers()
+    const expand = vi.fn(() => Promise.resolve([] as FleetSource[]))
+    const h = harness([[LOCAL_MACHINE_ID, '']], expand)
+    h.fleet.connect()
+    h.fake(LOCAL_MACHINE_ID).open()
+    h.fake(LOCAL_MACHINE_ID).emitWelcome(welcome())
+
+    await vi.advanceTimersByTimeAsync(180_000)
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(expand).not.toHaveBeenCalled()
     h.fleet.close()
   })
 })

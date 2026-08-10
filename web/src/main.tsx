@@ -36,11 +36,18 @@ if (cleaned !== location.href) history.replaceState(null, '', cleaned)
  * same deployment by construction, and a URL from anywhere else would be a
  * second thing to keep true.
  *
- * On the daemon's own origin nothing is awaited and nothing is passed: the
- * router mounts the provider it always did, and that builds the loopback
- * client itself.
+ * On the daemon's own origin nothing is awaited and no client is passed: the
+ * router mounts the provider it always did, and that builds the loopback client
+ * itself. What it *is* told is that this is that origin — the one fact a tab
+ * cannot work out from below, and the one the fleet needs before it can enrol
+ * itself as a device of this machine's fleet or read the fleet directory
+ * through the daemon (see src/fleet/enrol.ts). It is decided here, beside the
+ * relay branch it is the alternative to, so there is one place in the app where
+ * "how was this page served" is answered.
  */
-const router = createFlueRouter(isRelayOrigin() ? await relayBoot(location.origin) : {})
+const router = createFlueRouter(
+  isRelayOrigin() ? await relayBoot(location.origin) : { loopback: true },
+)
 
 const root = document.getElementById('root')
 if (!root) throw new Error('missing #root')

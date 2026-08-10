@@ -247,16 +247,22 @@ export async function loadPinnedDaemonKeyFor(
  * overwrite would be stranded on a key nothing signs under any more, with
  * clearing site data as the only way back.
  *
- * Which puts the weight on the caller, and the two callers carry it
- * differently. The ceremony writes what the QR said, unconditionally. The other
- * — fleet/fleet.ts's adoptFleetKey — writes only into an empty record, and only
- * a key that reached this browser over a Noise session keyed to a daemon static
- * key it pinned at a ceremony of its own. Neither is trust-on-first-use: the
- * first learned the key out of band, and the second learned it from a party it
- * had already authenticated out of band. What would be is a key taken off a
- * connection to a peer this browser never pinned — whoever supplied it could
- * then mint a machine certificate for every machine this browser will ever
- * dial — and there is no path here that does that.
+ * Which puts the weight on the caller, and the three callers carry it
+ * differently. The ceremony writes what the QR said, unconditionally.
+ * fleet/fleet.ts's adoptFleetKey writes only into an empty record, and only a
+ * key that reached this browser over a Noise session keyed to a daemon static
+ * key it pinned at a ceremony of its own. fleet/enrol.ts writes what this
+ * machine's own daemon answered on loopback, overwriting if it differs, because
+ * there the answer comes from the process that owns the key over a socket with
+ * no room in it for anybody else — and because a loopback tab has no ceremony
+ * to be sent back to.
+ *
+ * None of the three is trust-on-first-use: the first learned the key out of
+ * band, the second from a party it had already authenticated out of band, the
+ * third from the machine the page itself came from. What would be is a key
+ * taken off a connection to a peer this browser never pinned — whoever supplied
+ * it could then mint a machine certificate for every machine this browser will
+ * ever dial — and there is no path here that does that.
  */
 export async function savePinnedFleetKey(
   publicKey: Uint8Array,
@@ -310,8 +316,10 @@ export async function loadPinnedFleetKey(
  * is worth knowing before relying on it: a loopback connection authenticates a
  * machine-local session token rather than a device key, so the daemon does not
  * know whose certificate to send and sends none (internal/daemon/server.go,
- * fleetCertFor). A browser paired only over loopback holds what the ceremony
- * wrote here and has no second source for it.
+ * fleetCertFor). What a loopback tab has instead is the third writer,
+ * fleet/enrol.ts: it names its device key over `POST /api/fleet/enrol` and the
+ * daemon signs one for it, which is how a browser that never ran a ceremony
+ * comes to hold a certificate at all.
  *
  * It is public data either way: a certificate is a signed statement about a
  * public key, and holding one grants nothing without the private half of the

@@ -1,10 +1,12 @@
 import { StrictMode, useEffect } from 'react'
-import { render } from '@testing-library/react'
+import { act, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { IDBFactory } from 'fake-indexeddb'
 
 import type { ConnStatus, FlueClient } from '@/client/client'
 import { FlueClientProvider, useFlueClient } from '@/client/provider'
 import { fakeClient } from '@/testing/socket'
+import { ENROL_PATH } from './enrol'
 import { FleetClient, type FleetSource } from './fleet'
 import { FleetProvider, useFleet } from './provider'
 import { LOCAL_MACHINE_ID, type MachineState } from './types'
@@ -230,6 +232,47 @@ describe('FleetProvider', () => {
     expect(instances).toHaveLength(2)
     expect(instances[0]!.closed).toBe(true)
     expect(instances[1]!.closed).toBe(false)
+  })
+
+  it('enrols this browser only on the tab the daemon served', async () => {
+    // The flag arrives from src/main.tsx through the router's context, and the
+    // difference it makes is where a device key gets posted: at the machine
+    // this page came from, or at whatever else answered. A tab that guessed
+    // from `client === undefined` would get this wrong for every test client
+    // and every future caller.
+    class FakeWebSocket {
+      binaryType = ''
+      onopen: unknown = null
+      onclose: unknown = null
+      onmessage: unknown = null
+      send() {}
+      close() {}
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    const posts: string[] = []
+    vi.stubGlobal('fetch', (url: string) => {
+      posts.push(url)
+      // 404, so nothing is stored and no directory is read: this case is about
+      // who asks, not what comes back.
+      return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve('') })
+    })
+
+    const plain = render(
+      <FleetProvider>
+        <Probe seen={[]} />
+      </FleetProvider>,
+    )
+    await act(async () => {})
+    expect(posts).toEqual([])
+    plain.unmount()
+
+    render(
+      <FleetProvider loopback>
+        <Probe seen={[]} />
+      </FleetProvider>,
+    )
+    await vi.waitFor(() => expect(posts).toEqual([ENROL_PATH]))
   })
 
   it('adopts a client already in context as the local ride', () => {
