@@ -500,6 +500,136 @@ describe('JoinReveal', () => {
   })
 })
 
+describe('Disconnect', () => {
+  /**
+   * A daemon that answers the Remote screen's two endpoints, and remembers
+   * whether it has been left.
+   *
+   * The second answer is the point: leaving changes what the daemon says about
+   * itself — no relay configured, and a leg reporting `off` — and the screen is
+   * rendered from that answer, so the same stub has to be able to give both.
+   */
+  function daemonThatCanBeLeft(info: Record<string, unknown>) {
+    const posts: string[] = []
+    let left = false
+    const impl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'POST') {
+        posts.push(url)
+        left = true
+        return new Response(
+          JSON.stringify({
+            steps: [
+              'left wss://flue-relay.example — relay.json deleted',
+              'relay leg stopped; nothing outside this computer reaches this machine now',
+              'the Worker flue-relay is still deployed in your Cloudflare account; delete it there if you want it gone',
+              'paired devices, this daemon’s key and the stored Cloudflare token are untouched',
+              'rejoining needs the join line from a machine still on this relay, and mints this machine a new id',
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      const body = left ? { configured: false, can_deploy: true, version: 'v', transport: 'off' } : info
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+    vi.stubGlobal('fetch', impl)
+    return posts
+  }
+
+  const CONFIGURED = {
+    configured: true,
+    can_deploy: true,
+    version: 'v',
+    worker: 'flue-relay',
+    transport: 'connected',
+    transport_origin: 'https://flue-relay.example',
+  }
+
+  it('asks before it takes this machine off the relay, and says what it will not do', async () => {
+    const user = userEvent.setup()
+    const posts = daemonThatCanBeLeft(CONFIGURED)
+    try {
+      await mountRemote({ relay: RELAY_UP })
+
+      await user.click(await screen.findByRole('button', { name: 'Leave this relay…' }))
+
+      // The question, and the four truths that decide the answer: the Worker
+      // is not undeployed, the way back is a join line from elsewhere, a
+      // rejoin arrives as a new machine, and nothing local is lost.
+      expect(await screen.findByText('Leave this relay?')).toBeTruthy()
+      expect(screen.getByText(/The Worker flue-relay stays deployed/)).toBeTruthy()
+      expect(screen.getByText(/neither credential can be read back/)).toBeTruthy()
+      expect(screen.getByText(/mints this machine a new id/)).toBeTruthy()
+      expect(screen.getByText(/Paired devices, this daemon’s key and the stored Cloudflare token/))
+        .toBeTruthy()
+      // Asking is not doing.
+      expect(posts).toHaveLength(0)
+
+      await user.click(screen.getByRole('button', { name: 'Cancel' }))
+      expect(posts).toHaveLength(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('leaves on the second click, shows what happened, and stops claiming the machine is reachable', async () => {
+    const user = userEvent.setup()
+    const posts = daemonThatCanBeLeft(CONFIGURED)
+    try {
+      await mountRemote({ relay: RELAY_UP })
+
+      await user.click(await screen.findByRole('button', { name: 'Leave this relay…' }))
+      await user.click(screen.getByRole('button', { name: 'Leave the relay' }))
+
+      expect(posts).toEqual(['/api/relay/leave'])
+      // The receipt stays up while the window is: it is the reader's only
+      // account of what was done, and the card behind it is about to go.
+      expect(await screen.findByText(/relay leg stopped/)).toBeTruthy()
+      expect(screen.getByText(/still deployed in your Cloudflare account/)).toBeTruthy()
+
+      // Closing is what re-asks the daemon, and its new answer is what the
+      // screen renders: the welcome still says "connected" — nothing
+      // re-greets a live socket — so a screen that trusted it would go on
+      // offering to pair a device against a relay this machine has left.
+      await user.click(screen.getByRole('button', { name: 'Done' }))
+
+      expect(await screen.findByText('Not configured')).toBeTruthy()
+      expect(screen.queryByText('https://flue-relay.example')).toBeNull()
+      expect(screen.getByText(SETUP)).toBeTruthy()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('is offered on a relay the daemon refuses to dial, where the file is all there is', async () => {
+    const user = userEvent.setup()
+    const posts = daemonThatCanBeLeft({
+      configured: true,
+      can_deploy: true,
+      version: 'v',
+      problems: ['no fleet key'],
+      transport: 'off',
+    })
+    try {
+      // The welcome carries no relay: the transport reports `off` for a file
+      // it refuses, exactly as it does for a machine that never had one.
+      await mountRemote()
+
+      expect(await screen.findByText('Not usable')).toBeTruthy()
+      await user.click(await screen.findByRole('button', { name: 'Leave this relay…' }))
+      await user.click(screen.getByRole('button', { name: 'Leave the relay' }))
+
+      expect(posts).toEqual(['/api/relay/leave'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
 describe('the welcome gap', () => {
   it('flips to connected when the daemon says the relay came up after the greeting', async () => {
     // The welcome is a snapshot: a tab greeted mid-dial would say

@@ -381,12 +381,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle(uiAssetPrefix, s.withProvenance(s.ui))
 	mux.Handle("/api/sessions", s.withAuth(http.HandlerFunc(s.handleSessions)))
 	// The Remote screen's relay endpoints (relayui.go). Loopback-only by the
-	// bind, mutating only by POST — methodPolicy names the two that mutate.
+	// bind, mutating only by POST — methodPolicy names the ones that mutate.
 	mux.Handle(RelayInfoPath, s.withAuth(http.HandlerFunc(s.handleRelayInfo)))
 	mux.Handle(RelayDeployPath, s.withAuth(http.HandlerFunc(s.handleRelayDeploy)))
 	mux.Handle(RelayUpdatePath, s.withAuth(http.HandlerFunc(s.handleRelayUpdate)))
 	mux.Handle(RelayJoinPath, s.withAuth(http.HandlerFunc(s.handleRelayJoin)))
 	mux.Handle(RelayAddressPath, s.withAuth(http.HandlerFunc(s.handleRelayAddress)))
+	mux.Handle(RelayLeavePath, s.withAuth(http.HandlerFunc(s.handleRelayLeave)))
 	mux.Handle(ReleasePath, s.withAuth(http.HandlerFunc(s.handleRelease)))
 	// /api is the daemon's namespace, and an unclaimed path in it is a 404 —
 	// never the app shell.
@@ -421,7 +422,7 @@ func (s *Server) Handler() http.Handler {
 
 // methodPolicy rejects everything but GET and HEAD, plus POST to the named
 // paths that are allowed to receive one: MintPath, PairPath, and the Remote
-// screen's two relay mutations.
+// screen's relay mutations.
 //
 // This is what makes "no mutating endpoint reachable by GET" an invariant of
 // the surface rather than a property of today's handlers: a later task cannot
@@ -440,7 +441,7 @@ func methodPolicy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		postable := r.URL.Path == MintPath || r.URL.Path == PairPath ||
 			r.URL.Path == RelayDeployPath || r.URL.Path == RelayUpdatePath ||
-			r.URL.Path == RelayAddressPath
+			r.URL.Path == RelayAddressPath || r.URL.Path == RelayLeavePath
 		allowed := r.Method == http.MethodGet || r.Method == http.MethodHead ||
 			(postable && r.Method == http.MethodPost)
 		if !allowed {
@@ -1031,9 +1032,13 @@ func (s *Server) SetRelayStatus(status, origin string) {
 
 // SetRelayMachine records which machine this daemon is on the relay: the id it
 // dials /daemon/<id> as, and the human label that goes with it. Both come from
-// relay.json, read once at startup by the process that wires the transport up
-// — which is the only caller, and why there is no un-set: a machine identity
-// does not change while the daemon runs.
+// relay.json, read by the process that wires the transport up.
+//
+// Empty strings are the un-set, and there is exactly one caller that means it:
+// leaving a relay (cmd/flue, forgetRelay), which deletes the file these came
+// from. Short of that, a machine identity does not change while the daemon
+// runs — a relay swapped underneath a running daemon takes effect on its next
+// start, and the id it dialled until then is the id it held.
 //
 // It is separate from SetRelayStatus because the two describe different
 // things: the status is the socket's, reported by the transport as it dials

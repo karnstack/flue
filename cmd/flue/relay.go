@@ -74,7 +74,7 @@ const (
 // number, and EOF alone is not enough of a guarantee to rely on.
 const accountPromptAttempts = 3
 
-const relayUsage = "usage: flue relay <setup|join|status|update|address|reset>"
+const relayUsage = "usage: flue relay <setup|join|status|update|address|leave|reset>"
 
 func cmdRelay(args []string) error {
 	if len(args) == 0 {
@@ -93,6 +93,8 @@ func cmdRelay(args []string) error {
 		return runRelayUpdate(os.Stdout, os.Stdin, &cloudflare.Client{}, args[1:])
 	case "address":
 		return runRelayAddress(os.Stdout, args[1:])
+	case "leave":
+		return runRelayLeave(os.Stdout, os.Stdin, args[1:])
 	case "reset":
 		return runRelayReset(os.Stdout, os.Stdin, args[1:])
 	default:
@@ -827,6 +829,155 @@ func resetDirectory(ctx context.Context, rc config.Relay) (removed int, err erro
 		return 0, errors.New("the relay answered something that is not a directory reset")
 	}
 	return doc.Removed, nil
+}
+
+const relayLeaveUsage = "usage: flue relay leave [--yes]"
+
+// relayWorkerLabel names the Cloudflare script a relay.json points at, for the
+// one sentence that has to be about the thing leaving does *not* remove.
+//
+// It falls back to the host because the name is not always recorded: a
+// relay.json written by `flue relay join` never knew it (join deploys nothing),
+// and updateWorkerName can only derive one from a workers.dev address. "The
+// Worker behind relay.example.com" is still enough to find in a dashboard,
+// which is all this label is for.
+func relayWorkerLabel(cfg config.Relay) string {
+	if w, err := updateWorkerName("", cfg); err == nil {
+		return "the Worker " + w
+	}
+	return "the Worker behind " + strings.TrimPrefix(cfg.URL, "wss://")
+}
+
+// relayLeaveWarning is what the command says before it asks, and half of it is
+// about what leaving does *not* do — which is the half a user cannot check and
+// will otherwise assume, in whichever direction is wrong for them.
+//
+// The first paragraph is the cost, and it is unrecoverable in the strict sense:
+// relay.json is the only copy of two credentials this machine holds. The
+// second is the one a user is likeliest to have backwards — leaving does not
+// undeploy anything, because leaving makes no API call at all. The third is
+// the reassurance, and it is load-bearing too: "leave the relay" reads like
+// "unpair everything", and somebody would otherwise re-pair four phones for
+// no reason.
+func relayLeaveWarning(cfg config.Relay) string {
+	return fmt.Sprintf(`this deletes relay.json — this machine's place on the relay, the relay's
+daemon secret and the fleet key, all of which live in that one file.
+
+rejoining means running the "flue relay join" line from a machine that is
+still on this relay — it carries both credentials back, and nothing else
+can. neither can be read out of anywhere else: the secret's other copy is a
+binding on the Worker, which Cloudflare will not hand back, and the fleet key
+has no copy at all outside the relay.json of the machines still on it. if
+this is the last machine on the relay, there is no line left to run, and a
+fresh "flue relay setup" is the way back — a new secret and a new fleet key,
+so every other machine re-joins and every browser pairs again.
+
+leaving also mints nothing: a rejoin gives this machine a new id, so every
+browser's record of the old one is dead. devices holding a certificate from
+this same fleet find the machine again through the fleet directory; anything
+else pairs again.
+
+the relay stays deployed. this command calls Cloudflare not at all — %s
+keeps running in your account and keeps serving whatever is still joined to
+it. delete it from the Cloudflare dashboard (Workers & Pages) if you want it
+gone.
+
+nothing else on this machine is touched: paired devices, this daemon's key,
+the revocation list, the stored Cloudflare token and the browser tab on
+127.0.0.1 are all exactly as they were.
+
+`, relayWorkerLabel(cfg))
+}
+
+// relayLeaveDone is the part that only makes sense once the file is gone: what
+// is still true of a daemon that has not restarted, and the two facts about the
+// relay this machine just walked away from.
+//
+// The restart note is the same admission `flue relay join` and `flue relay
+// address` make, and it matters more here: those leave a daemon dialling the
+// *wrong* relay, and this leaves one dialling a relay the user believes they
+// are off. The transport holds the secret it read at startup, so it keeps the
+// socket — and keeps serving every browser on it — until the process ends. The
+// Remote screen's Disconnect is named because it is the one path that does both
+// halves at once: it runs inside the daemon and can stop the leg.
+const relayLeaveDone = `
+restart the daemon to make it stop dialling: flue disable && flue enable, or
+restart flue serve. until then a daemon that is already running keeps its
+relay socket, and every device on the other end keeps reaching this machine.
+(the Remote screen's Disconnect does both halves at once, no restart.)
+
+two things stay behind on the relay itself. this machine's certificate is
+still in the fleet directory — nothing there deletes a single entry, so the
+fleet's browsers keep listing this machine until somebody runs "flue relay
+reset" — and this machine has stopped re-publishing the revocations it holds.
+they are still on disk here and still in the directory, but if that directory
+is ever emptied, a revocation whose only remaining holder was this machine
+does not come back. revoke that device again from a machine still on the
+relay if you are unsure.
+`
+
+// runRelayLeave takes this machine off the relay it is on: relay.json, deleted,
+// and nothing else.
+//
+// It is the missing verb. Every other piece of relay state has had a command
+// for a while — setup, join, status, update, address, reset — and "I want this
+// machine off this relay" meant knowing that flue keeps a relay.json in its
+// config directory and removing it by hand, which is a thing a user can only
+// do after reading the source or the docs.
+//
+// It makes no network call, on purpose rather than for want of an API. There is
+// nothing honest to call: the Worker is the user's and undeploying it would be
+// a much larger action wearing this one's name (the other machines on that
+// relay would lose their access to it), and the fleet directory has no
+// per-entry delete — `flue relay reset` empties all of it, which is a
+// fleet-wide act, not this machine's to perform on its way out. So this is a
+// local command, and everything it cannot do it says instead.
+//
+// The confirmation is runRelayReset's, in the same words and with the same
+// --yes for scripts, because the two are the same kind of dangerous: this one
+// destroys the only copy of the fleet key a single-machine relay has, and no
+// amount of Cloudflare access brings it back.
+func runRelayLeave(w io.Writer, r io.Reader, args []string) error {
+	fs := flag.NewFlagSet("relay leave", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	yes := fs.Bool("yes", false, "do not ask for confirmation")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("%w; %s", err, relayLeaveUsage)
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected argument %q; %s", fs.Arg(0), relayLeaveUsage)
+	}
+
+	cfg, ok, err := config.LoadRelay()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		// Not an error of the user's making, but not a success either: a
+		// command that printed "left the relay" here would be claiming to have
+		// done something to a machine that was never on one.
+		return errors.New("no relay is configured on this machine; there is nothing to leave")
+	}
+
+	if !*yes {
+		fmt.Fprint(w, relayLeaveWarning(cfg))
+		fmt.Fprint(w, "type yes to continue: ")
+		line, readErr := bufio.NewReader(r).ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("read the confirmation: %w", readErr)
+		}
+		if strings.TrimSpace(line) != "yes" {
+			fmt.Fprintln(w, "  this machine is still on the relay")
+			return nil
+		}
+	}
+
+	if err := config.DeleteRelay(); err != nil {
+		return fmt.Errorf("delete the relay configuration: %w", err)
+	}
+	fmt.Fprintf(w, "  ✓ left %s (relay.json deleted)\n", cfg.URL)
+	fmt.Fprint(w, relayLeaveDone)
+	return nil
 }
 
 const relayResetUsage = "usage: flue relay reset [--yes]"

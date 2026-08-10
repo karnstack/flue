@@ -3309,6 +3309,9 @@ func TestRelayUIEndpointSurface(t *testing.T) {
 // test that carries it.
 type stubRelayUI struct {
 	join string
+	// left counts the leaves, for the one endpoint whose whole subject is that
+	// it happened exactly as often as it was asked for.
+	left int
 }
 
 func (s *stubRelayUI) Status(context.Context) RelayUIStatus { return RelayUIStatus{} }
@@ -3326,6 +3329,10 @@ func (s *stubRelayUI) JoinCommand(context.Context) (string, bool, error) {
 }
 func (s *stubRelayUI) SetAddress(context.Context, string) (RelayUIDeployResult, error) {
 	return RelayUIDeployResult{}, nil
+}
+func (s *stubRelayUI) Leave(context.Context) (RelayUIDeployResult, error) {
+	s.left++
+	return RelayUIDeployResult{Steps: []string{"left wss://r — relay.json deleted"}}, nil
 }
 
 // TestRelayUIJoinEndpoint: an authenticated GET gets the line back, and a
@@ -3380,6 +3387,85 @@ func TestRelayUIJoinEndpoint(t *testing.T) {
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Fatalf("unconfigured GET join = %d, want 404", resp2.StatusCode)
+	}
+}
+
+// TestRelayUILeaveEndpoint: the most destructive local mutation on this
+// surface, so it is held to the shape the others are — POST only, authenticated
+// only, 404 with no service — and a GET must never reach the service, because a
+// GET spelling of "leave the relay" is one a link, a prefetch or a crawl could
+// take on the reader's behalf.
+func TestRelayUILeaveEndpoint(t *testing.T) {
+	ts, _, srv := newTestServerUI(t, http.NotFoundHandler())
+	ui := &stubRelayUI{}
+	srv.SetRelayUI(ui)
+
+	// An authenticated GET is refused by methodPolicy, and the service never
+	// hears about it.
+	getReq, err := http.NewRequest(http.MethodGet, ts.URL+RelayLeavePath, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	getReq.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
+	getReq.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		t.Fatalf("GET leave: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("authenticated GET %s = %d, want 405", RelayLeavePath, resp.StatusCode)
+	}
+
+	// Unauthenticated POST: refused before anything is deleted.
+	plain, err := http.Post(ts.URL+RelayLeavePath, "application/json", nil)
+	if err != nil {
+		t.Fatalf("plain POST: %v", err)
+	}
+	plain.Body.Close()
+	if plain.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated POST leave = %d, want 401", plain.StatusCode)
+	}
+	if ui.left != 0 {
+		t.Fatalf("the service was asked to leave %d times before any authenticated request", ui.left)
+	}
+
+	// The real thing: one POST, one leave, the steps handed back.
+	req, err := http.NewRequest(http.MethodPost, ts.URL+RelayLeavePath, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
+	req.Header.Set("Origin", ts.URL)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST leave: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST leave = %d, want 200", resp.StatusCode)
+	}
+	var body RelayUIDeployResult
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if ui.left != 1 || len(body.Steps) == 0 {
+		t.Fatalf("leaves = %d, steps = %v; want one leave and its steps", ui.left, body.Steps)
+	}
+
+	// And a daemon nobody wired a service into answers 404 rather than
+	// pretending it left anything.
+	srv.SetRelayUI(nil)
+	req2, _ := http.NewRequest(http.MethodPost, ts.URL+RelayLeavePath, nil)
+	req2.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
+	req2.Header.Set("Origin", ts.URL)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("POST leave with no service: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("POST leave with no service = %d, want 404", resp2.StatusCode)
 	}
 }
 

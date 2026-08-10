@@ -65,6 +65,7 @@ flue relay join    # point this machine at a relay another machine deployed
 flue relay status  # show the configured relay
 flue relay update  # redeploy this release's relay; secret and pairings kept
 flue relay address # repoint this machine at a custom domain on the same relay
+flue relay leave   # take this machine off its relay; the Worker stays deployed
 flue serve         # run the daemon in the foreground, no login service
 flue update        # download the newest release, swap this binary, restart the daemon
 flue version       # print the version (also --version, -v)

@@ -8,8 +8,10 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
@@ -37,6 +39,7 @@ const NOTE = 'text-sm/6 text-pretty text-zinc-600 sm:text-xs/5 dark:text-zinc-40
 const INFO_ENDPOINT = '/api/relay/info'
 const DEPLOY_ENDPOINT = '/api/relay/deploy'
 const UPDATE_ENDPOINT = '/api/relay/update'
+const LEAVE_ENDPOINT = '/api/relay/leave'
 
 /** The exact template name the token page offers; a paraphrase is a hunt. */
 export const TOKEN_TEMPLATE = 'Edit Cloudflare Workers'
@@ -59,6 +62,17 @@ export interface RelayUIInfo {
   deployed_version?: string
   has_token?: boolean
   account_name?: string
+  /**
+   * The relay leg's live state, straight off the daemon rather than out of
+   * any config file: `off`, `connecting` or `connected` (daemon.RelayOff and
+   * friends). Absent from a daemon too old to send it.
+   *
+   * It is the answer to a question the welcome cannot keep up with, because
+   * the welcome is a snapshot per connection: a leg that ended inside a live
+   * daemon — which is what Disconnect does — leaves every open tab believing
+   * the last thing it was told.
+   */
+  transport?: string
   /**
    * The fleet directory as this daemon last read it (daemon.DirectoryCounts).
    * Absent on a daemon that is not reading one at all — no relay, or a relay
@@ -510,6 +524,13 @@ export function CloudflareConfiguredCard({ info }: { info: RelayUIInfo }) {
         <RelayUpdateDialog info={info} open={updating} onOpenChange={setUpdating} />
         <JoinReveal />
         <AddressChange origin={info.origin} />
+        {/*
+          Last on the card, and the only control here that removes something.
+          Every other action adds a machine, a domain or a newer Worker; this
+          one ends this machine's membership, so it sits below them all rather
+          than in the row a reader is aiming at.
+        */}
+        <RelayDisconnect info={info} />
       </CardContent>
     </Card>
   )
@@ -658,6 +679,153 @@ function AddressChange({ origin }: { origin?: string }) {
         {error}
       </p>
     </form>
+  )
+}
+
+/**
+ * Take this machine off its relay: the Remote screen's spelling of `flue relay
+ * leave`, through the same service (POST /api/relay/leave → relayUIService.Leave
+ * in cmd/flue), so the screen and the terminal cannot come to different
+ * conclusions about what happened.
+ *
+ * Everything else on this card creates something. This is the one control that
+ * takes it away, and it is unrecoverable in a way a user cannot see: relay.json
+ * is the only copy this machine holds of the relay's secret and of the fleet
+ * key, and on a one-machine relay it is the only copy anywhere. So it asks
+ * first, in the app's own confirm shape — a window with the question in its
+ * title, the consequences in its body, and Cancel beside the button that acts
+ * (bulk-bar.tsx does the same for closing sessions) — rather than acting on a
+ * click.
+ *
+ * The body says the four things a reader will otherwise assume, each in the
+ * direction that costs them something: the Worker is not undeployed (this
+ * calls Cloudflare not at all), rejoining needs the join line from a machine
+ * that still has one, a rejoin arrives as a new machine id, and the pairings,
+ * the daemon's key and the stored Cloudflare token all survive. They are the
+ * sentences `flue relay leave` prints, because they are the same facts.
+ *
+ * Placed at the foot of the card, past the address field, deliberately: a
+ * destructive control next to Deploy is a mis-click that costs a fleet key.
+ */
+export function RelayDisconnect({ info }: { info: RelayUIInfo }) {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [steps, setSteps] = useState<string[] | null>(null)
+  const [error, setError] = useState('')
+
+  const worker = info.worker ? `The Worker ${info.worker}` : 'The relay Worker'
+
+  async function leave() {
+    setBusy(true)
+    setError('')
+    try {
+      const res = await post(LEAVE_ENDPOINT, {})
+      setSteps(res.steps ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /*
+    Everything reading the daemon's answer is told on the way out, not on
+    success. The answer changed the moment relay.json went, and this card is
+    rendered from it — so re-asking while the window was up would unmount the
+    steps the daemon just handed back, which are the reader's only account of
+    what was done. RelayUpdateDialog keeps its receipt for the same reason.
+  */
+  function change(next: boolean) {
+    setOpen(next)
+    if (!next && steps) {
+      setSteps(null)
+      relayUIChanged()
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-y-1.5">
+      <div>
+        {/*
+          The trailing ellipsis is the menu convention this card already uses
+          for "Update relay…": this control opens a question, and the one in
+          the window is the one that acts. Two controls a click apart reading
+          exactly the same words is a pair a screen reader cannot tell apart.
+        */}
+        <Button variant="destructive" size="sm" onClick={() => setOpen(true)}>
+          Leave this relay…
+        </Button>
+      </div>
+      <Dialog open={open} onOpenChange={change}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>
+              {steps ? 'This machine has left the relay' : 'Leave this relay?'}
+            </DialogTitle>
+            <DialogDescription className={NOTE}>
+              {steps
+                ? 'The relay leg was stopped as well, so nothing outside this computer reaches these sessions now. No restart needed.'
+                : 'This deletes relay.json — this machine’s place on the relay, the relay’s secret and the fleet key, which live nowhere else on this machine.'}
+            </DialogDescription>
+          </DialogHeader>
+          {steps ? (
+            <ul className="flex flex-col gap-y-1">
+              {steps.map((step) => (
+                <li key={step} className={cn(NOTE, 'flex items-start gap-x-2')}>
+                  <CheckIcon
+                    aria-hidden="true"
+                    className="mt-0.5 size-4 shrink-0 text-(--primary)"
+                  />
+                  <span className="min-w-0">{step}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="flex flex-col gap-y-3">
+              <p className={NOTE}>
+                Rejoining means the <code className="font-mono">flue relay join</code> line from a
+                machine that is still on this relay — neither credential can be read back from
+                anywhere else, so if this is the last machine on the relay, deploying a new one is
+                the way back. A rejoin also mints this machine a new id: devices carrying a
+                certificate from this fleet find it again through the fleet directory, and anything
+                else pairs again.
+              </p>
+              <p className={NOTE}>
+                {worker} stays deployed in your Cloudflare account — leaving calls Cloudflare not at
+                all. Delete it from the Cloudflare dashboard if you want it gone.
+              </p>
+              <p className={NOTE}>
+                Paired devices, this daemon’s key and the stored Cloudflare token are untouched, and
+                this computer’s own tab keeps working exactly as it does now.
+              </p>
+            </div>
+          )}
+          <DialogFooter>
+            {steps ? (
+              <DialogClose asChild>
+                <Button variant="outline">Done</Button>
+              </DialogClose>
+            ) : (
+              <>
+                <DialogClose asChild>
+                  <Button variant="outline">Cancel</Button>
+                </DialogClose>
+                <Button variant="destructive" disabled={busy} onClick={() => void leave()}>
+                  {busy ? 'Leaving…' : 'Leave the relay'}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+          {/*
+            Always in the tree and empty until it has something to say, the
+            same live-region shape every other error on this card has.
+          */}
+          <p role="status" className={cn(NOTE, 'text-red-600 empty:hidden dark:text-red-400')}>
+            {error}
+          </p>
+        </DialogContent>
+      </Dialog>
+    </div>
   )
 }
 
