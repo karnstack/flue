@@ -269,10 +269,17 @@ export async function loadPinnedFleetKey(
  * The certificate used to be read out of the relay's credential-less
  * `GET /directory`, which meant every device's public key and human label sat
  * in a document anybody could read, and every pairing ceremony ever performed
- * spent one of the directory's 512 permanent entries. It now arrives twice over
+ * spent one of the directory's 512 permanent entries. It now arrives over
  * channels that are already private and already authenticated — in the pairing
- * answer, and in the welcome on every connection — so the public copy buys
- * nothing.
+ * answer, and again in the welcome of every *relayed* connection — so the
+ * public copy buys nothing.
+ *
+ * The second delivery is a relay-tab property and not a universal one, which
+ * is worth knowing before relying on it: a loopback connection authenticates a
+ * machine-local session token rather than a device key, so the daemon does not
+ * know whose certificate to send and sends none (internal/daemon/server.go,
+ * fleetCertFor). A browser paired only over loopback holds what the ceremony
+ * wrote here and has no second source for it.
  *
  * It is public data either way: a certificate is a signed statement about a
  * public key, and holding one grants nothing without the private half of the

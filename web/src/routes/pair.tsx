@@ -198,9 +198,18 @@ function keyFromLink(text: string): Uint8Array | null {
  * device is registered on the machine it just paired with and reaches it by
  * key alone; what a certificate adds is the machines it has *not* paired with,
  * and a daemon with no fleet key or no place on a relay legitimately mints
- * none. There is also a second chance built in: every connection's welcome
- * carries the same blob again (internal/daemon/conn.go), so a browser that
- * ends up here without one picks it up the next time it connects.
+ * none.
+ *
+ * **How much of a second chance there is depends on which page this is.** A
+ * tab paired *through the relay* has one: every welcome carries the same blob
+ * again (internal/daemon/conn.go, fleetCertFor), so any machine it can still
+ * reach re-supplies it. A tab paired over **loopback** has none — the daemon
+ * cannot know which device a cookie-authenticated tab is, so it sends no
+ * certificate in that welcome, and a loopback ceremony pins the daemon key
+ * without a machine id (`savePinnedDaemonKey` below), so such a tab holds no
+ * per-machine pin to reach a sibling with and has nobody else to ask. For that
+ * tab this answer is the only delivery there is; losing what it wrote means
+ * pairing again.
  *
  * The store failure is swallowed for the same reason and not the same shape as
  * the daemon key's, which fails the ceremony: without the daemon's key this
@@ -223,8 +232,10 @@ async function keepDeviceCert(
   try {
     await savePinnedDeviceCert(blob)
   } catch {
-    // A store that would not keep it costs the fleet, not the pairing. The
-    // welcome offers it again on the next connection.
+    // A store that would not keep it costs the fleet, not the pairing: this
+    // device still reaches the machine it just paired with. A relay tab is
+    // offered it again on its next welcome; a loopback one is not, and pairs
+    // again. See the note above.
   }
 }
 

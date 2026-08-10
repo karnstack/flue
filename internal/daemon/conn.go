@@ -329,9 +329,16 @@ func (c *conn) serve() {
 		// And the device's own fleet certificate, for the device that just
 		// proved it holds the key the certificate names. This is the re-supply
 		// path: the ceremony hands one over in its answer, and this hands the
-		// same one over again on every connection, so a browser that never
-		// stored it, or lost it, or was paired before this machine had a fleet
-		// key, gets one from any machine it can still reach.
+		// same one over again on every connection that has a device identity,
+		// so a browser that never stored it, or lost it, or was paired before
+		// this machine had a fleet key, gets one from any machine it can still
+		// reach *over the relay*.
+		//
+		// Empty over loopback, and not by omission: a session-token connection
+		// has named no device key, so there is no certificate this daemon
+		// could know to be its. A tab that only ever paired over loopback has
+		// no second source for its certificate and re-pairs instead — see
+		// fleetCertFor, and keepDeviceCert in web/src/routes/pair.tsx.
 		FleetCert: c.srv.fleetCertFor(c.device),
 	})
 

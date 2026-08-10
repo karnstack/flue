@@ -620,10 +620,13 @@ export class FleetClient {
  *
  * This is the re-supply path, and the reason a certificate no longer has to
  * live in the relay's public directory. The ceremony hands one over in its
- * answer; every connection after that offers the same blob again, inside Noise,
- * to a device that has already proved it holds the key the certificate names.
- * So a browser that never stored one, or lost it, or was paired before its
- * machine had a fleet key, picks one up from any machine it can still reach.
+ * answer; every relayed connection after that offers the same blob again,
+ * inside Noise, to a device that has already proved it holds the key the
+ * certificate names. So a browser that never stored one, or lost it, or was
+ * paired before its machine had a fleet key, picks one up from any machine it
+ * can still reach that way. A loopback welcome carries none — a session-token
+ * connection has named no device key — so this listener earns its keep on the
+ * relay sources, and a tab that only ever paired over loopback re-pairs.
  *
  * Verified before it is kept, under the fleet key pinned at pairing and against
  * this browser's own device key — the same three checks the pairing page makes,
