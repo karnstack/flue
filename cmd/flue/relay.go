@@ -141,7 +141,12 @@ func runRelayAddress(w io.Writer, args []string) error {
 		return fmt.Errorf("save the relay configuration: %w", err)
 	}
 	fmt.Fprintf(w, "  ✓ relay address is now wss://%s\n", host)
-	tellTheDaemon(w)
+	// The loopback tab is repointed too, and it is the one thing here that a
+	// user reads as already handled: a browser paired on the old origin is
+	// obviously somebody else's machine, while the tab on this one looks like
+	// it lives with the daemon. Its policy names the old origin and forbids the
+	// new one — see relayReloadNote.
+	sayReloadOpenTabs(w, tellTheDaemon(w))
 	fmt.Fprint(w, relayAddressDone)
 	return nil
 }
@@ -369,6 +374,12 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 		}
 	}
 
+	// The daemon catches up in place, and the browser tab that daemon served
+	// before any of this existed does not: it was handed a policy naming no
+	// relay, and its fleet enrolment ran and was refused while this machine
+	// still had no fleet key. relayReloadNote says so where it can be acted on.
+	sayReloadOpenTabs(w, tellTheDaemon(w))
+
 	// The one line another machine needs, exactly as it should be run there,
 	// spelled by joinCommand so this print and the Remote screen's copy can
 	// never drift. It carries the secret and now the fleet key — that is the
@@ -377,8 +388,6 @@ func runRelaySetup(w io.Writer, r io.Reader, api *cloudflare.Client, args []stri
 	// their fleet up. Its weight changed when the fleet key came aboard:
 	// leaking this line used to buy disruption, and now it buys the fleet —
 	// docs/RELAY.md says so where it teaches the line.
-	tellTheDaemon(w)
-
 	fmt.Fprintf(w, "\nto add another machine, run this on it:\n\n  %s\n", joinCommand(host, secret, fleetKey.Seed()))
 
 	fmt.Fprint(w, relaySetupDone)
@@ -410,23 +419,75 @@ const machineNameMaxRunes = 64
 // reached, which is the one case that still names a restart — the honest
 // remainder, rather than the blanket instruction this used to print for
 // everyone.
-func tellTheDaemon(w io.Writer) {
+//
+// It reports whether a daemon is running at all — told or not, because a
+// daemon that could not be told is still a daemon that has served pages. That
+// is the question sayReloadOpenTabs needs answered, and asking it twice would
+// mean two probes that could disagree.
+func tellTheDaemon(w io.Writer) (running bool) {
 	port, ok := ourDaemon()
 	if !ok {
 		// Nothing is running, so nothing is stale: whatever starts next reads
 		// the file that is now on disk.
 		fmt.Fprintln(w, "  ✓ no daemon is running; the next one to start reads relay.json as it is now")
-		return
+		return false
 	}
 	steps, err := reloadRelayLeg(port)
 	if err != nil {
 		fmt.Fprintf(w, "  ! the daemon on 127.0.0.1:%d could not be told (%v)\n", port, err)
 		fmt.Fprintln(w, "    restart it to pick this up: flue disable && flue enable, or restart flue serve")
-		return
+		return true
 	}
 	for _, step := range steps {
 		fmt.Fprintf(w, "  ✓ %s\n", step)
 	}
+	return true
+}
+
+// relayReloadNote is the one consequence of rewriting relay.json that neither
+// this command nor the daemon it just told can repair: a flue tab that was
+// already open on this machine when it ran.
+//
+// A page's Content-Security-Policy is fixed when the daemon serves the
+// document, and it names the relay origin relay.json held at that moment
+// (internal/daemon.LocalCSPFor). So a tab served before this command carries a
+// policy that forbids the relay this machine has now — both
+// `wss://<relay>/client/<id>` and the `/directory` read — and no header can be
+// changed after the fact, by anything. The tab's fleet enrolment is the same
+// story from the other end: it runs once per load (web/src/fleet/enrol.ts),
+// and a tab loaded before this machine held a fleet key was answered 409 and
+// never asks again. Neither failure announces itself — the directory read
+// reports "no machines" for every fault by design — so the tab goes on showing
+// a fleet of one and looks perfectly healthy doing it.
+//
+// A reload is the whole fix and the only one; polling, reconnecting and
+// restarting the daemon are not, which is why this is said out loud rather
+// than left for the page to sort out. The Remote screen reached the same
+// conclusion and offers the button (web/src/components/cloudflare-connect.tsx,
+// ReloadAfterDeploy); this is that sentence for a terminal.
+//
+// No tick, and the two-space indent every note in this file wears: a ✓ is
+// something that happened, and this is something the command could not do.
+const relayReloadNote = "  reload any flue tab you already have open on this machine\n" +
+	"    what a page may connect to is fixed when the daemon serves it, so a tab\n" +
+	"    served before this command cannot reach the relay this machine has now —\n" +
+	"    nothing it does on its own repairs that, and a reload repairs all of it\n"
+
+// sayReloadOpenTabs prints relayReloadNote when there is a daemon that could
+// have served the tab it is about.
+//
+// With no daemon there is no such tab: this page comes from a daemon on
+// loopback and from nowhere else. A tab left over from a daemon that has since
+// exited is not the exception it looks like — it is already staring at a dead
+// socket, and what it needs is a daemon, not a reload.
+//
+// It takes the answer rather than asking, because tellTheDaemon has just asked
+// and a second probe could come back different.
+func sayReloadOpenTabs(w io.Writer, daemonRunning bool) {
+	if !daemonRunning {
+		return
+	}
+	fmt.Fprint(w, relayReloadNote)
 }
 
 // reloadRelayLeg is the request half of the above: POST RelayReloadPath with
@@ -621,7 +682,11 @@ func runRelayJoin(w io.Writer, args []string) error {
 	}
 
 	fmt.Fprintf(w, "  ✓ this machine joined wss://%s as %s (%s)\n", host, machineName, machineID)
-	tellTheDaemon(w)
+	// The daemon is told and catches up; a tab already open on this machine
+	// cannot be, and this is the command where that hurts most — the whole
+	// point of joining is the fleet, and an unreloaded tab shows a fleet of
+	// one. relayReloadNote has the why.
+	sayReloadOpenTabs(w, tellTheDaemon(w))
 	fmt.Fprint(w, relayJoinDone)
 	return nil
 }
@@ -1072,6 +1137,15 @@ func runRelayLeave(w io.Writer, r io.Reader, args []string) error {
 		return fmt.Errorf("delete the relay configuration: %w", err)
 	}
 	fmt.Fprintf(w, "  ✓ left %s (relay.json deleted)\n", cfg.URL)
+	// No sayReloadOpenTabs here, and not by omission. The other three commands
+	// leave an open tab with a policy too narrow for the relay this machine now
+	// has; leaving leaves it with one too *wide*, which forbids nothing, and the
+	// tab keeps every capability it had — its fleet identity is its own, held in
+	// the browser, and the relay it was certified for is still standing. A
+	// reload is the one thing that would take that away: the next document
+	// names no relay origin at all, and re-enrolling against a machine that
+	// holds no fleet key gets nothing back. So the advice would be wrong here in
+	// the strong sense — following it costs the reader something.
 	tellTheDaemon(w)
 	fmt.Fprint(w, relayLeaveDone)
 	return nil

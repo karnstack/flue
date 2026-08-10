@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -798,5 +799,141 @@ func TestRelayJoinKeepsTheRestartNoteForADaemonItCannotTell(t *testing.T) {
 	printed := out.String()
 	if !strings.Contains(printed, "could not be told") || !strings.Contains(printed, "flue disable && flue enable") {
 		t.Errorf("a daemon that could not be told was not reported, so nothing tells the user to restart it:\n%s", printed)
+	}
+}
+
+// reloadHint is the phrase the advice is recognised by. Short on purpose: the
+// wording of relayReloadNote is prose and will be edited, and a test that
+// pinned the paragraph would fail for every improvement to it.
+const reloadHint = "reload any flue tab"
+
+// runningDaemon puts a real daemon on loopback and records it, so that the CLI
+// commands under test find one exactly as they do beside a `flue serve`.
+func runningDaemon(t *testing.T) {
+	t.Helper()
+	token, err := config.LoadOrCreateToken()
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	rt := &relayRuntime{start: alwaysStarts}
+	port := serveWithRelayUI(t, token, &relayUIService{runtime: rt})
+	if err := daemon.WriteRuntime(port); err != nil {
+		t.Fatalf("WriteRuntime: %v", err)
+	}
+}
+
+// onARelay is the relay.json of a machine already joined to one, for the
+// commands that edit an existing configuration rather than write a first.
+func onARelay(t *testing.T) {
+	t.Helper()
+	if err := config.SaveRelay(config.Relay{
+		URL:         "wss://relay.example.com",
+		Secret:      "the-daemon-secret",
+		FleetSeed:   testFleetSeed,
+		Origin:      "https://relay.example.com",
+		MachineID:   "karns-macbook-pro-a1b2-0f9a12cd",
+		MachineName: "Karn's MacBook Pro",
+		Worker:      "flue-relay",
+	}); err != nil {
+		t.Fatalf("SaveRelay: %v", err)
+	}
+}
+
+// TestRelayCommandsTellAnOpenTabToReload is the transcript half of the CSP
+// trap: a page is served with the relay it may talk to fixed in its
+// Content-Security-Policy (internal/daemon.LocalCSPFor), so every command that
+// rewrites relay.json strands the tab the user already had open — a fleet of
+// one, forever, with nothing in the UI saying why. The daemon is told and
+// catches up in place; the tab cannot be told anything, and only the command
+// that caused it is in a position to mention it.
+//
+// The Remote screen has offered its "Reload flue" button since the deploy path
+// landed. This pins the same honesty in the terminal, for the three commands
+// that write the file: join, setup, and address.
+//
+// The second half is the part that keeps it honest. A page comes from a daemon
+// on loopback and from nowhere else, so with no daemon running there is no tab
+// to reload, and advice about one would be noise on the one path — a fresh
+// machine configured before its first `flue enable` — where the transcript is
+// already someone's first impression of flue.
+func TestRelayCommandsTellAnOpenTabToReload(t *testing.T) {
+	commands := []struct {
+		name string
+		run  func(t *testing.T, w io.Writer)
+	}{{
+		name: "join",
+		run: func(t *testing.T, w io.Writer) {
+			if err := runRelayJoin(w, []string{
+				"wss://relay.example.com",
+				"--secret", "s3cr3t-daemon-secret",
+				"--fleet", testFleetSeed,
+			}); err != nil {
+				t.Fatalf("runRelayJoin: %v", err)
+			}
+		},
+	}, {
+		name: "setup",
+		run: func(t *testing.T, w io.Writer) {
+			f := newFakeCloudflare(t, oneAccount(), "karn")
+			if err := runRelaySetup(w, strings.NewReader(setupToken+"\n"), f.client(), nil); err != nil {
+				t.Fatalf("runRelaySetup: %v", err)
+			}
+		},
+	}, {
+		name: "address",
+		run: func(t *testing.T, w io.Writer) {
+			onARelay(t)
+			if err := runRelayAddress(w, []string{"wss://relay2.example.com"}); err != nil {
+				t.Fatalf("runRelayAddress: %v", err)
+			}
+		},
+	}}
+
+	for _, c := range commands {
+		t.Run(c.name+" beside a running daemon", func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			runningDaemon(t)
+
+			var out strings.Builder
+			c.run(t, &out)
+			if !strings.Contains(out.String(), reloadHint) {
+				t.Errorf("`flue relay %s` never tells the user to reload the tab it just stranded:\n%s", c.name, out.String())
+			}
+		})
+		t.Run(c.name+" with no daemon", func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+			var out strings.Builder
+			c.run(t, &out)
+			if strings.Contains(out.String(), reloadHint) {
+				t.Errorf("`flue relay %s` tells the user to reload a tab that cannot exist — no daemon has served one:\n%s", c.name, out.String())
+			}
+		})
+	}
+}
+
+// TestRelayLeaveDoesNotTellAnOpenTabToReload is the command deliberately left
+// out, and the reason is not that the advice would be merely redundant: it
+// would be wrong.
+//
+// Leaving takes the relay origin *out* of relay.json, so the tab's policy is
+// now wider than the daemon's configuration rather than narrower — and a policy
+// that permits an origin nothing dials forbids nothing. The tab keeps what it
+// had: its fleet identity lives in the browser, and the relay it was certified
+// for is still deployed and still carrying the machines that stayed. A reload
+// is the one act that would end that — the next document names no relay origin
+// at all, and re-enrolling against a machine with no fleet key gets nothing
+// back.
+func TestRelayLeaveDoesNotTellAnOpenTabToReload(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	runningDaemon(t)
+	onARelay(t)
+
+	var out strings.Builder
+	if err := runRelayLeave(&out, strings.NewReader("yes\n"), nil); err != nil {
+		t.Fatalf("runRelayLeave: %v", err)
+	}
+	if strings.Contains(out.String(), reloadHint) {
+		t.Errorf("leaving tells the user to reload a tab that a reload would take the fleet away from:\n%s", out.String())
 	}
 }

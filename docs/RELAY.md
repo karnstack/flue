@@ -121,6 +121,18 @@ built from the file that was just written. A daemon that could not be told —
 one that is wedged, or an older build — is the only case that still wants a
 restart, and the command says so there and nowhere else.
 
+What that knock cannot reach is a **browser tab that was already open** on
+this machine. What a page may connect to is fixed when the daemon serves the
+document (`internal/daemon.LocalCSPFor`), so a tab served before the join
+carries a policy naming no relay: the fleet socket and the directory read are
+both blocked, its fleet enrolment already ran and was refused, and nothing
+says so — a failed directory read reports "no machines" by design, so the tab
+shows a fleet of one and looks healthy doing it. Only a reload fixes that, so
+`join`, `setup` and `address` each say so when there is a daemon running that
+could have served such a tab. `leave` does not: it leaves an open tab with a
+policy wider than the configuration rather than narrower, which forbids
+nothing, and a reload there would cost that tab the fleet it can still reach.
+
 Run it from a **release binary** (`make build`, or an installed flue). The
 Worker and the web app are both compiled into that binary, and a dev build
 carries neither, setup refuses rather than deploying something that is not
