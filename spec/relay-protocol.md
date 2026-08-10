@@ -182,9 +182,16 @@ kind byte other than `0x00` or `0x01`, is a protocol error.
 One more Durable Object, and the only one that is not per machine: the fleet
 directory, `idFromName("directory")`, because one relay is one fleet
 (`spec/fleet-trust.md`, "The fleet directory"). It holds the signed artifacts
-that have to reach every machine and every device — machine certs, device
-certs, revocations — and it holds them as **blobs it cannot verify**, because
-the fleet key never touches the Worker.
+that have to reach every machine and every device — machine certs and
+revocations — and it holds them as **blobs it cannot verify**, because the
+fleet key never touches the Worker.
+
+*Device* certificates are deliberately not among them. A device is handed its
+own by the machine that minted it, over the pairing answer and over every
+welcome, so publishing them here would only have made a credential-less route
+into a roster of the operator's device keys and spent one permanent entry per
+ceremony against a cap of 512. The Worker cannot tell one blob from another and
+does not try; this is a rule the daemons keep, not one this leg enforces.
 
 That is the invariant this leg exists to preserve, and it must survive every
 future change to it: **the relay stores and serves, and never verifies.** Every

@@ -91,36 +91,22 @@ describe('reading the fleet directory', () => {
   })
 })
 
-describe('the device certificate a browser reads out of the directory', () => {
-  it('finds the one naming this device and ignores the rest', async () => {
-    const mine = deviceCert(DEVICE, 'my phone')
-    const view = await read([deviceCert(OTHER_DEVICE, 'somebody else'), mine])
-    expect(view.deviceCert).toEqual(mine)
-  })
-
-  it('is null when the fleet has never certified this device', async () => {
-    const view = await read([deviceCert(OTHER_DEVICE)])
-    expect(view.deviceCert).toBeNull()
+describe('the device certificates a browser no longer reads out of the directory', () => {
+  it('counts one as verified and takes nothing from it', async () => {
+    // A device certificate here means an older machine in the fleet is still
+    // publishing them. It verifies, so it is counted — the number is "how much
+    // of this did our fleet key sign" — and it is otherwise ignored: this
+    // browser holds its own certificate (crypto/keys.ts, from the pairing
+    // answer and every welcome) and was never owed anybody else's.
+    const view = await read([deviceCert(DEVICE, 'my phone'), deviceCert(OTHER_DEVICE, 'somebody')])
+    expect(view.verified).toBe(2)
+    expect(view.machines).toEqual([])
     expect(view.revoked).toBe(false)
-  })
-
-  it('takes the newest when the device has been paired more than once', async () => {
-    const older = deviceCert(DEVICE, 'phone', 'attic-pi', 1_754_700_000)
-    const newer = deviceCert(DEVICE, 'phone', 'mesa-1a2b', 1_754_700_900)
-    expect((await read([newer, older])).deviceCert).toEqual(newer)
-    expect((await read([older, newer])).deviceCert).toEqual(newer)
-  })
-
-  it('ignores a device certificate signed by another key', async () => {
-    const view = await read([
-      deviceCert(DEVICE, 'phone', 'attic-pi', 1_754_700_000, OTHER_SEED),
-    ])
-    expect(view.deviceCert).toBeNull()
   })
 })
 
-describe('a revocation outranks a device certificate', () => {
-  it('however much fresher the certificate is', async () => {
+describe('a revocation is what the reader still owes a stored certificate', () => {
+  it('reports this device as revoked however much fresher any certificate is', async () => {
     // The rule with its own sentence in the spec: `iat` is display, never
     // precedence. A reader that took the newer of the two would let a
     // certificate minted after the revoke undo it — and un-revoking is
@@ -130,7 +116,6 @@ describe('a revocation outranks a device certificate', () => {
       deviceCert(DEVICE, 'phone', 'attic-pi', 1_759_999_999),
     ])
     expect(view.revoked).toBe(true)
-    expect(view.deviceCert).toBeNull()
   })
 
   it('whichever order the answer happens to list them in', async () => {
@@ -138,15 +123,13 @@ describe('a revocation outranks a device certificate', () => {
     // first or last and nothing may depend on which.
     const rev = revocation(DEVICE, 1_754_700_000)
     const cert = deviceCert(DEVICE, 'phone', 'attic-pi', 1_759_999_999)
-    expect((await read([cert, rev])).deviceCert).toBeNull()
-    expect((await read([rev, cert])).deviceCert).toBeNull()
+    expect((await read([cert, rev])).revoked).toBe(true)
+    expect((await read([rev, cert])).revoked).toBe(true)
   })
 
   it('and does not touch another device', async () => {
-    const mine = deviceCert(DEVICE)
-    const view = await read([revocation(OTHER_DEVICE), mine])
+    const view = await read([revocation(OTHER_DEVICE), deviceCert(DEVICE)])
     expect(view.revoked).toBe(false)
-    expect(view.deviceCert).toEqual(mine)
   })
 
   it('unless the revocation was signed by another key', async () => {
@@ -154,10 +137,8 @@ describe('a revocation outranks a device certificate', () => {
     // from an untrusted channel — but it still has to be *the fleet's*. A
     // stranger able to revoke devices would be a denial of service anybody
     // with write access to the directory could mount.
-    const mine = deviceCert(DEVICE)
-    const view = await read([revocation(DEVICE, 1_754_700_000, OTHER_SEED), mine])
+    const view = await read([revocation(DEVICE, 1_754_700_000, OTHER_SEED), deviceCert(DEVICE)])
     expect(view.revoked).toBe(false)
-    expect(view.deviceCert).toEqual(mine)
   })
 })
 
@@ -200,7 +181,7 @@ describe('what the reader will not take from the relay on faith', () => {
 })
 
 describe('a directory that cannot be read costs visibility and nothing else', () => {
-  const empty = { machines: [], deviceCert: null, revoked: false, entries: 0, verified: 0 }
+  const empty = { machines: [], revoked: false, entries: 0, verified: 0 }
 
   it('answers empty for a relay that has not been updated (503)', async () => {
     // `/directory` on a relay deployed before the FleetDirectory object
@@ -254,17 +235,19 @@ describe('a directory that cannot be read costs visibility and nothing else', ()
     const whole = [
       machineCert('attic-pi', 'Attic Pi', ATTIC_NOISE),
       machineCert('mesa-1a2b', 'Mesa', MESA_NOISE),
-      deviceCert(DEVICE),
+      revocation(OTHER_DEVICE),
     ]
     const full = await read(whole)
     expect(full.machines.map((m) => m.id)).toEqual(['attic-pi', 'mesa-1a2b'])
-    expect(full.deviceCert).not.toBeNull()
+    expect(full.verified).toBe(3)
 
     const half = await read(whole.slice(0, 1))
     expect(half.machines.map((m) => m.id)).toEqual(['attic-pi'])
-    // The device certificate went missing with it, which is the honest cost:
-    // fewer machines this browser can open, never a machine it should not.
-    expect(half.deviceCert).toBeNull()
+    // Fewer machines this browser can open, never a machine it should not —
+    // and the withheld revocation is the exception the spec now names, since
+    // omitting one is the one direction that *adds* rather than subtracts
+    // (spec/relay-protocol.md, "What withholding costs").
+    expect(half.verified).toBe(1)
   })
 
   it('answers empty for a fleet key that is not 32 bytes', async () => {

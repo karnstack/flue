@@ -818,8 +818,8 @@ const relayResetUsage = "usage: flue relay reset [--yes]"
 // relayResetWarning is what the command says before it asks. Both halves are
 // load-bearing: the first is why an operator would ever run this, the second is
 // the one thing a wipe can cost that re-publishing does not put back.
-const relayResetWarning = `this empties the relay's fleet directory: every machine certificate,
-every device certificate and every revocation the relay is holding.
+const relayResetWarning = `this empties the relay's fleet directory: every machine certificate
+and every revocation the relay is holding.
 
 every machine re-publishes everything it holds when it reconnects, so a
 fleet that is switched on refills the directory within seconds. what does

@@ -329,8 +329,15 @@ re-joins and re-pairs) is the whole of compromise recovery.
 Certificates only mean something once they reach the machines and devices
 that check them. Daemons do not talk to each other and should not start to,
 so the relay carries them: one more Durable Object, not per machine, holding
-the signed blobs the fleet has produced — machine certificates, device
-certificates, revocations.
+the signed blobs the fleet has produced — machine certificates and
+revocations.
+
+Your *device* certificates are not in there, deliberately. The machine that
+paired a device hands that device its certificate directly — in the pairing
+answer, and again every time it connects — so there is no reason to publish a
+list of your devices' keys and the names you gave them on a route that needs no
+credential, and no reason to spend one of the directory's 512 permanent entries
+every time you pair something.
 
 ```
 PUT    /directory  the daemon secret; one signed blob
@@ -365,11 +372,12 @@ Three things follow that an operator sees:
 
 - **A machine joined later needs no ceremony.** `flue relay join` mints that
   machine's certificate and publishes it; the next directory read on every
-  paired browser puts the machine in the list, and every device certificate
-  already in the directory lets those devices straight in.
+  paired browser puts the machine in the list, and the certificate each of
+  those devices already holds is what the new machine lets them in on.
 - **Pair a device once, for the fleet.** The ceremony's machine signs the
-  device certificate and publishes it. The browser being paired takes the
-  fleet *public* key out of the same QR that carries the daemon's own
+  device certificate and hands it to the device it is about. The browser being
+  paired takes the fleet *public* key out of the same QR that carries the
+  daemon's own
   (`f=` beside `k=`) and pins it — the QR is the one leg of the ceremony no
   intermediary can sit in — and from then on it accepts any machine whose
   certificate verifies under that key, pinning the Noise key the certificate
@@ -430,8 +438,8 @@ signatures nobody can verify occupying the cap. So there is one command:
 
 ```
 $ flue relay reset
-this empties the relay's fleet directory: every machine certificate,
-every device certificate and every revocation the relay is holding.
+this empties the relay's fleet directory: every machine certificate
+and every revocation the relay is holding.
 ...
 type yes to continue: yes
   ✓ fleet directory reset (512 entries cleared)
@@ -453,15 +461,16 @@ an empty one. If you are not sure, revoke the device again from any machine
 after the reset; a revocation is idempotent everywhere it lands.
 
 **What the relay learns from it.** The blobs are opaque to the *code* and not
-to whoever runs the Worker: machine ids and display names, device public keys
-and device names, and who revoked what and when are all in there, signed
-rather than secret. The relay already routed by machine id; the delta is names
-and device keys. Public-key material is public by design and none of it opens
-anything — reaching a machine still needs the private half of a device key
-that never leaves the browser holding it — but it is a real change in what a
-relay operator can see, and on your own Worker, in front of your own machines,
-that is the trade this document would rather state than leave to be
-discovered. The full list of what a relay sees is in
+to whoever runs the Worker: machine ids and display names, and who revoked what
+and when, are in there, signed rather than secret. The relay already routed by
+machine id; the delta is machine names and the revocation history. Device
+public keys and the names you gave your devices are **not** — they reach the
+device that owns them and go no further. None of what is there opens anything
+— reaching a machine still needs the private half of a device key that never
+leaves the browser holding it — but it is a real change in what a relay
+operator can see, and on your own Worker, in front of your own machines, that
+is the trade this document would rather state than leave to be discovered. The
+full list of what a relay sees is in
 [`spec/relay-protocol.md`](../spec/relay-protocol.md), "What the relay sees".
 
 **Reading it.** `flue relay status` asks the relay directly and verifies every

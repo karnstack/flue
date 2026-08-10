@@ -284,7 +284,6 @@ func (d *fakeDirectory) awaitPublished(t *testing.T, blob []byte, what string) {
 	}
 }
 
-// readCount is how many credential-less-shaped reads the directory answered.
 // readCount is how many times the daemon has *asked*, which is the question
 // every caller of awaitRead is really asking. Bodies and 304s both count: a
 // reconnect against an unchanged directory still performed its catch-up read,

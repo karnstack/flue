@@ -343,10 +343,16 @@ func TestDirectoryIngestIsIdempotent(t *testing.T) {
 	f.sink.stayedAt(t, 1, "the same revocation delivered three times")
 }
 
-// TestDirectoryPublishesWhatThisMachineHolds: the machine cert from
-// relay.json, the device certs this machine's own ceremonies minted, and every
-// revocation it knows — all of it, on connect, so a machine that was switched
-// off while the fleet moved catches the fleet up as well as catching up.
+// TestDirectoryPublishesWhatThisMachineHolds: the machine cert from relay.json
+// and every revocation this machine knows — on connect, so a machine that was
+// switched off while the fleet moved catches the fleet up as well as catching
+// up.
+//
+// And **not** the device certificates its own ceremonies minted. Those reach
+// the device that owns them over the pairing answer and every welcome, and no
+// daemon ever read one from here; publishing them made the credential-less
+// `GET /directory` a roster of the operator's devices and spent one of 512
+// permanent entries per ceremony ever performed.
 func TestDirectoryPublishesWhatThisMachineHolds(t *testing.T) {
 	var machineCert []byte
 	f := newDirFixture(t, func(c *Config) {})
@@ -373,8 +379,13 @@ func TestDirectoryPublishesWhatThisMachineHolds(t *testing.T) {
 
 	f.run(t)
 	f.fd.awaitPublished(t, machineCert, "this machine's certificate")
-	f.fd.awaitPublished(t, devCert, "a device certificate this machine minted")
 	f.fd.awaitPublished(t, rev, "a revocation this machine minted")
+	// The revocation is the fence: it is published after the device cert would
+	// have been (mine walks the registry before the revocation list), so by the
+	// time it lands, a device cert that was going to be sent has been.
+	if f.fd.published(devCert) {
+		t.Error("a device certificate reached the directory; it belongs to the device, not to a public store")
+	}
 }
 
 // TestDirectoryPublishesAFreshlyMintedArtifact: the live path — a pairing

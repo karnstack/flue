@@ -9,6 +9,7 @@ import {
   loadOrCreateDeviceKey,
   loadPinnedDeviceCert,
   savePinnedDaemonKeyFor,
+  savePinnedDeviceCert,
   savePinnedFleetKey,
 } from '@/crypto/keys'
 import { saveMachine } from '@/relay/machines'
@@ -712,12 +713,24 @@ describe('fleetSources with a fleet directory', () => {
    *  it — the key the fleet's device certificate has to name. */
   const devicePub = async () => (await loadOrCreateDeviceKey()).publicKey
 
+  /**
+   * The certificate this browser holds, put where it now comes from: its own
+   * key store, written by the pairing answer or by a welcome
+   * (fleet.ts, adoptFleetCert). It used to be fished out of `GET /directory`,
+   * and taking it off that credential-less route is what stopped the directory
+   * being a public roster of the operator's devices and growing by one
+   * permanent entry per ceremony.
+   */
+  const holdCert = async (...args: Parameters<typeof deviceCert>) => {
+    const cert = deviceCert(...args)
+    await savePinnedDeviceCert(cert)
+    return cert
+  }
+
   it('builds a source for a machine it never paired with', async () => {
     await savePinnedFleetKey(FLEET_PUB)
-    const fetch = directoryFetch([
-      machineCert('loft-9f9f', 'Loft', LOFT_PUB),
-      deviceCert(await devicePub()),
-    ])
+    await holdCert(await devicePub())
+    const fetch = directoryFetch([machineCert('loft-9f9f', 'Loft', LOFT_PUB)])
 
     const { urls, raws, factory } = recordingFactory()
     const sources = await fleetSources({
@@ -756,7 +769,6 @@ describe('fleetSources with a fleet directory', () => {
       relayOrigin: 'https://relay.example',
       directoryFetch: directoryFetch([
         machineCert('loft-9f9f', 'Loft', LOFT_PUB, 1_754_700_000, OTHER_SEED),
-        deviceCert(await devicePub()),
       ]),
     })
     expect(sources).toEqual([])
@@ -772,6 +784,7 @@ describe('fleetSources with a fleet directory', () => {
     saveMachine(ATTIC)
     await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
     const pub = await devicePub()
+    await holdCert(pub, 'phone', 'attic-pi', 1_759_999_999)
 
     const sources = await fleetSources({
       loopback: false,
@@ -779,7 +792,6 @@ describe('fleetSources with a fleet directory', () => {
       directoryFetch: directoryFetch([
         machineCert('loft-9f9f', 'Loft', LOFT_PUB),
         machineCert(ATTIC.id, 'Attic Pi', DAEMON_PUB),
-        deviceCert(pub, 'phone', 'attic-pi', 1_759_999_999),
         revocation(pub, 1_754_700_000),
       ]),
     })
@@ -792,16 +804,14 @@ describe('fleetSources with a fleet directory', () => {
     saveMachine(ATTIC)
     await savePinnedDaemonKeyFor(ATTIC.id, DAEMON_PUB)
     const pub = await devicePub()
+    await holdCert(pub, 'phone', 'attic-pi', 1_759_999_999)
 
     const { raws, factory } = recordingFactory()
     const sources = await fleetSources({
       loopback: false,
       relayOrigin: 'https://relay.example',
       wsFactory: factory,
-      directoryFetch: directoryFetch([
-        deviceCert(pub, 'phone', 'attic-pi', 1_759_999_999),
-        revocation(pub, 1_754_700_000),
-      ]),
+      directoryFetch: directoryFetch([revocation(pub, 1_754_700_000)]),
     })
     sources[0]!.client.connect()
     raws[0]!.open()
@@ -826,10 +836,7 @@ describe('fleetSources with a fleet directory', () => {
       loopback: false,
       relayOrigin: 'https://relay.example',
       wsFactory: factory,
-      directoryFetch: directoryFetch([
-        machineCert(ATTIC.id, 'Attic Pi', LOFT_PUB),
-        deviceCert(await devicePub()),
-      ]),
+      directoryFetch: directoryFetch([machineCert(ATTIC.id, 'Attic Pi', LOFT_PUB)]),
     })
 
     sources[0]!.client.connect()
@@ -860,13 +867,11 @@ describe('fleetSources with a fleet directory', () => {
     // again. With a fleet key and a certificate it is a machine that works.
     await savePinnedFleetKey(FLEET_PUB)
     saveMachine(ATTIC) // written down, never pinned
+    await holdCert(await devicePub())
     const sources = await fleetSources({
       loopback: false,
       relayOrigin: 'https://relay.example',
-      directoryFetch: directoryFetch([
-        machineCert(ATTIC.id, 'Attic Pi', DAEMON_PUB),
-        deviceCert(await devicePub()),
-      ]),
+      directoryFetch: directoryFetch([machineCert(ATTIC.id, 'Attic Pi', DAEMON_PUB)]),
     })
     expect(sources.map((s) => s.id)).toEqual(['attic-pi'])
   })

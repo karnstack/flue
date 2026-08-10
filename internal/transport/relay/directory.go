@@ -655,10 +655,13 @@ func (d *Directory) restoreCounts() {
 //     switch, and it is the only kind with a local consequence.
 //
 //   - Device cert → **nothing**, deliberately, and this is the load-bearing
-//     decision of this file. A cert here is a public blob off a
-//     credential-less GET; the *handshake* is where a device proves it holds
-//     the key, and rule 2 of the acceptance order already admits a
-//     fleet-signed device that presents its cert in message A
+//     decision of this file. This daemon no longer publishes them either (see
+//     mine), so one reaching here at all means an older machine in the fleet is
+//     still doing so, or a relay is offering something nobody asked for; either
+//     way the answer is the same, and it is the answer it always was. A cert
+//     here is a public blob off a credential-less GET; the *handshake* is where
+//     a device proves it holds the key, and rule 2 of the acceptance order
+//     already admits a fleet-signed device that presents its cert in message A
 //     (channel.go, admitByFleetCert) — writing the row at that moment, when
 //     possession has just been proved. Pre-populating the registry from the
 //     directory instead would put rows in devices.json for keys nobody has
@@ -766,7 +769,32 @@ func (d *Directory) publishAll(ctx context.Context) {
 	}
 }
 
-// mine is every blob this machine is the source of.
+// mine is every blob this machine is the source of: its own machine
+// certificate, and every revocation it knows.
+//
+// **Device certificates are deliberately not here**, and their absence is the
+// load-bearing half of this function. A device gets its own certificate from
+// the machine that minted it — in the pairing answer, and again in the welcome
+// on every connection it opens anywhere in the fleet (internal/daemon) — both
+// of which are channels the device is already authenticated on. Publishing the
+// same blob to `GET /directory` bought exactly one thing, a browser being able
+// to find its own certificate, and cost two:
+//
+//   - **Privacy.** That route is credential-less by design, because what it
+//     carries is signed rather than secret. A device certificate names a device
+//     public key and the human label its owner typed — "Karn's phone" — so
+//     publishing every one of them made the directory a roster of the operator's
+//     devices, readable by anybody who knew the relay's address.
+//   - **The cap.** Nothing in the directory is ever deleted, one entry at a
+//     time, and it holds 512. Device certificates were the term that grew: one
+//     permanent entry per pairing ceremony ever performed, against machines and
+//     revocations that grow with the fleet rather than with its use. A full
+//     directory refuses new writes, and the write it refuses might be a
+//     revocation.
+//
+// Nothing needs them here. No daemon ever ingested one (see ingest, at length);
+// a machine admits a roaming device on the certificate the device *presents* in
+// its handshake, which is rule 2 and never consults this store.
 func (d *Directory) mine() [][]byte {
 	var out [][]byte
 	if cert := d.machineCert(); cert != nil {
@@ -774,15 +802,6 @@ func (d *Directory) mine() [][]byte {
 	}
 	if d.devices == nil {
 		return out
-	}
-	devices, err := d.devices.List()
-	if err != nil {
-		d.log.Error("could not read the device registry to publish it", "err", err)
-	}
-	for _, dev := range devices {
-		if len(dev.Cert) > 0 {
-			out = append(out, dev.Cert)
-		}
 	}
 	revs, err := d.devices.Revocations()
 	if err != nil {

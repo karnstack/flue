@@ -2,11 +2,19 @@
  * The fleet directory, as a browser reads it.
  *
  * `GET /directory` is credential-less and answers the whole set of signed
- * blobs the relay is holding — machine certificates, device certificates,
- * revocations (spec/relay-protocol.md, "The fleet directory"). It is how a
- * device paired on one machine learns of every other machine in the fleet
- * without a second ceremony, and how it gets hold of its own certificate to
- * present to them.
+ * blobs the relay is holding — machine certificates and revocations
+ * (spec/relay-protocol.md, "The fleet directory"). It is how a device paired on
+ * one machine learns of every other machine in the fleet without a second
+ * ceremony, and how it hears that a device has been cut off.
+ *
+ * **It is not where this browser's own certificate comes from.** That arrives
+ * from the machine that minted it — in the pairing answer, and again in every
+ * welcome — and is kept in this origin's key store (crypto/keys.ts). Device
+ * certificates are not published here at all: the route needs no credential, so
+ * publishing them made this document a roster of the operator's devices, and
+ * nothing was ever deleted from it, so each one spent a permanent entry against
+ * a cap of 512. What this reader still owes that certificate is the *other*
+ * half of the rule below: whether it has been revoked.
  *
  * **Nothing the relay says is trusted here.** The Worker stores and serves and
  * can verify nothing — the fleet key never touches it — so every blob is
@@ -25,14 +33,15 @@
  *     either one's `iat` says.** Not "the newer wins" — that would let a
  *     device certificate re-issued after a revoke undo it, and `iat` is a
  *     display field a signer chooses. Un-revoking is pairing again under a
- *     fresh key.
+ *     fresh key. The certificate it outranks is now the one this browser holds
+ *     locally, which is why `revoked` is reported rather than acted on here.
  *   - **Order in the answer means nothing.** Storage hands entries back
  *     sorted by digest, so a reader that took the last one for the newest
  *     would be reading a property of SHA-256. Everything is collected first
  *     and ranked afterwards, which is also why a revocation filed before the
  *     certificate it kills still kills it.
  */
-import { keyHex, sameKey, verifyCert, type Cert } from '@/crypto/cert'
+import { keyHex, verifyCert, type Cert } from '@/crypto/cert'
 
 /**
  * The largest blob this reader will look at, mirroring `MAX_BLOB_BYTES` in
@@ -109,12 +118,6 @@ export interface FleetView {
    *  id. Sorted by id so two reads of one directory build the same list. */
   machines: DirectoryMachine[]
   /**
-   * This device's own certificate, to seal into message A — null when the
-   * fleet has never certified this key, and null when it has been revoked.
-   * Without one, a machine this browser has not paired with will not admit it.
-   */
-  deviceCert: Uint8Array | null
-  /**
    * Whether this device's key is revoked. Distinct from "no certificate":
    * one is a device that was never enrolled, the other is one the operator
    * cut off, and only the second means every machine in the fleet has been
@@ -141,7 +144,6 @@ export type DirectoryFetch = (url: string) => Promise<DirectoryAnswer>
 /** The empty view: what a relay that answered nothing usable amounts to. */
 const NOTHING: FleetView = {
   machines: [],
-  deviceCert: null,
   revoked: false,
   entries: 0,
   verified: 0,
@@ -187,7 +189,6 @@ export async function readDirectory(opts: {
   // revocation may arrive before the certificate it kills — and must still
   // kill it.
   const machines = new Map<string, DirectoryMachine>()
-  const mine: { blob: Uint8Array; iat: number }[] = []
   const revoked = new Set<string>()
   let verified = 0
 
@@ -197,20 +198,19 @@ export async function readDirectory(opts: {
     const cert = verifyCert(opts.fleetPub, blob)
     if (cert === null) continue
     verified++
-    ingest(cert, blob, opts.devicePub, machines, mine, revoked)
+    ingest(cert, machines, revoked)
   }
 
-  const isRevoked = revoked.has(keyHex(opts.devicePub))
   return {
     machines: [...machines.values()].sort((a, b) => a.id.localeCompare(b.id)),
     // The reader's rule, in one line: a revocation outranks every device
-    // certificate for the same key, whatever their timestamps. Presenting a
-    // revoked certificate would be refused by any daemon that has heard of
-    // the revocation (AddFromFleetCert checks the list inside its own write),
-    // so carrying one would buy nothing but a channel that closes — and
-    // building on it here would be this browser deciding it knows better.
-    deviceCert: isRevoked ? null : newest(mine),
-    revoked: isRevoked,
+    // certificate for the same key, whatever their timestamps. The caller
+    // holds its own certificate now (crypto/keys.ts) and this is what tells it
+    // to stop presenting it — presenting a revoked certificate would be
+    // refused by any daemon that has heard of the revocation (AddFromFleetCert
+    // checks the list inside its own write), so carrying one buys nothing but
+    // a channel that closes.
+    revoked: revoked.has(keyHex(opts.devicePub)),
     entries: entries.length,
     verified,
   }
@@ -219,10 +219,7 @@ export async function readDirectory(opts: {
 /** File one verified certificate under whichever of the three rules it is. */
 function ingest(
   cert: Cert,
-  blob: Uint8Array,
-  devicePub: Uint8Array,
   machines: Map<string, DirectoryMachine>,
-  mine: { blob: Uint8Array; iat: number }[],
   revoked: Set<string>,
 ): void {
   switch (cert.kind) {
@@ -239,24 +236,17 @@ function ingest(
       break
     }
     case 'device':
-      // Only this device's own. Everybody else's certificates are the
-      // daemons' business — this browser cannot present them, and holding a
-      // roster of the fleet's devices is not something a tab is owed.
-      if (sameKey(cert.device, devicePub)) mine.push({ blob, iat: cert.iat })
+      // Nothing. A device certificate reaches the device it belongs to over
+      // the pairing answer and every welcome (internal/daemon), so this
+      // browser already holds its own and no browser was ever owed anybody
+      // else's. Daemons in this fleet no longer publish them at all; one
+      // arriving here means an older machine still does, and it is counted as
+      // verified — it is — and otherwise ignored.
       break
     case 'revoke':
       revoked.add(keyHex(cert.device))
       break
   }
-}
-
-/** The newest of this device's certificates, or null when it has none. */
-function newest(mine: { blob: Uint8Array; iat: number }[]): Uint8Array | null {
-  let best: { blob: Uint8Array; iat: number } | null = null
-  for (const c of mine) {
-    if (best === null || c.iat > best.iat) best = c
-  }
-  return best?.blob ?? null
 }
 
 /**

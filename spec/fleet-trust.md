@@ -127,11 +127,28 @@ One additional Durable Object per fleet (`idFromName("directory")`, one relay
 is one fleet) with three routes:
 
 ```
-PUT  /directory            daemon leg auth (Bearer secret); body: one cert or revocation
-GET  /directory            credential-less; the full set: machine certs, device certs, revocations
-WS   /directory (daemons)  daemon leg auth; push on write, so daemons learn of new
-                           devices/revocations without polling
+PUT    /directory          daemon leg auth (Bearer secret); body: one cert or revocation
+GET    /directory          credential-less; the full set: machine certs and revocations
+DELETE /directory          daemon leg auth; empties the whole set (`flue relay reset`)
+WS     /directory (daemons)  daemon leg auth; push on write, so daemons learn of new
+                           revocations without polling
 ```
+
+**Device certificates are deliberately not in the directory.** A device gets
+its own certificate from the machine that minted it — in the pairing answer,
+and again in the welcome of every connection it opens anywhere in the fleet —
+both channels on which it is already authenticated, and the second of which is
+inside Noise. Publishing them as well bought one thing, a browser being able to
+find its own, and cost two: `GET /directory` needs no credential, so it became
+a public roster of the operator's device keys and the human labels beside them;
+and nothing in the directory is ever deleted one entry at a time, so each
+ceremony ever performed spent one of 512 permanent entries. No daemon ever read
+one from there — a machine admits a roaming device on the certificate the
+device *presents* in its handshake, which is rule 2 — so nothing needed them.
+
+What the directory still owes a stored certificate is the other half of the
+rule: a browser reads the revocations and stops presenting a certificate whose
+key the fleet has cut off.
 
 The Worker stores blobs it cannot check; every reader verifies every
 signature under the fleet public key and drops what fails. A hostile relay
@@ -140,21 +157,27 @@ but cannot mint a machine or a device, because it does not hold the fleet
 key. Availability remains the relay's only power; that invariant is the spine
 of `spec/relay-protocol.md` and survives intact.
 
-Privacy note for `docs/RELAY.md`: the directory makes machine names/ids and
-device public keys/names visible to the relay (they are signed, not secret).
-The relay already routes by machine id; the delta is names and device pubs.
-One operator, their own Worker: acceptable, but stated.
+Privacy note for `docs/RELAY.md`: the directory makes machine names and ids
+visible to the relay, and to anyone who reads the credential-less route (they
+are signed, not secret). The relay already routes by machine id, so the delta
+is machine *names* and the revocation history — who was cut off and when.
+Device public keys and device labels are **not** in it, per the paragraph
+above. One operator, their own Worker: acceptable, and stated.
 
 Flows, end to end:
 
 - **New machine.** `flue relay join` (one line) → daemon mints its machine
   cert, PUTs it, opens the directory socket. Every paired browser's next
-  directory read shows the machine; every existing device cert already in the
-  directory lets those devices straight in. No ceremony.
+  directory read shows the machine, and presents the certificate it already
+  holds to be let in. No ceremony.
 - **New device.** Pair once, on any machine (that machine's `/pair` page,
-  reached through the relay as today). The ceremony's machine mints the
-  device cert, PUTs it; every other daemon hears the push. The phone's next
-  directory read gives it the whole fleet.
+  reached through the relay as today). The ceremony's machine mints the device
+  cert and hands it to the device in the pairing answer, which the browser
+  verifies under the fleet key it pinned from the QR seconds earlier and keeps.
+  The phone's next directory read gives it the whole fleet's machines, and its
+  stored certificate is what those machines admit it on. Any machine it can
+  reach re-offers the same certificate in its welcome, so losing it is not
+  losing the fleet.
 - **Revoke.** The Devices screen on any machine revokes any fleet device: PUT
   the revocation, push to every daemon, each drops the key from its local
   registry and closes its channels — the existing `revoked{reason}` flow, now

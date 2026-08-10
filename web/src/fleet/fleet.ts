@@ -29,6 +29,7 @@ import { sameKey, verifyCert } from '@/crypto/cert'
 import {
   loadOrCreateDeviceKey,
   loadPinnedDaemonKeyFor,
+  loadPinnedDeviceCert,
   loadPinnedFleetKey,
   savePinnedDeviceCert,
   type DeviceKey,
@@ -681,6 +682,18 @@ export async function fleetSources(opts: {
   }
 
   const view = await fleetView(origin, device, opts.directoryFetch)
+  // This device's own certificate, from this browser's store rather than from
+  // the relay: the machine that minted it handed it over at pairing and hands
+  // it over again on every welcome (fleet.ts, adoptFleetCert), so the public
+  // directory never has to carry one.
+  //
+  // Dropped when the directory says this key is revoked. That is the reader's
+  // rule and it is enforced here rather than in storage: a revocation outranks
+  // a certificate whatever either one's `iat` says, so a browser that went on
+  // presenting a stored certificate after the fleet cut it off would be
+  // deciding it knows better than the fleet — and would be refused by any
+  // daemon that had heard, which is a channel that opens and closes.
+  const deviceCert = view.revoked ? null : await storedDeviceCert()
 
   for (const machine of mergeMachines(listMachines(), view.machines)) {
     let pinned: Uint8Array | null = null
@@ -696,13 +709,13 @@ export async function fleetSources(opts: {
     // A machine this browser never paired with admits it on the device
     // certificate and on nothing else (channel.go, rule 2). Without one there
     // is no handshake to attempt, only a row that would sit at unreachable.
-    if (pinned === null && view.deviceCert === null) continue
+    if (pinned === null && deviceCert === null) continue
     const key = await device()
     if (key === null) break
     const identity = {
       deviceKey: key,
       daemonPub,
-      ...(view.deviceCert !== null && { deviceCert: view.deviceCert }),
+      ...(deviceCert !== null && { deviceCert }),
     }
     sources.push({
       id: machine.id,
@@ -752,8 +765,17 @@ async function fleetView(
 
 const EMPTY_FLEET: FleetView = {
   machines: [],
-  deviceCert: null,
   revoked: false,
   entries: 0,
   verified: 0,
+}
+
+/** This device's stored fleet certificate, or null — including when the key
+ *  store will not open, which is a browser with no identity to spend anyway. */
+async function storedDeviceCert(): Promise<Uint8Array | null> {
+  try {
+    return await loadPinnedDeviceCert()
+  } catch {
+    return null
+  }
 }
