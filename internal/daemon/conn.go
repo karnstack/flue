@@ -150,6 +150,17 @@ type frame struct {
 	// then close it" would deliver the close and drop the reason. Queued, the
 	// order is the order.
 	last bool
+
+	// sent, when non-nil, is closed once this frame has been handed to the
+	// socket. It is how the file pump paces itself, and it is only ever set on
+	// file chunks.
+	//
+	// Nothing else needs it: every other frame is small and fire-and-forget,
+	// and the outbox absorbs them. A file does not fit that pattern — 8 MiB is
+	// 256 chunks, which is exactly outboxDepth, so a pump that queued as fast
+	// as it read would trip the backlog check and drop the very connection it
+	// was answering.
+	sent chan struct{}
 }
 
 // conn is the per-connection state machine, over whatever transport delivered
@@ -217,6 +228,21 @@ type conn struct {
 	mu      sync.Mutex
 	nextRef uint32
 	attach  map[uint32]*attachment
+	// reads are the file reads in flight, keyed by the ref they stream under.
+	// Same counter as attach, different table: a read is structurally an
+	// attachment (request, handle, binary frames, end) but it holds a file
+	// rather than a subscription, and nothing that walks attachments should
+	// find one.
+	reads map[uint32]*fileRead
+
+	// pumps counts the file pumps still running. closeAll waits on it, so no
+	// goroutine holding a file descriptor outlives serve.
+	//
+	// They do all end on their own — every wait a pump can be in selects on
+	// this connection's context — but "eventually" is not good enough at
+	// teardown: serve returning while a pump is still unwinding puts a race
+	// report in whatever test runs next rather than in the one that caused it.
+	pumps sync.WaitGroup
 }
 
 func newConn(ctx context.Context, cancel context.CancelFunc, mc MessageConn, srv *Server, peer, origin string, deviceKey []byte) *conn {
@@ -230,6 +256,7 @@ func newConn(ctx context.Context, cancel context.CancelFunc, mc MessageConn, srv
 		deviceKey: deviceKey,
 		out:       make(chan frame, outboxDepth),
 		attach:    map[uint32]*attachment{},
+		reads:     map[uint32]*fileRead{},
 	}
 }
 
@@ -277,6 +304,33 @@ func (c *conn) enqueue(f frame) error {
 	}
 }
 
+// enqueueWait hands a frame to the writer, waiting for room rather than
+// treating a full outbox as the client's fault.
+//
+// enqueue above is right for the producers it serves: an attachment's output
+// pump and another connection's broadcast have nowhere to wait, so a client
+// that has not drained outboxDepth frames has to be dropped rather than
+// allowed to consume this daemon's memory on its behalf.
+//
+// A file read is the one producer that *does* have somewhere to wait — a
+// goroutine of its own, serving one request, whose only job is this file. For
+// it, a full outbox is backpressure rather than a verdict: the terminal is
+// busy, the writer is behind, and the right response is to slow down. Using
+// enqueue here would mean that opening a file during a burst of output drops
+// the session, intermittently, and blames the read.
+//
+// The wait needs no timeout of its own. A peer that has genuinely stopped
+// reading stalls the writer, which trips writeTimeout, which fails the
+// connection and cancels the context this selects on.
+func (c *conn) enqueueWait(f frame) error {
+	select {
+	case c.out <- f:
+		return nil
+	case <-c.ctx.Done():
+		return errConnClosed
+	}
+}
+
 // fail tears the connection down. Cancelling the context unblocks the read
 // loop, which runs the ordinary cleanup path on its way out.
 func (c *conn) fail() { c.cancel() }
@@ -291,6 +345,12 @@ func (c *conn) runWriter(done chan<- struct{}) {
 			ctx, cancel := context.WithTimeout(c.ctx, writeTimeout)
 			err := c.mc.Write(ctx, f.text, f.b)
 			cancel()
+			// Before the error check, so it fires whether the write succeeded
+			// or not: a pump waiting on a frame that failed must be released,
+			// not left parked until the connection's context unwinds.
+			if f.sent != nil {
+				close(f.sent)
+			}
 			if err != nil || f.last {
 				// A final frame ends the connection here, on the one goroutine
 				// that writes to the socket, so nothing queued behind it can
@@ -540,6 +600,9 @@ func (c *conn) handleControl(msg any) {
 			entries = append(entries, statEntry(p, cwd, home))
 		}
 		_ = c.sendControl(wire.Stats{Entries: entries, ReqID: m.ReqID})
+
+	case wire.Read:
+		c.startRead(m)
 
 	case wire.Spawn:
 		s, err := c.srv.reg.Spawn(session.SpawnOpts{
@@ -966,4 +1029,18 @@ func (c *conn) closeAll() {
 	for _, ref := range refs {
 		c.detach(ref)
 	}
+
+	c.mu.Lock()
+	reads := make([]uint32, 0, len(c.reads))
+	for ref := range c.reads {
+		reads = append(reads, ref)
+	}
+	c.mu.Unlock()
+	for _, ref := range reads {
+		c.endRead(ref)
+	}
+	// Ending each read first is what makes this wait finite: endRead releases
+	// the pump's done channel and closes its file, so a pump parked on a chunk
+	// stops waiting and one inside a read gets an error back.
+	c.pumps.Wait()
 }

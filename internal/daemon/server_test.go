@@ -110,6 +110,15 @@ func dialWith(t *testing.T, ts *httptest.Server, header http.Header) *websocket.
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
+	// coder/websocket defaults a client to a 32 KiB read limit, which is
+	// smaller than anything that actually talks to this daemon: a browser's
+	// WebSocket has no such bound, and the relay leg sets 2 MiB
+	// (internal/transport/relay/relay.go). A file chunk is chunkBytes plus the
+	// five-byte binary header, so the default would have this harness refuse a
+	// frame every real client accepts and report it as the daemon's fault.
+	// readLimit is what the daemon allows in the other direction, and a test
+	// client symmetric with the server is the honest stand-in.
+	c.SetReadLimit(readLimit)
 	t.Cleanup(func() { c.Close(websocket.StatusNormalClosure, "") })
 	return c
 }

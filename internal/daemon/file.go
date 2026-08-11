@@ -2,10 +2,13 @@ package daemon
 
 import (
 	"errors"
+	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/karnstack/flue/internal/wire"
 )
@@ -170,4 +173,226 @@ func classify(head []byte) (kind, mime string, ok bool) {
 		return "text", mime, true
 	}
 	return "", mime, false
+}
+
+// fileRead is one read in flight: an open file, the ref its chunks carry, and
+// a way to tell the pump to stop.
+type fileRead struct {
+	ref  uint32
+	f    *os.File
+	done chan struct{}
+	once sync.Once
+}
+
+func (r *fileRead) release() { r.once.Do(func() { close(r.done) }) }
+
+func (r *fileRead) released() bool {
+	select {
+	case <-r.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// startRead answers a read: resolve, decide, open, and start the pump.
+//
+// Everything that can refuse the request happens before a ref is minted, so a
+// client that gets an error has nothing to clean up and a client that gets a
+// file has a stream that is already running.
+func (c *conn) startRead(m wire.Read) {
+	s, ok := c.srv.reg.Get(m.ID)
+	if !ok {
+		c.sendErrorFor(m.ReqID, "not_found", "no such session")
+		return
+	}
+	home, _ := os.UserHomeDir()
+	abs, err := resolvePath(m.Path, s.Info().Cwd, home)
+	if err != nil {
+		c.sendErrorFor(m.ReqID, "bad_path", "not a usable path")
+		return
+	}
+	// Symlinks resolve here rather than in resolvePath, which is pure so its
+	// rules can be tested without a filesystem. The resolved path is what gets
+	// opened and what file.path reports: a link means the file you get is not
+	// the path you clicked, and a reader should be told what it actually
+	// opened. EvalSymlinks also fails on a path that is not there, which is
+	// where a missing file is usually caught.
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
+		return
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
+		return
+	}
+	if fi.IsDir() {
+		c.sendErrorFor(m.ReqID, "is_dir", "that is a directory")
+		return
+	}
+	if !fi.Mode().IsRegular() {
+		// A socket, a device, a fifo. Opening one can block forever and none
+		// of them has a size worth showing.
+		c.sendErrorFor(m.ReqID, "unsupported", "not a regular file")
+		return
+	}
+
+	f, err := os.Open(abs)
+	if err != nil {
+		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
+		return
+	}
+	head := make([]byte, sniffBytes)
+	n, err := io.ReadFull(f, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		_ = f.Close()
+		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
+		return
+	}
+	kind, mime, ok := classify(head[:n])
+	if !ok {
+		_ = f.Close()
+		c.sendErrorFor(m.ReqID, "unsupported", "not a text or image file")
+		return
+	}
+	limit := int64(maxFileBytes)
+	if kind == "image" {
+		// Refused rather than truncated: half a PNG is not a smaller PNG.
+		if fi.Size() > maxImageBytes {
+			_ = f.Close()
+			c.sendErrorFor(m.ReqID, "too_large", "image is too large to show")
+			return
+		}
+		limit = maxImageBytes
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
+		return
+	}
+
+	c.mu.Lock()
+	if len(c.reads) >= maxReads {
+		c.mu.Unlock()
+		_ = f.Close()
+		c.sendErrorFor(m.ReqID, "busy", "too many reads at once")
+		return
+	}
+	c.nextRef++
+	r := &fileRead{ref: c.nextRef, f: f, done: make(chan struct{})}
+	c.reads[r.ref] = r
+	c.mu.Unlock()
+
+	_ = c.sendControl(wire.File{
+		Ref:       r.ref,
+		Path:      abs,
+		Size:      fi.Size(),
+		Mime:      mime,
+		Kind:      kind,
+		Truncated: fi.Size() > limit,
+		ReqID:     m.ReqID,
+	})
+	// Counted before the goroutine starts, so closeAll cannot observe zero
+	// pumps for a read it has already registered.
+	c.pumps.Add(1)
+	go c.pump(r, limit)
+}
+
+// readErrCode maps a filesystem error to the code the client is told.
+//
+// Two outcomes, because two are all a client can act on: it may not read this,
+// or there is nothing there. Anything else — a broken device, an interrupted
+// syscall — reads as not_found, which is what the user sees anyway.
+func readErrCode(err error) string {
+	if errors.Is(err, fs.ErrPermission) {
+		return "denied"
+	}
+	return "not_found"
+}
+
+// pump streams the file under its ref and ends with eof.
+//
+// One chunk in flight at a time; see sendChunk. The loop stops at limit rather
+// than at the size read earlier, because a file can grow between the stat and
+// the read and the cap is the promise that matters.
+func (c *conn) pump(r *fileRead, limit int64) {
+	defer c.pumps.Done()
+	defer c.endRead(r.ref)
+
+	buf := make([]byte, chunkBytes)
+	var sent int64
+	for sent < limit {
+		want := int64(len(buf))
+		if left := limit - sent; left < want {
+			want = left
+		}
+		n, err := r.f.Read(buf[:want])
+		if n > 0 {
+			sent += int64(n)
+			if !c.sendChunk(r, buf[:n]) {
+				return
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	// A cancelled read is over, and eof would tell the client a stream it
+	// abandoned finished cleanly.
+	if r.released() {
+		return
+	}
+	_ = c.sendControl(wire.Eof{Ref: r.ref})
+}
+
+// sendChunk queues one chunk and waits for the writer to have written it.
+//
+// Two waits, for two different reasons, and both matter.
+//
+// enqueueWait is the wait for *room*. The outbox can be full because the
+// terminal is busy, and dropping a client over that would make opening a file
+// during a burst of output an intermittent disconnect. A pump has somewhere to
+// wait, so it waits.
+//
+// The wait on `sent` is the wait for *the writer*, and it is what keeps only
+// one chunk in flight. That bounds queued memory to 32 KiB rather than a whole
+// file, keeps a read from ever filling the outbox by itself — an 8 MiB file is
+// exactly outboxDepth chunks — and bounds what the next keystroke can be
+// queued behind, on a socket that carries the terminal too.
+//
+// Neither costs throughput. A websocket write returns when the bytes reach the
+// socket buffer, not when the far end acknowledges them, so this paces the pump
+// against the link rather than against the round trip.
+func (c *conn) sendChunk(r *fileRead, b []byte) bool {
+	sent := make(chan struct{})
+	if err := c.enqueueWait(frame{b: wire.EncodeBinary(wire.FrameFile, r.ref, b), sent: sent}); err != nil {
+		return false
+	}
+	select {
+	case <-sent:
+		return true
+	case <-r.done:
+		return false
+	case <-c.ctx.Done():
+		return false
+	}
+}
+
+// endRead closes a read and forgets it. Safe to call twice: the pump ends every
+// read it finishes, and a cancel or a dropped connection may have ended the
+// same one already.
+func (c *conn) endRead(ref uint32) {
+	c.mu.Lock()
+	r := c.reads[ref]
+	delete(c.reads, ref)
+	c.mu.Unlock()
+	if r == nil {
+		return
+	}
+	// Released before the file is closed, so a pump blocked in sendChunk stops
+	// waiting rather than discovering it later through a read error.
+	r.release()
+	_ = r.f.Close()
 }
