@@ -2,14 +2,14 @@ import { createFileRoute } from '@tanstack/react-router'
 import type { ReactNode } from 'react'
 
 import { Code, DocPage, Link, P } from '@/components/doc-page'
-import { findDoc } from '@/lib/docs'
+import { docTitle, findDoc } from '@/lib/docs'
 import { REPO_URL } from '@/lib/site'
 
 const DOC = findDoc('faq')!
 
 export const Route = createFileRoute('/docs/faq')({
   head: () => ({
-    meta: [{ title: `${DOC.title} — flue` }, { name: 'description', content: DOC.blurb }],
+    meta: [{ title: docTitle(DOC) }, { name: 'description', content: DOC.blurb }],
   }),
   component: Faq,
 })

@@ -11,7 +11,7 @@ import type { ReactNode } from 'react'
  * plain text.
  */
 
-export type DocSlug = 'how-it-works' | 'relay' | 'faq'
+export type DocSlug = 'setup' | 'how-it-works' | 'relay' | 'faq'
 
 export type Doc = {
   slug: DocSlug
@@ -23,30 +23,44 @@ export type Doc = {
 
 export const DOCS: Doc[] = [
   {
+    slug: 'setup',
+    label: 'Setup',
+    title: 'Setting up your fleet',
+    blurb: 'One relay, every machine joined to it, every device paired once.',
+  },
+  {
     slug: 'how-it-works',
     label: 'How it works',
     title: 'How flue works',
-    blurb:
-      'A daemon owns the shells. A tab renders them. What that buys you, and what it costs.',
+    blurb: 'A daemon owns the shells. A tab draws them. What that gives you, and what it costs.',
   },
   {
     slug: 'relay',
     label: 'Remote access',
     title: 'Remote access',
-    blurb:
-      'How a machine becomes reachable from anywhere, on infrastructure you own, in one command.',
+    blurb: 'How a machine becomes reachable from anywhere, on infrastructure you own, in one command.',
   },
   {
     slug: 'faq',
     label: 'FAQ',
     title: 'Questions worth a straight answer',
-    blurb:
-      'Including the one where the honest answer is not the flattering one.',
+    blurb: 'Including the one where the honest answer is not the flattering one.',
   },
 ]
 
 export function findDoc(slug: string): Doc | undefined {
   return DOCS.find((doc) => doc.slug === slug)
+}
+
+/**
+ * A document's `<title>`.
+ *
+ * One function rather than a template in each route, because the separator is
+ * a house style decision and four copies of it is four chances to type an
+ * em-dash into a search result.
+ */
+export function docTitle(doc: Doc): string {
+  return `${doc.title} · flue`
 }
 
 /** A question and its answer. The verdict leads; the reasoning follows. */

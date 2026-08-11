@@ -2,14 +2,14 @@ import { createFileRoute } from '@tanstack/react-router'
 
 import { Code, DocPage, Lead, Link, Note, P, Section, Shell } from '@/components/doc-page'
 import { RelayProtocol } from '@/components/mock/diagrams'
-import { findDoc } from '@/lib/docs'
+import { docTitle, findDoc } from '@/lib/docs'
 import { REPO_URL } from '@/lib/site'
 
 const DOC = findDoc('relay')!
 
 export const Route = createFileRoute('/docs/relay')({
   head: () => ({
-    meta: [{ title: `${DOC.title} — flue` }, { name: 'description', content: DOC.blurb }],
+    meta: [{ title: docTitle(DOC) }, { name: 'description', content: DOC.blurb }],
   }),
   component: Relay,
 })
