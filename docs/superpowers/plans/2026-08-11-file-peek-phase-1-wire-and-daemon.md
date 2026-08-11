@@ -432,10 +432,80 @@ that list have to move together or the web suite fails.
 - Modify: `web/src/client/client.test.ts`
 
 **Interfaces:**
-- Consumes: the Go types from Task 2.
-- Produces, in `web/src/client/protocol.ts`: `StatMsg`, `ReadMsg`, `CancelMsg`,
-  `PathEntry`, `StatsMsg`, `FileMsg`, `EofMsg`, all exported and joined to the
-  `ClientMessage` and `ServerMessage` unions.
+- Consumes: the Go types from Task 2, and `wire.FrameFile` from Task 1.
+- Produces, in `web/src/client/protocol.ts`: `FRAME_FILE`, and `StatMsg`,
+  `ReadMsg`, `CancelMsg`, `PathEntry`, `StatsMsg`, `FileMsg`, `EofMsg`, all
+  exported and joined to the `ClientMessage` and `ServerMessage` unions.
+
+**Note added during execution:** `protocol.ts` hand-mirrors the binary frame
+constants and `decodeBinary` guards on a closed set of two
+(`web/src/client/protocol.ts`, around line 59). It therefore *throws* on a
+`0x02` frame today. Nothing sends one until phase 2, but the constant and the
+guard belong with the rest of the TypeScript mirror, so they are Step 0 below.
+Nothing cross-checks the Go and TypeScript frame bytes — `control.json` covers
+control messages only — so this is a runtime failure rather than a compile
+error, which is exactly why it is worth a test of its own.
+
+- [ ] **Step 0: Teach the TypeScript decoder about the file frame**
+
+In `web/src/client/protocol.ts`, add the constant beside the other two:
+
+```ts
+/** Binary frame types. Layout is [1 byte type][4 bytes ref BE][payload]. */
+export const FRAME_OUTPUT = 0x00 // daemon -> client
+export const FRAME_INPUT = 0x01 // client -> daemon
+export const FRAME_FILE = 0x02 // daemon -> client, one chunk of a file being read
+```
+
+and admit it in `decodeBinary`'s guard:
+
+```ts
+  if (type !== FRAME_OUTPUT && type !== FRAME_INPUT && type !== FRAME_FILE) {
+    throw new Error(`flue: unknown frame type 0x${type.toString(16)}`)
+  }
+```
+
+Then pin it, in whichever file already tests `decodeBinary` (find it with
+`grep -rln decodeBinary web/src`):
+
+```ts
+it('decodes a file chunk, which is the third frame type', () => {
+  // The Go and TypeScript frame bytes are mirrored by hand and nothing
+  // cross-checks them: the shared fixture covers control messages only. So a
+  // frame type missing here is a runtime throw in the browser rather than a
+  // build failure, and this is the only place that catches it.
+  const payload = new Uint8Array([0x70, 0x6b, 0x67])
+  const frame = decodeBinary(encodeBinary(FRAME_FILE, 9, payload))
+  expect(frame.type).toBe(FRAME_FILE)
+  expect(frame.ref).toBe(9)
+  expect(Array.from(frame.payload)).toEqual([0x70, 0x6b, 0x67])
+})
+
+it('still refuses a frame type nobody defined', () => {
+  expect(() => decodeBinary(encodeBinary(0x7f, 1, new Uint8Array()))).toThrow()
+})
+
+it('agrees with the daemon on which byte a file chunk is', () => {
+  // The literal, not the symbol. Every other assertion in both suites uses
+  // the constant at both ends, so renumbering it to 0x03 would leave Go and
+  // TypeScript each internally consistent and silently unable to talk to
+  // each other. This line and its Go twin in wire_test.go are the only two
+  // places the number itself is written down as an assertion.
+  expect(FRAME_FILE).toBe(0x02)
+})
+```
+
+Then add the Go twin, at the end of `TestFileFramesRoundTrip` in
+`internal/wire/wire_test.go`:
+
+```go
+	// The literal, for the reason its TypeScript twin exists: the frame bytes
+	// are mirrored by hand across two languages, and every other assertion in
+	// either suite goes through the symbol.
+	if FrameFile != 0x02 {
+		t.Errorf("FrameFile = %#x, want 0x02; web/src/client/protocol.ts hard-codes it", FrameFile)
+	}
+```
 
 - [ ] **Step 1: Add the fixture cases**
 
@@ -2478,12 +2548,18 @@ and `unsupported`, each correlated by `reqId`.
 - [ ] **Step 4: Run everything**
 
 ```
-go test ./...
+make test-go
 cd web && pnpm vitest run && pnpm run lint
 ```
 
 Expected: PASS throughout. `web` should be untouched by this task, so a failure
 there means something from Task 3 was left half-done.
+
+`make test-go` rather than a bare `go test ./...`: `web/embed.go` and
+`relay/embed.go` carry `go:embed` directives over `dist` directories that are
+git-ignored, so `./...` cannot compile in a fresh worktree until those are
+built. The make target builds them first. Package-scoped runs
+(`go test ./internal/daemon/`) are unaffected and stay as written.
 
 - [ ] **Step 5: Commit and open the pull request**
 
