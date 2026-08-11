@@ -5,6 +5,7 @@ import { ArrowRight, Cloud, HardDrive, Lock, Plus, Smartphone } from 'lucide-rea
 import { CopyCommand } from '@/components/copy-command'
 import { ScatteredFigure, WaitingFigure, WindowFigure } from '@/components/mock/figures'
 import { FleetWindow, PhoneFrame } from '@/components/mock/fleet'
+import { SwitcherWindow } from '@/components/mock/switcher'
 import { MockTerminal, ok, output, prompt } from '@/components/mock/terminal'
 import { SiteFooter } from '@/components/site-footer'
 import { SiteHeader } from '@/components/site-header'
@@ -66,6 +67,8 @@ function Home() {
         <Problem />
         <SectionRule />
         <How />
+        <SectionRule />
+        <Switcher />
         <SectionRule />
         <Remote />
         <SectionRule />
@@ -272,6 +275,48 @@ function How() {
             </a>
           </div>
           <MockTerminal title="flue enable" lines={ENABLE_LINES} className="shadow-xl" />
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/* ------------------------------------------------------------ switching --- */
+
+/**
+ * The switcher, full width rather than in a column.
+ *
+ * The real dialog is 56rem across and does not survive being squeezed into
+ * half a row: the preview pane is the first thing to go, and the pane is the
+ * argument. Full width also keeps the rhythm either side of it, since How
+ * puts its text on the left and Remote puts its mock there.
+ */
+function Switcher() {
+  return (
+    <section id="switching" className="scroll-mt-20 py-20 sm:py-24">
+      <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
+        <div className="max-w-[60ch]">
+          <p className="font-mono text-sm tracking-wide text-primary uppercase">Switching</p>
+          <h2 className="mt-3 max-w-[35ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            The list comes to you.
+          </h2>
+          <p className="mt-5 text-lg text-pretty text-muted-foreground">
+            Press <kbd className="font-mono text-base text-foreground">&#8984;K</kbd> on a Mac, or{' '}
+            <kbd className="font-mono text-base text-foreground">Ctrl+Shift+K</kbd> on any platform
+            including macOS, on any screen that can see a daemon. Pinned sessions come first, with
+            number keys on them. Then the sessions this browser has opened before. Then the rest.
+          </p>
+          <p className="mt-4 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+            Type to narrow the list, use the arrow keys to move, press Enter to go. The
+            highlighted row shows its own last fourteen lines beside the list, so you can see
+            which one is the build instead of guessing from its name.{' '}
+            <kbd className="font-mono text-foreground">Ctrl+Shift+1</kbd> to{' '}
+            <kbd className="font-mono text-foreground">9</kbd> jumps straight to a pinned session
+            without opening the list at all.
+          </p>
+        </div>
+        <div className="mt-12 lg:mt-14">
+          <SwitcherWindow />
         </div>
       </div>
     </section>

@@ -16,7 +16,14 @@ export type MockSession = {
   age: string
   state: 'running' | 'exited'
   tag?: string
+  /** Kept to hand, and starred for it. The app's own mark (session-table.tsx). */
   pinned?: boolean
+  /**
+   * The session the phone beside the window has open. Not a state the app
+   * draws: it is how the hero's two figures are shown to be one session, and
+   * the ring is the site's own mark for it.
+   */
+  held?: boolean
 }
 
 export type MockGroup = {
@@ -38,6 +45,7 @@ export const GROUPS: MockGroup[] = [
         state: 'running',
         tag: 'agent',
         pinned: true,
+        held: true,
       },
       {
         name: 'pnpm vitest --watch',
@@ -60,6 +68,7 @@ export const GROUPS: MockGroup[] = [
         age: '1m ago',
         state: 'running',
         tag: 'ci',
+        pinned: true,
       },
       {
         name: 'ssh prod-1',
