@@ -156,7 +156,8 @@ Truncation is reported, not hidden. The viewer says how much of the file it is
 showing and how much it is not.
 
 Errors, each correlated by `reqId`: `not_found`, `is_dir`, `too_large`,
-`denied`, `bad_path`.
+`denied`, `bad_path`, `busy` (the concurrency cap), and `unsupported` (a file
+that is neither text nor image, and anything that is not a regular file).
 
 Every read is cancelled and its handle closed when the connection drops. A
 phone that goes into a pocket mid-read must not leave a file open on the
