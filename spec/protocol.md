@@ -58,7 +58,7 @@ Every control message is a JSON object with a `type` discriminator.
 | `preview` | `id`, `data`, `cols`, `rows`, `reqId?` | answers `peek` |
 | `stats` | `entries[]`, `reqId?` | answers `stat` |
 | `file` | `ref`, `path`, `size`, `mime`, `kind`, `truncated?`, `reqId?` | answers `read`; content follows as `0x02` frames |
-| `eof` | `ref` | that read has sent every byte |
+| `eof` | `ref` | that read's stream has ended |
 | `deviceList` | `devices[]` | answers `devices`, and is broadcast after a pairing or a `revoke` |
 | `pairing` | `token`, `url`, `daemonPub`, `expiresAt` | answers `pairStart` |
 | `revoked` | `reason` | this device was unpaired; the connection is about to close |
@@ -199,12 +199,30 @@ miss, with no second attempt against the spawn directory: two resolution rules
 would make "opened the wrong file" indistinguishable from "opened the right
 one".
 
+Symlinks are followed, by both verbs. A `stat` entry describes what the link
+points at, so a link to a file is `kind: "file"` and a link to nothing is
+`exists: false` — following is the point, since the reader wants the file at the
+end of the link and a link reported as `other` would refuse to underline a path
+that opens perfectly well. A `read` opens the target too, and `file.path` is the
+resolved path with every link expanded. That is why it is worth showing: the
+file on screen is the target, which is not always the path that was clicked.
+
 `stat` takes up to 32 paths at once, because a client verifies a whole hovered
 line rather than one candidate at a time, and a path it cannot resolve is
-`exists: false` rather than an error — "no" is the ordinary answer here. Beside
-`path` and `exists`, an entry that exists carries `kind` (`file`, `dir` or
-`other`), `size` in bytes and `mtime` in unix **seconds**, the unit
-`deviceList` uses rather than the RFC 3339 strings `sessions[]` does.
+`exists: false` rather than an error — "no" is the ordinary answer here. More
+than 32 in one message is **refused** with `error{bad_path}`, which is the
+opposite of what the ceiling on `peek`'s `bytes` does: a clamp there costs a
+shorter preview, while a clamp here would answer some paths and silently drop
+the rest, leaving a client unable to tell which of its candidates it never heard
+about. A client with more than 32 sends a second `stat`.
+
+Beside `path` and `exists`, an entry that exists carries `kind` (`file`, `dir`
+or `other`), `size` in bytes and `mtime` in unix **seconds** — the unit
+`deviceList` uses rather than the RFC 3339 strings `sessions[]` does. `size` and
+`mtime` are **omitted when they are zero**, so an empty file arrives with no
+`size` key at all and a file stamped at the epoch with no `mtime`. Absent means
+zero here, not unknown: a client that declares them required reads `undefined`
+off an ordinary empty file.
 
 `read` mints a `ref` from the same counter `attach` uses and answers `file`,
 after which the content arrives as `0x02` frames under that ref and ends with
@@ -212,6 +230,13 @@ after which the content arrives as `0x02` frames under that ref and ends with
 content shares one socket with the terminal, so a larger frame would sit in
 front of the next keystroke. The daemon keeps one chunk in flight at a time for
 the same reason.
+
+`eof` says the stream ended, not that the file arrived whole. The daemon stops
+on a read error exactly as it stops at the end of the file, and says `eof`
+either way, so a partial delivery is indistinguishable on the wire from a
+complete one. A client that cares counts the bytes it received and compares them
+against `file.size`, or against the cap when `file.truncated` is set, rather than
+reading `eof` as a guarantee it does not make.
 
 What may be read is anything the daemon's user can read, and nothing is
 written. That is not a widening: a client that can send `read` can already send
@@ -223,10 +248,18 @@ than truncated. `file.kind` is `text` or `image`, sniffed from the content and
 never from the extension; anything else is refused. Two reads may be open per
 connection.
 
-`cancel` abandons a read by `ref`. A ref the daemon does not hold is ignored:
-a read finishing and a client cancelling it cross on the wire routinely, and a
-race the client cannot avoid should not be an error it has to handle. Every
-read is ended and its file closed when the connection drops.
+`cancel` abandons a read by `ref`, and **nothing answers it** — not on success,
+where the stream stopping is the whole of the reply, and not for a ref the
+daemon does not hold, which is ignored rather than refused. A read finishing and
+a client cancelling it cross on the wire routinely, and a race the client cannot
+avoid should not be an error it has to handle. Every read is ended and its file
+closed when the connection drops.
+
+A viewer closed before its `file` has arrived has no ref to cancel yet. It
+remembers the `reqId` as abandoned and sends the `cancel` when the ref lands,
+which is what a client already does for an `attach` whose view went away
+mid-flight. That is the common case rather than the exotic one: a reader opens a
+file, changes their mind, and the round trip has not finished.
 
 **A cancel stops a stream; it does not un-send one.** Cancelling unparks the
 pump wherever it is waiting and closes the file under it, so the read winds
