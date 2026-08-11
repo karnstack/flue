@@ -57,17 +57,38 @@ const TOKEN = String.raw`[^\s'"\u0060<>|(){}\[\],=]+`
  * pieces and the piece that looks like a path is not the piece carrying the
  * scheme. Nothing local to that piece can tell it from a real path, and the
  * cost of getting it wrong is not one wasted request: xterm's web-links addon
- * is already underlining the whole link, so a second provider over part of it
- * is two marks on one run of text and a click that could go either way.
+ * is already underlining that whole run, so a second provider over part of it
+ * is two marks on one piece of text and a click that could go either way.
  *
- * Everything up to the next space is taken, closing bracket and all. Taking
- * too much only ever costs a candidate inside a link, which is the one place
- * a candidate is unwanted anyway.
+ * The span ends on the same characters TOKEN ends on, and for the same reason:
+ * they are punctuation around a link far more often than a character in one.
+ * An earlier version ran to the next space instead, which was not merely
+ * over-eager, it was wrong in the costly direction. Compact JSON log output,
+ * which is what pino, zap and logrus all print, puts a path one quote away
+ * from a URL: in `{"url":"https://x.com/a","file":"src/main.ts"}` a span to the
+ * next space covers the whole record, so the path was dropped here, and the
+ * addon's own matcher stops at the quote and never marks it either. A path on
+ * screen that answers to nothing is the failure this file's header calls the
+ * expensive one. The comma and the equals sign stay inside the span, because
+ * the addon accepts both and really does mark `https://x.com/a,b/c.ts` end to
+ * end.
+ *
+ * The scheme is bounded at 32 because unbounded it backtracks. On a long run
+ * of scheme-shaped characters with no `://` anywhere in it, one hex digest is
+ * enough, the engine consumes the run from every start position in turn and
+ * the cost goes quadratic. Measured over 100000 characters: 30.5 seconds
+ * before the bound, 21ms after, in a function that runs while a pointer moves.
+ *
+ * One thing the paragraph above overstates. The addon's default matcher takes
+ * `http` and `https` only, so `file://` and `git+ssh://` get a span here and a
+ * mark from nobody, and suppressing inside them is not deferring to anyone.
+ * It costs nothing today, because a token carrying `://` fails pathish()
+ * regardless, and a scheme is not a path.
  *
  * Hoisted where the token scanner cannot be: matchAll() walks a copy of the
  * regex, so no `lastIndex` from one line reaches the next.
  */
-const URL_RUN = /[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+/gu
+const URL_RUN = /[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s'"`<>|(){}\[\]]*/gu
 
 /** Half-open, in the coordinates of the line the run was found in. */
 interface Span {

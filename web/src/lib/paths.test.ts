@@ -82,6 +82,22 @@ describe('findPaths', () => {
     expect(paths('https://x.com/a?q=1 and src/main.ts')).toEqual(['src/main.ts'])
   })
 
+  it('ends a URL where a token ends, so a path beside one is still offered', () => {
+    // Compact JSON log output, which is what pino, zap and logrus print, puts
+    // a path one quote away from a URL. A span that ran to the next space took
+    // the whole record, and xterm's matcher stops at the quote, so this path
+    // had nothing marking it at all.
+    expect(paths('{"url":"https://x.com/a","file":"src/main.ts"}')).toEqual(['src/main.ts'])
+    expect(paths('(https://x.com/a)(src/main.ts)')).toEqual(['src/main.ts'])
+    expect(paths('<https://x.com/a><src/main.ts>')).toEqual(['src/main.ts'])
+    expect(paths('url=https://x.com/a|file=src/main.ts')).toEqual(['src/main.ts'])
+    expect(paths('https://x.com/a"src/main.ts')).toEqual(['src/main.ts'])
+    // The comma goes the other way. xterm's matcher accepts it, so it marks
+    // this whole run, and a second mark under the tail of it is exactly the
+    // ambiguity the pre-pass exists to prevent.
+    expect(paths('https://x.com/a,src/main.ts')).toEqual([])
+  })
+
   it('does not take a flag apart into a path', () => {
     // `=` ends a token, so the value is offered on its own and the flag is not.
     expect(paths('--config=web/vite.config.ts')).toEqual(['web/vite.config.ts'])
