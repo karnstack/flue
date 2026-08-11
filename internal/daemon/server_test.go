@@ -2131,6 +2131,53 @@ func TestBroadcastDoesNotWaitOnABackloggedPeer(t *testing.T) {
 	}
 }
 
+// TestReleasePrimaryDoesNotRetainTheClientItDropped is about what the garbage
+// collector can still reach after a view lets go.
+//
+// The attachment list is a slice, and removing from the middle of one by
+// shifting leaves the departing element in the tail slot the header no longer
+// covers — a slot the collector scans, because it scans the whole backing
+// array. A connection there keeps its outbox (up to outboxDepth queued frames),
+// its attachment map and its context alive for as long as the session is
+// listed, which for an exited one is ExitedRetention on top of everything else.
+// dropConn already says this about the connection registry; this is the same
+// rule on the other list, where it was not being kept.
+func TestReleasePrimaryDoesNotRetainTheClientItDropped(t *testing.T) {
+	reg := session.NewRegistry(time.Now)
+	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"sleep", "10"}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer s.Close()
+	srv := New(reg, nil, nil, "test", Identity{})
+
+	newPeer := func() *conn {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		c := newConn(ctx, cancel, nil, srv, "", "", nil)
+		srv.claimPrimaryIfUnset(s.ID(), c)
+		return c
+	}
+
+	first, second, stays := newPeer(), newPeer(), newPeer()
+	srv.releasePrimary(s.ID(), first)
+	srv.releasePrimary(s.ID(), second)
+
+	srv.primaryMu.Lock()
+	list := srv.attached[s.ID()]
+	tail := list[len(list):cap(list)]
+	srv.primaryMu.Unlock()
+
+	if len(list) != 1 || list[0] != stays {
+		t.Fatalf("attached = %v, want exactly the client that stayed", list)
+	}
+	for i, ghost := range tail {
+		if ghost != nil {
+			t.Errorf("attached backing array slot %d still points at a departed connection", len(list)+i)
+		}
+	}
+}
+
 func externalIP(t *testing.T) string {
 	t.Helper()
 	addrs, err := net.InterfaceAddrs()

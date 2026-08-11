@@ -10,6 +10,7 @@ import {
   frame,
   freshHub,
   handshakeDeadline,
+  idleTimeout,
   MACHINE,
   open,
   sleep,
@@ -22,6 +23,18 @@ import {
  * minutes, so the reaper only ever fires where a test asked it to.
  */
 const TIMEOUT_MS = 50
+
+/**
+ * The idle window the sweep tests bind with `idleTimeout()`, and it is wide
+ * where the handshake one is narrow.
+ *
+ * The test it is sized for proves a socket is kept alive by its keepalive
+ * alone, which means sleeping past the window first and then pinging — so the
+ * window is also the slack the runner has to fire the alarm in before the ping
+ * it is measuring goes stale. A second is a long time on a loaded runner and
+ * still a short test.
+ */
+const IDLE_MS = 1_000
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -321,8 +334,16 @@ describe('hibernation', () => {
     expect(bytes(await client.next('the payload after eviction'))).toEqual([4])
     // The wake re-found the live daemon from its attachment and the next id
     // from the persisted counter.
-    await dial(hub, `/client/${MACHINE}`)
+    const second = await dial(hub, `/client/${MACHINE}`)
     expect(await daemon.nextControl()).toEqual({ type: 'open', channel: 2, origin: BASE })
+    // And routes both channels: the channel index the forwarding path reads is
+    // memory, so a wake rebuilds it from the attachments — including the socket
+    // that was already there when the object came back, which is the one a
+    // half-built index would have lost.
+    daemon.ws.send(frame(2, Uint8Array.of(5)))
+    daemon.ws.send(frame(1, Uint8Array.of(6)))
+    expect(bytes(await second.next('channel 2 after eviction'))).toEqual([5])
+    expect(bytes(await client.next('channel 1 after eviction'))).toEqual([6])
   })
 })
 
@@ -351,8 +372,57 @@ describe('the handshake deadline', () => {
     // The seen client is spared and still bridged.
     daemon.ws.send(frame(1, Uint8Array.of(7)))
     expect(bytes(await seen.next('the payload after the reap'))).toEqual([7])
-    // Nothing unseen remains, so the alarm is not re-armed.
-    expect(await runInDurableObject(hub, (_instance, state) => state.storage.getAlarm())).toBeNull()
+    // Nothing unseen remains, but the alarm is still armed: the seen client is
+    // on the idle deadline now, which is the sweep's own next look at it. The
+    // pool binds that window at ten minutes, so this is a stamp far in the
+    // future rather than one about to fire.
+    const armed = await runInDurableObject(hub, (_instance, state) => state.storage.getAlarm())
+    expect(armed).not.toBeNull()
+    expect(armed as number).toBeGreaterThan(Date.now() + TIMEOUT_MS)
+  })
+
+  it('sweeps a client that handshook and then went quiet: 4002 idle, daemon told', async () => {
+    const hub = freshHub()
+    await idleTimeout(hub, TIMEOUT_MS)
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const ghost = await dial(hub, `/client/${MACHINE}`)
+    await daemon.nextControl()
+    // One frame is all it takes to be past the handshake deadline and onto the
+    // idle one. This is the browser that goes away without a close frame: a
+    // laptop that slept, a phone that lost its network. Nothing else notices it
+    // — a daemon writing into the channel succeeds all the way to the hub — so
+    // without the sweep it would hold a channel, an attachment and the daemon's
+    // whole connection state machine for as long as the daemon kept writing.
+    ghost.ws.send(Uint8Array.of(1))
+    await daemon.nextFrame()
+    await sleep(TIMEOUT_MS + 30)
+    await runDurableObjectAlarm(hub)
+    expect(await within(ghost.closed, 'the idle client to close')).toEqual({
+      code: 4002,
+      reason: 'idle',
+    })
+    expect(await daemon.nextControl()).toEqual({ type: 'closed', channel: 1 })
+  })
+
+  it('spares a client whose only sign of life is the keepalive', async () => {
+    const hub = freshHub()
+    await idleTimeout(hub, IDLE_MS)
+    const daemon = await dial(hub, `/daemon/${MACHINE}`)
+    const client = await dial(hub, `/client/${MACHINE}`)
+    await daemon.nextControl()
+    client.ws.send(Uint8Array.of(1))
+    await daemon.nextFrame()
+    // Past the window measured from that frame, so what saves this socket can
+    // only be the ping — which the edge answers from the auto-response without
+    // ever waking this object, and stamps where the sweep reads it. This is the
+    // ordinary shape of a live terminal nobody is typing into.
+    await sleep(IDLE_MS + 100)
+    client.ws.send('flue-ping')
+    expect(await client.next('the pong')).toBe('flue-pong')
+    await runDurableObjectAlarm(hub)
+    // Still bridged, both ways.
+    daemon.ws.send(frame(1, Uint8Array.of(7)))
+    expect(bytes(await client.next('the payload after the sweep'))).toEqual([7])
   })
 
   it('re-arms while unseen clients remain, then reaps them too', async () => {

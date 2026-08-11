@@ -1884,7 +1884,16 @@ func (s *Server) releasePrimary(id string, c *conn) (promoted *conn, eff viewSiz
 	list := s.attached[id]
 	for i, other := range list {
 		if other == c {
-			list = append(list[:i], list[i+1:]...)
+			// slices.Delete rather than the append idiom, and the difference is
+			// the same one dropConn spells out: the shift leaves the departing
+			// connection in the vacated tail slot, which the slice header no
+			// longer covers and the garbage collector still scans. A session two
+			// tabs take turns on would keep the last one to leave — its outbox,
+			// its attachments, its context — reachable until something happened
+			// to attach again and overwrite the slot. slices.Delete zeroes what
+			// it shifts past (Go 1.22 onward), which is exactly the nil dropConn
+			// writes by hand.
+			list = slices.Delete(list, i, i+1)
 			break
 		}
 	}

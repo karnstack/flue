@@ -682,6 +682,7 @@ machine:
 | concurrent client channels | 64 | a socket flood; over it, `503 relay full` |
 | client message size | 1 MiB | one browser taking the daemon leg down; over it, that socket alone closes `1009` |
 | handshake deadline | 30 s | channels opened and never used, reaped by alarm |
+| client idle window | 5 min | a browser that went away without a close frame: a laptop that slept, a phone that lost its network. A socket with no frame and no keepalive for the window is closed `4002 idle` and the daemon is told, so the daemon stops streaming a session's output into a channel nobody is reading |
 | concurrent parked pair requests | 8 | pairing attempts held open; over it, `429` |
 | pairing body cap | 4 KiB | an oversized POST; over it, `413` |
 | pairing answer deadline | 10 s | a daemon that never answers; `504` |
