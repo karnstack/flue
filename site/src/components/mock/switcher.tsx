@@ -219,7 +219,11 @@ function RowList({
   onHighlight: (key: string) => void
 }) {
   return (
-    <div className="min-w-0 flex-1 py-1.5 @2xl:w-80 @2xl:flex-none @2xl:border-r @2xl:border-border">
+    // The app's dialog is 56rem wide and gives the list 20rem of it. This one
+    // runs the full measure, so a fixed 20rem would leave the names truncating
+    // beside a pane with room to spare; the wider step keeps the app's
+    // proportion rather than its pixels.
+    <div className="min-w-0 flex-1 py-1.5 @2xl:w-80 @2xl:flex-none @2xl:border-r @2xl:border-border @4xl:w-96">
       {sections.map((section) => (
         <div key={section.label}>
           <p className="px-3.5 pt-2 pb-1 text-[0.6875rem] font-medium tracking-wide text-muted-foreground uppercase">
