@@ -173,15 +173,15 @@ function Setup() {
           A machine missing from the list is usually one of three things. It is asleep or
           offline. It never ran <Code>flue relay join</Code>. Or somebody ran{' '}
           <Code>flue relay setup</Code> a second time, which reset the relay and left this
-          machine holding a fleet key and a secret the rest of the fleet has moved on from.
+          machine holding a fleet key and a secret the relay has moved on from.
         </P>
         <P>
           Run <Code>flue relay status</Code> on the machine that is missing, and read the fleet
           line rather than the address. A reset does not change the address, so an address that
           matches tells you nothing. The fleet line counts how many entries in the
           relay&rsquo;s directory this machine can verify with the fleet key it holds. When it
-          says entries are signed by something else, this machine is on a fleet key the rest of
-          the relay has left behind. That is the reset.
+          says an entry is signed by something else, this machine is on a fleet key the relay
+          has left behind. That is the reset.
         </P>
         <P>
           The fix is the join line the most recent setup printed, run on this machine, and then
