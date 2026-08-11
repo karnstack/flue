@@ -615,6 +615,22 @@ func TestStatsEncodesAnEmptyListAsAList(t *testing.T) {
 func TestFileAndReadRoundTrip(t *testing.T) {
 	for _, msg := range []any{
 		Stat{ID: "s1", Paths: []string{"internal/wire/binary.go"}, ReqID: 4},
+		// Populated on purpose, and every field of the entry with it: this is
+		// the only test that decodes a stats, so both of the sites that fail at
+		// runtime rather than at compile time — the discriminator case and the
+		// deref case — are covered here or nowhere, and every PathEntry field
+		// is shown surviving the trip rather than being quietly dropped.
+		//
+		// What a round trip cannot catch is a tag *renamed on both sides at
+		// once: encode and decode agree, and the daemon then speaks a dialect
+		// no client understands. Spelling is the golden fixture's job.
+		//
+		// The *empty* stats cannot join this table. MarshalJSON turns a nil
+		// Entries into [], which decodes back to a non-nil empty slice, so
+		// DeepEqual fails on a message that is perfectly correct — the same
+		// asymmetry Sessions and DeviceList have. It is pinned by
+		// TestStatsEncodesAnEmptyListAsAList instead, which only encodes.
+		Stats{Entries: []PathEntry{{Path: "~/notes.md", Exists: true, Kind: "file", Size: 120, Mtime: 1762800000}}, ReqID: 4},
 		Read{ID: "s1", Path: "~/notes.md", ReqID: 5},
 		Cancel{Ref: 9},
 		File{Ref: 9, Path: "/home/karn/notes.md", Size: 120, Mime: "text/plain; charset=utf-8", Kind: "text", ReqID: 5},
