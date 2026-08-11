@@ -250,14 +250,18 @@ written. That is not a widening: a client that can send `read` can already send
 
 Text is sent to 8 MiB, past which `file.truncated` is true, `file.size` remains
 the real size, and only the head arrives. An image is refused past 4 MiB rather
-than truncated. `file.kind` is `text` or `image`, sniffed from the content and
-never from the extension; anything else is refused. Two reads may be open per
-connection.
+than truncated, measured by the same snapshot `file.size` comes from: a file
+that crosses 4 MiB after that measurement and before the stream ends is sent up
+to the cap and arrives with `truncated` unset, for the reason `eof` is not a
+completeness claim. A file still being written is not a file this can be exact
+about. `file.kind` is `text` or `image`, sniffed from the content and never from
+the extension; anything else is refused. Two reads may be open per connection.
 
 `cancel` abandons a read by `ref`, and **nothing answers it**: no confirmation
 on success, and no refusal for a ref the daemon does not hold, which is ignored
 rather than rejected. The stream stopping is the whole of the reply — and it
-stops rather than stops dead, which is what the two paragraphs below are about.
+stops rather than stops dead, which is what **A cancel stops a stream; it does
+not un-send one** below sets out.
 A read finishing and a client cancelling it cross on the wire routinely, and a
 race the client cannot avoid should not be an error it has to handle. Every read
 is ended and its file closed when the connection drops.

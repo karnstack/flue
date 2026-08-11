@@ -91,7 +91,7 @@ because it does the same job.
 
 ```
 browser                                   daemon
-  stat{id, paths[], reqId}      ------->  resolve against session cwd, lstat each
+  stat{id, paths[], reqId}      ------->  resolve against session cwd, stat each
        <-------  stats{reqId, entries[]}
   read{id, path, reqId}         ------->  resolve, sniff, open, mint ref
        <-------  file{ref, reqId, size, mime, kind, truncated}

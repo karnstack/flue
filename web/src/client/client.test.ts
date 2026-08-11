@@ -259,6 +259,7 @@ describe('control message golden file', () => {
       'read',
       'file',
       'fileTruncated',
+      'fileImage',
       'eof',
       'cancel',
     ])
@@ -613,6 +614,13 @@ describe('control message golden file', () => {
     // A path that does not exist is `exists: false` and nothing else. Not an
     // error: "no" is the ordinary answer to this question, and the hover that
     // asked it simply does not underline.
+    //
+    // All three kinds an entry can carry, because all three are arms of a union
+    // this side switches on. A `dir` is what a click has to offer something
+    // other than a viewer for, and `other` is a socket or a device: real enough
+    // to underline, not a thing that can be read. Pinned here because the
+    // daemon can emit either and nothing else in this suite would notice if the
+    // spelling drifted.
     const answer: StatsMsg = {
       type: 'stats',
       entries: [
@@ -621,6 +629,20 @@ describe('control message golden file', () => {
           exists: true,
           kind: 'file',
           size: 1204,
+          mtime: 1754870400,
+        },
+        {
+          path: 'internal/wire',
+          exists: true,
+          kind: 'dir',
+          size: 4096,
+          mtime: 1754870400,
+        },
+        // No `size`: a socket has none, and zero is omitted rather than sent.
+        {
+          path: '/tmp/flue-agent.sock',
+          exists: true,
+          kind: 'other',
           mtime: 1754870400,
         },
         { path: '~/notes.md', exists: false },
@@ -669,6 +691,21 @@ describe('control message golden file', () => {
       reqId: 14,
     }
     expect(fixture('fileTruncated')).toStrictEqual(cut)
+
+    // The other kind, and the one a viewer renders differently in every
+    // respect. `truncated` is absent rather than false on purpose: an image is
+    // refused past its cap rather than cut, so a `file` with `kind: 'image'`
+    // that arrives at all is a whole image.
+    const image: FileMsg = {
+      type: 'file',
+      ref: 6,
+      path: '/home/karn/shots/graph.png',
+      size: 184320,
+      mime: 'image/png',
+      kind: 'image',
+      reqId: 15,
+    }
+    expect(fixture('fileImage')).toStrictEqual(image)
   })
 
   it('decodes the end of a stream, and the abandonment of one', () => {

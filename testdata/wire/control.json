@@ -394,6 +394,19 @@
           "mtime": 1754870400
         },
         {
+          "path": "internal/wire",
+          "exists": true,
+          "kind": "dir",
+          "size": 4096,
+          "mtime": 1754870400
+        },
+        {
+          "path": "/tmp/flue-agent.sock",
+          "exists": true,
+          "kind": "other",
+          "mtime": 1754870400
+        },
+        {
           "path": "~/notes.md",
           "exists": false
         }
@@ -441,6 +454,18 @@
       "kind": "text",
       "truncated": true,
       "reqId": 14
+    }
+  },
+  {
+    "name": "fileImage",
+    "json": {
+      "type": "file",
+      "ref": 6,
+      "path": "/home/karn/shots/graph.png",
+      "size": 184320,
+      "mime": "image/png",
+      "kind": "image",
+      "reqId": 15
     }
   },
   {
