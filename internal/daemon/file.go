@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/karnstack/flue/internal/wire"
 )
 
 // Reading a file the session named.
@@ -95,4 +98,41 @@ func resolvePath(raw, cwd, home string) (string, error) {
 		p = filepath.Join(cwd, p)
 	}
 	return filepath.Clean(p), nil
+}
+
+// statEntry answers one path: does it exist, and what is it.
+//
+// os.Stat rather than os.Lstat, so a symlink reads as whatever it points at.
+// Following is the point — the reader wants the file at the end of the link,
+// and a link reported as "other" would refuse to underline a path that opens
+// perfectly well.
+//
+// Every failure is the same answer, exists false: a path that cannot be
+// resolved, one that is not there, one in a directory this user cannot search.
+// None of them is an error on the wire, because "no" is the ordinary answer to
+// this question and the hover that asked it simply does not underline. It is
+// also the answer that says least: a caller learns whether a path it already
+// named is readable, and nothing about the shape of anything it did not name.
+func statEntry(raw, cwd, home string) wire.PathEntry {
+	e := wire.PathEntry{Path: raw}
+	abs, err := resolvePath(raw, cwd, home)
+	if err != nil {
+		return e
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return e
+	}
+	e.Exists = true
+	switch {
+	case fi.IsDir():
+		e.Kind = "dir"
+	case fi.Mode().IsRegular():
+		e.Kind = "file"
+	default:
+		e.Kind = "other"
+	}
+	e.Size = fi.Size()
+	e.Mtime = fi.ModTime().Unix()
+	return e
 }

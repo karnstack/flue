@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -518,6 +519,27 @@ func (c *conn) handleControl(msg any) {
 		}
 		data, cols, rows := s.Tail(want)
 		_ = c.sendControl(wire.Preview{ID: m.ID, Data: data, Cols: cols, Rows: rows, ReqID: m.ReqID})
+
+	case wire.Stat:
+		// One message per hovered line rather than one per candidate: the
+		// terminal underlines a path only once it is known to be real, and the
+		// round trip is the cost on a relayed link.
+		s, ok := c.srv.reg.Get(m.ID)
+		if !ok {
+			c.sendErrorFor(m.ReqID, "not_found", "no such session")
+			return
+		}
+		if len(m.Paths) > maxStatPaths {
+			c.sendErrorFor(m.ReqID, "bad_path", "too many paths in one stat")
+			return
+		}
+		home, _ := os.UserHomeDir()
+		cwd := s.Info().Cwd
+		entries := make([]wire.PathEntry, 0, len(m.Paths))
+		for _, p := range m.Paths {
+			entries = append(entries, statEntry(p, cwd, home))
+		}
+		_ = c.sendControl(wire.Stats{Entries: entries, ReqID: m.ReqID})
 
 	case wire.Spawn:
 		s, err := c.srv.reg.Spawn(session.SpawnOpts{
