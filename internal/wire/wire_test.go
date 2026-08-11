@@ -70,6 +70,13 @@ func TestFileFramesRoundTrip(t *testing.T) {
 	if string(got) != string(payload) {
 		t.Errorf("payload = %q, want %q", got, payload)
 	}
+
+	// The literal, for the reason its TypeScript twin exists: the frame bytes
+	// are mirrored by hand across two languages, and every other assertion in
+	// either suite goes through the symbol.
+	if FrameFile != 0x02 {
+		t.Errorf("FrameFile = %#x, want 0x02; web/src/client/protocol.ts hard-codes it", FrameFile)
+	}
 }
 
 func TestDecodeControlDispatchesByType(t *testing.T) {
@@ -615,15 +622,17 @@ func TestStatsEncodesAnEmptyListAsAList(t *testing.T) {
 func TestFileAndReadRoundTrip(t *testing.T) {
 	for _, msg := range []any{
 		Stat{ID: "s1", Paths: []string{"internal/wire/binary.go"}, ReqID: 4},
-		// Populated on purpose, and every field of the entry with it: this is
-		// the only test that decodes a stats, so both of the sites that fail at
-		// runtime rather than at compile time — the discriminator case and the
-		// deref case — are covered here or nowhere, and every PathEntry field
-		// is shown surviving the trip rather than being quietly dropped.
+		// Populated on purpose, and every field of the entry with it: the two
+		// sites that fail at runtime rather than at compile time — the
+		// discriminator case and the deref case — are exercised here, and
+		// every PathEntry field is shown surviving the trip rather than being
+		// quietly dropped.
 		//
 		// What a round trip cannot catch is a tag *renamed on both sides at
-		// once: encode and decode agree, and the daemon then speaks a dialect
-		// no client understands. Spelling is the golden fixture's job.
+		// once*: encode and decode agree, and the daemon then speaks a dialect
+		// no client understands. Spelling is the golden fixture's job, and the
+		// stat and stats cases in testdata/wire/control.json are where it does
+		// it.
 		//
 		// The *empty* stats cannot join this table. MarshalJSON turns a nil
 		// Entries into [], which decodes back to a non-nil empty slice, so

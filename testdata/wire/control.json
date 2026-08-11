@@ -368,5 +368,93 @@
       "type": "revoked",
       "reason": "revoked by another device"
     }
+  },
+  {
+    "name": "stat",
+    "json": {
+      "type": "stat",
+      "id": "a1b2c3d4e5f60708",
+      "paths": [
+        "internal/wire/binary.go",
+        "~/notes.md"
+      ],
+      "reqId": 11
+    }
+  },
+  {
+    "name": "stats",
+    "json": {
+      "type": "stats",
+      "entries": [
+        {
+          "path": "internal/wire/binary.go",
+          "exists": true,
+          "kind": "file",
+          "size": 1204,
+          "mtime": 1754870400
+        },
+        {
+          "path": "~/notes.md",
+          "exists": false
+        }
+      ],
+      "reqId": 11
+    }
+  },
+  {
+    "name": "statsEmpty",
+    "json": {
+      "type": "stats",
+      "entries": [],
+      "reqId": 12
+    }
+  },
+  {
+    "name": "read",
+    "json": {
+      "type": "read",
+      "id": "a1b2c3d4e5f60708",
+      "path": "internal/wire/binary.go",
+      "reqId": 13
+    }
+  },
+  {
+    "name": "file",
+    "json": {
+      "type": "file",
+      "ref": 4,
+      "path": "/home/karn/code/flue/internal/wire/binary.go",
+      "size": 1204,
+      "mime": "text/plain; charset=utf-8",
+      "kind": "text",
+      "reqId": 13
+    }
+  },
+  {
+    "name": "fileTruncated",
+    "json": {
+      "type": "file",
+      "ref": 5,
+      "path": "/home/karn/big.log",
+      "size": 41943040,
+      "mime": "text/plain; charset=utf-8",
+      "kind": "text",
+      "truncated": true,
+      "reqId": 14
+    }
+  },
+  {
+    "name": "eof",
+    "json": {
+      "type": "eof",
+      "ref": 4
+    }
+  },
+  {
+    "name": "cancel",
+    "json": {
+      "type": "cancel",
+      "ref": 4
+    }
   }
 ]

@@ -17,6 +17,7 @@ export const CAPS: readonly string[] = ['binary']
 /** Binary frame types. Layout is [1 byte type][4 bytes ref BE][payload]. */
 export const FRAME_OUTPUT = 0x00 // daemon -> client
 export const FRAME_INPUT = 0x01 // client -> daemon
+export const FRAME_FILE = 0x02 // daemon -> client, one chunk of a file being read
 
 const HEADER_LEN = 5
 const MAX_REF = 0xffffffff
@@ -56,7 +57,7 @@ export function decodeBinary(buf: ArrayBuffer): BinaryFrame {
   if (buf.byteLength < HEADER_LEN) throw new Error('flue: frame shorter than header')
   const view = new DataView(buf)
   const type = view.getUint8(0)
-  if (type !== FRAME_OUTPUT && type !== FRAME_INPUT) {
+  if (type !== FRAME_OUTPUT && type !== FRAME_INPUT && type !== FRAME_FILE) {
     throw new Error(`flue: unknown frame type 0x${type.toString(16)}`)
   }
   return {
@@ -254,6 +255,39 @@ export interface PeekMsg {
   reqId?: number
 }
 
+/**
+ * Ask whether paths exist, resolved against a session's working directory.
+ *
+ * Plural because of who asks: a hovered terminal line carries several
+ * candidates, and a message per candidate would be a round trip per candidate.
+ * Answered by `stats`, whose entries echo these paths in this order.
+ */
+export interface StatMsg {
+  type: 'stat'
+  id: string
+  paths: string[]
+  reqId?: number
+}
+
+/**
+ * Start reading one file, resolved the way `stat` resolves a path.
+ *
+ * Answered by `file`, which mints the ref the content arrives under, or by an
+ * error. The content itself is binary frames, not this reply.
+ */
+export interface ReadMsg {
+  type: 'read'
+  id: string
+  path: string
+  reqId?: number
+}
+
+/** Abandon a read in flight. Addressed by the ref `file` handed out. */
+export interface CancelMsg {
+  type: 'cancel'
+  ref: number
+}
+
 /** Ask for the paired-device list. Answered by `deviceList`. */
 export interface DevicesMsg {
   type: 'devices'
@@ -289,6 +323,9 @@ export type ClientMessage =
   | CloseMsg
   | UpdateMsg
   | PeekMsg
+  | StatMsg
+  | ReadMsg
+  | CancelMsg
   | DevicesMsg
   | RevokeMsg
   | PairStartMsg
@@ -487,6 +524,45 @@ export interface Preview {
   reqId?: number
 }
 
+/** What one path turned out to be. `path` echoes what was asked, not what it resolved to. */
+export interface PathEntry {
+  path: string
+  exists: boolean
+  kind?: 'file' | 'dir' | 'other'
+  size?: number
+  mtime?: number
+}
+
+/** Answers `stat`, one entry per path asked about, in order. */
+export interface StatsMsg {
+  type: 'stats'
+  entries: PathEntry[]
+  reqId?: number
+}
+
+/**
+ * Answers `read`: the stream is open and these are its terms.
+ *
+ * `path` is the resolved path, unlike `PathEntry.path`. `size` is the file's
+ * real size, which is not always how much arrives — see `truncated`.
+ */
+export interface FileMsg {
+  type: 'file'
+  ref: number
+  path: string
+  size: number
+  mime: string
+  kind: 'text' | 'image'
+  truncated?: boolean
+  reqId?: number
+}
+
+/** Every byte of a read has been sent. The only way a stream ends rather than stalls. */
+export interface EofMsg {
+  type: 'eof'
+  ref: number
+}
+
 export interface DeviceList {
   type: 'deviceList'
   /** Empty rather than absent when nothing is paired. */
@@ -533,6 +609,9 @@ export type ServerMessage =
   | SizeChanged
   | ErrorMsg
   | Preview
+  | StatsMsg
+  | FileMsg
+  | EofMsg
   | DeviceList
   | Pairing
   | Revoked
