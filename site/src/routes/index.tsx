@@ -129,7 +129,7 @@ function Eyebrow() {
 function Headline() {
   return (
     <h1 className="max-w-[24ch] text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl">
-      Your work shouldn&rsquo;t stop when you close the laptop.
+      The desk stops mattering.
     </h1>
   )
 }
@@ -137,8 +137,8 @@ function Headline() {
 function Subline() {
   return (
     <p className="mt-5 max-w-[52ch] text-lg text-pretty text-muted-foreground">
-      Builds, agents and SSH sessions keep running on the machine that owns them. Pick any of them
-      back up from any device you have.
+      Builds, agents and SSH sessions keep running on the machine that owns them. Every one of
+      them is one tab away, on any screen you have.
     </p>
   )
 }
