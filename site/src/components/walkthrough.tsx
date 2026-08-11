@@ -1,32 +1,34 @@
-import { Clapperboard, Play } from 'lucide-react'
-import { lazy, Suspense, useState } from 'react'
+import { MuxPlayer } from '@karnstack/kino/mux'
+import '@karnstack/kino/styles.css'
+import { Clapperboard } from 'lucide-react'
 
-import { WALKTHROUGH_POSTER, WALKTHROUGH_RUNTIME } from '@/lib/site'
+import {
+  WALKTHROUGH_BLUR,
+  WALKTHROUGH_PLAYBACK_ID,
+  WALKTHROUGH_POSTER,
+  WALKTHROUGH_RUNTIME,
+} from '@/lib/site'
 import { cn } from '@/lib/utils'
 
-const Player = lazy(() => import('@/components/walkthrough-player'))
-
 /**
- * The panel, cut the way every other window on this site is cut. MockTerminal,
- * FleetWindow and the docs Shell blocks all wear it.
- */
-const PANEL =
-  'relative aspect-video overflow-hidden rounded-xl bg-zinc-950 ring-1 ring-zinc-950/10 dark:ring-white/10'
-
-/**
- * The setup walkthrough, mounted on a click.
+ * The setup walkthrough.
  *
- * The click is not decoration. kino pulls in an adaptive streaming engine, and
- * that chunk is 218 kB gzipped against a site whose entire bundle is 101 kB, so
- * mounting it on arrival would triple what every visitor downloads for a video
- * most of them will not play. Deferring it also keeps the custom element out of
- * the prerender, which renders every route to static HTML at build time and has
- * nothing to do with a custom element.
+ * Nothing here starts playback, and that is worth saying because kino's
+ * `autoPlay` prop is right there and using it breaks in a way that takes a
+ * while to see. kino builds its <mux-video> inside a mount effect and sets
+ * `autoplay` on the element there, while its teardown calls remove(), which
+ * detaches an element without pausing it. React runs a mount effect twice in
+ * development, so the first element is left detached and playing and
+ * unreachable: a second audio track a beat behind the visible one, which no
+ * control on the page can stop, because the provider that owned it is gone.
  *
- * What stands in for it until then is a poster and a play button. Deliberately
- * not a copy of kino's own control: matching that pixel for pixel means copying
- * measurements out of a stylesheet this file does not own, and it goes wrong
- * the first time either side changes.
+ * The accent is handed over as `var(--primary)` rather than as a colour. kino
+ * assigns the prop straight to --kino-accent on its own root, so it resolves
+ * inside whichever theme the page is wearing and the header's toggle moves the
+ * scrubber with everything else. A literal would have pinned it to one theme.
+ *
+ * `tokens` is absent on purpose: playback is public, so there is nothing to
+ * sign and no key to hold.
  */
 export function Walkthrough({
   align = 'left',
@@ -36,28 +38,18 @@ export function Walkthrough({
   align?: 'left' | 'center'
   className?: string
 }) {
-  const [playing, setPlaying] = useState(false)
-
   return (
     <figure className={className}>
-      <div className={PANEL}>
-        {playing ? (
-          <Suspense fallback={<Poster />}>
-            <Player />
-          </Suspense>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setPlaying(true)}
-            aria-label={`Play the setup walkthrough, ${WALKTHROUGH_RUNTIME}`}
-            className="group absolute inset-0 grid w-full place-items-center focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
-          >
-            <Poster />
-            <span className="relative grid size-20 place-items-center rounded-full bg-black/40 backdrop-blur-sm group-hover:bg-black/55 motion-safe:transition">
-              <Play className="size-8 fill-white stroke-none" aria-hidden="true" />
-            </span>
-          </button>
-        )}
+      <div className="relative aspect-video overflow-hidden rounded-xl bg-zinc-950 ring-1 ring-zinc-950/10 dark:ring-white/10">
+        <MuxPlayer
+          playbackId={WALKTHROUGH_PLAYBACK_ID}
+          poster={WALKTHROUGH_POSTER}
+          placeholder={WALKTHROUGH_BLUR}
+          accentColor="var(--primary)"
+          /* kino's glass sits inside a corner this site sets. One step in from
+             the panel's own, which is what nesting two curves asks for. */
+          theme={{ '--kino-radius': 'var(--radius-lg)' }}
+        />
       </div>
       <figcaption
         className={cn(
@@ -70,15 +62,5 @@ export function Walkthrough({
         a QR code, then a second machine.
       </figcaption>
     </figure>
-  )
-}
-
-function Poster() {
-  return (
-    <img
-      src={WALKTHROUGH_POSTER}
-      alt=""
-      className="absolute inset-0 size-full object-cover"
-    />
   )
 }
