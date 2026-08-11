@@ -1,14 +1,14 @@
 # flue
 
-> flue keeps your terminal sessions alive on the machine that owns them and hands them back on any device you have. A small Go daemon owns the shells and their scrollback; a web app renders them. Closing the tab detaches rather than kills, so a build, an agent run or an SSH session keeps going, and reattaching replays what was missed.
+> flue keeps your terminal sessions alive on the machine that owns them and hands them back on any device you have. A small Go daemon owns the shells and their scrollback, and a web app draws them. Closing the tab does not kill a session. It only detaches it, so a build, an agent run or an SSH session keeps going, and reattaching replays what was missed. One keystroke opens every session on every machine at once.
 
 flue is open source (MIT), pre-1.0, and free. It installs as one static Go
 binary on macOS, Linux and WSL, with no Node, Python or other toolchain.
 
-There is no hosted service. The daemon binds loopback and nothing else.
+There is no hosted service. The daemon listens on loopback and nothing else.
 Remote access is opt-in and runs on infrastructure you own: `flue relay setup`
 deploys a relay Worker and the web app into your own Cloudflare account, on the
-free tier. Traffic crossing that relay is end-to-end encrypted with Noise IK,
+free plan. Traffic crossing that relay is end-to-end encrypted with Noise IK,
 the daemon's static key pinned when a browser pairs, so the Worker forwards
 ciphertext it holds no key for. flue.sh serves docs and downloads and is never
 part of the data path.
@@ -28,6 +28,10 @@ flue enable
 `flue enable` installs a login service, starts the daemon and opens the UI.
 Everything after that happens in the browser.
 
+Switching between sessions is a keyboard action in the web app rather than a
+CLI one. Cmd+K on a Mac, or Ctrl+Shift+K on any platform including macOS, opens every session on
+every reachable machine, with a preview of the highlighted one.
+
 ## CLI
 
 - `flue enable`: install the login service, start the daemon, open the UI
@@ -43,6 +47,7 @@ Everything after that happens in the browser.
 
 ## Docs
 
+- [Setting up your fleet](https://flue.sh/docs/setup): the order to do things in. Install on every machine, deploy exactly one relay, join the rest, and pair each device once for the whole fleet.
 - [How flue works](https://flue.sh/docs/how-it-works): the daemon that owns the shells, why closing a tab detaches rather than kills, how two devices mirror one session, and the CLI.
 - [Remote access](https://flue.sh/docs/relay): how a machine becomes reachable from anywhere on infrastructure you own, the relay protocol, what it costs, and what a relay operator can and cannot see.
 - [FAQ](https://flue.sh/docs/faq): short answers, including the one where the honest answer is not the flattering one. The web app's JavaScript is served by the relay origin, so a hostile origin is a real threat that encryption does not remove.
