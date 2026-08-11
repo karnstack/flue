@@ -1,5 +1,6 @@
+import { Fragment } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
-import { ArrowRight, Lock, Plus } from 'lucide-react'
+import { ArrowRight, Cloud, HardDrive, Lock, Plus, Smartphone } from 'lucide-react'
 
 import { CopyCommand } from '@/components/copy-command'
 import { FleetWindow, PhoneFrame } from '@/components/mock/fleet'
@@ -196,54 +197,60 @@ function Sessions() {
   return (
     <section id="sessions" className="scroll-mt-20 py-20 sm:py-24">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
-        <div className="max-w-[62ch]">
-          <p className="font-mono text-sm tracking-wide text-primary uppercase">Why it exists</p>
+        {/* Why it exists, beside what it is. Same grid and gap as Remote, so
+            the column edges of the two sections line up down the page. */}
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:items-center lg:gap-10">
+          <div>
+            <p className="font-mono text-sm tracking-wide text-primary uppercase">Why it exists</p>
+            <blockquote className="mt-6 border-l-2 border-primary/40 pl-5">
+              <p className="max-w-[48ch] text-lg text-pretty">
+                I wanted my 10,000 steps. Coding agents had other plans, and I am not buying a
+                walking pad. So now I start the run on my machine, go for the walk, and read the
+                answer on my phone.
+              </p>
+              <footer className="mt-3 text-base text-muted-foreground sm:text-sm">
+                Karn, who wrote this instead of walking
+              </footer>
+            </blockquote>
+          </div>
 
-          <blockquote className="mt-6 border-l-2 border-primary/40 pl-5">
-            <p className="text-lg text-pretty">
-              I wanted my 10,000 steps. Coding agents had other plans, and I am not buying a walking
-              pad. So now I start the run on my machine, go for the walk, and read the answer on my
-              phone.
+          <div>
+            <h2 className="max-w-[35ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+              One daemon owns the shells. Every screen is only a view.
+            </h2>
+            <p className="mt-5 max-w-[48ch] text-lg text-pretty text-muted-foreground">
+              A small Go daemon holds the terminals and their scrollback. Closing the tab does not
+              kill the session. It only detaches it. Reattach and the daemon replays what you
+              missed.
             </p>
-            <footer className="mt-2 text-base text-muted-foreground sm:text-sm">
-              Karn, who wrote this instead of walking
-            </footer>
-          </blockquote>
+            <p className="mt-4 max-w-[48ch] text-lg text-pretty text-muted-foreground">
+              Two devices can attach to one session and mirror live. Size follows the view you used
+              last, so it fits the phone in your hand, and the laptop when you go back to it.
+            </p>
+          </div>
+        </div>
 
-          <h2 className="mt-12 max-w-[35ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            One daemon owns the shells. Every screen is only a view.
-          </h2>
-          <p className="mt-5 text-lg text-pretty text-muted-foreground">
-            A small Go daemon holds the terminals and their scrollback. Closing the tab does not
-            kill the session. It only detaches it, so the build keeps going. Reattach and the daemon
-            replays what you missed.
-          </p>
-          <p className="mt-4 text-lg text-pretty text-muted-foreground">
-            Two devices can attach to one session and they mirror live. What you type on the phone
-            appears in the laptop&rsquo;s browser. Size follows the view you are using. Pick up the
-            phone and the session fits the phone. Type on the laptop and it fits the laptop again.
-          </p>
-
-          <h3 className="mt-14 max-w-[35ch] text-2xl font-semibold tracking-tight text-balance">
+        {/* The palette's heading group, with the heading holding the left
+            column and its prose the right, so the run above the full-width
+            drawing occupies the same measure the drawing does. */}
+        <div className="mt-20 grid grid-cols-[minmax(0,1fr)] gap-x-10 gap-y-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-10">
+          <h3 className="max-w-[40ch] text-2xl font-semibold tracking-tight text-balance">
             Finding one of them is the other half.
           </h3>
-          <p className="mt-5 text-lg text-pretty text-muted-foreground">
-            Press <kbd className="font-mono text-base text-foreground">&#8984;K</kbd> on a Mac, or{' '}
-            <kbd className="font-mono text-base text-foreground">Ctrl+Shift+K</kbd> on any platform
-            including macOS, on any screen that can see a daemon. Pinned sessions come first, with
-            number keys on them. Then the sessions this browser has opened before. Then the rest.
-          </p>
-          <p className="mt-4 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-            The highlighted row shows its own last fourteen lines beside the list, so you can see
-            which one is the build instead of guessing from its name.{' '}
-            <kbd className="font-mono text-foreground">Ctrl+Shift+1</kbd> to{' '}
-            <kbd className="font-mono text-foreground">9</kbd> jumps straight to a pinned session
-            without opening the list at all.
-          </p>
-          <p className="mt-4 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-            The one below is a drawing of it, wired up against an invented fleet. Press either chord
-            anywhere on this page, then type, or use the arrow keys.
-          </p>
+          <div>
+            <p className="max-w-[48ch] text-lg text-pretty text-muted-foreground">
+              Press <kbd className="font-mono text-base text-foreground">&#8984;K</kbd> on a Mac, or{' '}
+              <kbd className="font-mono text-base text-foreground">Ctrl+Shift+K</kbd> on any platform
+              including macOS, from any screen that can see a daemon. Pinned sessions first, with
+              number keys on them, then the ones this browser has opened, then the rest.
+            </p>
+            <p className="mt-4 max-w-[56ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+              The highlighted row shows its last fourteen lines, so you can see which one is the
+              build. <kbd className="font-mono text-foreground">Ctrl+Shift+1</kbd> to{' '}
+              <kbd className="font-mono text-foreground">9</kbd> jumps straight to a pinned session
+              without opening the list. The one below is wired up: press either chord and type.
+            </p>
+          </div>
         </div>
 
         {/* Full width rather than in a column: the real dialog is 56rem across
@@ -267,13 +274,43 @@ function Sessions() {
 
 /* --------------------------------------------------------------- remote --- */
 
+/*
+ * The three places your bytes are, in order.
+ *
+ * The middle one is the point: it is the box you do not have to trust, and it
+ * is drawn between the other two so that the dashed run passing through it
+ * reads as one channel rather than two hops. The device box says the browser
+ * pins the daemon's key, because the browser holds a long-lived key of its own
+ * (web/src/crypto/keys.ts) and this panel used to claim the daemon held the
+ * only one.
+ */
+const PATH = [
+  {
+    title: 'Your machine',
+    body: 'The daemon owns the terminals and holds the key your browser pins. It listens on loopback and nothing else.',
+    mono: '127.0.0.1:7717',
+    icon: HardDrive,
+  },
+  {
+    title: 'Your Cloudflare account',
+    body: 'A relay Worker you deployed forwards ciphertext between devices. It holds no key, so it can read nothing.',
+    mono: 'flue-relay.you.workers.dev',
+    icon: Cloud,
+  },
+  {
+    title: 'Your other devices',
+    body: 'Each browser pairs once from a QR code, and pins the daemon’s key from then on.',
+    mono: 'phone · tablet · second laptop',
+    icon: Smartphone,
+  },
+]
+
 /**
  * Remote access and the trust argument, together.
  *
- * They were two sections, and the second one was a numbered three-box path
- * restating what the first had already said in prose. The claim that carries
- * the weight is that nothing in the middle holds a key, and it needs one
- * paragraph rather than a diagram of itself.
+ * They were two sections saying one thing twice: the prose and the path both
+ * argued that the middle holds no key. Merged, the prose makes the claim and
+ * the path shows it, which is the division of labour they should have had.
  */
 function Remote() {
   return (
@@ -290,16 +327,16 @@ function Remote() {
             <h2 className="mt-3 max-w-[35ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
               Reachable from anywhere, with nobody in the middle.
             </h2>
-            <p className="mt-5 max-w-[56ch] text-lg text-pretty text-muted-foreground">
-              The daemon listens on loopback and nothing else, so reaching it from somewhere else is
-              opt-in and takes one command. That command deploys a relay Worker and this web app
-              into your own Cloudflare account, on the free plan. Every machine you own shares it.
+            <p className="mt-5 max-w-[48ch] text-lg text-pretty text-muted-foreground">
+              The daemon listens on loopback and nothing else. One command deploys a relay Worker
+              and this web app into your own Cloudflare account, on the free plan, and every machine
+              you own shares it.
             </p>
             <p className="mt-4 max-w-[56ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-              Everything crossing the relay is end-to-end encrypted with Noise IK. Your browser pins
-              the daemon&rsquo;s key when it pairs, so the Worker only forwards ciphertext it holds
-              no key for. The relay is new. It is built and it works, but it has not been through
-              its release gate yet, so treat it as ready to try rather than ready to rely on.
+              Everything crossing it is end-to-end encrypted with Noise IK. Your browser pins the
+              daemon&rsquo;s key when it pairs, so the Worker forwards ciphertext it holds no key
+              for. The relay is new: it works, but it has not been through its release gate, so
+              treat it as ready to try rather than ready to rely on.
             </p>
             <a
               href="/docs/relay"
@@ -312,18 +349,65 @@ function Remote() {
         </div>
 
         <div className="mt-16 border-t border-dashed border-border pt-10">
-          <p className="max-w-[62ch] text-lg text-pretty text-muted-foreground">
+          <p className="max-w-[56ch] text-lg text-pretty text-muted-foreground">
             There is no flue account, no flue server and no billing, because there is no company.
             There is me and a Cloudflare free plan. flue.sh serves docs and downloads, and is never
             part of the data path.
           </p>
-          <p className="mt-6 flex items-center gap-3 font-mono text-xs text-muted-foreground">
+
+          {/* The three places, as a path rather than as three cards: dashed
+              connectors carry the Noise IK channel from end to end, and the
+              middle box is deliberately the one that holds no key. */}
+          <ol
+            role="list"
+            className="mt-12 grid grid-cols-[minmax(0,1fr)] gap-y-10 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-stretch lg:gap-y-0"
+          >
+            {PATH.map((step, i) => (
+              <Fragment key={step.title}>
+                {i > 0 && <Connector />}
+                <li className="relative rounded-xl border border-dashed border-border p-6">
+                  <span
+                    aria-hidden="true"
+                    className="absolute -top-3 left-6 flex items-center gap-2 bg-background px-2 font-mono text-xs tabular-nums text-muted-foreground"
+                  >
+                    {String(i + 1).padStart(2, '0')}
+                  </span>
+                  <step.icon className="size-5 shrink-0 text-primary" aria-hidden="true" />
+                  <p className="mt-4 text-lg font-medium">{step.title}</p>
+                  <p className="mt-2 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+                    {step.body}
+                  </p>
+                  <p className="mt-4 truncate font-mono text-xs text-primary">{step.mono}</p>
+                </li>
+              </Fragment>
+            ))}
+          </ol>
+
+          <p className="mt-10 flex items-center gap-3 font-mono text-xs text-muted-foreground">
             <Lock className="size-3.5 shrink-0" aria-hidden="true" />
             Noise IK, end to end. The middle box forwards bytes it cannot read.
           </p>
         </div>
       </div>
     </section>
+  )
+}
+
+/**
+ * The dashed run between two boxes in the path. Horizontal from `lg`, where
+ * the boxes sit in a row; vertical below it, where they stack.
+ */
+function Connector() {
+  return (
+    <li aria-hidden="true" className="flex items-center justify-center lg:px-4">
+      <span className="flex items-center gap-1 max-lg:hidden">
+        <span className="w-10 border-t border-dashed border-border" />
+        <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" />
+      </span>
+      <span className="flex flex-col items-center gap-1 lg:hidden">
+        <span className="h-6 border-l border-dashed border-border" />
+      </span>
+    </li>
   )
 }
 
