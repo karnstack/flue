@@ -26,12 +26,19 @@ export default defineConfig({
         // route at fault, and it was frequent enough during this site's
         // rewrite to cost several rebuilds an hour.
         //
-        // retryCount re-fetches the failed route after retryDelay instead of
-        // failing the build (start-plugin-core/src/prerender.ts), so a real
-        // error still fails, three attempts later. Costs nothing on a green
-        // run. Remove it if the upstream race is fixed.
-        retryCount: 3,
-        retryDelay: 500,
+        // One fetch at a time is what fixes it. The default is os.cpus().length
+        // (prerender.ts), which puts ten simultaneous connections on a server
+        // that has only just bound its port. Six pages that each render in
+        // milliseconds do not need the parallelism, so the whole race is bought
+        // out for a fraction of a second of build time.
+        //
+        // Not retryCount. That option looks like the fix and is worse than
+        // nothing here: its retry calls addCrawlPageTask(page), which returns
+        // early because `seen` already holds the path, so the page is never
+        // re-queued. Taking the retry branch also skips the failOnError throw,
+        // so the build exits 0 with the page missing. scripts/check-pages.mjs
+        // now fails the build on a missing page, whatever the cause.
+        concurrency: 1,
       },
     }),
     viteReact(),
