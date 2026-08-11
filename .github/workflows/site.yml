@@ -62,9 +62,35 @@ jobs:
       # router's vite plugin, so on a fresh checkout there is no copy to typecheck
       # against and tsc fails on `Cannot find module './routeTree.gen'`. The build
       # is also what check-prose reads — it scans the prerendered dist/client.
+      #
+      # Three attempts because the prerender step fetches each route out of a
+      # vite preview server on an ephemeral port and loses a race with it often
+      # enough to matter: measured at 1 build in 8, 3 in 12 and 4 in 6, failing
+      # as `connect ETIMEDOUT ::1:<port>` and `ECONNREFUSED 127.0.0.1:<port>` on
+      # the port nothing is listening on yet. A required check that red-lights at
+      # that rate teaches people to press re-run without reading, and then it
+      # stops catching anything.
+      #
+      # Every measurement was macOS, and the error shapes are macOS-flavoured, so
+      # this may be precautionary here — see the note in the commit. It is a
+      # workaround for a flake and not a licence for a broken build: each attempt
+      # announces itself, so a real failure reads as three real failures. Drop it
+      # if the runs stay green without it, or when the prerender's own retryCount
+      # is set in vite.config.ts and fixes this where it happens.
       - name: Build the site
         working-directory: site
-        run: pnpm build
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::Build attempt $attempt of 3"
+            if pnpm build; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::Site build attempt $attempt of 3 failed. If the log above ends in a prerender fetch error, it is the port race; anything else is real."
+          done
+          echo "::error::Site build failed three times. Three failures is not the flake — read the first attempt's log."
+          exit 1
 
       - name: Lint the site
         working-directory: site
