@@ -156,8 +156,9 @@ function Setup() {
         </Lead>
         <P>
           A laptop sleeps. The sessions on a sleeping machine are not lost, but they are out of
-          reach until it wakes. The switcher still lists them, greyed and marked unreachable, and
-          it still opens them, so nothing disappears. It is just that nothing runs either.
+          reach until it wakes. The switcher still shows the ones this browser has opened
+          before, greyed and marked unreachable, and it still opens them. It is just that
+          nothing runs until the machine is back.
         </P>
         <P>
           So a desktop, a Pi or a VPS is where agent runs and long builds want to live. That is
