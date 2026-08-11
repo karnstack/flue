@@ -48,17 +48,50 @@ export const MAX_CANDIDATES = 64
  */
 const TOKEN = String.raw`[^\s'"\u0060<>|(){}\[\],=]+`
 
+/**
+ * A whole URL, read off the raw line before any token is cut out of it.
+ *
+ * It has to be read that way round. The token pattern ends a token at `=`, at
+ * the comma and at every bracket, which are the characters a query string is
+ * made of, so `https://x.com/search?q=src/main.ts` arrives at pathish() in
+ * pieces and the piece that looks like a path is not the piece carrying the
+ * scheme. Nothing local to that piece can tell it from a real path, and the
+ * cost of getting it wrong is not one wasted request: xterm's web-links addon
+ * is already underlining the whole link, so a second provider over part of it
+ * is two marks on one run of text and a click that could go either way.
+ *
+ * Everything up to the next space is taken, closing bracket and all. Taking
+ * too much only ever costs a candidate inside a link, which is the one place
+ * a candidate is unwanted anyway.
+ *
+ * Hoisted where the token scanner cannot be: matchAll() walks a copy of the
+ * regex, so no `lastIndex` from one line reaches the next.
+ */
+const URL_RUN = /[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+/gu
+
+/** Half-open, in the coordinates of the line the run was found in. */
+interface Span {
+  start: number
+  end: number
+}
+
 /** What a sentence leaves on the end of a path. */
 const TRAILING = /[.;:]+$/
 
 /** A `:42` or `:42:7` on the end of an otherwise complete path. */
 const SUFFIX = /:(\d+)(?::(\d+))?$/
 
-/** A file extension: a dot and a short run of letters or digits, at the end. */
+/**
+ * A dot near the end of a name, with a short run of letters or digits after it.
+ *
+ * The length bound is what does the work, because this is the only thing
+ * standing between a bare word and the daemon. Unbounded, every dotted
+ * expression a program prints reads as a name with a suffix on it, and
+ * `payload.someDescriptiveField` becomes a request. Twelve leaves room for the
+ * longest suffixes anyone ships, `.properties` and `.storyboard`, and stops
+ * well short of the identifiers.
+ */
 const EXTENSION = /\.[\p{L}\p{N}]{1,12}$/u
-
-/** Somewhere in this text there is a letter, a digit or an underscore. */
-const SUBSTANTIAL = /[\p{L}\p{N}_]/u
 
 /**
  * Every path-shaped run in `line`, in the order they appear.
@@ -67,23 +100,39 @@ const SUBSTANTIAL = /[\p{L}\p{N}_]/u
  * and the caller that batches them for verification is the one that dedupes.
  */
 export function findPaths(line: string): PathCandidate[] {
-  // Built per call rather than hoisted. A module-level regex with the global
-  // flag carries `lastIndex` between calls, and this one is called from a
-  // hover handler that can be re-entered while a previous verification is
-  // still in flight.
+  const links: Span[] = []
+  for (const m of line.matchAll(URL_RUN)) links.push({ start: m.index, end: m.index + m[0].length })
+  // Built per call rather than hoisted, because of the break below: a line that
+  // hits the cap leaves the scanner parked mid-line, and a module-level regex
+  // with the global flag would carry that `lastIndex` into the next call and
+  // begin the next line wherever the capped one ran out of room.
   const scanner = new RegExp(TOKEN, 'gu')
   const out: PathCandidate[] = []
   for (let m = scanner.exec(line); m !== null; m = scanner.exec(line)) {
     if (out.length >= MAX_CANDIDATES) break
     const trimmed = m[0].replace(TRAILING, '')
     if (trimmed === '') continue
+    const start = m.index
+    const end = start + trimmed.length
+    if (links.some((l) => l.start < end && start < l.end)) continue
     const suffix = SUFFIX.exec(trimmed)
     const path = suffix === null ? trimmed : trimmed.slice(0, suffix.index)
     if (!pathish(path)) continue
-    const found: PathCandidate = { path, start: m.index, end: m.index + trimmed.length }
+    const found: PathCandidate = { path, start, end }
+    // A suffix too big to be a position is dropped rather than carried. Number
+    // has already lost digits past 2^53 and reaches Infinity soon after, which
+    // JSON.stringify writes as null, so the daemon would be asked to open a
+    // line that no longer says what the terminal said. The path is still worth
+    // offering; it opens at the top instead.
     if (suffix !== null) {
-      found.line = Number(suffix[1])
-      if (suffix[2] !== undefined) found.col = Number(suffix[2])
+      const at = Number(suffix[1])
+      if (Number.isSafeInteger(at)) {
+        found.line = at
+        if (suffix[2] !== undefined) {
+          const across = Number(suffix[2])
+          if (Number.isSafeInteger(across)) found.col = across
+        }
+      }
     }
     out.push(found)
   }
@@ -93,18 +142,19 @@ export function findPaths(line: string): PathCandidate[] {
 /**
  * Whether this run of characters is worth asking the daemon about.
  *
- * A URL is refused rather than merely unmatched: xterm's own web-links addon
- * already underlines those, and two providers offering the same range is two
- * underlines and an ambiguous click.
+ * The URL work is done over the whole line before this is reached, so the
+ * `://` test here is only for what that pass will not call a link: it wants a
+ * scheme beginning with a letter, and something like `://host/a.ts` still
+ * reads as one to a person, whose eye is what the marks are for.
  */
 function pathish(text: string): boolean {
   if (text === '' || text.includes('://')) return false
-  if (text === '~' || text === '.' || text === '..') return false
   if (text.startsWith('/') || text.startsWith('~/')) return true
   if (text.startsWith('./') || text.startsWith('../')) return true
   if (text.includes('/')) return true
-  // A bare name has to carry an extension to be told from a word. A version
-  // number satisfies that and will be asked about; the daemon says no, and
-  // nothing underlines.
-  return EXTENSION.test(text) && SUBSTANTIAL.test(text)
+  // A bare name has to carry a suffix to be told from a word. A version number
+  // satisfies that and will be asked about; the daemon says no, and nothing
+  // underlines. `~`, `.` and `..` fall out here too: none of them can match
+  // EXTENSION, which needs a letter or a digit after its dot.
+  return EXTENSION.test(text)
 }

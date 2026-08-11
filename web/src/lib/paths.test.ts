@@ -29,14 +29,33 @@ describe('findPaths', () => {
   })
 
   it('reads a line and column suffix off the end', () => {
-    expect(findPaths('src/main.ts:42')).toEqual([
+    // toStrictEqual, not toEqual: toEqual counts an explicit `col: undefined`
+    // as equal to no `col` at all, so it would pass a candidate that carries
+    // the key with nothing in it, which is what goes on the wire.
+    expect(findPaths('src/main.ts:42')).toStrictEqual([
       { path: 'src/main.ts', start: 0, end: 14, line: 42 },
     ])
-    expect(findPaths('src/main.ts:42:7')).toEqual([
+    expect(findPaths('src/main.ts:42:7')).toStrictEqual([
       { path: 'src/main.ts', start: 0, end: 16, line: 42, col: 7 },
     ])
     // A trailing colon is punctuation, not an empty suffix.
     expect(paths('src/main.ts:')).toEqual(['src/main.ts'])
+  })
+
+  it('drops a position too large to be one, and keeps the path', () => {
+    // Number gives 1e+22 for this, which JSON.stringify writes as a number no
+    // daemon can seek to, and enough more digits reach Infinity, which it
+    // writes as null. Opening at the top beats opening at either.
+    expect(findPaths('src/a.ts:9999999999999999999999')).toStrictEqual([
+      { path: 'src/a.ts', start: 0, end: 31 },
+    ])
+    expect(findPaths(`src/a.ts:${'9'.repeat(31)}`)).toStrictEqual([
+      { path: 'src/a.ts', start: 0, end: 40 },
+    ])
+    // The column goes on its own, and a real line beside it survives.
+    expect(findPaths('src/a.ts:12:9999999999999999999999')).toStrictEqual([
+      { path: 'src/a.ts', start: 0, end: 34, line: 12 },
+    ])
   })
 
   it('underlines the suffix along with the path', () => {
@@ -51,6 +70,18 @@ describe('findPaths', () => {
     expect(paths('git+ssh://host/repo.git')).toEqual([])
   })
 
+  it('leaves the inside of a URL alone, where a token no longer looks like one', () => {
+    // A query string is built from the characters that end a token, so each of
+    // these reaches the shape test as a piece with no scheme on it and every
+    // mark of a path. Only the whole line says otherwise, and the whole line is
+    // what the addon is already underlining.
+    expect(paths('https://x.com/search?q=src/main.ts')).toEqual([])
+    expect(paths('https://x.com/a?next=/etc/hosts')).toEqual([])
+    expect(paths('https://x.com/a,b/c.ts')).toEqual([])
+    // And a link ends at a space, so the rest of the line is still read.
+    expect(paths('https://x.com/a?q=1 and src/main.ts')).toEqual(['src/main.ts'])
+  })
+
   it('does not take a flag apart into a path', () => {
     // `=` ends a token, so the value is offered on its own and the flag is not.
     expect(paths('--config=web/vite.config.ts')).toEqual(['web/vite.config.ts'])
@@ -58,7 +89,7 @@ describe('findPaths', () => {
 
   it('offers several candidates from one line, in order, with offsets', () => {
     const line = 'moved a/b.go to c/d.go'
-    expect(findPaths(line)).toEqual([
+    expect(findPaths(line)).toStrictEqual([
       { path: 'a/b.go', start: 6, end: 12 },
       { path: 'c/d.go', start: 16, end: 22 },
     ])
