@@ -3,8 +3,10 @@ import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
 import { REPO_URL } from '@/lib/site'
 
+// Docs only. The homepage used to have an anchor here, back when it had seven
+// sections worth navigating between; it has four now, and scrolling is cheaper
+// than a link.
 const NAV = [
-  { href: '/#problem', label: 'Why' },
   { href: '/docs/setup', label: 'Setup' },
   { href: '/docs/how-it-works', label: 'How it works' },
   { href: '/docs/relay', label: 'Remote' },
