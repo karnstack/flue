@@ -58,12 +58,14 @@ function Setup() {
             <Shell
               lines={[
                 '$ flue relay setup',
-                '  token verified',
-                '  worker deployed: flue-relay',
-                '  web app uploaded',
-                '  reachable at https://flue-relay.you.workers.dev',
-                '  fleet key minted (Cloudflare never sees it)',
-                '  this machine joined as laptop (laptop-9f3a)',
+                '  ✓ token verified',
+                '  ✓ account: Personal (a1b2c3…)',
+                '  ✓ worker deployed: flue-relay',
+                '  ✓ web app uploaded (128 files)',
+                '  ✓ reachable at https://flue-relay.you.workers.dev',
+                '  ✓ secret set',
+                '  ✓ fleet key minted (stays on your machines; Cloudflare never sees it)',
+                '  ✓ this machine joined as laptop (laptop-9f3a)',
               ]}
             />
             <Note title="Run flue relay setup once, and only once">
@@ -172,21 +174,22 @@ function Setup() {
         <P>
           A machine missing from the list is usually one of three things. It is asleep or
           offline. It never ran <Code>flue relay join</Code>. Or somebody ran{' '}
-          <Code>flue relay setup</Code> a second time, which reset the relay and left this
-          machine holding a fleet key and a secret the relay has moved on from.
+          <Code>flue relay setup</Code> a second time, which resets the relay: every run mints a
+          fresh secret and a fresh fleet key, so every other machine is left holding credentials
+          the relay has moved on from. The address does not change when that happens, so
+          comparing addresses tells you nothing.
         </P>
         <P>
-          Run <Code>flue relay status</Code> on the machine that is missing, and read the fleet
-          line rather than the address. A reset does not change the address, so an address that
-          matches tells you nothing. The fleet line counts how many entries in the
-          relay&rsquo;s directory this machine can verify with the fleet key it holds. When it
-          says an entry is signed by something else, this machine is on a fleet key the relay
-          has left behind. That is the reset.
+          When you are not sure which of the three it is, re-joining is the cheap answer. Take
+          the join line the most recent <Code>flue relay setup</Code> printed, run it on the
+          machine that is missing, and pair your devices again. It costs nothing if the machine
+          was only asleep, and it is the whole fix if it was not.
         </P>
         <P>
-          The fix is the join line the most recent setup printed, run on this machine, and then
-          pairing your devices again. If that same line says this machine is not in the
-          directory, your other devices cannot discover it yet.
+          One line not to read as a fault: <Code>flue relay status</Code> may say that entries
+          are signed by something else. Old directory entries are never removed, so that line
+          stays after a reset even once every machine has re-joined, and the count goes up
+          rather than down as they do. Only <Code>flue relay reset</Code> clears it.
         </P>
         <P>
           Sessions that vanish after you log out of a Linux box mean lingering is off. Run{' '}
