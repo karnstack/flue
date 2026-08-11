@@ -143,11 +143,13 @@ whichever machine is convenient. It needs a Cloudflare API token.
 
 This step holds the only real trap, so it gets a `Note`:
 
-> Do not run `flue relay setup` a second time. A second setup deploys a second
-> Worker and makes a second fleet key. You then have two fleets that cannot see
-> each other. What you notice is a sessions list missing half your machines. If
-> this has already happened, run `flue relay leave` on the extra machine, then
-> join it using the first relay's line.
+> Do not run `flue relay setup` a second time. On the same Cloudflare account
+> it does not give you a second relay, it replaces the one you have: the deploy
+> and the secret are upserts, and every run mints a fresh secret, a fresh fleet
+> key and a fresh machine id. Every other machine is then holding a secret the
+> relay no longer accepts, and every device has to pair again. The way back is
+> the join line the most recent setup printed, run on every other machine. The
+> first setup's line does not work any more.
 
 **03. Join every other machine.** Run the `flue relay join` line that setup
 printed, once on each remaining machine. Guard that line like a root password.
