@@ -2545,6 +2545,70 @@ Refusals are `not_found`, `is_dir`, `too_large`, `denied`, `bad_path`, `busy`
 and `unsupported`, each correlated by `reqId`.
 ```
 
+- [ ] **Step 3b: Pin the invariant neither task 5 nor task 7 pinned**
+
+Neither `stat` nor `read` may move a session's `lastActive`. The sessions list
+orders by that stamp, so a hover or a file open that counted as activity would
+sort the row out from under the pointer resting on it. `peek` has this test
+already (`internal/daemon/peek_test.go`,
+`TestPeekDoesNotCountAsActivityInTheSession`); the two new verbs do not, and the
+review of Task 5 named the gap and left it here deliberately.
+
+Reuse `quiet` from `peek_test.go` rather than sampling the stamp directly. It
+exists because of a real CI flake: the stamp moves on every chunk read back from
+the pty, so a baseline taken the moment a session looks ready catches the pump
+finishing its delivery and blames the verb under test.
+
+Append to `internal/daemon/file_test.go`:
+
+```go
+// TestStatAndReadAreNotActivityInTheSession. The sessions list orders by
+// LastActive, so either verb touching it would reorder the list under the
+// pointer that is resting on it. peek has the same rule and the same test.
+func TestStatAndReadAreNotActivityInTheSession(t *testing.T) {
+	ts, reg := newTestServer(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# notes\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := readTarget(t, reg, dir)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+
+	before := quiet(t, s)
+
+	writeControl(t, c, wire.Stat{ID: s.ID(), Paths: []string{"notes.md"}, ReqID: 91})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		_, ok := msg.(wire.Stats)
+		return ok
+	})
+	if got := s.Info().LastActive; !got.Equal(before) {
+		t.Fatalf("stat moved LastActive from %v to %v", before, got)
+	}
+
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "notes.md", ReqID: 92})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		_, ok := msg.(wire.Eof)
+		return ok
+	})
+	if got := s.Info().LastActive; !got.Equal(before) {
+		t.Fatalf("read moved LastActive from %v to %v", before, got)
+	}
+}
+```
+
+Run it:
+
+```
+go test ./internal/daemon/ -run TestStatAndReadAreNotActivity -v
+```
+
+Expected: PASS. It should pass without any production change — this pins
+behaviour that is already correct, so that a later `c.srv.touch` copied into
+either arm is caught. If it fails, one of the two arms is touching the session
+and that is a real bug to fix here.
+
 - [ ] **Step 4: Run everything**
 
 ```
