@@ -222,3 +222,35 @@ func TestStatRefusesAnUnknownSessionAndTooManyPaths(t *testing.T) {
 		return true
 	})
 }
+
+func TestClassifyAcceptsTextAndImagesAndNothingElse(t *testing.T) {
+	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("\x00", 32))
+
+	cases := []struct {
+		name string
+		head []byte
+		kind string
+		ok   bool
+	}{
+		{"go source", []byte("package main\n\nfunc main() {}\n"), "text", true},
+		{"json", []byte(`{"name":"flue","private":true}`), "text", true},
+		{"an empty file", nil, "text", true},
+		{"utf-8 beyond ascii", []byte("// naïve — ✓\n"), "text", true},
+		{"a png", png, "image", true},
+		{"a compiled object", []byte("\x7fELF\x02\x01\x01\x00\x00\x00"), "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, mime, ok := classify(tc.head)
+			if ok != tc.ok {
+				t.Fatalf("classify ok = %v, want %v (mime %q)", ok, tc.ok, mime)
+			}
+			if kind != tc.kind {
+				t.Errorf("classify kind = %q, want %q (mime %q)", kind, tc.kind, mime)
+			}
+			if ok && mime == "" {
+				t.Error("an accepted file carries no mime type")
+			}
+		})
+	}
+}

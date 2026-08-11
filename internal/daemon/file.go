@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,4 +136,38 @@ func statEntry(raw, cwd, home string) wire.PathEntry {
 	e.Size = fi.Size()
 	e.Mtime = fi.ModTime().Unix()
 	return e
+}
+
+// sniffBytes is how much of a file's head classify needs.
+// http.DetectContentType reads at most this many and the extra would be
+// discarded.
+const sniffBytes = 512
+
+// classify decides what a file is from its first bytes.
+//
+// From the content, never the extension. An extension is a claim by whoever
+// named the file, and the two disagree constantly in a directory an agent has
+// been writing in — a .txt holding a PNG, a .log holding a core dump, a file
+// with no extension at all holding perfectly ordinary Go.
+//
+// Only text and images are accepted. Everything else is refused rather than
+// sent, because the client has nothing to do with a zip but render it as
+// mojibake, and sending megabytes for that is worse than saying no. That
+// includes PDFs and archives, which are legible to something but not to a
+// viewer this small.
+//
+// SVG lands in text, since http.DetectContentType reads it as XML. That is the
+// honest answer here rather than a special case: this function knows what the
+// bytes are, and an SVG genuinely is text — whether a viewer draws it is the
+// viewer's decision to make later.
+func classify(head []byte) (kind, mime string, ok bool) {
+	mime = http.DetectContentType(head)
+	base, _, _ := strings.Cut(mime, ";")
+	switch {
+	case strings.HasPrefix(base, "image/"):
+		return "image", mime, true
+	case strings.HasPrefix(base, "text/"):
+		return "text", mime, true
+	}
+	return "", mime, false
 }
