@@ -29,7 +29,7 @@ export function RelayProtocol() {
         <Hop label="wss /daemon/<id>" dir="down" />
         <Node
           icon={Cloud}
-          title="Worker, one Durable Object per machine"
+          title="Worker, one Durable Object per machine and one for the directory"
           lines={['in your Cloudflare account', 'forwards frames, holds no key']}
         />
         <Hop label="wss /client/<id>" dir="up" />

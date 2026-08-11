@@ -4,9 +4,9 @@ import type { ReactNode } from 'react'
 import { SITE_URL } from '@/lib/site'
 import appCss from '@/styles.css?url'
 
-const TITLE = 'flue — your work keeps running when you walk away'
+const TITLE = 'flue: every terminal session you have running, one tab away'
 const DESCRIPTION =
-  'Builds, agents and SSH sessions keep running on the machine that owns them, and you pick any of them back up on any device you own. One static Go binary, no hosted service.'
+  'Builds, agents and SSH sessions keep running on the machine that owns them. Every one of them is one tab away, on any screen you have. One static Go binary, no hosted service.'
 
 export const Route = createRootRoute({
   head: () => ({
@@ -25,7 +25,7 @@ export const Route = createRootRoute({
       { property: 'og:image:height', content: '630' },
       {
         property: 'og:image:alt',
-        content: 'flue — every session on every machine you own, in one tab',
+        content: 'flue: every session on every machine you own, one tab away',
       },
       { name: 'twitter:card', content: 'summary_large_image' },
       { name: 'theme-color', media: '(prefers-color-scheme: light)', content: '#ffffff' },

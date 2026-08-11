@@ -2,14 +2,14 @@ import { createFileRoute } from '@tanstack/react-router'
 import type { ReactNode } from 'react'
 
 import { Code, DocPage, Link, P } from '@/components/doc-page'
-import { findDoc } from '@/lib/docs'
+import { docTitle, findDoc } from '@/lib/docs'
 import { REPO_URL } from '@/lib/site'
 
 const DOC = findDoc('faq')!
 
 export const Route = createFileRoute('/docs/faq')({
   head: () => ({
-    meta: [{ title: `${DOC.title} — flue` }, { name: 'description', content: DOC.blurb }],
+    meta: [{ title: docTitle(DOC) }, { name: 'description', content: DOC.blurb }],
   }),
   component: Faq,
 })
@@ -29,8 +29,8 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     verdict: 'No. There is nothing of ours in the path to read it with.',
     body: (
       <P>
-        There is no flue server. Local sessions never leave your machine, and remote ones cross a
-        relay that runs in <em>your</em> Cloudflare account, not ours.
+        There is no flue server. Local sessions never leave your machine. Remote ones cross a relay
+        that runs in <em>your</em> Cloudflare account, not ours.
       </P>
     ),
   },
@@ -40,20 +40,20 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     body: (
       <>
         <P>
-          Your browser and your daemon run a Noise IK handshake directly with each other, with the
-          daemon's key pinned when you paired the device. Everything after that is ciphertext the
-          relay holds no key for.
+          Your browser and your daemon run a Noise IK handshake directly with each other. Your
+          browser pinned the daemon&rsquo;s key when you paired the device. Everything after that
+          is ciphertext, and the relay holds no key for it.
         </P>
         <P>
-          The part encryption does not fix: the web app's JavaScript is served by the relay origin,
-          so you are trusting that origin to serve the published code. Code that holds your keys is
-          code you fetched. This is true of every end-to-end encrypted web app and it is true of
-          this one. Self-hosting is the answer flue has, which is why it is the only deployment it
-          offers.
+          Here is the part encryption does not fix. The web app&rsquo;s JavaScript is served by the
+          relay origin, so you are trusting that origin to serve the published code. The code that
+          holds your keys is code you fetched. This is true of every end-to-end encrypted web app,
+          and it is true of this one. Self-hosting is the answer flue has, which is why it is the
+          only way flue is deployed.
         </P>
         <P>
           The full version, including the exact move a hostile origin would make and what we do
-          about it, is in <Link href={FAQ_DOC}>the repository's FAQ</Link>.
+          about it, is in <Link href={FAQ_DOC}>the repository&rsquo;s FAQ</Link>.
         </P>
       </>
     ),
@@ -64,8 +64,8 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     body: (
       <P>
         <Code>flue relay setup</Code> deploys the Worker and the web app into your own Cloudflare
-        account. No flue account, no billing, nothing of anyone else's between your browser and
-        your machines. flue.sh is a landing page and stores nothing.
+        account. No flue account, no billing, nothing of anyone else&rsquo;s between your browser
+        and your machines. flue.sh is a landing page and stores nothing.
       </P>
     ),
   },
@@ -74,24 +74,49 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     verdict: "Nothing. It is MIT licensed, and Cloudflare's free plan covers personal use.",
     body: (
       <P>
-        The relay is a Worker with one Durable Object per machine. What it deploys and what the
-        caps are is in <Link href={RELAY_DOC}>the relay runbook</Link>.
+        The relay is a Worker with one Durable Object per machine, plus one more for the fleet
+        directory. What it deploys and what the caps are is in{' '}
+        <Link href={RELAY_DOC}>the relay runbook</Link>.
       </P>
     ),
   },
   {
     q: 'Do I have to set up remote access?',
-    verdict: 'No. The daemon binds loopback and nothing else until you ask for more.',
+    verdict: 'No. The daemon listens on loopback and nothing else until you ask for more.',
     body: (
       <P>
         Remote access is one opt-in command. Skip it and flue is a local tool that happens to keep
-        your sessions alive.
+        your sessions alive. The steps, if you want it, are in{' '}
+        <Link href="/docs/setup">the setup guide</Link>.
+      </P>
+    ),
+  },
+  {
+    q: 'How many relays do I need?',
+    verdict: 'One, for all your machines.',
+    body: (
+      <P>
+        Run <Code>flue relay setup</Code> on one machine, then run the join line it prints on every
+        other machine. Running setup a second time does not add a relay. It replaces the one you
+        have, with a fresh secret and a fresh fleet key, so every machine then has to re-join with
+        the newly printed line and every device has to pair again.
+      </P>
+    ),
+  },
+  {
+    q: 'Do I have to pair my phone with every machine?',
+    verdict: 'No. Pair it once and it reaches the whole fleet.',
+    body: (
+      <P>
+        The machine that runs the pairing signs a device certificate that every machine in the
+        fleet accepts. You do pair per browser, though: Safari and Chrome on the same iPad each
+        hold their own keys, so each one pairs on its own.
       </P>
     ),
   },
   {
     q: 'What happens when I close the tab?',
-    verdict: 'Nothing. Closing detaches; it does not kill.',
+    verdict: 'Nothing. Closing detaches the session. It does not kill it.',
     body: (
       <P>
         The daemon owns the shell and its scrollback, so the build keeps running. Reattach from any
@@ -104,8 +129,21 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     verdict: 'Yes, and they mirror live.',
     body: (
       <P>
-        Typing on the phone shows up in the laptop's browser. The phone's 40 columns do not shrink
-        the laptop.
+        What you type on the phone appears in the laptop&rsquo;s browser. The terminal takes the
+        size of whichever view you are using, so picking up the phone fits the session to the
+        phone, and your next keystroke on the laptop fits it back.
+      </P>
+    ),
+  },
+  {
+    q: 'What happens to sessions on a laptop that goes to sleep?',
+    verdict: 'They stop running, and they come back when it wakes.',
+    body: (
+      <P>
+        Nothing is lost. The switcher still shows the ones this browser has opened before, greyed
+        and marked unreachable, and it still opens them. It remembers per browser, so your phone
+        lists where your phone has been. If a job needs to keep going while you are away, start it
+        on a machine that stays on: a desktop, a Pi, a VPS.
       </P>
     ),
   },
@@ -119,9 +157,9 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     verdict: 'Who connected, when, how much traffic moved, and the whole pairing exchange.',
     body: (
       <P>
-        Enough for traffic analysis of a session, never its content. The pairing exchange is the
-        one worth naming rather than filing under metadata: it crosses a cleartext control channel
-        carrying a single-use token that lives two minutes. The full list is in{' '}
+        Enough to analyse a session, never to read one. The pairing exchange is worth naming rather
+        than filing under metadata: it crosses a cleartext control channel carrying a single-use
+        token that lives two minutes. The full list is in{' '}
         <Link href={PROTOCOL_DOC}>the protocol spec</Link>.
       </P>
     ),

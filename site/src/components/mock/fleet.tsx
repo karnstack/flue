@@ -156,10 +156,17 @@ function SessionList() {
                 key={session.name}
                 className={cn(
                   'flex items-center gap-2 rounded-md py-1.5 pr-2 pl-3',
-                  /* The row the phone beside this window is holding open. */
-                  session.pinned && 'bg-teal-500/6 inset-ring inset-ring-teal-500/30',
+                  /* The ring is the site's own mark, not the app's: it says
+                     the phone beside this window has this row open, which is
+                     what makes the two figures one session rather than two
+                     pictures. Pinning is a different fact and wears the star
+                     below. */
+                  session.held && 'bg-teal-500/6 inset-ring inset-ring-teal-500/30',
                 )}
               >
+                {/* The star, and only the star, is how the app marks a pinned
+                    row (web/src/components/session-table.tsx). The blank keeps
+                    every other row's name on the same left edge. */}
                 {session.pinned ? (
                   <Star
                     className="size-3 shrink-0 fill-current text-muted-foreground"
@@ -298,7 +305,7 @@ export function PhoneFrame({ className }: { className?: string }) {
             aria-hidden="true"
             className="size-1.5 shrink-0 rounded-full bg-zinc-950 dark:bg-white"
           />
-          <p className="truncate text-[0.6875rem] font-medium">claude — relay handshake</p>
+          <p className="truncate text-[0.6875rem] font-medium">claude: relay handshake</p>
           <span className="ml-auto shrink-0 font-mono text-[0.625rem] text-muted-foreground">
             macbook
           </span>

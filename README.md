@@ -1,6 +1,6 @@
 <h1 align="center">flue</h1>
 
-<p align="center"><strong>Your work shouldn't stop when you close the laptop.</strong></p>
+<p align="center"><strong>The desk stops mattering.</strong></p>
 
 <p align="center">
   <a href="https://github.com/karnstack/flue/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/karnstack/flue/ci.yml?branch=main&label=ci" alt="CI status"></a>
@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://flue.sh">flue.sh</a> ·
+  <a href="https://flue.sh/docs/setup">setup</a> ·
   <a href="https://flue.sh/docs/how-it-works">how it works</a> ·
   <a href="https://flue.sh/docs/relay">remote access</a> ·
   <a href="https://flue.sh/docs/faq">faq</a>
@@ -23,20 +24,26 @@
   </picture>
 </p>
 
-Builds, agents and SSH sessions keep running on the machine that owns them,
-and you pick any of them back up on any device you have. A small Go daemon
-holds the shells and their scrollback; a web app renders them. Closing the tab
-detaches rather than kills, and reattaching replays what you missed.
+Builds, agents and SSH sessions keep running on the machine that owns them.
+Every one of them is one tab away, on any screen you have. A small Go daemon
+holds the shells and their scrollback, and a web app draws them. Closing the
+tab does not kill a session. It only detaches it, and reattaching replays what
+you missed.
 
 - **Sessions outlive the tab.** Close it and the build keeps running.
 - **One list, every machine.** Name, tag, pin, group and search the whole
-  fleet from one place. Hover a session to see what it is actually doing.
-- **Reachable from anything you own.** Pair a phone with a QR code. Two
-  devices on one session mirror live, and the phone's 40 columns don't shrink
-  the laptop.
+  fleet from one place. Hover a session to see what it is doing.
+- **One keystroke to any of them.** `⌘K`, or `Ctrl+Shift+K` anywhere, opens
+  every session on every machine. The highlighted row shows its own last
+  fourteen lines, so you can see which one is the build. `Ctrl+Shift+1` to `9`
+  jumps to a pinned session.
+- **Reachable from anything you own.** Pair a phone with a QR code, once for
+  the whole fleet. Two devices on one session mirror live, and the size follows
+  whichever view you are using.
 - **No hosted service.** Remote access runs through a relay you deploy into
-  your own Cloudflare account, end-to-end encrypted with the daemon's key
-  pinned at pairing. flue.sh is a landing page, never part of the data path.
+  your own Cloudflare account, end-to-end encrypted, with the daemon's key
+  pinned at pairing. flue.sh is a landing page and is never part of the data
+  path.
 
 One static Go binary. macOS, Linux, WSL. No Node, no Python, no toolchain.
 
@@ -48,10 +55,29 @@ flue enable
 ```
 
 `flue enable` installs a login service, starts the daemon, and opens the UI.
-On Linux it also runs `loginctl enable-linger`, so the daemon — and your
-sessions — survive your last logout; if lingering can't be enabled (some
-containers refuse it), `flue enable` warns and names the command to run.
+On Linux it also runs `loginctl enable-linger`, so the daemon and your sessions
+survive your last logout. If lingering cannot be turned on, which happens in
+some containers, `flue enable` warns you and names the command to run.
 Everything after that happens in the browser.
+
+## Recommended setup
+
+One relay, every machine joined to it, every device paired once.
+
+1. Install flue and run `flue enable` on every machine that runs work: the
+   laptop, the desktop, the Pi, the VPS.
+2. Run `flue relay setup` **once**, on one machine. Running it again does not
+   add a relay, it replaces the one you have: every machine then has to re-join
+   with the newly printed line, and every device has to pair again.
+3. Run the `flue relay join` line it prints on every other machine.
+4. Pair each phone or tablet once, from a QR code. That pairing covers the
+   whole fleet, so there is no second ceremony per machine. It is per browser,
+   so Safari and Chrome on one iPad pair separately.
+
+Long jobs belong on a machine that stays on. A sleeping laptop's sessions are
+not lost, but nothing runs until it wakes.
+
+The full version is at [flue.sh/docs/setup](https://flue.sh/docs/setup).
 
 ## The CLI
 
@@ -73,8 +99,8 @@ flue version       # print the version (also --version, -v)
 
 ## Remote access
 
-The daemon binds loopback and nothing else, so reaching it from elsewhere is
-opt-in and takes one command:
+The daemon listens on loopback and nothing else, so reaching it from somewhere
+else is opt-in and takes one command:
 
 ```sh
 flue relay setup                                                 # machine 1: paste a Cloudflare token
@@ -82,9 +108,9 @@ flue relay join wss://<your-relay> --secret <...> --fleet <...>  # every other m
 ```
 
 That deploys a Worker **and** this web app into your own Cloudflare account,
-on the free tier. The same deploy is a card on the UI's Remote screen. One
-relay fronts every machine you own; pairing is per machine, once per browser,
-from the QR each machine shows.
+on the free plan. The same deploy is a card on the UI's Remote screen. One
+relay fronts every machine you own, and pairing a device covers the whole
+fleet rather than one machine.
 
 What it deploys and what it costs is at
 [flue.sh/docs/relay](https://flue.sh/docs/relay), with the operator-grade
@@ -124,3 +150,4 @@ under [site/](site/), and `make site-dev` runs it.
 ## License
 
 [MIT](LICENSE)
+

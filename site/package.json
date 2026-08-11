@@ -5,7 +5,8 @@
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "vite dev --port 3100",
-    "build": "vite build && node scripts/sitemap.mjs",
+    "build": "vite build && node scripts/sitemap.mjs && node scripts/check-prose.mjs",
+    "check:prose": "node scripts/check-prose.mjs",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "deploy": "wrangler deploy"

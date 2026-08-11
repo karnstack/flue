@@ -41,7 +41,7 @@
     <text class="title" x="80" y="313">flue daemon</text>
     <text class="body" x="80" y="334">one static Go binary</text>
     <text class="body" x="80" y="354">owns the PTYs and scrollback</text>
-    <text class="body" x="80" y="374">binds loopback only</text>
+    <text class="body" x="80" y="374">listens on loopback only</text>
     <text class="body" x="80" y="394">dials out, never listens out</text>
 
     <!-- zone: your cloudflare account -->

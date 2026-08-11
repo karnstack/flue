@@ -19,6 +19,12 @@ export function SiteFooter() {
         <div className="flex items-center gap-x-6 gap-y-3 max-sm:flex-wrap">
           <nav className="flex items-center gap-x-6" aria-label="Documentation">
             <a
+              href="/docs/setup"
+              className="text-base font-normal text-muted-foreground hover:text-foreground sm:text-sm"
+            >
+              Setup
+            </a>
+            <a
               href="/docs/how-it-works"
               className="text-base font-normal text-muted-foreground hover:text-foreground sm:text-sm"
             >

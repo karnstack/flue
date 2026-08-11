@@ -13,10 +13,10 @@ const FRAME =
   'flex h-32 items-center justify-center gap-3 overflow-hidden rounded-lg border border-dashed border-border px-4'
 
 /**
- * A window with a build in it, and the same window gone — the dashed outline
+ * A window with a build in it, and the same window gone. The dashed outline
  * is what is left of the work when the thing that owned it closes.
  */
-export function LidFigure() {
+export function WindowFigure() {
   return (
     <div className={FRAME} aria-hidden="true">
       <div className="w-28 shrink-0 rounded-md bg-card shadow-sm ring-1 ring-zinc-950/10 dark:shadow-none dark:ring-white/10">

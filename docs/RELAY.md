@@ -147,10 +147,14 @@ is now presenting a stale secret and has to run the newly printed join line —
 and, because ids carry a MAC tag minted under the secret, every old id stops
 routing at the same moment (the re-join each machine runs anyway mints its
 fresh one). The fresh fleet key is deliberate for the same reason and cuts
-deeper: it retires every device certificate the old key signed, so no device
-walks into any machine on a cert from before the reset, and every device
-pairs again. The
-fresh id means the old hub slot is simply abandoned: a browser that paired
+deeper, though not by revoking anything: a device already in a machine's
+registry is admitted on its key, cert or no cert
+(`internal/transport/relay/channel.go`, rule 1). What it costs is discovery.
+A browser never overwrites a fleet key it has already pinned
+(`web/src/fleet/fleet.ts`, `adoptFleetKey`), so it goes on verifying machine
+certificates under a key that now signs nothing, and lists no machine at all.
+Pairing is the one thing that replaces the pin, so every device pairs again.
+The fresh id means the old hub slot is simply abandoned: a browser that paired
 against it is dialling a slot no daemon dials, answered `503 daemon offline`
 until it pairs this machine again and forgets the old row in the picker. To
 *add* a machine, the join line is the whole of it, setup is never the command

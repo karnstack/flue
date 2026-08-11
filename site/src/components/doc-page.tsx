@@ -159,3 +159,36 @@ export function Note({ title, children }: { title: string; children: ReactNode }
     </div>
   )
 }
+
+/** An ordered run of steps. The only numbered structure the docs have. */
+export function Steps({ children }: { children: ReactNode }) {
+  return (
+    <ol role="list" className="flex max-w-[68ch] flex-col gap-8">
+      {children}
+    </ol>
+  )
+}
+
+/**
+ * One step.
+ *
+ * The number is written rather than left to a marker, because it is set in
+ * mono and tabular and has to line up with the ones above and below it however
+ * many there are.
+ */
+export function Step({ n, title, children }: { n: number; title: string; children: ReactNode }) {
+  return (
+    <li className="flex gap-4">
+      <span
+        aria-hidden="true"
+        className="mt-0.5 shrink-0 font-mono text-sm tabular-nums text-primary"
+      >
+        {String(n).padStart(2, '0')}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-lg font-medium text-pretty">{title}</p>
+        <div className="mt-3 flex flex-col gap-4">{children}</div>
+      </div>
+    </li>
+  )
+}
