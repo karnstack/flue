@@ -319,6 +319,16 @@ git commit -m "Find the paths in a line of terminal output, generously"
 
 ### Task 2: Assembling a wrapped line, and mapping back out of it
 
+> **Superseded during execution.** The implementation below pads every row to
+> `cols` and cuts it back, and both of those are wrong. The pad invents a blank
+> at a wrap join when a row is shorter than its cell count, and the cut deletes
+> a real character when a row is longer than one, which a combining mark or a
+> ZWJ emoji makes ordinary; the cut can also split a surrogate pair. Neither
+> failure needs a double-width character. What shipped instead carries per-row
+> start offsets in `LogicalLine` and neither pads nor cuts, which is xterm's own
+> shape. Read `web/src/emulator/wrap.ts` for the real contract.
+
+
 **Files:**
 - Create: `web/src/emulator/wrap.ts`
 - Test: `web/src/emulator/wrap.test.ts`
@@ -733,7 +743,7 @@ Expected: FAIL, cannot resolve `./link-provider`.
 Create `web/src/emulator/link-provider.ts`:
 
 ```ts
-import { logicalLineAt, spansFor, type BufferRows } from './wrap'
+import { logicalLineAt, spansFor, type BufferRows, type LogicalLine } from './wrap'
 import type { LinkDetector, LinkMatch } from './types'
 
 /**
@@ -840,7 +850,7 @@ function rowsOf(buf: LinkBuffer): BufferRows {
 function linksFor<T>(
   term: LinkTerminal,
   detector: LinkDetector<T>,
-  line: { text: string; top: number; cols: number },
+  line: LogicalLine,
   match: LinkMatch<T>,
 ): ProvidedLink[] {
   const text = detector.label?.(match) ?? line.text.slice(match.start, match.end)
