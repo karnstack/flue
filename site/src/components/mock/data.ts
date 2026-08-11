@@ -108,101 +108,176 @@ export const GROUPS: MockGroup[] = [
 ]
 
 /**
- * The same fleet, arranged the way the switcher arranges it.
+ * The same fleet, as the switcher's rows.
  *
- * Pinned first with number keys on them, then where this browser has been,
- * then the rest. That is the app's own order (web/src/switcher/order.ts) and
- * the reason the palette is a reflex rather than a search.
+ * Flat rather than pre-sectioned, because the drawn palette on the homepage
+ * is typed into and the app re-sections on every keystroke: at rest the rows
+ * read in three runs, and any search collapses them into one
+ * (buildPalette, web/src/switcher/order.ts). A list of sections could only
+ * draw the resting half of that.
+ *
+ * Each row carries its own tail, because the pane beside the list follows the
+ * highlight. That pane is the whole argument for the palette: "which one is
+ * the build?" is answered by looking rather than by reading names.
  */
 export type MockSwitcherRow = {
+  /** Stable identity, and what the highlight is tracked by. */
+  key: string
   label: string
   cwd: string
   machine: string
+  /** Which run this row rests in, before anyone types. */
+  section: 'pinned' | 'recent' | 'all'
   /** The number key that jumps here, on pinned rows only. */
   badge?: string
   state: 'running' | 'exited'
-  /** The row the keyboard is on. Exactly one row has this. */
-  active?: boolean
   /** The session the tab is already in. */
   current?: boolean
+  /**
+   * The row's last lines. The app asks the machine for a scrollback tail and
+   * draws the last fourteen (PEEK_LINES,
+   * web/src/components/session-switcher.tsx). These are thirteen at most, so
+   * the prompt row the pane draws under a running session is the fourteenth.
+   */
+  preview: string[]
 }
 
-export type MockSwitcherSection = {
-  label: string
-  rows: MockSwitcherRow[]
+/** The headings the resting palette puts over each run. */
+export const SWITCHER_SECTION_LABELS: Record<MockSwitcherRow['section'], string> = {
+  pinned: 'Pinned',
+  recent: 'Recent',
+  all: 'All sessions',
 }
 
-export const SWITCHER_SECTIONS: MockSwitcherSection[] = [
+export const SWITCHER_ROWS: MockSwitcherRow[] = [
   {
-    label: 'Pinned',
-    rows: [
-      {
-        label: 'claude: relay handshake',
-        cwd: '~/code/flue',
-        machine: 'macbook',
-        badge: '1',
-        state: 'running',
-        active: true,
-      },
-      {
-        label: 'go test ./...',
-        cwd: '~/code/flue',
-        machine: 'studio',
-        badge: '2',
-        state: 'running',
-      },
+    key: 'macbook/claude',
+    label: 'claude: relay handshake',
+    cwd: '~/code/flue',
+    machine: 'macbook',
+    section: 'pinned',
+    badge: '1',
+    state: 'running',
+    preview: [
+      'Read relay/handshake.go, relay/reaper.go and the two',
+      'tests around them.',
+      '',
+      'Handshake fails when the reaper fires mid-pairing. The',
+      'pairing side never sees the ack. Add the guard?',
+      '',
+      '> yes, with a test',
+      '',
+      'Added TestReaperSkipsPairing. Running it now.',
+      '',
+      '--- PASS: TestReaperSkipsPairing (0.02s)',
+      'ok      github.com/karnstack/flue/relay   0.31s',
+      // The blank before the prompt row under it. Between content rather than
+      // trailing it, which is the only kind of blank the app's own reader keeps
+      // (previewLines, web/src/sessions/preview.ts).
+      '',
     ],
   },
   {
-    label: 'Recent',
-    rows: [
-      {
-        label: 'pnpm vitest --watch',
-        cwd: '~/code/flue/web',
-        machine: 'macbook',
-        state: 'running',
-        current: true,
-      },
-      { label: 'ssh prod-1', cwd: '~', machine: 'studio', state: 'running' },
+    key: 'studio/go-test',
+    label: 'go test ./...',
+    cwd: '~/code/flue',
+    machine: 'studio',
+    section: 'pinned',
+    badge: '2',
+    state: 'running',
+    preview: [
+      '--- PASS: TestDirectoryUpsert (0.01s)',
+      '--- PASS: TestDirectoryKeepsStaleRows (0.01s)',
+      '--- PASS: TestReaperSkipsPairing (0.02s)',
+      'ok      github.com/karnstack/flue/relay            0.31s',
+      'ok      github.com/karnstack/flue/internal/relaydeploy    0.94s',
+      '',
+      '=== RUN   TestEffectiveLockedFollowsLastActiveView',
+      '=== RUN   TestResizeIgnoresDetachedView',
+      '--- PASS: TestResizeIgnoresDetachedView (0.00s)',
+      '',
     ],
   },
   {
-    label: 'All sessions',
-    rows: [
-      { label: 'tail -f /var/log/syslog', cwd: '~', machine: 'pi-4', state: 'running' },
-      { label: 'docker compose up', cwd: '~/srv/media', machine: 'vps', state: 'exited' },
+    key: 'macbook/vitest',
+    label: 'pnpm vitest --watch',
+    cwd: '~/code/flue/web',
+    machine: 'macbook',
+    section: 'recent',
+    state: 'running',
+    current: true,
+    preview: [
+      ' ✓ src/switcher/order.test.ts (14 tests) 21ms',
+      ' ✓ src/switcher/keys.test.ts (9 tests) 8ms',
+      ' ✓ src/sessions/view.test.ts (22 tests) 34ms',
+      '',
+      ' Test Files  3 passed (3)',
+      '      Tests  45 passed (45)',
+      '   Duration  412ms',
+      '',
+      ' PASS  Waiting for file changes...',
+      '       press h to show help, press q to quit',
+      '',
+    ],
+  },
+  {
+    key: 'studio/ssh-prod',
+    label: 'ssh prod-1',
+    cwd: '~',
+    machine: 'studio',
+    section: 'recent',
+    state: 'running',
+    preview: [
+      'Welcome to Ubuntu 24.04.2 LTS (GNU/Linux 6.8.0 aarch64)',
+      '',
+      '  System load:  0.08',
+      '  Memory usage: 31%',
+      '  Processes:    142',
+      '',
+      'Last login: Tue Aug 11 09:14:02 2026 from 10.0.0.4',
+      '',
+      'karn@prod-1:~$ systemctl is-active media',
+      'active',
+      '',
+    ],
+  },
+  {
+    key: 'pi-4/syslog',
+    label: 'tail -f /var/log/syslog',
+    cwd: '~',
+    machine: 'pi-4',
+    section: 'all',
+    state: 'running',
+    preview: [
+      'Aug 11 09:12:03 pi-4 systemd[1]: Started flue daemon.',
+      'Aug 11 09:12:03 pi-4 flue[612]: listening on 127.0.0.1:7717',
+      'Aug 11 09:12:04 pi-4 flue[612]: relay dialled, 3 machines online',
+      'Aug 11 09:41:19 pi-4 CRON[9033]: (karn) CMD (backup.sh)',
+      'Aug 11 10:07:52 pi-4 flue[612]: session attached, device phone',
+      'Aug 11 10:41:19 pi-4 CRON[9251]: (karn) CMD (backup.sh)',
+      'Aug 11 11:07:55 pi-4 flue[612]: session detached, device phone',
+      'Aug 11 11:41:19 pi-4 CRON[9412]: (karn) CMD (backup.sh)',
+      '',
+    ],
+  },
+  {
+    key: 'vps/compose',
+    label: 'docker compose up',
+    cwd: '~/srv/media',
+    machine: 'vps',
+    section: 'all',
+    state: 'exited',
+    preview: [
+      'media-1  | listening on :8096',
+      'media-1  | library scan complete, 2411 items',
+      '^C',
+      'Gracefully stopping... (press Ctrl+C again to force)',
+      ' Container media-1  Stopping',
+      ' Container media-1  Stopped',
+      ' Container media-1  Removed',
+      '',
+      'exit',
+      '',
     ],
   },
 ]
-
-/**
- * What the pane beside the list shows for the highlighted row.
- *
- * The app asks the machine for a scrollback tail and draws the last fourteen
- * lines of it (PEEK_LINES, web/src/components/session-switcher.tsx). This is
- * that, invented: thirteen lines here and the prompt row the component draws
- * under them, which is the fourteenth. And it is the whole argument for the
- * pane: "which one is the build?" is answered by looking.
- */
-export const SWITCHER_PREVIEW: { title: string; machine: string; lines: string[] } = {
-  title: 'claude: relay handshake',
-  machine: 'macbook',
-  lines: [
-    'Read relay/handshake.go, relay/reaper.go and the two',
-    'tests around them.',
-    '',
-    'Handshake fails when the reaper fires mid-pairing. The',
-    'pairing side never sees the ack. Add the guard?',
-    '',
-    '> yes, with a test',
-    '',
-    'Added TestReaperSkipsPairing. Running it now.',
-    '',
-    '--- PASS: TestReaperSkipsPairing (0.02s)',
-    'ok      github.com/karnstack/flue/relay   0.31s',
-    // The blank before the prompt row under it. Between content rather than
-    // trailing it, which is the only kind of blank the app's own reader keeps
-    // (previewLines, web/src/sessions/preview.ts).
-    '',
-  ],
-}
