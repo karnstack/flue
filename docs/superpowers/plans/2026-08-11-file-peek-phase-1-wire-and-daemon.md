@@ -2541,9 +2541,48 @@ a read finishing and a client cancelling it cross on the wire routinely, and a
 race the client cannot avoid should not be an error it has to handle. Every
 read is ended and its file closed when the connection drops.
 
+**A cancel stops a stream; it does not un-send one.** Cancelling unparks the
+pump wherever it is waiting, so nothing further is read from the file, but a
+frame the outbox has already accepted belongs to the writer, which has no way
+to drop it again. More than that: the pump parks in selects that offer outbox
+room on one arm and the cancelled read on the other, and a select whose arms are
+both ready may take either, so a chunk can be queued *after* the cancel was
+handled. The same is true of `eof`, whose "was this cancelled" check is
+check-then-act ahead of the same select.
+
+A client must therefore discard `0x02` frames and an `eof` naming a ref it has
+cancelled, rather than treat either as a protocol violation. The ref is enough
+to do that unambiguously: refs come from a counter that only ever goes up, so a
+cancelled ref never names a later read.
+
 Refusals are `not_found`, `is_dir`, `too_large`, `denied`, `bad_path`, `busy`
 and `unsupported`, each correlated by `reqId`.
 ```
+
+- [ ] **Step 3a: Correct two comments before transcribing them**
+
+Task 8's review found two comments that contradict the rule Task 8's own cancel
+arm establishes. Both were written verbatim from this plan, and both would be
+carried into the spec by the step above if left alone.
+
+In `internal/daemon/file_test.go`, `TestCancelStopsAReadAndReleasesItsRef`'s doc
+comment claims the test proves "no eof arrives for a cancelled read". The body
+never asserts that, and per the cancel arm an `eof` for a cancelled ref is a
+legal thing to receive. Reword to say the observable half is the slot, and that
+an `eof` for a cancelled ref is legal and deliberately not asserted against.
+
+In `internal/daemon/conn.go`, the cancel arm's comment says "the chunk already
+in the pump's hands". `endRead` releases before it closes the file, and the
+pump's second wait can take the writer's arm when both are ready, so the pump
+can loop and queue another chunk before the close lands. Make it plural: a
+client author reading the singular could reasonably tolerate exactly one.
+
+Also in `internal/daemon/file_test.go`, `TestClosingAConnectionEndsItsReads`
+says it "asserts the pump ended rather than the slot". It asserts neither: a
+fresh connection reading successfully holds even if the dropped connection
+leaked both, since the cap is per connection. Say plainly that the assertion is
+liveness and that the real property is carried by the race build walking the
+`CloseNow` teardown.
 
 - [ ] **Step 3b: Pin the invariant neither task 5 nor task 7 pinned**
 
