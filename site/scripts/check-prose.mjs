@@ -24,8 +24,7 @@ const BANNED = [
 
 async function exists(path) {
   try {
-    await stat(path)
-    return true
+    return (await stat(path)).isDirectory()
   } catch {
     return false
   }
@@ -68,7 +67,18 @@ function context(text, at) {
   return `${lead}${squash(before)}${text[at]}${squash(after)}${tail}`
 }
 
-const files = [...(await targets()), README]
+const prerendered = await targets()
+
+/**
+ * A dist/client with no HTML in it means the build did not finish, and
+ * scanning only the README would report clean having checked almost nothing.
+ * Count the pages, not the list: the README is always on the end of it.
+ */
+if (!prerendered.some((file) => file.endsWith('.html'))) {
+  throw new Error('check-prose: no prerendered pages under dist/client, did vite build run?')
+}
+
+const files = [...prerendered, README]
 
 /** One entry per file that has hits, in scan order, each with every hit. */
 const found = []
