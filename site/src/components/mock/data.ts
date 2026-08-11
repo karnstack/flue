@@ -31,7 +31,7 @@ export const GROUPS: MockGroup[] = [
     tally: '2 running',
     sessions: [
       {
-        name: 'claude — relay handshake',
+        name: 'claude: relay handshake',
         command: '/bin/zsh -l',
         path: '~/code/flue',
         age: '2m ago',

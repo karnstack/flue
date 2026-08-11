@@ -298,7 +298,7 @@ export function PhoneFrame({ className }: { className?: string }) {
             aria-hidden="true"
             className="size-1.5 shrink-0 rounded-full bg-zinc-950 dark:bg-white"
           />
-          <p className="truncate text-[0.6875rem] font-medium">claude — relay handshake</p>
+          <p className="truncate text-[0.6875rem] font-medium">claude: relay handshake</p>
           <span className="ml-auto shrink-0 font-mono text-[0.625rem] text-muted-foreground">
             macbook
           </span>

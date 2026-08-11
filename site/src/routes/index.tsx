@@ -3,7 +3,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { ArrowRight, Cloud, HardDrive, Lock, Plus, Smartphone } from 'lucide-react'
 
 import { CopyCommand } from '@/components/copy-command'
-import { LidFigure, ScatteredFigure, WaitingFigure } from '@/components/mock/figures'
+import { ScatteredFigure, WaitingFigure, WindowFigure } from '@/components/mock/figures'
 import { FleetWindow, PhoneFrame } from '@/components/mock/fleet'
 import { MockTerminal, ok, output, prompt } from '@/components/mock/terminal'
 import { SiteFooter } from '@/components/site-footer'
@@ -36,21 +36,21 @@ const RELAY_LINES = [
 
 const PROBLEMS = [
   {
-    term: 'You close the lid and the build dies.',
+    term: 'You close the window and the build dies.',
     detail:
-      'A shell belongs to the window that opened it. Lose the window (a reboot, a dropped SSH, a closed tab) and you lose whatever was running in it, plus the twenty minutes it takes to get back to where you were.',
-    figure: LidFigure,
+      'A shell belongs to the window that opened it. Lose the window, through a reboot, a dropped SSH link or a closed tab, and you lose what was running in it. You also lose the twenty minutes it takes to get back to where you were.',
+    figure: WindowFigure,
   },
   {
     term: 'The agent asked a question an hour ago.',
     detail:
-      'Long jobs need answers at moments you are not at the desk. With no way in from the device in your pocket, the run just sits there waiting for someone to come back and press a key.',
+      'Long jobs need answers at times when you are not at your desk. If you cannot reach the machine from the device in your pocket, the run just sits there and waits for you.',
     figure: WaitingFigure,
   },
   {
     term: 'Four machines, and no single list.',
     detail:
-      'A laptop, a desktop, a Pi, a VPS. Each one keeps its sessions to itself, so knowing what is running anywhere means logging into everywhere and reading four different answers.',
+      'A laptop, a desktop, a Pi, a VPS. Each one keeps its sessions to itself. To find out what is running, you have to log in to all four and read four answers.',
     figure: ScatteredFigure,
   },
 ]
@@ -218,11 +218,11 @@ function Problem() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <p className="font-mono text-sm tracking-wide text-primary uppercase">The problem</p>
         <h2 className="mt-3 max-w-[35ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-          A terminal has no memory of you.
+          A terminal forgets you.
         </h2>
         <p className="mt-5 max-w-[56ch] text-lg text-pretty text-muted-foreground">
-          Every shell is tied to the window that opened it and the machine it lives on. Both of
-          those are things you walk away from.
+          Every shell is tied to the window that opened it, and to the machine it runs on. You walk
+          away from both.
         </p>
 
         <dl className="mt-12 grid gap-x-8 gap-y-10 border-t border-dashed border-border pt-10 sm:grid-cols-3">
@@ -251,16 +251,17 @@ function How() {
           <div>
             <p className="font-mono text-sm tracking-wide text-primary uppercase">How it works</p>
             <h2 className="mt-3 max-w-[35ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-              One daemon owns the shells. Every device just renders them.
+              One daemon owns the shells. Every device just shows them.
             </h2>
             <p className="mt-5 max-w-[56ch] text-lg text-pretty text-muted-foreground">
-              A small Go daemon holds the terminals and their scrollback. Closing the tab detaches
-              rather than kills, so the build keeps going. Reattach and it replays what you missed.
+              A small Go daemon holds the terminals and their scrollback. Closing the tab does not
+              kill the session. It only detaches it, so the build keeps going. Reattach and the
+              daemon replays what you missed.
             </p>
             <p className="mt-4 max-w-[56ch] text-lg text-pretty text-muted-foreground">
-              Attach from two devices and they mirror live: typing on the phone shows up in the
-              laptop&rsquo;s browser, and the phone&rsquo;s 40 columns don&rsquo;t shrink the
-              laptop.
+              Two devices can attach to one session and they mirror live. What you type on the phone
+              appears in the laptop&rsquo;s browser. The phone is 40 columns wide, and that does not
+              make the laptop&rsquo;s terminal smaller.
             </p>
             <a
               href="/docs/how-it-works"
@@ -295,15 +296,15 @@ function Remote() {
               Reachable from anywhere, on infrastructure you own.
             </h2>
             <p className="mt-5 max-w-[56ch] text-lg text-pretty text-muted-foreground">
-              The daemon binds loopback and nothing else, so reaching it from elsewhere is opt-in
-              and takes one command. It deploys a relay Worker and this web app into your own
-              Cloudflare account, on the free tier, and every machine you own shares it.
+              The daemon listens on loopback and nothing else, so reaching it from somewhere else is
+              opt-in and takes one command. That command deploys a relay Worker and this web app
+              into your own Cloudflare account, on the free plan. Every machine you own shares it.
             </p>
             <p className="mt-4 max-w-[56ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-              Everything crossing the relay is end-to-end encrypted with Noise IK, the
-              daemon&rsquo;s key pinned when the browser pairs, so the Worker forwards ciphertext it
-              holds no key for. The relay is new: built and working, but not yet through its release
-              gate, so treat it as ready to try rather than ready to rely on.
+              Everything crossing the relay is end-to-end encrypted with Noise IK. Your browser pins
+              the daemon&rsquo;s key when it pairs, so the Worker only forwards ciphertext it holds
+              no key for. The relay is new. It is built and it works, but it has not been through
+              its release gate yet, so treat it as ready to try rather than ready to rely on.
             </p>
             <a
               href="/docs/relay"
@@ -330,14 +331,14 @@ const PATH = [
   },
   {
     title: 'Your Cloudflare account',
-    body: 'A relay Worker you deployed forwards ciphertext between devices. It holds no key and can read nothing.',
+    body: 'A relay Worker you deployed forwards ciphertext between devices. It holds no key, so it can read nothing.',
     mono: 'flue-relay.you.workers.dev',
     icon: Cloud,
   },
   {
     title: 'Your other devices',
-    body: 'Each browser pairs once from a QR code and pins the daemon\u2019s key from then on.',
-    mono: 'phone \u00b7 tablet \u00b7 second laptop',
+    body: 'Each browser pairs once from a QR code, and pins the daemon’s key from then on.',
+    mono: 'phone · tablet · second laptop',
     icon: Smartphone,
   },
 ]
@@ -351,8 +352,8 @@ function Trust() {
           There is no hosted service.
         </h2>
         <p className="mt-5 max-w-[56ch] text-lg text-pretty text-muted-foreground">
-          No flue account, no flue server, no billing. Three places, all yours, and flue.sh is
-          docs and downloads, never part of the data path.
+          No flue account, no flue server, no billing. Three places, and all of them are yours.
+          flue.sh serves docs and downloads. It is never part of the data path.
         </p>
 
         {/* The three places, as a path rather than as three cards: dashed
@@ -421,9 +422,15 @@ function Install() {
             Install it, then close the tab on purpose.
           </h2>
           <p className="mt-5 max-w-[48ch] text-lg text-pretty text-muted-foreground">
-            <code className="font-mono text-foreground">flue enable</code> installs a login
-            service, starts the daemon and opens the UI. Everything after that happens in the
-            browser.
+            <code className="font-mono text-foreground">flue enable</code> installs a login service,
+            starts the daemon and opens the UI. Everything after that happens in the browser.
+          </p>
+          <p className="mt-3 max-w-[48ch] text-base text-muted-foreground sm:text-sm">
+            Setting up more than one machine?{' '}
+            <a href="/docs/setup" className="text-primary underline underline-offset-4">
+              Read the setup guide
+            </a>
+            .
           </p>
           <div className="w-full">
             <InstallBlock align="center" />
