@@ -67,6 +67,11 @@ const (
 var (
 	errConnClosed     = errors.New("daemon: connection closed")
 	errConnBacklogged = errors.New("daemon: client is not draining its socket")
+	// errSendAbandoned is a frame the producer gave up on while waiting for
+	// room: a file read that was cancelled, or a connection being torn down.
+	// Distinct from errConnClosed because the connection is usually fine — it
+	// is the thing the frame was for that is gone.
+	errSendAbandoned = errors.New("daemon: the frame's producer gave up on it")
 )
 
 // What a client is told when the device registry fails, in place of the error
@@ -268,6 +273,31 @@ func (c *conn) sendControl(msg any) error {
 	return c.enqueue(frame{text: true, b: b})
 }
 
+// sendControlWait is sendControl for a producer that has somewhere to wait: the
+// frame takes the same waiting path a file chunk takes rather than enqueue's
+// drop-the-client verdict.
+//
+// The file pump is the only caller, and it needs this for exactly one frame —
+// the eof that ends a stream. Everything before it went out through sendChunk,
+// which waits. An eof through sendControl would mean a pump can wait politely
+// for room across all 256 chunks of an 8 MiB file and then drop the connection
+// on the single frame that says the file is finished, because the session's
+// output refilled the slot the writer had just freed. That is the same
+// intermittent disconnect enqueueWait exists to prevent, narrowed to one frame
+// in N and no less real for it.
+//
+// Not for control responses in general, and in particular not for the file
+// frame that answers a read. Those are sent on the read loop, where a full
+// outbox does mean the client has stopped draining and enqueue's verdict is the
+// established rule for every reply this daemon makes.
+func (c *conn) sendControlWait(msg any, done <-chan struct{}) error {
+	b, err := wire.EncodeControl(msg)
+	if err != nil {
+		return err
+	}
+	return c.enqueueWaitFor(frame{text: true, b: b}, done)
+}
+
 // sendFinal queues msg as the last thing this connection will say, and ends
 // the connection once it has gone out. It is how a client is told why it is
 // being disconnected rather than simply finding itself disconnected.
@@ -322,10 +352,33 @@ func (c *conn) enqueue(f frame) error {
 // The wait needs no timeout of its own. A peer that has genuinely stopped
 // reading stalls the writer, which trips writeTimeout, which fails the
 // connection and cancels the context this selects on.
-func (c *conn) enqueueWait(f frame) error {
+func (c *conn) enqueueWait(f frame) error { return c.enqueueWaitFor(f, nil) }
+
+// enqueueWaitFor is enqueueWait for a producer that can be told to stop, and it
+// is the form everything in this daemon actually uses.
+//
+// done is the producer's own end signal — a file read's done channel, closed by
+// endRead. A wait that could not see it would be a wait nothing can interrupt
+// but the connection dying, and two things depend on interrupting it:
+//
+//   - A cancel has to stop the stream now. Without this arm, a client that
+//     closes its viewer while the outbox is full gets endRead returning
+//     promptly and a pump still parked holding an already-encoded chunk, which
+//     is delivered the moment the writer frees a slot — under a ref the client
+//     has already torn down.
+//   - closeAll's wait has to be finite on its own terms. Without this arm it is
+//     finite only because serve cancels the context first, which makes a
+//     correctness property out of the order of two lines in a deferred
+//     function.
+//
+// A nil done never fires, which is exactly the right shape for a producer with
+// no end signal of its own; that is enqueueWait above.
+func (c *conn) enqueueWaitFor(f frame, done <-chan struct{}) error {
 	select {
 	case c.out <- f:
 		return nil
+	case <-done:
+		return errSendAbandoned
 	case <-c.ctx.Done():
 		return errConnClosed
 	}
@@ -1039,8 +1092,16 @@ func (c *conn) closeAll() {
 	for _, ref := range reads {
 		c.endRead(ref)
 	}
-	// Ending each read first is what makes this wait finite: endRead releases
-	// the pump's done channel and closes its file, so a pump parked on a chunk
-	// stops waiting and one inside a read gets an error back.
+	// Ending each read first is what makes this wait finite, and it is finite on
+	// its own terms. Every wait a pump can be in selects on that read's done
+	// channel — waiting for outbox room, waiting for the writer to have written
+	// a chunk, waiting for room for the eof — and endRead closes it; endRead
+	// also closes the file, so a pump inside a read gets an error back rather
+	// than a chunk.
+	//
+	// Nothing here leans on the connection's context having been cancelled
+	// first. It has been, by serve's defer, but a closeAll that depended on that
+	// would be one reordering of two lines away from parking the read loop here
+	// forever, and nothing at the call site would say so.
 	c.pumps.Wait()
 }

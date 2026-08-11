@@ -660,3 +660,149 @@ func TestClosingAConnectionMidReadEndsItsPump(t *testing.T) {
 		t.Fatal("ServeConn did not return while a read was still streaming")
 	}
 }
+
+// heldRead registers one read on c over a real file, the way startRead would,
+// and hands back the file so a test can prove the descriptor was released.
+func heldRead(t *testing.T, c *conn, ref uint32, body string) (*fileRead, *os.File) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "held.txt")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	r := &fileRead{ref: ref, f: f, done: make(chan struct{})}
+	c.mu.Lock()
+	c.reads[ref] = r
+	c.mu.Unlock()
+	return r, f
+}
+
+// fillOutbox puts the outbox at its depth, which is what a session redrawing at
+// speed does to it. The connection is fine; the writer is behind.
+func fillOutbox(t *testing.T, c *conn) {
+	t.Helper()
+	for i := 0; i < outboxDepth; i++ {
+		if err := c.enqueue(frame{text: true, b: []byte("{}")}); err != nil {
+			t.Fatalf("filling the outbox at %d: %v", i, err)
+		}
+	}
+}
+
+// TestEndingAReadUnparksAPumpWaitingForRoom is the other half of trap two, and
+// the half that is easy to leave open.
+//
+// A pump has two places it waits: for room in the outbox, and for the writer to
+// have written the chunk it queued. Ending the read has to reach both. If it
+// reaches only the second, then with a full outbox a cancel closes the file and
+// returns while the pump stays parked holding an encoded chunk — which goes out
+// under a ref the client has already torn down, the moment the writer frees a
+// slot. closeAll has the same problem from the other side: its wait would be
+// finite only because serve cancels the context first, which makes a
+// correctness property out of the order of two lines in a defer.
+func TestEndingAReadUnparksAPumpWaitingForRoom(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := newConn(ctx, cancel, newPipeConn(), nil, "test", "", nil)
+	fillOutbox(t, c)
+	r, f := heldRead(t, c, 1, "held")
+
+	parked := make(chan bool, 1)
+	go func() { parked <- c.sendChunk(r, []byte("a chunk")) }()
+
+	// Waiting for room, not failing over it.
+	select {
+	case ok := <-parked:
+		t.Fatalf("sendChunk returned %v on a full outbox; it has to wait", ok)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// A cancel, or a dropped connection: endRead is the one door into both.
+	c.endRead(r.ref)
+
+	select {
+	case ok := <-parked:
+		if ok {
+			t.Fatal("sendChunk reported the chunk sent, but the read was ended before there was ever room for it")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ending a read left its pump parked waiting for outbox room: a cancel cannot stop the stream and closeAll cannot finish")
+	}
+
+	// The chunk did not sneak in behind the release. The outbox is still
+	// exactly full, so nothing was queued under a ref that is now gone.
+	if n := len(c.out); n != outboxDepth {
+		t.Fatalf("outbox holds %d frames, want the %d it was filled with", n, outboxDepth)
+	}
+	// The file went with the read, and the connection did not.
+	if _, err := f.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("reading the read's file after endRead = %v, want it closed", err)
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("a full outbox failed the connection")
+	default:
+	}
+}
+
+// TestAPumpWaitsForRoomToSayEof closes trap two's last frame.
+//
+// Every chunk waits politely for room, and then the one frame that ends the
+// stream used to go out through sendControl, whose full-outbox arm drops the
+// connection. A session redrawing at speed refills the slot the writer just
+// freed, the eof lands on that arm, and opening a file during a burst of output
+// is an intermittent disconnect again — after 256 frames of getting it right.
+func TestAPumpWaitsForRoomToSayEof(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := newConn(ctx, cancel, newPipeConn(), nil, "test", "", nil)
+	fillOutbox(t, c)
+	// Empty, so the pump sends no chunks at all and the eof is the only frame
+	// under test.
+	r, _ := heldRead(t, c, 1, "")
+
+	done := make(chan struct{})
+	c.pumps.Add(1)
+	go func() { c.pump(r, maxFileBytes); close(done) }()
+
+	select {
+	case <-done:
+		t.Fatal("the pump finished with a full outbox; its eof did not wait for room")
+	case <-ctx.Done():
+		t.Fatal("a pump's eof failed the connection because the terminal was busy")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The writer gets through one frame, and the eof follows it.
+	<-c.out
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the pump never sent its eof once there was room")
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("a full outbox failed the connection")
+	default:
+	}
+
+	// And what it queued is an eof for this ref, at the back of the queue
+	// rather than in place of anything the terminal had already said.
+	var last frame
+	for len(c.out) > 0 {
+		last = <-c.out
+	}
+	msg, err := wire.DecodeControl(last.b)
+	if err != nil {
+		t.Fatalf("DecodeControl on the pump's last frame: %v", err)
+	}
+	e, ok := msg.(wire.Eof)
+	if !ok {
+		t.Fatalf("the pump's last frame was %#v, want an eof", msg)
+	}
+	if e.Ref != r.ref {
+		t.Fatalf("Eof.Ref = %d, want %d", e.Ref, r.ref)
+	}
+}

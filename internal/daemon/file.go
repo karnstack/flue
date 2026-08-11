@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/karnstack/flue/internal/wire"
 )
@@ -181,10 +180,17 @@ type fileRead struct {
 	ref  uint32
 	f    *os.File
 	done chan struct{}
-	once sync.Once
 }
 
-func (r *fileRead) release() { r.once.Do(func() { close(r.done) }) }
+// release ends every wait this read's pump can be in.
+//
+// A bare close rather than a sync.Once, because endRead's delete under c.mu
+// already elects exactly one caller per ref: whichever of the pump, a cancel
+// and closeAll takes the read out of the map is the one that gets here. A Once
+// would guard nothing and would imply a second releaser exists, sending the
+// next reader looking for one. If one is ever added, the panic is the better
+// answer — two owners of one read is a bug, not a thing to absorb quietly.
+func (r *fileRead) release() { close(r.done) }
 
 func (r *fileRead) released() bool {
 	select {
@@ -344,17 +350,21 @@ func (c *conn) pump(r *fileRead, limit int64) {
 	if r.released() {
 		return
 	}
-	_ = c.sendControl(wire.Eof{Ref: r.ref})
+	// Through the waiting path, like every chunk before it. sendControl would
+	// mean a read that waited politely for room 256 times could still drop the
+	// connection on the one frame that ends it; see sendControlWait.
+	_ = c.sendControlWait(wire.Eof{Ref: r.ref}, r.done)
 }
 
 // sendChunk queues one chunk and waits for the writer to have written it.
 //
 // Two waits, for two different reasons, and both matter.
 //
-// enqueueWait is the wait for *room*. The outbox can be full because the
+// enqueueWaitFor is the wait for *room*. The outbox can be full because the
 // terminal is busy, and dropping a client over that would make opening a file
 // during a burst of output an intermittent disconnect. A pump has somewhere to
-// wait, so it waits.
+// wait, so it waits — and it waits on r.done too, so a cancel reaches a pump
+// parked here rather than only one parked below.
 //
 // The wait on `sent` is the wait for *the writer*, and it is what keeps only
 // one chunk in flight. That bounds queued memory to 32 KiB rather than a whole
@@ -367,7 +377,7 @@ func (c *conn) pump(r *fileRead, limit int64) {
 // against the link rather than against the round trip.
 func (c *conn) sendChunk(r *fileRead, b []byte) bool {
 	sent := make(chan struct{})
-	if err := c.enqueueWait(frame{b: wire.EncodeBinary(wire.FrameFile, r.ref, b), sent: sent}); err != nil {
+	if err := c.enqueueWaitFor(frame{b: wire.EncodeBinary(wire.FrameFile, r.ref, b), sent: sent}, r.done); err != nil {
 		return false
 	}
 	select {
@@ -391,8 +401,12 @@ func (c *conn) endRead(ref uint32) {
 	if r == nil {
 		return
 	}
-	// Released before the file is closed, so a pump blocked in sendChunk stops
-	// waiting rather than discovering it later through a read error.
+	// Released before the file is closed, so every wait the pump can be in ends
+	// at once: waiting for outbox room, waiting for the writer to have written
+	// the chunk it queued, and waiting for room for the eof. All three select
+	// on this channel. That is what makes a cancel stop a stream now rather
+	// than at whatever point the writer next frees a slot — by which time the
+	// chunk already encoded would go out under a ref the client has torn down.
 	r.release()
 	_ = r.f.Close()
 }
