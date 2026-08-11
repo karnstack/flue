@@ -236,41 +236,72 @@ func (c *conn) startRead(m wire.Read) {
 		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
 		return
 	}
-	// Opened before anything has been decided about it, and opened
-	// non-blocking, because that flag is the guard here and a stat taken first
-	// would not be one.
+	// What follows checks the same three things twice, on purpose, and a reader
+	// who deletes either half will reintroduce a bug this code already had.
 	//
-	// A fifo, a socket or a device can block in the kernel forever on open: a
-	// fifo with no writer parks until a writer arrives, and that can be never.
-	// Deciding from a stat and then opening only narrows the window, it does not
-	// close it, since the name can be replaced between the two calls by anyone
-	// who can write to the directory. Nothing would rescue the daemon from
-	// landing in that window. An open takes no context, this runs on the
-	// connection's read loop, so a connection parked here handles no further
-	// message and never reaches its own teardown, and Server.Shutdown cancels a
-	// context nothing in this path is waiting on. O_NONBLOCK closes the window
-	// instead of narrowing it: an open that would have blocked returns at once.
-	//
-	// The type checks then run on the descriptor's own Stat, which describes the
-	// file that was actually opened rather than whatever the name pointed at a
-	// moment earlier. The flag costs the ordinary path nothing: it has no effect
-	// on reading a regular file, and a regular file is the only thing that gets
-	// past the checks below.
-	f, err := os.OpenFile(abs, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	// This stat is the *filter*. It decides from the path, before anything is
+	// opened, which is the only way to refuse a fifo, a socket or a device
+	// without touching it — and touching one is not free. Opening a fifo unparks
+	// whatever is blocked in open() on the other end, so a shell running
+	// `cmd > /tmp/p` is handed a reader that vanishes a moment later and dies of
+	// SIGPIPE: a click on an underlined path would kill a user's process. A
+	// serial device asserts DTR when it is opened. A tty can become this
+	// daemon's controlling terminal, and it is exactly the process shape that
+	// picks one up, being a session leader with none of its own (see Setsid in
+	// cmd/flue/main.go); a later hangup on that terminal would then take every
+	// session down with it. The filter is also what gets the refusal right: a
+	// socket answers stat as kind "other", so a client may well underline it,
+	// and open() on one fails with EOPNOTSUPP or ENXIO, which is not a code this
+	// daemon could translate into anything a reader recognises.
+	fi, err := os.Stat(abs)
 	if err != nil {
-		// The open is the guard; this stat only chooses which refusal to name.
-		// A directory this user may not read fails the open with a permission
-		// error, and "that is a directory" is the more useful of the two things
-		// that could be said about it: is_dir is a shape a client can act on,
-		// denied is not. Every other failure keeps the code it had.
-		if fi, serr := os.Stat(abs); serr == nil && fi.IsDir() {
+		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
+		return
+	}
+	if fi.IsDir() {
+		c.sendErrorFor(m.ReqID, "is_dir", "that is a directory")
+		return
+	}
+	if !fi.Mode().IsRegular() {
+		// A socket, a device, a fifo. None of them has a size worth showing,
+		// and none of them is what a viewer asked for.
+		c.sendErrorFor(m.ReqID, "unsupported", "not a regular file")
+		return
+	}
+
+	// And this open, with the checks under it, is the *guard*. The filter above
+	// is advisory and cannot be anything else: the name can be replaced between
+	// the stat and the open by anyone who can write to the directory, so the
+	// file that is opened is not necessarily the file that was described.
+	//
+	// O_NONBLOCK is what makes landing in that window survivable. An open on a
+	// fifo with no writer parks in the kernel forever, and this runs on the
+	// connection's read loop, so a connection parked there handles no further
+	// message, never reaches its own teardown, and is not rescued by anything:
+	// an open takes no context, and Server.Shutdown cancels one nothing in this
+	// path is waiting on. With the flag, an open that would have blocked returns
+	// at once. O_NOCTTY is the same idea for the tty case, and worth having even
+	// though the filter refuses ttys by name: an open that lands on one through
+	// the window cannot make it this daemon's controlling terminal.
+	//
+	// The checks then run again on the descriptor's own Stat, which describes
+	// what was actually opened. Both flags cost the ordinary path nothing, since
+	// neither has any effect on a regular file.
+	f, err := os.OpenFile(abs, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
+	if err != nil {
+		// Not a guard, and not a second filter: the open has already happened
+		// and this stat only chooses which refusal to name. A directory this
+		// user may not read fails the open with a permission error, and is_dir
+		// is a shape a client can act on where denied is not. Every other
+		// failure keeps the code readErrCode gives it.
+		if di, serr := os.Stat(abs); serr == nil && di.IsDir() {
 			c.sendErrorFor(m.ReqID, "is_dir", "that is a directory")
 			return
 		}
 		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
 		return
 	}
-	fi, err := f.Stat()
+	fi, err = f.Stat()
 	if err != nil {
 		_ = f.Close()
 		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
@@ -282,10 +313,10 @@ func (c *conn) startRead(m wire.Read) {
 		return
 	}
 	if !fi.Mode().IsRegular() {
-		// A socket, a device, a fifo. None of them has a size worth showing,
-		// and none of them is what a viewer asked for. The descriptor is closed
-		// rather than read: the non-blocking open above got this far without
-		// hanging, and that is all it was for.
+		// The path changed under the filter. Everything below reads from this
+		// descriptor and reports its size, so this is the check that has to be
+		// true, and the one above is the check that keeps this one from ever
+		// being reached by an ordinary hover.
 		_ = f.Close()
 		c.sendErrorFor(m.ReqID, "unsupported", "not a regular file")
 		return

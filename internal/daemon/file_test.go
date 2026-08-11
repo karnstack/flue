@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -638,26 +639,65 @@ func TestReadRefusesWhatItCannotShow(t *testing.T) {
 	}
 }
 
-// TestReadRefusesAFifoWithoutHangingOnIt drives the one path in startRead where
-// the kernel, not the daemon, decides how long a call takes.
+// TestReadRefusesAFifoWithoutOpeningIt pins the rule that a fifo is refused
+// from its stat, and never touched.
 //
-// A fifo with no writer parks an ordinary open forever. That open happens on the
-// connection's read loop, so a daemon that landed on one would answer nothing
-// else on that connection ever again, and there is no context to cancel and no
-// timeout to trip. The non-blocking open is what makes this finish; take the
-// flag away and this test stops on its read deadline with the daemon still in
-// the kernel.
+// Opening one is not an observation, it is an act. A fifo has a process on the
+// other end of it, parked in open() until someone opens this end: `cmd > /tmp/p`
+// in a shell is exactly that, and it is a shape that turns up in a terminal
+// often enough to be underlined. A daemon that opened the fifo to look at it
+// would unpark that process, hand it a reader that closes a moment later, and
+// kill it with SIGPIPE. So the assertion is not only that the read is refused,
+// but that the writer on the other end is still parked afterwards.
 //
 // The refusal itself is ordinary: a fifo has no size worth showing and is not
 // what a viewer asked for.
-func TestReadRefusesAFifoWithoutHangingOnIt(t *testing.T) {
+//
+// It is deterministic in the direction that matters. Nothing else in this test
+// opens the fifo, so the only thing that can unpark the writer is the daemon
+// doing it, and the daemon would have done it before writing the refusal this
+// test waits for. The window after that is slack for the scheduler, not for the
+// event.
+func TestReadRefusesAFifoWithoutOpeningIt(t *testing.T) {
 	ts, reg := newTestServer(t)
 	dir := t.TempDir()
-	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+	fifo := filepath.Join(dir, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("Mkfifo: %v", err)
 	}
-	s := readTarget(t, reg, dir)
 
+	// The process on the other end. It parks in open() and stays there until
+	// something opens the read end.
+	var w *os.File
+	unparked := make(chan struct{})
+	go func() {
+		defer close(unparked)
+		w, _ = os.OpenFile(fifo, os.O_WRONLY, 0)
+	}()
+	t.Cleanup(func() {
+		// Unparked deliberately on the way out, so the goroutine and its
+		// descriptor do not outlive the test. Opening the read end is what
+		// releases a writer blocked in open, which is the whole point above.
+		r, err := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return
+		}
+		<-unparked
+		if w != nil {
+			_ = w.Close()
+		}
+		_ = r.Close()
+	})
+
+	// Parked before the read is sent, so anything that unparks it from here on
+	// is the daemon and nothing else.
+	select {
+	case <-unparked:
+		t.Fatal("the writer was not parked in open(); this test cannot observe what it exists for")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	s := readTarget(t, reg, dir)
 	c := dial(t, ts)
 	writeControl(t, c, wire.Hello{Ver: "test"})
 	writeControl(t, c, wire.Read{ID: s.ID(), Path: "pipe", ReqID: 47})
@@ -668,6 +708,76 @@ func TestReadRefusesAFifoWithoutHangingOnIt(t *testing.T) {
 		}
 		if e.ReqID != 47 || e.Code != "unsupported" {
 			t.Fatalf("error = %+v, want unsupported for reqId 47", e)
+		}
+		return true
+	})
+
+	select {
+	case <-unparked:
+		t.Fatal("refusing a fifo opened it: the writer parked on the other end was released, which for a shell running `cmd > /tmp/p` means losing its pipe and dying of SIGPIPE")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestReadRefusesASocketAsUnsupported is the same rule from the other side: the
+// refusal has to come from the stat, because open() cannot produce it.
+//
+// A unix socket stats as kind "other", which is real enough for a client to
+// underline, and open(2) on one fails with EOPNOTSUPP on Darwin and ENXIO on
+// Linux. Neither is a permission error, so a daemon that decided from the open
+// would answer not_found: the same daemon that just said the path exists would
+// then say it is not there. unsupported is what the protocol promises for
+// anything that is not a regular file, and it is the answer a reader can make
+// sense of.
+func TestReadRefusesASocketAsUnsupported(t *testing.T) {
+	ts, reg := newTestServer(t)
+	// Not t.TempDir(): a unix socket path is bounded at 104 bytes on Darwin and
+	// 108 on Linux, and the temp directory a test gets named after this function
+	// is most of that on its own.
+	dir, err := os.MkdirTemp("/tmp", "flue-sock")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	ln, err := net.Listen("unix", filepath.Join(dir, "agent.sock"))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	s := readTarget(t, reg, dir)
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+
+	// Stat first, because the two answers have to agree. A path this daemon
+	// calls real is not a path it may then call missing.
+	writeControl(t, c, wire.Stat{ID: s.ID(), Paths: []string{"agent.sock"}, ReqID: 48})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		got, ok := msg.(wire.Stats)
+		if !ok {
+			return false
+		}
+		if len(got.Entries) != 1 {
+			t.Fatalf("Stats.Entries = %+v, want one", got.Entries)
+		}
+		if !got.Entries[0].Exists || got.Entries[0].Kind != "other" {
+			t.Fatalf("entry = %+v, want an existing path of kind other", got.Entries[0])
+		}
+		return true
+	})
+
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "agent.sock", ReqID: 49})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		if !ok {
+			return false
+		}
+		if e.ReqID != 49 {
+			return false
+		}
+		if e.Code != "unsupported" {
+			t.Fatalf("Error.Code = %q, want unsupported: %q is what a client is told about a path that is not there, and this one is", e.Code, e.Code)
 		}
 		return true
 	})
