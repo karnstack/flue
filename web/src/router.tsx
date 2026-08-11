@@ -15,6 +15,7 @@ import { RemoteRoute } from '@/routes/remote'
 import { SessionsRoute } from '@/routes/sessions'
 import { SettingsRoute } from '@/routes/settings'
 import { TerminalRoute } from '@/routes/terminal'
+import { SwitcherProvider } from '@/switcher/provider'
 
 /** The pairing page's path. Its own constant because two routing decisions
  *  turn on it: the route below, and whether the tab opens a socket at all. */
@@ -109,7 +110,19 @@ const rootRoute = createRootRouteWithContext<FlueRouterOptions>()({
     if (picker === true) return <MachinesRoute />
     return (
       <FleetProvider client={client} pinned={pinned} loopback={loopback}>
-        <Outlet />
+        {/*
+          Inside the fleet and above every screen that can see one. The palette
+          it holds is about every machine's sessions at once, so the fleet has
+          to be above it; and a chord that worked on the terminal but not on
+          Sessions would be a chord nobody trusts, so it has to be above them
+          all. The two routes it does not reach are the two that have no daemon
+          to list — /pair, which is how a device gets a token in the first
+          place, and the machine picker, which is the screen for a tab that has
+          not chosen one.
+        */}
+        <SwitcherProvider>
+          <Outlet />
+        </SwitcherProvider>
       </FleetProvider>
     )
   },
