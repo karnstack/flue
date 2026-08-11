@@ -371,7 +371,7 @@ function Remote() {
 const PATH = [
   {
     title: 'Your machine',
-    body: 'The daemon owns the terminals and holds the only long-lived key. It listens on loopback and nothing else.',
+    body: 'The daemon owns the terminals and holds the key your browser pins. It listens on loopback and nothing else.',
     mono: '127.0.0.1:7717',
     icon: HardDrive,
   },

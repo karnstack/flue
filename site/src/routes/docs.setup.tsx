@@ -65,7 +65,11 @@ function Setup() {
                 '  ✓ reachable at https://flue-relay.you.workers.dev',
                 '  ✓ secret set',
                 '  ✓ fleet key minted (stays on your machines; Cloudflare never sees it)',
-                '  ✓ this machine joined as laptop (laptop-9f3a)',
+                '  ✓ this machine joined as laptop (laptop-9f3a-3f9a12cd)',
+                '',
+                'to add another machine, run this on it:',
+                '  flue relay join wss://flue-relay.you.workers.dev \\',
+                '    --secret <secret> --fleet <fleet key>',
               ]}
             />
             <Note title="Run flue relay setup once, and only once">
@@ -76,8 +80,9 @@ function Setup() {
               </P>
               <P>
                 That resets the fleet. Every other machine is left holding a secret the relay no
-                longer accepts, and every device has to pair again, because the new fleet key
-                retires every device certificate the old one signed.
+                longer accepts, and rejoins under a fresh machine id. Every device has to pair
+                again, because a browser will not swap a fleet key it has already pinned, and
+                pairing is the one thing that replaces it.
               </P>
               <P>
                 So the way back is forwards. Take the join line the most recent setup printed, run
@@ -189,8 +194,8 @@ function Setup() {
         <P>
           One line not to read as a fault: <Code>flue relay status</Code> may say that entries
           are signed by something else. Old directory entries are never removed, so that line
-          stays after a reset even once every machine has re-joined, and the count goes up
-          rather than down as they do. Only <Code>flue relay reset</Code> clears it.
+          stays after a reset even once every machine has re-joined, and re-joining does not
+          bring the count down. Only <Code>flue relay reset</Code> clears it.
         </P>
         <P>
           Sessions that vanish after you log out of a Linux box mean lingering is off. Run{' '}

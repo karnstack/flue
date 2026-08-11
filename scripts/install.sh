@@ -102,7 +102,7 @@ resolve_version() {
     200) ;;
     404)
       # The state until the first tag is pushed.
-      die "no release published yet — there is nothing to install; watch https://github.com/${REPO}/releases"
+      die "no release published yet. There is nothing to install; watch https://github.com/${REPO}/releases"
       ;;
     *)
       die "the GitHub API answered HTTP ${code} when asked for the latest release"

@@ -902,9 +902,9 @@ function Switcher() {
           </h2>
           <p className="mt-5 text-lg text-pretty text-muted-foreground">
             Press <kbd className="font-mono text-base text-foreground">&#8984;K</kbd> on a Mac, or{' '}
-            <kbd className="font-mono text-base text-foreground">Ctrl+Shift+K</kbd> everywhere
-            else, on any screen that can see a daemon. Pinned sessions come first, with number
-            keys on them. Then the sessions this browser has opened before. Then the rest.
+            <kbd className="font-mono text-base text-foreground">Ctrl+Shift+K</kbd> on any platform
+            including macOS, on any screen that can see a daemon. Pinned sessions come first, with
+            number keys on them. Then the sessions this browser has opened before. Then the rest.
           </p>
           <p className="mt-4 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
             Type to narrow the list, use the arrow keys to move, press Enter to go. The
@@ -1878,7 +1878,7 @@ you missed.
 - **Sessions outlive the tab.** Close it and the build keeps running.
 - **One list, every machine.** Name, tag, pin, group and search the whole
   fleet from one place. Hover a session to see what it is doing.
-- **One keystroke to any of them.** `⌘K`, or `Ctrl+Shift+K` elsewhere, opens
+- **One keystroke to any of them.** `⌘K`, or `Ctrl+Shift+K` anywhere, opens
   every session on every machine. The highlighted row shows its own last
   fourteen lines, so you can see which one is the build. `Ctrl+Shift+1` to `9`
   jumps to a pinned session.

@@ -71,8 +71,9 @@ function HowItWorks() {
         <P>
           The highlighted row shows its own last fourteen lines beside the list, so you can see
           which one is the build instead of guessing from its name. <Code>Ctrl+Shift+1</Code> to{' '}
-          <Code>9</Code> jumps straight to a pinned session, and <Code>Ctrl+Shift+]</Code> steps to
-          the next one, both without opening the list.
+          <Code>9</Code> jumps straight to a pinned session. <Code>Ctrl+Shift+]</Code> and{' '}
+          <Code>Ctrl+Shift+[</Code> step forward and back through every session, not only the
+          pinned ones. None of them open the list.
         </P>
         <P>
           When a machine goes unreachable the fleet stops listing its sessions, on purpose: rows

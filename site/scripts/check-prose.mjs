@@ -1,10 +1,15 @@
 /**
  * Fail if an em-dash or en-dash reached anything a reader sees.
  *
- * Scans the prerendered HTML under dist/client, the llms.txt copied there
- * from public/, and the repository README. Source files are deliberately not
+ * Scans every text asset under dist/client — the prerendered HTML, and the
+ * files copied there from public/ such as llms.txt, install.sh and the
+ * diagrams — plus the repository README. Source files are deliberately not
  * scanned: code comments keep their own voice, and scanning the build output
  * is the only way to check exactly what a visitor is served.
+ *
+ * install.sh is why this is an extension list rather than just .html. It is
+ * piped into a shell straight off flue.sh, so its die() messages are copy a
+ * reader sees, and a gate that only read the pages missed them.
  *
  * Run by `pnpm check:prose`, and by `pnpm build` once the site is clean.
  */
@@ -30,7 +35,18 @@ async function exists(path) {
   }
 }
 
-/** Every .html file under dist/client, plus llms.txt if it was copied. */
+/**
+ * Extensions of the files a reader is served as text.
+ *
+ * An allowlist rather than a denylist, because the thing that must never be
+ * scanned is a binary: og.png and the screenshots would report hits on
+ * whatever bytes happen to sit where a dash would be. .js and .css are left
+ * off for the same reason a source file is — the bundles are compiled output,
+ * and any prose in them is already being read in the page it renders.
+ */
+const TEXT_EXT = ['.html', '.txt', '.svg', '.xml', '.sh']
+
+/** Every text asset under dist/client, whatever put it there. */
 async function targets(dir = DIST, out = []) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name)
@@ -38,7 +54,7 @@ async function targets(dir = DIST, out = []) {
       await targets(full, out)
       continue
     }
-    if (entry.name.endsWith('.html') || entry.name === 'llms.txt') out.push(full)
+    if (TEXT_EXT.some((ext) => entry.name.endsWith(ext))) out.push(full)
   }
   return out
 }

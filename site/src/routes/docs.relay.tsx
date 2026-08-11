@@ -62,7 +62,7 @@ function Relay() {
             '  ✓ reachable at https://flue-relay.you.workers.dev',
             '  ✓ secret set',
             '  ✓ fleet key minted (stays on your machines; Cloudflare never sees it)',
-            '  ✓ this machine joined as laptop (laptop-9f3a)',
+            '  ✓ this machine joined as laptop (laptop-9f3a-3f9a12cd)',
           ]}
         />
         <P>
