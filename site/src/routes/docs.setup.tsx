@@ -68,14 +68,24 @@ function Setup() {
             />
             <Note title="Run flue relay setup once, and only once">
               <P>
-                A second setup deploys a second Worker and mints a second fleet key. You then have
-                two fleets that cannot see each other, and what you notice is a sessions list
-                missing half your machines.
+                Running it again on the same Cloudflare account does not give you a second relay.
+                It replaces the one you have. Setup is the recovery path for a leaked secret, so
+                every run mints a fresh secret, a fresh fleet key and a fresh machine id.
               </P>
               <P>
-                If this has already happened, run <Code>flue relay leave</Code> on the extra
-                machine, then join it with the first relay&rsquo;s line. The stray Worker stays
-                deployed until you delete it in Cloudflare.
+                That resets the fleet. Every other machine is left holding a secret the relay no
+                longer accepts, and every device has to pair again, because the new fleet key
+                retires every device certificate the old one signed.
+              </P>
+              <P>
+                So the way back is forwards. Take the join line the most recent setup printed, run
+                it on every other machine, and pair your devices again. The line from the first
+                setup does not work any more.
+              </P>
+              <P>
+                Running setup against a <em>different</em> Cloudflare account is the other case.
+                That does leave the first Worker deployed and reachable, and no command removes
+                it, so delete it in the Cloudflare dashboard yourself.
               </P>
             </Note>
           </Step>
