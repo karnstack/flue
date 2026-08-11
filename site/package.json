@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite dev --port 3100",
     "build": "vite build && node scripts/sitemap.mjs",
+    "check:prose": "node scripts/check-prose.mjs",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "deploy": "wrangler deploy"
