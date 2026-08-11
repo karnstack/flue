@@ -409,7 +409,7 @@ Replace the heading and the two paragraphs inside `How`:
 </p>
 <p className="mt-4 max-w-[56ch] text-lg text-pretty text-muted-foreground">
   Two devices can attach to one session and they mirror live. What you type on the phone
-  appears in the laptop&rsquo;s browser. The phone is 40 columns wide, and that does not make
+  appears in the laptop&rsquo;s browser. A phone might be about 40 columns wide, and that does not make
   the laptop&rsquo;s terminal smaller.
 </p>
 ```
@@ -1309,8 +1309,9 @@ function Setup() {
         </Lead>
         <P>
           A laptop sleeps. The sessions on a sleeping machine are not lost, but they are out of
-          reach until it wakes. The switcher still lists them, greyed and marked unreachable, and
-          it still opens them, so nothing disappears. It is just that nothing runs either.
+          reach until it wakes. The switcher still shows the ones this browser has opened
+          before, greyed and marked unreachable, and it still opens them. It is just that
+          nothing runs until the machine is back.
         </P>
         <P>
           So a desktop, a Pi or a VPS is where agent runs and long builds want to live. That is
@@ -1458,7 +1459,7 @@ Section two:
     frame.
   </P>
   <P>
-    Size is negotiated, not shared. The phone is 40 columns wide, and that does not make the
+    Size is negotiated, not shared. A phone might be about 40 columns wide, and that does not make the
     laptop&rsquo;s terminal smaller. Sharing the size is the failure that makes most screen
     sharing useless for real work.
   </P>
@@ -1477,8 +1478,8 @@ New section three, placed after it:
 ```tsx
 <Section title="One keystroke to any of them">
   <P>
-    Press <Code>⌘K</Code> on a Mac, or <Code>Ctrl+Shift+K</Code> everywhere else, on any
-    screen that can see a daemon. Pinned sessions come first, with number keys on them, then
+    Press <Code>⌘K</Code> on a Mac, or <Code>Ctrl+Shift+K</Code> on any platform including
+    macOS, from any screen that can see a daemon. Pinned sessions come first, with number keys on them, then
     the sessions this browser has opened before, then the rest.
   </P>
   <P>
@@ -1488,9 +1489,11 @@ New section three, placed after it:
     <Code>Ctrl+Shift+]</Code> steps to the next one, both without opening the list.
   </P>
   <P>
-    A session on a machine that is asleep still appears, greyed and marked unreachable, and
-    it still opens. The list remembers where this browser has been even when the machine
-    holding it cannot answer right now.
+    When a machine goes unreachable the fleet stops listing its sessions, on purpose: rows
+    from a machine nobody can reach are a claim it cannot stand behind. The switcher still
+    shows the ones this browser has opened before, greyed and marked unreachable, and it
+    still opens them. That memory is per browser, so what your laptop remembers is not what
+    your phone remembers.
   </P>
 </Section>
 ```
@@ -1621,7 +1624,8 @@ The setting-it-up section now defers to the guide rather than half-repeating it,
 ```tsx
 <Section title="What it costs">
   <P>
-    A Worker, and one Durable Object per machine. Cloudflare&rsquo;s free plan is enough for
+    A Worker, one Durable Object per machine, and one more holding the fleet directory.
+    Cloudflare&rsquo;s free plan is enough for
     personal use. The caps, the counters and how to read them are in{' '}
     <Link href={RELAY_DOC}>the operator runbook</Link>.
   </P>
@@ -1708,7 +1712,8 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     verdict: "Nothing. It is MIT licensed, and Cloudflare's free plan covers personal use.",
     body: (
       <P>
-        The relay is a Worker with one Durable Object per machine. What it deploys and what the
+        The relay is a Worker with one Durable Object per machine, plus one more for the fleet
+        directory. What it deploys and what the
         caps are is in <Link href={RELAY_DOC}>the relay runbook</Link>.
       </P>
     ),
@@ -1772,9 +1777,10 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     verdict: 'They stop running, and they come back when it wakes.',
     body: (
       <P>
-        Nothing is lost. The switcher still lists them, greyed and marked unreachable, and it
-        still opens them. If a job needs to keep going while you are away, start it on a
-        machine that stays on: a desktop, a Pi, a VPS.
+        Nothing is lost. The switcher still shows the ones this browser has opened before,
+        greyed and marked unreachable, and it still opens them. It remembers per browser, so
+        your phone lists where your phone has been. If a job needs to keep going while you are
+        away, start it on a machine that stays on: a desktop, a Pi, a VPS.
       </P>
     ),
   },
@@ -1949,7 +1955,7 @@ Add a line about the switcher to the CLI section's surroundings. Insert this par
 
 ```
 Switching between sessions is a keyboard action in the web app rather than a
-CLI one. Cmd+K on a Mac, or Ctrl+Shift+K elsewhere, opens every session on
+CLI one. Cmd+K on a Mac, or Ctrl+Shift+K on any platform including macOS, opens every session on
 every reachable machine, with a preview of the highlighted one.
 ```
 
