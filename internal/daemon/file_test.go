@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -211,18 +212,46 @@ func TestStatRefusesAnUnknownSessionAndTooManyPaths(t *testing.T) {
 		return true
 	})
 
+	// Exactly the ceiling is answered, because the refusal is for more than the
+	// ceiling. Without this case a `>` turned into a `>=` refuses the largest
+	// batch the protocol promises to take and every other test here still
+	// passes, since nothing else asks for more than three paths at once.
+	atCap := make([]string, maxStatPaths)
+	for i := range atCap {
+		atCap[i] = "real.txt"
+	}
+	writeControl(t, c, wire.Stat{ID: s.ID(), Paths: atCap, ReqID: 23})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		switch v := msg.(type) {
+		case wire.Error:
+			if v.ReqID == 23 {
+				t.Fatalf("a stat of exactly maxStatPaths paths was refused with %+v", v)
+			}
+		case wire.Stats:
+			if v.ReqID != 23 {
+				return false
+			}
+			if len(v.Entries) != maxStatPaths {
+				t.Fatalf("Stats.Entries has %d entries, want one per path asked about (%d)",
+					len(v.Entries), maxStatPaths)
+			}
+			return true
+		}
+		return false
+	})
+
 	many := make([]string, maxStatPaths+1)
 	for i := range many {
 		many[i] = "real.txt"
 	}
-	writeControl(t, c, wire.Stat{ID: s.ID(), Paths: many, ReqID: 23})
+	writeControl(t, c, wire.Stat{ID: s.ID(), Paths: many, ReqID: 24})
 	readUntil(t, c, func(msg any, _ []byte) bool {
 		e, ok := msg.(wire.Error)
 		if !ok {
 			return false
 		}
-		if e.ReqID != 23 || e.Code != "bad_path" {
-			t.Fatalf("error = %+v, want bad_path for reqId 23", e)
+		if e.ReqID != 24 || e.Code != "bad_path" {
+			t.Fatalf("error = %+v, want bad_path for reqId 24", e)
 		}
 		return true
 	})
@@ -266,10 +295,10 @@ func TestClassifyAcceptsTextAndImagesAndNothingElse(t *testing.T) {
 // and a pump that read that as "this client is broken" would turn opening a
 // file during a burst of output into an intermittent disconnect.
 
-func TestEnqueueWaitWaitsForRoom(t *testing.T) {
+func TestEnqueueWaitForWaitsForRoom(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// No server and no writer: enqueueWait touches neither, and a conn with
+	// No server and no writer: enqueueWaitFor touches neither, and a conn with
 	// nothing draining it is exactly the condition under test.
 	c := newConn(ctx, cancel, newPipeConn(), nil, "test", "", nil)
 	for i := 0; i < outboxDepth; i++ {
@@ -278,12 +307,15 @@ func TestEnqueueWaitWaitsForRoom(t *testing.T) {
 		}
 	}
 
+	// A nil done, because the wait for room is the whole of what this pins: a
+	// producer with an end signal has one more way out of the select, and the
+	// test would then prove the wrong arm.
 	done := make(chan error, 1)
-	go func() { done <- c.enqueueWait(frame{text: true, b: []byte("{}")}) }()
+	go func() { done <- c.enqueueWaitFor(frame{text: true, b: []byte("{}")}, nil) }()
 
 	select {
 	case err := <-done:
-		t.Fatalf("enqueueWait returned %v on a full outbox; it has to wait", err)
+		t.Fatalf("enqueueWaitFor returned %v on a full outbox; it has to wait", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -293,10 +325,10 @@ func TestEnqueueWaitWaitsForRoom(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("enqueueWait once there was room = %v, want nil", err)
+			t.Fatalf("enqueueWaitFor once there was room = %v, want nil", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("enqueueWait did not proceed once there was room")
+		t.Fatal("enqueueWaitFor did not proceed once there was room")
 	}
 
 	// And the connection is still alive. Waiting is not a fault, which is the
@@ -308,7 +340,7 @@ func TestEnqueueWaitWaitsForRoom(t *testing.T) {
 	}
 }
 
-func TestEnqueueWaitGivesUpWhenTheConnectionEnds(t *testing.T) {
+func TestEnqueueWaitForGivesUpWhenTheConnectionEnds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := newConn(ctx, cancel, newPipeConn(), nil, "test", "", nil)
 	for i := 0; i < outboxDepth; i++ {
@@ -318,7 +350,7 @@ func TestEnqueueWaitGivesUpWhenTheConnectionEnds(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- c.enqueueWait(frame{text: true, b: []byte("{}")}) }()
+	go func() { done <- c.enqueueWaitFor(frame{text: true, b: []byte("{}")}, nil) }()
 
 	// A peer that has stopped reading is what ends this wait in production:
 	// the writer's own timeout fails the connection, which cancels this
@@ -328,10 +360,10 @@ func TestEnqueueWaitGivesUpWhenTheConnectionEnds(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, errConnClosed) {
-			t.Fatalf("enqueueWait after the connection ended = %v, want errConnClosed", err)
+			t.Fatalf("enqueueWaitFor after the connection ended = %v, want errConnClosed", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("enqueueWait did not give up when the connection ended")
+		t.Fatal("enqueueWaitFor did not give up when the connection ended")
 	}
 }
 
@@ -398,7 +430,7 @@ func TestReadStreamsAFileAndEndsWithEof(t *testing.T) {
 		return true
 	})
 
-	readUntil(t, c, func(msg any, out []byte) bool {
+	readUntilFrames(t, c, func(msg any, out []byte, frames []binFrame) bool {
 		e, ok := msg.(wire.Eof)
 		if !ok {
 			return false
@@ -408,6 +440,25 @@ func TestReadStreamsAFileAndEndsWithEof(t *testing.T) {
 		}
 		if string(out) != body {
 			t.Fatalf("streamed %d bytes, want %d", len(out), len(body))
+		}
+		// The header, not just the bytes. This is the only assertion in the
+		// suite that looks at it, and it is the one that keeps file content out
+		// of the terminal: a client routes on the frame type and then on the
+		// ref, so content sent as 0x01 is pasted into whatever the reader was
+		// attached to, and content sent under a ref nobody holds is dropped on
+		// the floor. Both mutations leave every other assertion here green,
+		// because every other assertion only accumulates payload bytes.
+		if len(frames) == 0 {
+			t.Fatal("the file arrived in no binary frames at all")
+		}
+		for i, f := range frames {
+			if f.typ != wire.FrameFile {
+				t.Fatalf("chunk %d is frame type 0x%02x, want 0x%02x: file content is not terminal output",
+					i, f.typ, wire.FrameFile)
+			}
+			if f.ref != ref {
+				t.Fatalf("chunk %d carries ref %d, want the read's own %d", i, f.ref, ref)
+			}
 		}
 		return true
 	})
@@ -452,6 +503,99 @@ func TestReadSendsTheHeadOfATooLargeFileAndSaysSo(t *testing.T) {
 	})
 }
 
+// pngOfSize writes a file of exactly size bytes that the daemon reads as a PNG.
+//
+// A real PNG signature and then filler. classify sniffs the first 512 bytes and
+// nothing behind them changes its answer, so the honest fixture for a test about
+// the size cap is the header the sniffer looks for with the right number of
+// bytes standing behind it.
+func pngOfSize(t *testing.T, dir, name string, size int) string {
+	t.Helper()
+	sig := []byte("\x89PNG\r\n\x1a\n")
+	if size < len(sig) {
+		t.Fatalf("a png cannot be %d bytes", size)
+	}
+	body := make([]byte, size)
+	copy(body, sig)
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return path
+}
+
+// TestReadRefusesAnImageOverTheCapAndSendsOneAtIt pins the promise the protocol
+// makes without any qualification: an image is refused past 4 MiB rather than
+// truncated, because half a PNG is not a smaller PNG.
+//
+// The refusal had no coverage at all before this, which is a strange gap for a
+// branch that is the whole reason images have a cap of their own. Delete it and
+// a 30 MiB PNG streams to 4 MiB and arrives with truncated false, so the client
+// renders a broken image and is told nothing went wrong.
+//
+// Both sides of the boundary, one byte apart, because a test that used a wildly
+// oversized file would pass on any cap at all and pin nothing about where the
+// line actually is. maxImageBytes exactly is the largest image that may be read:
+// the refusal is a strict greater-than, and the file below it is the one that
+// proves that is deliberate.
+func TestReadRefusesAnImageOverTheCapAndSendsOneAtIt(t *testing.T) {
+	ts, reg := newTestServer(t)
+	dir := t.TempDir()
+	pngOfSize(t, dir, "over.png", maxImageBytes+1)
+	pngOfSize(t, dir, "at.png", maxImageBytes)
+	s := readTarget(t, reg, dir)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "over.png", ReqID: 101})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		switch v := msg.(type) {
+		case wire.File:
+			t.Fatalf("an image one byte over the cap was answered with %+v, want a refusal", v)
+		case wire.Error:
+			// Correlated, like every other refusal: a reader has one viewer per
+			// reqId and an error it cannot match is an error it cannot show.
+			if v.ReqID != 101 {
+				t.Fatalf("Error.ReqID = %d, want 101", v.ReqID)
+			}
+			if v.Code != "too_large" {
+				t.Fatalf("Error.Code = %q, want too_large", v.Code)
+			}
+			return true
+		}
+		return false
+	})
+
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "at.png", ReqID: 102})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		switch v := msg.(type) {
+		case wire.Error:
+			t.Fatalf("an image exactly at the cap was refused with %+v", v)
+		case wire.File:
+			if v.ReqID != 102 {
+				t.Fatalf("File.ReqID = %d, want 102", v.ReqID)
+			}
+			if v.Kind != "image" {
+				t.Fatalf("File.Kind = %q, want image", v.Kind)
+			}
+			if v.Mime != "image/png" {
+				t.Fatalf("File.Mime = %q, want image/png", v.Mime)
+			}
+			if v.Size != int64(maxImageBytes) {
+				t.Fatalf("File.Size = %d, want the cap %d", v.Size, maxImageBytes)
+			}
+			// The one thing an image never says. If it did, the cap would have
+			// become a truncation point and the refusal above would be the only
+			// thing standing between a reader and half a picture.
+			if v.Truncated {
+				t.Fatal("an image at the cap says it was truncated; images are refused, not cut")
+			}
+			return true
+		}
+		return false
+	})
+}
+
 func TestReadRefusesWhatItCannotShow(t *testing.T) {
 	ts, reg := newTestServer(t)
 	dir := t.TempDir()
@@ -492,6 +636,41 @@ func TestReadRefusesWhatItCannotShow(t *testing.T) {
 			return true
 		})
 	}
+}
+
+// TestReadRefusesAFifoWithoutHangingOnIt drives the one path in startRead where
+// the kernel, not the daemon, decides how long a call takes.
+//
+// A fifo with no writer parks an ordinary open forever. That open happens on the
+// connection's read loop, so a daemon that landed on one would answer nothing
+// else on that connection ever again, and there is no context to cancel and no
+// timeout to trip. The non-blocking open is what makes this finish; take the
+// flag away and this test stops on its read deadline with the daemon still in
+// the kernel.
+//
+// The refusal itself is ordinary: a fifo has no size worth showing and is not
+// what a viewer asked for.
+func TestReadRefusesAFifoWithoutHangingOnIt(t *testing.T) {
+	ts, reg := newTestServer(t)
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+		t.Fatalf("Mkfifo: %v", err)
+	}
+	s := readTarget(t, reg, dir)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "pipe", ReqID: 47})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		if !ok {
+			return false
+		}
+		if e.ReqID != 47 || e.Code != "unsupported" {
+			t.Fatalf("error = %+v, want unsupported for reqId 47", e)
+		}
+		return true
+	})
 }
 
 // TestReadReportsThePathItActuallyOpened. A symlink means the file you get is
@@ -673,11 +852,55 @@ func heldRead(t *testing.T, c *conn, ref uint32, body string) (*fileRead, *os.Fi
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	// A real descriptor per call, and no caller of this helper ever ends the
+	// read it registers, so without this the file would stay open for the life
+	// of the test binary. Closing here covers every call site at once, and it is
+	// safe next to the tests that end the read themselves: those assert on the
+	// error from a *read* after the close, and a second Close is a no-op whose
+	// error nothing here looks at.
+	t.Cleanup(func() { _ = f.Close() })
 	r := &fileRead{ref: ref, f: f, done: make(chan struct{})}
 	c.mu.Lock()
 	c.reads[ref] = r
 	c.mu.Unlock()
 	return r, f
+}
+
+// fdScanLimit is how many descriptor numbers fileIsOpen looks at. Well past
+// what a test binary opens, and cheap: an fstat on a number nothing is using
+// returns EBADF immediately.
+const fdScanLimit = 4096
+
+// fileIsOpen reports whether this process still holds a descriptor on path.
+//
+// By fstat over the descriptor numbers rather than by listing /dev/fd, which
+// Darwin does not let a process read reliably, and by inode rather than by
+// name. So a path replaced since it was opened cannot make this say yes, and a
+// second open of the same file cannot make it say no.
+//
+// It exists for one assertion: that a refusal closes the file it opened before
+// it decided to refuse. Nothing else in this package can see that, because the
+// descriptor never leaves startRead. A scan that found nothing because it
+// looked in the wrong place would pass that assertion while observing nothing,
+// so the caller proves the scan against a descriptor it holds itself first.
+func fileIsOpen(t *testing.T, path string) bool {
+	t.Helper()
+	var want syscall.Stat_t
+	if err := syscall.Stat(path, &want); err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	for fd := 0; fd < fdScanLimit; fd++ {
+		var got syscall.Stat_t
+		// An unused number, or one holding something an fstat cannot describe.
+		// Neither is the file being looked for.
+		if err := syscall.Fstat(fd, &got); err != nil {
+			continue
+		}
+		if got.Dev == want.Dev && got.Ino == want.Ino {
+			return true
+		}
+	}
+	return false
 }
 
 // fillOutbox puts the outbox at its depth, which is what a session redrawing at
@@ -918,7 +1141,8 @@ func TestReadsAreCappedPerConnection(t *testing.T) {
 func TestAThirdReadIsRefusedWhileTwoAreHeld(t *testing.T) {
 	_, reg, srv := newTestServerUI(t, http.NotFoundHandler())
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "third.log"), []byte("hello\n"), 0o644); err != nil {
+	third := filepath.Join(dir, "third.log")
+	if err := os.WriteFile(third, []byte("hello\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	s := readTarget(t, reg, dir)
@@ -928,6 +1152,24 @@ func TestAThirdReadIsRefusedWhileTwoAreHeld(t *testing.T) {
 	c := newConn(ctx, cancel, newPipeConn(), srv, "test", "", nil)
 	for ref := uint32(1); ref <= maxReads; ref++ {
 		heldRead(t, c, ref, "held")
+	}
+
+	// The descriptor check is proved on a descriptor this test holds itself,
+	// before it is trusted to report the absence of one below. A fileIsOpen
+	// that could only ever answer no would pass that assertion while observing
+	// nothing at all.
+	probe, err := os.Open(third)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !fileIsOpen(t, third) {
+		t.Fatal("fileIsOpen cannot see a descriptor this test is holding open")
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if fileIsOpen(t, third) {
+		t.Fatal("fileIsOpen still sees a descriptor this test has closed")
 	}
 
 	c.startRead(wire.Read{ID: s.ID(), Path: "third.log", ReqID: 63})
@@ -959,6 +1201,17 @@ func TestAThirdReadIsRefusedWhileTwoAreHeld(t *testing.T) {
 	c.mu.Unlock()
 	if held != maxReads {
 		t.Fatalf("c.reads holds %d reads after a refusal, want the %d that were already there", held, maxReads)
+	}
+
+	// Nor did it keep the file. The cap is checked after the open, because the
+	// sniff that decides whether a file may be shown at all needs its first
+	// bytes, so this branch is holding a descriptor at the moment it decides to
+	// say no. Every other refusal in startRead is in the same position and
+	// closes for the same reason; this is the one a client can reach over and
+	// over on a connection that is simply busy, so a leak here is the one that
+	// would run a daemon out of descriptors.
+	if fileIsOpen(t, third) {
+		t.Fatal("a read refused with busy left its file open")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/karnstack/flue/internal/wire"
 )
@@ -115,7 +116,13 @@ func resolvePath(raw, cwd, home string) (string, error) {
 // None of them is an error on the wire, because "no" is the ordinary answer to
 // this question and the hover that asked it simply does not underline. It is
 // also the answer that says least: a caller learns whether a path it already
-// named is readable, and nothing about the shape of anything it did not name.
+// named is there, and nothing about the shape of anything it did not name.
+//
+// There, and not readable. A file with no permissions at all stats perfectly
+// well through a directory this user can search, so it underlines like any
+// other path and is refused with denied on the click that follows. Answering
+// that question honestly would mean opening every candidate on a hover, which
+// is a great deal of work for a question the click asks again anyway.
 func statEntry(raw, cwd, home string) wire.PathEntry {
 	e := wire.PathEntry{Path: raw}
 	abs, err := resolvePath(raw, cwd, home)
@@ -229,25 +236,58 @@ func (c *conn) startRead(m wire.Read) {
 		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
 		return
 	}
-	fi, err := os.Stat(abs)
+	// Opened before anything has been decided about it, and opened
+	// non-blocking, because that flag is the guard here and a stat taken first
+	// would not be one.
+	//
+	// A fifo, a socket or a device can block in the kernel forever on open: a
+	// fifo with no writer parks until a writer arrives, and that can be never.
+	// Deciding from a stat and then opening only narrows the window, it does not
+	// close it, since the name can be replaced between the two calls by anyone
+	// who can write to the directory. Nothing would rescue the daemon from
+	// landing in that window. An open takes no context, this runs on the
+	// connection's read loop, so a connection parked here handles no further
+	// message and never reaches its own teardown, and Server.Shutdown cancels a
+	// context nothing in this path is waiting on. O_NONBLOCK closes the window
+	// instead of narrowing it: an open that would have blocked returns at once.
+	//
+	// The type checks then run on the descriptor's own Stat, which describes the
+	// file that was actually opened rather than whatever the name pointed at a
+	// moment earlier. The flag costs the ordinary path nothing: it has no effect
+	// on reading a regular file, and a regular file is the only thing that gets
+	// past the checks below.
+	f, err := os.OpenFile(abs, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
+		// The open is the guard; this stat only chooses which refusal to name.
+		// A directory this user may not read fails the open with a permission
+		// error, and "that is a directory" is the more useful of the two things
+		// that could be said about it: is_dir is a shape a client can act on,
+		// denied is not. Every other failure keeps the code it had.
+		if fi, serr := os.Stat(abs); serr == nil && fi.IsDir() {
+			c.sendErrorFor(m.ReqID, "is_dir", "that is a directory")
+			return
+		}
+		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
+		return
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
 		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
 		return
 	}
 	if fi.IsDir() {
+		_ = f.Close()
 		c.sendErrorFor(m.ReqID, "is_dir", "that is a directory")
 		return
 	}
 	if !fi.Mode().IsRegular() {
-		// A socket, a device, a fifo. Opening one can block forever and none
-		// of them has a size worth showing.
+		// A socket, a device, a fifo. None of them has a size worth showing,
+		// and none of them is what a viewer asked for. The descriptor is closed
+		// rather than read: the non-blocking open above got this far without
+		// hanging, and that is all it was for.
+		_ = f.Close()
 		c.sendErrorFor(m.ReqID, "unsupported", "not a regular file")
-		return
-	}
-
-	f, err := os.Open(abs)
-	if err != nil {
-		c.sendErrorFor(m.ReqID, readErrCode(err), "cannot read that path")
 		return
 	}
 	head := make([]byte, sniffBytes)

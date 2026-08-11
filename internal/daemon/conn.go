@@ -283,8 +283,8 @@ func (c *conn) sendControl(msg any) error {
 // for room across all 256 chunks of an 8 MiB file and then drop the connection
 // on the single frame that says the file is finished, because the session's
 // output refilled the slot the writer had just freed. That is the same
-// intermittent disconnect enqueueWait exists to prevent, narrowed to one frame
-// in N and no less real for it.
+// intermittent disconnect enqueueWaitFor exists to prevent, narrowed to one
+// frame in N and no less real for it.
 //
 // Not for control responses in general, and in particular not for the file
 // frame that answers a read. Those are sent on the read loop, where a full
@@ -334,7 +334,7 @@ func (c *conn) enqueue(f frame) error {
 	}
 }
 
-// enqueueWait hands a frame to the writer, waiting for room rather than
+// enqueueWaitFor hands a frame to the writer, waiting for room rather than
 // treating a full outbox as the client's fault.
 //
 // enqueue above is right for the producers it serves: an attachment's output
@@ -352,10 +352,6 @@ func (c *conn) enqueue(f frame) error {
 // The wait needs no timeout of its own. A peer that has genuinely stopped
 // reading stalls the writer, which trips writeTimeout, which fails the
 // connection and cancels the context this selects on.
-func (c *conn) enqueueWait(f frame) error { return c.enqueueWaitFor(f, nil) }
-
-// enqueueWaitFor is enqueueWait for a producer that can be told to stop, and it
-// is the form everything in this daemon actually uses.
 //
 // done is the producer's own end signal — a file read's done channel, closed by
 // endRead. A wait that could not see it would be a wait nothing can interrupt
@@ -372,7 +368,10 @@ func (c *conn) enqueueWait(f frame) error { return c.enqueueWaitFor(f, nil) }
 //     function.
 //
 // A nil done never fires, which is exactly the right shape for a producer with
-// no end signal of its own; that is enqueueWait above.
+// no end signal of its own. Every production caller has one, so nil belongs to
+// the tests that exercise the waiting itself and want nothing else in the
+// select. There is deliberately no second function wrapping that argument:
+// one waiting path, one place to read the rules above.
 func (c *conn) enqueueWaitFor(f frame, done <-chan struct{}) error {
 	select {
 	case c.out <- f:
