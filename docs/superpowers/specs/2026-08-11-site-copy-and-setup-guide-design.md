@@ -103,7 +103,7 @@ HEADING   The list comes to you.
 The heading answers problem card three, which says "Four machines, and no
 single list."
 
-Body: `⌘K` on a Mac, `Ctrl+Shift+K` everywhere else, from any screen that can
+Body: `⌘K` on a Mac, `Ctrl+Shift+K` on any platform including macOS, from any screen that can
 see a daemon. Pinned sessions come first, with number keys on them. Then the
 sessions this browser has opened before. Then the rest. Type to narrow the
 list, use the arrow keys to move, press Enter to go. The highlighted row shows
