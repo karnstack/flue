@@ -126,12 +126,18 @@ browser loads its JavaScript from that origin, is in the
 
 ## Status
 
-Pre-1.0, and honest about it. The local terminal, the login service, the
-fleet-wide sessions list and the end-to-end pairing all work. The Cloudflare
-relay is built and deployable but has not been through its manual end-to-end
-gate against a real account ([docs/RELAY.md](docs/RELAY.md)), so treat it as
-ready to try rather than ready to rely on. Known rough edges live in
-[docs/FOLLOW-UPS.md](docs/FOLLOW-UPS.md).
+Released and in daily use. v0.5.1 is the current release, `brew install
+karnstack/tap/flue` gets it, and the whole of it works: the local terminal, the
+login service, the fleet-wide sessions list, pairing, and the Cloudflare relay.
+The relay has been through its manual end-to-end gate
+([docs/RELAY.md](docs/RELAY.md)) against a real account, with a phone on a
+different network paired to it and a second machine joined to the same relay.
+There is a recording of that run at
+[flue.sh/docs/setup](https://flue.sh/docs/setup).
+
+It is 0.x, which means what it usually means: commands, flags and the config
+file can still change between releases, and an upgrade may ask something of
+you. Known rough edges live in [docs/FOLLOW-UPS.md](docs/FOLLOW-UPS.md).
 
 flue is open source and always free.
 

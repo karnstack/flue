@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 
 import { Code, DocPage, Lead, Link, Note, P, Section, Shell, Step, Steps } from '@/components/doc-page'
+import { Walkthrough } from '@/components/walkthrough'
 import { docTitle, findDoc } from '@/lib/docs'
 
 const DOC = findDoc('setup')!
@@ -15,6 +16,19 @@ export const Route = createFileRoute('/docs/setup')({
 function Setup() {
   return (
     <DocPage slug="setup" title={DOC.title} blurb={DOC.blurb}>
+      {/* First, before a single command. Somebody who opened this page has
+          already decided to install flue, and the thing they want to know
+          before they start is how long it takes and what it looks like when
+          it works. The steps below answer neither, and eight minutes of
+          somebody doing it answers both. */}
+      <Section title="The whole thing, on camera">
+        <Lead>
+          Every step below, run on two machines: a Mac from nothing, then an Ubuntu box joining the
+          same relay.
+        </Lead>
+        <Walkthrough className="max-w-[68ch]" />
+      </Section>
+
       <Section title="The shape to aim for">
         <Lead>
           One relay. Every machine joined to it. Every device paired once. Everything below is a

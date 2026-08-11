@@ -13,6 +13,7 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@karnstack/kino": "^0.12.0",
     "@tanstack/react-router": "1.170.17",
     "@tanstack/react-start": "1.168.27",
     "class-variance-authority": "^0.7.1",
