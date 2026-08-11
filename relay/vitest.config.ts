@@ -26,6 +26,12 @@ import { defineConfig } from 'vitest/config'
  * The pairing deadline stays short and stays the looser of the two, because the
  * tests that must *not* hit it run a whole HTTP request through a WebSocket
  * round trip first.
+ *
+ * CLIENT_IDLE_TIMEOUT_MS is bound the same way and for the same reason: a test
+ * client sends when its test needs it to and is otherwise silent — it sends no
+ * keepalives at all — so an ambient idle sweep would close healthy sockets
+ * halfway through unrelated suites. The tests that are about the sweep bind
+ * their own short window with `idleTimeout()`.
  */
 export default defineConfig({
   plugins: [
@@ -34,6 +40,7 @@ export default defineConfig({
       miniflare: {
         bindings: {
           HANDSHAKE_TIMEOUT_MS: 600_000,
+          CLIENT_IDLE_TIMEOUT_MS: 600_000,
           PAIR_TIMEOUT_MS: 250,
           DAEMON_SECRET: 'test-secret',
           // The deploy stamps this (internal/relaydeploy, VersionVar); binding

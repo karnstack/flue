@@ -381,6 +381,12 @@ and `setWebSocketAutoResponse` matches a text request against a text response.
 An application-level ping is what buys an idle terminal a sleeping,
 almost-free Durable Object.
 
+The edge stamps each answer where the Durable Object can read it later
+(`getWebSocketAutoResponseTimestamp`). A browser's keepalive is therefore
+evidence of life the hub can read without ever having been woken by a ping.
+That is what the **idle window** under Auth rests on, and it is why a browser
+that stops pinging is one the relay eventually hangs up on.
+
 ## Auth
 
 The daemon's upgrade request carries `Authorization: Bearer <daemon secret>` —
@@ -393,8 +399,27 @@ complete an IK handshake against a daemon that has not paired their key, and one
 who could complete it would not have needed the credential. What an
 unauthenticated `/client` does expose is denial of service, so the Durable
 Object bounds it directly: a cap on concurrent channels, a deadline on
-completing the handshake, after which the channel is closed, and a cap on the
-size of one client message.
+completing the handshake, after which the channel is closed (`4001`
+`handshake timeout`), a cap on the size of one client message, and an **idle
+window** after the handshake.
+
+The idle window collects a browser that went away without a close frame: a
+laptop that slept, a phone that lost its network, a tab that died with its
+machine. A socket with no sign of life for the window is closed `4002` `idle`,
+and the daemon is told `closed{channel}` as it is for any other departure. A
+sign of life is any frame the hub read on that socket, or a keepalive the edge
+answered for it. The window is many keepalive intervals wide (five minutes
+against a 30 s ping) so that a live terminal nobody is typing into is never
+swept: a hidden tab's timers are throttled, and a sleeping machine's do not run
+at all.
+
+Nothing else collects such a socket. The daemon cannot see it, because it holds
+the channel on a socket it dialled itself and a write into a channel whose
+browser is gone still succeeds all the way to the Durable Object. The edge
+cannot either, because a socket the hub is sending into is not idle. So the
+most expensive case was the one that lived longest: a dead channel attached to
+a session that is producing output, taking a copy of every chunk down the one
+relay socket that every other browser on that machine shares.
 
 The directory's legs are gated by the same one secret: `PUT /directory` and the
 `/directory` upgrade present the bearer, and `GET /directory` presents nothing,

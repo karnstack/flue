@@ -20,6 +20,10 @@ export interface Env {
   /** How long `POST /api/pair` waits for the daemon, in ms — the same test
    * seam (vitest binds 250). Unset in production, where it is 10 000. */
   PAIR_TIMEOUT_MS?: string | number
+  /** How long a client socket may go without a sign of life before the hub
+   * closes it, in ms — the same test seam. Unset in production, where the hub
+   * defaults to five minutes (src/hub.ts, CLIENT_IDLE_MS). */
+  CLIENT_IDLE_TIMEOUT_MS?: string | number
   /** The version of the flue that deployed this Worker, stamped by the
    * deploy as a plain-text binding (internal/relaydeploy, VersionVar) and
    * reported on /api/health. It is how a daemon sees that this relay is

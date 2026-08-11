@@ -91,6 +91,22 @@ export async function handshakeDeadline(hub: DurableObjectStub, ms: number): Pro
   })
 }
 
+/**
+ * Bind one hub's client idle window, for the tests that are about the sweep.
+ *
+ * The same shape as `handshakeDeadline` above and armed by the same rule: the
+ * pool binds a window no test can outlive, so the sweep only ever fires where a
+ * test asked for it. Call it before anything dials — the window is read when the
+ * alarm runs, and an alarm already armed minutes out is one no later change
+ * pulls forward.
+ */
+export async function idleTimeout(hub: DurableObjectStub, ms: number): Promise<void> {
+  await runInDurableObject(hub, (instance) => {
+    const withEnv = instance as unknown as { env: Record<string, unknown> }
+    withEnv.env = { ...withEnv.env, CLIENT_IDLE_TIMEOUT_MS: ms }
+  })
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }

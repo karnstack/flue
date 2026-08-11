@@ -15,9 +15,11 @@ import type { Env } from './index'
  * memory — no pending `setTimeout`/`setInterval` outside a request that is
  * already holding the object awake (the handshake deadline is a DO alarm; the
  * pairing deadline is the one exception, and `awaitPairResult` says why), and
- * no outbound sockets from the DO. Everything a handler needs about a socket
+ * no outbound sockets from the DO. Everything a handler *needs* about a socket
  * lives in its serialized attachment, because in-memory state does not survive
- * a hibernation wake.
+ * a hibernation wake — which is why the memory below is all derived, rebuilt
+ * from those attachments on the first frame after a wake and never the source
+ * of truth for anything.
  */
 export class DaemonHub extends DurableObject<Env> {
   /**
@@ -30,10 +32,57 @@ export class DaemonHub extends DurableObject<Env> {
    */
   private readonly pending = new Map<number, (outcome: PairOutcome) => void>()
 
+  /**
+   * The live client sockets by channel, and the live daemon socket — this
+   * wake's index over what `getWebSockets` would otherwise be walked for on
+   * every frame.
+   *
+   * It is the difference between forwarding costing O(1) and costing O(clients),
+   * and that mattered more than it looks. Every chunk of terminal output on
+   * every session on this machine is one frame through `daemonMessage`, and the
+   * lookup it used to do was a scan of every client socket with a
+   * `deserializeAttachment` — a structured-clone read — at each one, plus a
+   * second read to check the daemon leg was live. On a hub carrying a handful
+   * of browsers that is several V8 deserializations per frame, on the single
+   * thread every browser on that machine shares, which is a busy `cat` on one
+   * device slowing every other device's terminal.
+   *
+   * Both fields are derived and both are safe to lose: `null`/`undefined` means
+   * "not built this wake", and the builders below reconstruct them from the
+   * serialized attachments, which stay the record. Nothing is ever *only* in
+   * here.
+   */
+  private clients: Map<number, WebSocket> | null = null
+  /** The live daemon socket: `undefined` until resolved this wake, `null` for
+   *  a hub with none. See `daemon`. */
+  private live: WebSocket | null | undefined
+
+  /**
+   * Per-channel traffic that has not been written into an attachment yet, and
+   * when each channel was last heard from.
+   *
+   * The counters used to be summed straight into the attachment and
+   * re-serialized on every forwarded frame; they are diagnostics for one log
+   * line at close, and a structured-clone write per keystroke and per output
+   * chunk is not what they are worth. They are folded into the attachment at
+   * two points instead — when the socket retires, and on each alarm sweep —
+   * which leaves one residual worth stating: traffic since the last fold is
+   * lost if the object hibernates, so a `channel_closed` line can under-report
+   * an idle-then-woken socket. The line is for operators reading Workers Logs,
+   * not for billing.
+   *
+   * `heard` is liveness rather than diagnostics — see `deadline`.
+   */
+  private readonly traffic = new Map<number, Traffic>()
+  private readonly heard = new Map<number, number>()
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
     // The edge answers keepalives itself, without waking a hibernated object
-    // (spec/relay-protocol.md, Keepalive).
+    // (spec/relay-protocol.md, Keepalive). It also stamps each answer where
+    // `getWebSocketAutoResponseTimestamp` can read it, which is what lets the
+    // idle sweep in `alarm` tell a quiet browser from an absent one without
+    // ever having been woken by either.
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('flue-ping', 'flue-pong'))
   }
 
@@ -49,11 +98,38 @@ export class DaemonHub extends DurableObject<Env> {
    * The live daemon socket, if one is attached. Not `getWebSockets('daemon')[0]`:
    * after a replacement the dying socket can still be listed, so the `live`
    * flag in the attachment — not list position — names the socket frames go to.
+   *
+   * Resolved once per wake and remembered, because this runs on the forwarding
+   * path: every client frame asks for it. The attachment stays the record, so a
+   * wake re-finds the same socket the flag names; the field is only what keeps
+   * the second and later frames from re-reading it.
    */
   private daemon(): WebSocket | undefined {
-    return this.ctx
-      .getWebSockets('daemon')
-      .find((ws) => (ws.deserializeAttachment() as DaemonAttachment | null)?.live === true)
+    if (this.live === undefined) {
+      this.live =
+        this.ctx
+          .getWebSockets('daemon')
+          .find((ws) => (ws.deserializeAttachment() as DaemonAttachment | null)?.live === true) ??
+        null
+    }
+    return this.live ?? undefined
+  }
+
+  /**
+   * The live client sockets by channel, rebuilt from attachments on the first
+   * lookup of each wake. Retired sockets are left out: a `done` attachment is a
+   * socket whose close frame is still in flight, and nothing may be forwarded
+   * to it.
+   */
+  private clientIndex(): Map<number, WebSocket> {
+    if (this.clients !== null) return this.clients
+    const index = new Map<number, WebSocket>()
+    for (const ws of this.ctx.getWebSockets('client')) {
+      const att = ws.deserializeAttachment() as ClientAttachment | null
+      if (att && !att.done) index.set(att.channel, ws)
+    }
+    this.clients = index
+    return index
   }
 
   private acceptDaemon(req: Request): Response {
@@ -80,6 +156,9 @@ export class DaemonHub extends DurableObject<Env> {
     const pair = new WebSocketPair()
     this.ctx.acceptWebSocket(pair[1], ['daemon'])
     pair[1].serializeAttachment({ live: true } satisfies DaemonAttachment)
+    // The attachment is the record and this is the cache of it, written in the
+    // same breath so no frame in between resolves the socket this one replaced.
+    this.live = pair[1]
     return new Response(null, { status: 101, webSocket: pair[0] })
   }
 
@@ -99,11 +178,14 @@ export class DaemonHub extends DurableObject<Env> {
     // reconnects: a channel id is never reused within this hub's lifetime.
     const channel = (await this.ctx.storage.get<number>('nextChannel')) ?? 1
     await this.ctx.storage.put('nextChannel', channel + 1)
-    // Arm the handshake deadline unless a reap is already pending; alarm()
-    // re-arms for whoever remains.
-    if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + this.handshakeTimeout())
-    }
+    // Arm the handshake deadline, unless something sooner is already armed;
+    // alarm() re-arms for whoever remains. The comparison is not decoration: the
+    // alarm now also carries the idle sweep, whose deadlines are minutes out, so
+    // "an alarm is pending" no longer implies "this client will be looked at in
+    // time".
+    const deadline = Date.now() + this.handshakeTimeout()
+    const armed = await this.ctx.storage.getAlarm()
+    if (armed === null || armed > deadline) await this.ctx.storage.setAlarm(deadline)
     const pair = new WebSocketPair()
     this.ctx.acceptWebSocket(pair[1], ['client'])
     pair[1].serializeAttachment({
@@ -115,6 +197,12 @@ export class DaemonHub extends DurableObject<Env> {
       bytesToDaemon: 0,
       bytesToClient: 0,
     } satisfies ClientAttachment)
+    // Into this wake's index beside the attachment, for the same reason the
+    // daemon socket is: the frames start immediately and the lookup is on their
+    // path. Only when the index has been built — a wake that has not needed it
+    // yet builds it complete when it does, and seeding a half-built one would
+    // leave every earlier channel out of it.
+    this.clients?.set(channel, pair[1])
     try {
       daemon.send(controlFrame({ type: 'open', channel, origin: new URL(req.url).origin }))
     } catch {
@@ -294,33 +382,93 @@ export class DaemonHub extends DurableObject<Env> {
     this.teardown(ws)
   }
 
-  /** The handshake deadline: reap clients that never sent, re-arm for the rest. */
+  /**
+   * The two deadlines a client socket lives under: the handshake deadline for
+   * one that never sent, and the idle deadline for one that has stopped. Reap
+   * whoever is overdue, fold the rest's counters in, and re-arm for the earliest
+   * deadline left.
+   *
+   * The idle half is the answer to a browser that goes away without a close
+   * frame — a laptop that sleeps, a phone that loses its network, a tab killed
+   * with the machine. Nothing else notices it. The daemon cannot: it holds a
+   * channel on a socket it opened itself, and a write into a channel whose
+   * browser is gone succeeds all the way to this object. The edge cannot either,
+   * because a socket this hub is *sending* into is not idle — so precisely the
+   * expensive ghost, one attached to a session that is producing output, is the
+   * one that would never be collected. What the daemon does about it in the
+   * meantime is send every chunk of that session's output down the shared relay
+   * socket, sealed, to nobody: bandwidth and CPU taken from the browsers that
+   * are still there.
+   *
+   * The evidence a live browser leaves is the keepalive the edge answers for it
+   * (spec/relay-protocol.md, Keepalive), stamped per socket where
+   * `getWebSocketAutoResponseTimestamp` can read it without this object ever
+   * having been woken. So the sweep costs one wake per idle window per hub with
+   * clients on it, and a browser that has pinged inside the window is spared
+   * having spent nothing.
+   *
+   * The window is deliberately many keepalives wide (`CLIENT_IDLE_MS`): a
+   * background tab's timers are throttled — Chrome clamps them to about once a
+   * minute — so a live-but-hidden browser's 30-second ping can arrive at a
+   * fraction of its nominal rate, and reaping it would be this hub closing a
+   * session somebody is about to come back to.
+   */
   async alarm(): Promise<void> {
     const now = Date.now()
-    const timeout = this.handshakeTimeout()
     let next: number | null = null
     for (const ws of this.ctx.getWebSockets('client')) {
       const att = ws.deserializeAttachment() as ClientAttachment | null
-      if (!att || att.done || att.seen) continue
-      const deadline = att.opened + timeout
-      if (deadline <= now) {
+      if (!att || att.done) continue
+      const { at, code, reason } = this.deadline(ws, att)
+      if (at <= now) {
         // It was announced open, so the daemon hears closed.
         this.retireClient(ws, true)
         try {
-          ws.close(4001, 'handshake timeout')
+          ws.close(code, reason)
         } catch {
           // Already closing.
         }
-      } else {
-        next = next === null ? deadline : Math.min(next, deadline)
+        continue
       }
+      // The sweep is also where the counters are folded into the attachment, so
+      // a socket that hibernates between one sweep and the next carries at most
+      // one window's traffic in memory. See `traffic`.
+      this.fold(ws, att)
+      next = next === null ? at : Math.min(next, at)
     }
     if (next !== null) await this.ctx.storage.setAlarm(next)
   }
 
+  /**
+   * When this client socket is next overdue, and what it would be closed for.
+   *
+   * A socket that has never sent is on the handshake deadline and nothing else:
+   * a browser that opened a channel and did not start a handshake is not made
+   * live by keepalives, and the deadline is the DoS bound the spec names.
+   * Everything after message A is on the idle deadline, measured from the last
+   * of three things — a frame this hub read, a keepalive the edge answered, and
+   * the moment the socket was accepted. The last two are what survive
+   * hibernation; the first is what covers a client whose build predates the
+   * keepalive but is plainly talking.
+   */
+  private deadline(
+    ws: WebSocket,
+    att: ClientAttachment,
+  ): { at: number; code: number; reason: string } {
+    if (!att.seen) {
+      return { at: att.opened + this.handshakeTimeout(), code: 4001, reason: 'handshake timeout' }
+    }
+    const pinged = this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0
+    const spoke = this.heard.get(att.channel) ?? 0
+    const last = Math.max(att.opened, pinged, spoke)
+    return { at: last + this.idleTimeout(), code: 4002, reason: 'idle' }
+  }
+
   private daemonMessage(ws: WebSocket, buf: ArrayBuffer): void {
     // Only the live daemon may speak; a replaced socket's last words are dropped.
-    if (!(ws.deserializeAttachment() as DaemonAttachment | null)?.live) return
+    // By identity against the socket the `live` flag named, which is the same
+    // question the flag answers and asks it without a read per frame.
+    if (ws !== this.daemon()) return
     let frame: { channel: number; payload: Uint8Array }
     try {
       frame = decodeFrame(buf)
@@ -335,11 +483,11 @@ export class DaemonHub extends DurableObject<Env> {
     }
     const target = this.clientFor(frame.channel)
     if (!target) return // that browser is already gone; the payload is dropped
-    target.att.fwdToClient += 1
-    target.att.bytesToClient += frame.payload.byteLength
-    target.ws.serializeAttachment(target.att)
+    const t = this.count(frame.channel)
+    t.fwdToClient += 1
+    t.bytesToClient += frame.payload.byteLength
     try {
-      target.ws.send(frame.payload)
+      target.send(frame.payload)
     } catch {
       // Closing under us — the remote close is not yet processed. Its close
       // event finishes the teardown; the payload is dropped like any other
@@ -361,9 +509,9 @@ export class DaemonHub extends DurableObject<Env> {
       const target = this.clientFor(msg.channel)
       if (!target) return // already gone; a late close crossed a closed in flight
       // The daemon asked for this close; it needs no closed echoed back.
-      this.retireClient(target.ws, false)
+      this.retireClient(target, false)
       try {
-        target.ws.close(1000, 'daemon closed')
+        target.close(1000, 'daemon closed')
       } catch {
         // Already closing.
       }
@@ -410,10 +558,17 @@ export class DaemonHub extends DurableObject<Env> {
       }
       return
     }
-    att.seen = true
-    att.fwdToDaemon += 1
-    att.bytesToDaemon += buf.byteLength
-    ws.serializeAttachment(att)
+    // `seen` is the one field on this path that has to reach the attachment,
+    // because the handshake reaper reads it after a wake — and it flips exactly
+    // once, so the write costs one frame per socket rather than every frame.
+    if (!att.seen) {
+      att.seen = true
+      ws.serializeAttachment(att)
+    }
+    this.heard.set(att.channel, Date.now())
+    const t = this.count(att.channel)
+    t.fwdToDaemon += 1
+    t.bytesToDaemon += buf.byteLength
     try {
       daemon.send(encodeFrame(att.channel, new Uint8Array(buf)))
     } catch {
@@ -439,6 +594,12 @@ export class DaemonHub extends DurableObject<Env> {
     const att = ws.deserializeAttachment() as ClientAttachment | null
     if (!att || att.done) return
     att.done = true
+    // Everything this channel is remembered by leaves with it: the counters into
+    // the line below, the index entry that would otherwise name a closed socket
+    // for a channel id that is never reused, and the liveness stamp.
+    this.fold(ws, att, { write: false })
+    this.clients?.delete(att.channel)
+    this.heard.delete(att.channel)
     ws.serializeAttachment(att)
     console.log(
       JSON.stringify({
@@ -475,6 +636,10 @@ export class DaemonHub extends DurableObject<Env> {
     }
     if (!att?.live) return
     ws.serializeAttachment({ live: false } satisfies DaemonAttachment)
+    // The cache follows the flag it caches. Cleared rather than re-resolved:
+    // whatever is listed now is this socket and any predecessor, none of them
+    // live, and a replacement writes the field itself when it lands.
+    if (this.live === ws) this.live = null
     this.dropClients()
     this.failPendingPairs()
   }
@@ -495,18 +660,46 @@ export class DaemonHub extends DurableObject<Env> {
     }
   }
 
-  /** The client socket carrying this channel, with its attachment. */
-  private clientFor(channel: number): { ws: WebSocket; att: ClientAttachment } | undefined {
-    for (const ws of this.ctx.getWebSockets('client')) {
-      const att = ws.deserializeAttachment() as ClientAttachment | null
-      if (att && !att.done && att.channel === channel) return { ws, att }
+  /** The live client socket carrying this channel. */
+  private clientFor(channel: number): WebSocket | undefined {
+    return this.clientIndex().get(channel)
+  }
+
+  /** This channel's counters that have not reached its attachment yet. */
+  private count(channel: number): Traffic {
+    let t = this.traffic.get(channel)
+    if (t === undefined) {
+      t = { fwdToDaemon: 0, fwdToClient: 0, bytesToDaemon: 0, bytesToClient: 0 }
+      this.traffic.set(channel, t)
     }
-    return undefined
+    return t
+  }
+
+  /**
+   * Fold a channel's counters into its attachment, so what the attachment holds
+   * is the total this hub has seen. `write` is false for a caller that is about
+   * to serialize the attachment for its own reasons, which is the one place two
+   * writes would be one too many.
+   */
+  private fold(ws: WebSocket, att: ClientAttachment, opts: { write?: boolean } = {}): void {
+    const t = this.traffic.get(att.channel)
+    if (t === undefined) return
+    this.traffic.delete(att.channel)
+    att.fwdToDaemon += t.fwdToDaemon
+    att.fwdToClient += t.fwdToClient
+    att.bytesToDaemon += t.bytesToDaemon
+    att.bytesToClient += t.bytesToClient
+    if (opts.write !== false) ws.serializeAttachment(att)
   }
 
   private handshakeTimeout(): number {
     const n = Number(this.env.HANDSHAKE_TIMEOUT_MS ?? HANDSHAKE_TIMEOUT_MS)
     return Number.isFinite(n) && n > 0 ? n : HANDSHAKE_TIMEOUT_MS
+  }
+
+  private idleTimeout(): number {
+    const n = Number(this.env.CLIENT_IDLE_TIMEOUT_MS ?? CLIENT_IDLE_MS)
+    return Number.isFinite(n) && n > 0 ? n : CLIENT_IDLE_MS
   }
 
   private pairTimeout(): number {
@@ -542,6 +735,20 @@ const MAX_CLIENT_MESSAGE = 1 << 20
 /** The handshake deadline when HANDSHAKE_TIMEOUT_MS is unbound (production). */
 const HANDSHAKE_TIMEOUT_MS = 30_000
 
+/**
+ * How long a client socket may show no sign of life before the hub closes it,
+ * when CLIENT_IDLE_TIMEOUT_MS is unbound (production).
+ *
+ * Five minutes is ten keepalives (web/src/relay/socket.ts pings every 30 s), and
+ * the width is the whole design of the number. A hidden tab's timers are
+ * throttled — about once a minute in Chrome, less predictably elsewhere — and a
+ * sleeping laptop's do not run at all until it wakes, so the window has to
+ * tolerate a live browser pinging at a small fraction of its nominal rate. What
+ * it bounds is the other case: a browser that is *gone*, whose channel would
+ * otherwise be held open for as long as the daemon keeps writing into it.
+ */
+const CLIENT_IDLE_MS = 300_000
+
 /** How long a parked /api/pair waits when PAIR_TIMEOUT_MS is unbound. */
 const PAIR_TIMEOUT_MS = 10_000
 
@@ -563,6 +770,17 @@ interface DaemonAttachment {
   /** False once replaced. `getWebSockets` can still list the dying socket, so
    * this flag — not list position — names the daemon frames go to. */
   live: boolean
+}
+
+/**
+ * One channel's forwarded frames and bytes as this instance has counted them
+ * since the last fold into the attachment. In memory only; see `traffic`.
+ */
+interface Traffic {
+  fwdToDaemon: number
+  fwdToClient: number
+  bytesToDaemon: number
+  bytesToClient: number
 }
 
 /** What a client socket remembers across hibernation. */
