@@ -163,6 +163,125 @@ func (p Preview) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(p))
 }
 
+// Stat asks whether paths exist, resolved against a session's working
+// directory.
+//
+// Plural because of who asks. The terminal underlines a path only once it is
+// known to be real, and a hovered line carries several candidates: a message
+// per candidate would be a round trip per candidate, on a link where the
+// round trip is the cost. One message per hovered line is the shape the
+// caller actually has.
+//
+// Paths are echoed back in Stats.Entries in the order they were asked about,
+// so a client matches answers to the text it matched them from.
+type Stat struct {
+	ID    string   `json:"id"`
+	Paths []string `json:"paths"`
+	// ReqID correlates this request with the stats or error answering it.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// PathEntry is what one path turned out to be.
+//
+// Path is what was asked, not what it resolved to. Resolution is the daemon's
+// (a leading ~, a relative path against the session's cwd, symlinks), and the
+// client has no way to reproduce it — but it does need to know which of the
+// candidates it sent this answers.
+//
+// A path that does not exist, or cannot be resolved at all, is Exists false
+// with the rest left at zero. There is deliberately no error for it: "no" is
+// the ordinary answer here, not a failure.
+type PathEntry struct {
+	Path   string `json:"path"`
+	Exists bool   `json:"exists"`
+	// Kind is "file", "dir" or "other". Empty when Exists is false.
+	Kind string `json:"kind,omitempty"`
+	// Size is bytes, and Mtime unix seconds — the same unit deviceList uses,
+	// rather than the RFC 3339 strings sessions[] carries.
+	Size  int64 `json:"size,omitempty"`
+	Mtime int64 `json:"mtime,omitempty"`
+}
+
+// Stats answers stat, one entry per path asked about, in order.
+type Stats struct {
+	Entries []PathEntry `json:"entries"`
+	// ReqID echoes the reqId of the stat this answers.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// MarshalJSON writes an empty list as [] rather than null, for the reason
+// Sessions and DeviceList do: the client declares the field an array, and the
+// zero value is exactly the path that would otherwise ship null.
+func (s Stats) MarshalJSON() ([]byte, error) {
+	// The alias sheds this method, so json.Marshal below does not recurse.
+	type alias Stats
+	if s.Entries == nil {
+		s.Entries = []PathEntry{}
+	}
+	return json.Marshal(alias(s))
+}
+
+// Read starts reading one file, resolved against a session's working
+// directory the way Stat resolves one.
+//
+// Answered by file, which mints the ref the content arrives under, or by an
+// error naming why not. The reply is not the content: a file is streamed as
+// FrameFile chunks under that ref and terminated by eof, because a WebSocket
+// message is capped at 1 MiB by the relay and because a multi-megabyte frame
+// would sit in front of the next keystroke.
+type Read struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+	// ReqID correlates this request with the file or error answering it.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// File answers read: the stream is open and these are its terms.
+//
+// Ref is the handle every chunk carries, minted from the same counter
+// attachments use — a read is structurally an attachment, and sharing the
+// counter means the connection gains a kind of entry rather than a second
+// numbering scheme.
+//
+// Path is the *resolved* path, unlike PathEntry.Path. A symlink means the file
+// you get is not always the path you clicked, and the reader should be told
+// what it actually opened.
+type File struct {
+	Ref  uint32 `json:"ref"`
+	Path string `json:"path"`
+	// Size is the file's real size, which is not always how much is sent: see
+	// Truncated.
+	Size int64 `json:"size"`
+	// Mime is sniffed from the content, never from the extension.
+	Mime string `json:"mime"`
+	// Kind is "text" or "image". Anything else is refused rather than sent,
+	// because a client has nothing useful to do with it.
+	Kind string `json:"kind"`
+	// Truncated says the file is longer than this daemon will send and only
+	// its head is coming. Reported rather than hidden: a viewer that showed
+	// 8 MiB of a 40 MiB file in silence would be lying about the file.
+	Truncated bool `json:"truncated,omitempty"`
+	// ReqID echoes the reqId of the read this answers.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// Eof says every byte of a read has been sent. It is the only way a client
+// knows a stream ended rather than stalled.
+type Eof struct {
+	Ref uint32 `json:"ref"`
+}
+
+// Cancel abandons a read in flight — a viewer closed before its file finished
+// arriving.
+//
+// Addressed by ref rather than by reqId, because the ref is what the daemon
+// holds state under. A client that closed before its file arrived has no ref
+// yet; it remembers the reqId as abandoned and cancels once the ref lands,
+// exactly as it already does for an attach whose view went away mid-flight.
+type Cancel struct {
+	Ref uint32 `json:"ref"`
+}
+
 // Devices asks for the paired-device list.
 type Devices struct{}
 
@@ -459,6 +578,18 @@ func typeName(msg any) (string, bool) {
 		return "peek", true
 	case Preview:
 		return "preview", true
+	case Stat:
+		return "stat", true
+	case Stats:
+		return "stats", true
+	case Read:
+		return "read", true
+	case File:
+		return "file", true
+	case Eof:
+		return "eof", true
+	case Cancel:
+		return "cancel", true
 	case Devices:
 		return "devices", true
 	case Revoke:
@@ -551,6 +682,18 @@ func DecodeControl(b []byte) (any, error) {
 			return *t, nil
 		case *Preview:
 			return *t, nil
+		case *Stat:
+			return *t, nil
+		case *Stats:
+			return *t, nil
+		case *Read:
+			return *t, nil
+		case *File:
+			return *t, nil
+		case *Eof:
+			return *t, nil
+		case *Cancel:
+			return *t, nil
 		case *Devices:
 			return *t, nil
 		case *Revoke:
@@ -606,6 +749,18 @@ func DecodeControl(b []byte) (any, error) {
 		return deref(into(&Peek{}))
 	case "preview":
 		return deref(into(&Preview{}))
+	case "stat":
+		return deref(into(&Stat{}))
+	case "stats":
+		return deref(into(&Stats{}))
+	case "read":
+		return deref(into(&Read{}))
+	case "file":
+		return deref(into(&File{}))
+	case "eof":
+		return deref(into(&Eof{}))
+	case "cancel":
+		return deref(into(&Cancel{}))
 	case "devices":
 		return deref(into(&Devices{}))
 	case "revoke":

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -593,6 +594,43 @@ func TestSessionsEncodesEmptyAsArray(t *testing.T) {
 	}
 	if len(s.Sessions) != 0 {
 		t.Fatalf("decoded Sessions has %d entries, want 0", len(s.Sessions))
+	}
+}
+
+// TestStatsEncodesAnEmptyListAsAList follows Sessions and DeviceList: a nil
+// slice marshals to null, the client declares the field an array, and "none of
+// these paths exist" is reached by building the zero value — precisely the
+// path that would ship null.
+func TestStatsEncodesAnEmptyListAsAList(t *testing.T) {
+	b, err := EncodeControl(Stats{ReqID: 3})
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	if !strings.Contains(string(b), `"entries":[]`) {
+		t.Errorf("encoded = %s, want an empty entries array", b)
+	}
+}
+
+// TestFileAndReadRoundTrip pins the read half's discriminators and fields.
+func TestFileAndReadRoundTrip(t *testing.T) {
+	for _, msg := range []any{
+		Stat{ID: "s1", Paths: []string{"internal/wire/binary.go"}, ReqID: 4},
+		Read{ID: "s1", Path: "~/notes.md", ReqID: 5},
+		Cancel{Ref: 9},
+		File{Ref: 9, Path: "/home/karn/notes.md", Size: 120, Mime: "text/plain; charset=utf-8", Kind: "text", ReqID: 5},
+		Eof{Ref: 9},
+	} {
+		b, err := EncodeControl(msg)
+		if err != nil {
+			t.Fatalf("EncodeControl(%T): %v", msg, err)
+		}
+		got, err := DecodeControl(b)
+		if err != nil {
+			t.Fatalf("DecodeControl(%T): %v", msg, err)
+		}
+		if !reflect.DeepEqual(got, msg) {
+			t.Errorf("round trip of %T = %#v, want %#v", msg, got, msg)
+		}
 	}
 }
 
