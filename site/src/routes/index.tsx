@@ -8,6 +8,7 @@ import { SwitcherWindow } from '@/components/mock/switcher'
 import { MockTerminal, ok, output, prompt } from '@/components/mock/terminal'
 import { SiteFooter } from '@/components/site-footer'
 import { SiteHeader } from '@/components/site-header'
+import { Walkthrough } from '@/components/walkthrough'
 import { GithubMark } from '@/components/wordmark'
 import { BREW_CMD, INSTALL_CMD, REPO_URL } from '@/lib/site'
 
@@ -335,8 +336,7 @@ function Remote() {
             <p className="mt-4 max-w-[56ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
               Everything crossing it is end-to-end encrypted with Noise IK. Your browser pins the
               daemon&rsquo;s key when it pairs, so the Worker forwards ciphertext it holds no key
-              for. The relay is new: it works, but it has not been through its release gate, so
-              treat it as ready to try rather than ready to rely on.
+              for. It is a 0.x release, so commands and config can still change between versions.
             </p>
             <a
               href="/docs/relay"
@@ -413,6 +413,16 @@ function Connector() {
 
 /* -------------------------------------------------------------- install --- */
 
+/**
+ * The closer, and the one place on the page a recording belongs.
+ *
+ * Every other window here is drawn: the fleet, the switcher, the relay
+ * transcript. Drawings argue well and prove nothing, and the objection at the
+ * moment somebody is about to pipe a script into a shell is not "how does it
+ * work", it is "does this actually work". So the walkthrough sits between the
+ * claim and the command, where that question is live, rather than in the hero
+ * where nobody has asked it yet and nine minutes is a wall.
+ */
 function Install() {
   return (
     <section className="py-20 sm:py-24">
@@ -432,6 +442,11 @@ function Install() {
             </a>
             .
           </p>
+          {/* Full width, the way the switcher above sits full width in a
+              section that is otherwise columns. The caption is centred with
+              the rest of this section rather than left aligned, since it is
+              the only line here that would have read off axis. */}
+          <Walkthrough align="center" className="mt-10 w-full" />
           <div className="w-full">
             <InstallBlock align="center" />
           </div>
