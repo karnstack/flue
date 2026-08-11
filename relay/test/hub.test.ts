@@ -36,6 +36,13 @@ const TIMEOUT_MS = 50
  */
 const IDLE_MS = 1_000
 
+/**
+ * The handshake deadline, and the gap between two dials, in the one test that
+ * needs an alarm to land between two clients' deadlines. Wide on purpose: see
+ * that test for what a narrow one cost on CI.
+ */
+const STAGGER_MS = 500
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -427,14 +434,22 @@ describe('the handshake deadline', () => {
 
   it('re-arms while unseen clients remain, then reaps them too', async () => {
     const hub = freshHub()
-    await handshakeDeadline(hub, TIMEOUT_MS)
+    // Its own deadline, wider than TIMEOUT_MS, because this test is the one
+    // that has to land the alarm *between* two clients' deadlines: after the
+    // first one's and before the second's. The gap between those two is the gap
+    // between the two dials, so both are STAGGER_MS here, and every way the
+    // test can misread now needs the runner to stall for half a second rather
+    // than for the 25 ms it used to take. That stall is what CI hit: both
+    // clients came out overdue, the sweep found nobody left to arm for, and the
+    // re-arm this asserts had nothing to re-arm.
+    await handshakeDeadline(hub, STAGGER_MS)
     const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const b1 = await dial(hub, `/client/${MACHINE}`)
-    await sleep(40)
+    await sleep(STAGGER_MS + 100)
     const b2 = await dial(hub, `/client/${MACHINE}`) // rides b1's pending alarm
     await daemon.nextControl()
     await daemon.nextControl()
-    await sleep(25) // past b1's deadline, well before b2's
+    // b1 is a clear 100 ms past its deadline; b2 has a clear STAGGER_MS to go.
     await runDurableObjectAlarm(hub)
     expect(await within(b1.closed, 'b1 to close')).toEqual({
       code: 4001,
@@ -444,7 +459,7 @@ describe('the handshake deadline', () => {
     expect(
       await runInDurableObject(hub, (_instance, state) => state.storage.getAlarm()),
     ).not.toBeNull()
-    await sleep(60)
+    await sleep(STAGGER_MS + 100)
     await runDurableObjectAlarm(hub)
     expect(await within(b2.closed, 'b2 to close')).toEqual({
       code: 4001,
