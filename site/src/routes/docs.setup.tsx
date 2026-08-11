@@ -173,27 +173,20 @@ function Setup() {
           A machine missing from the list is usually one of three things. It is asleep or
           offline. It never ran <Code>flue relay join</Code>. Or somebody ran{' '}
           <Code>flue relay setup</Code> a second time, which reset the relay and left this
-          machine holding a secret the relay no longer accepts.
+          machine holding a fleet key and a secret the rest of the fleet has moved on from.
         </P>
         <P>
           Run <Code>flue relay status</Code> on the machine that is missing, and read the fleet
           line rather than the address. A reset does not change the address, so an address that
-          matches tells you nothing.
+          matches tells you nothing. The fleet line counts how many entries in the
+          relay&rsquo;s directory this machine can verify with the fleet key it holds. When it
+          says entries are signed by something else, this machine is on a fleet key the rest of
+          the relay has left behind. That is the reset.
         </P>
-        <Shell
-          lines={[
-            '$ flue relay status',
-            'relay:    configured (wss://flue-relay.you.workers.dev), status unknown from here',
-            "fleet:    unreachable (the relay refused this machine's credential; the",
-            '          secret in relay.json is not the one this Worker holds)',
-          ]}
-        />
         <P>
-          That is the reset. The fix is the join line the most recent setup printed, run on this
-          machine. A fleet line that says entries are signed by something else means the same
-          problem seen from the other end: the relay now belongs to a fleet whose key this
-          machine does not hold. A fleet line that says this machine is not in the directory
-          means your other devices cannot discover it yet.
+          The fix is the join line the most recent setup printed, run on this machine, and then
+          pairing your devices again. If that same line says this machine is not in the
+          directory, your other devices cannot discover it yet.
         </P>
         <P>
           Sessions that vanish after you log out of a Linux box mean lingering is off. Run{' '}
