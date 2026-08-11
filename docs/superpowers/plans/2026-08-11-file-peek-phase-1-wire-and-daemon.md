@@ -1396,15 +1396,53 @@ git commit -m "daemon: decide what a file is from its bytes, not its name"
 
 ### Task 7: Reading a file, one paced chunk at a time
 
-This is the task with the trap in it. The outbox is 256 frames deep and a
-connection that fills it is dropped as backlogged (`conn.enqueue`). An 8 MiB
-file at 32 KiB a chunk is exactly 256 frames, so a pump that queued its chunks
-as fast as it could read them would kill the connection it was answering.
+This is the task with the traps in it. Read this section before writing any of
+it.
 
-The fix is one chunk in flight: the pump enqueues a chunk, waits for the writer
-to have written it, then reads the next. That bounds queued memory to one
-chunk, bounds what a keystroke can be stuck behind to 32 KiB, and never touches
-the backlog threshold.
+The outbox is 256 frames deep and a connection that fills it is dropped as
+backlogged (`conn.enqueue` hits its `default:` and calls `fail`). That rule is
+right for the producers it was written for: an attachment's output pump and
+another connection's broadcast have nowhere to wait, so a client that will not
+drain has to be dropped rather than allowed to consume the daemon's memory.
+
+A file read breaks that assumption in two different ways, and each needs its
+own answer.
+
+**Trap one, self-inflicted.** An 8 MiB file at 32 KiB a chunk is exactly 256
+frames — the outbox's whole depth. A pump that queued chunks as fast as it read
+them would fill the outbox by itself and drop the connection it was answering.
+
+*Fix: one chunk in flight.* The pump enqueues a chunk, waits for the writer to
+have written it, then reads the next. Queued memory is one chunk, and the most
+a keystroke can be stuck behind is 32 KiB.
+
+**Trap two, and this is the one that would have shipped.** The outbox can be
+full for reasons that have nothing to do with the pump: an agent session
+redrawing at speed puts output frames in it. If the pump's enqueue lands in
+that moment, `default:` fires and the connection dies. Opening a file while the
+terminal is busy would drop the session, intermittently, and the stack trace
+would name the file read rather than the output that filled the queue.
+
+*Fix: the pump waits for room rather than treating fullness as a fault.* It is
+the one producer that has somewhere to wait — a goroutine of its own, serving
+one request — so a full outbox is backpressure to it, not a verdict about the
+client. The wait is bounded without any timeout of its own: a peer that has
+genuinely stopped reading trips the writer's `writeTimeout`, which fails the
+connection, which cancels the context this wait selects on.
+
+**Trap three, teardown.** Pumps are goroutines holding file descriptors, and
+nothing waits for them. They do end on their own, but `serve` can return while
+one is still unwinding, so a race report would surface in whatever test ran
+next rather than in this one.
+
+*Fix: a WaitGroup.* `closeAll` ends every read and then waits for every pump,
+so nothing touching this connection outlives `serve`.
+
+One thing that is deliberately *not* a trap, so nobody adds a lock for it:
+closing an `os.File` while another goroutine is inside `Read` on it is safe.
+Go's `poll.FD` reference-counts the descriptor, so the in-flight read returns
+`file already closed` rather than reading freed memory. That is what makes
+`endRead` able to close the file out from under a cancelled pump.
 
 **Files:**
 - Modify: `internal/daemon/conn.go`
@@ -1414,8 +1452,9 @@ the backlog threshold.
 **Interfaces:**
 - Consumes: `resolvePath`, `classify`, `wire.FrameFile`, `wire.Read`,
   `wire.File`, `wire.Eof`.
-- Produces: `frame.sent chan struct{}`; `conn.reads map[uint32]*fileRead`;
-  `fileRead`; `conn.startRead(m wire.Read)`; `conn.pump(r *fileRead, limit int64)`;
+- Produces: `frame.sent chan struct{}`; `conn.enqueueWait(f frame) error`;
+  `conn.reads map[uint32]*fileRead`; `conn.pumps sync.WaitGroup`; `fileRead`;
+  `conn.startRead(m wire.Read)`; `conn.pump(r *fileRead, limit int64)`;
   `conn.sendChunk(r *fileRead, b []byte) bool`; `conn.endRead(ref uint32)`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1423,6 +1462,81 @@ the backlog threshold.
 Append to `internal/daemon/file_test.go`:
 
 ```go
+// The two tests below are about conn.go rather than about files, and they live
+// here because the file pump is the only thing that needs the rule they pin.
+// Trap two from this task's preamble: a full outbox means the terminal is busy,
+// and a pump that read that as "this client is broken" would turn opening a
+// file during a burst of output into an intermittent disconnect.
+
+func TestEnqueueWaitWaitsForRoom(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// No server and no writer: enqueueWait touches neither, and a conn with
+	// nothing draining it is exactly the condition under test.
+	c := newConn(ctx, cancel, newPipeConn(), nil, "test", "", nil)
+	for i := 0; i < outboxDepth; i++ {
+		if err := c.enqueue(frame{text: true, b: []byte("{}")}); err != nil {
+			t.Fatalf("filling the outbox at %d: %v", i, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- c.enqueueWait(frame{text: true, b: []byte("{}")}) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("enqueueWait returned %v on a full outbox; it has to wait", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The writer drains one frame, and the wait ends.
+	<-c.out
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("enqueueWait once there was room = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueueWait did not proceed once there was room")
+	}
+
+	// And the connection is still alive. Waiting is not a fault, which is the
+	// whole difference between this and enqueue.
+	select {
+	case <-ctx.Done():
+		t.Fatal("a full outbox failed the connection")
+	default:
+	}
+}
+
+func TestEnqueueWaitGivesUpWhenTheConnectionEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := newConn(ctx, cancel, newPipeConn(), nil, "test", "", nil)
+	for i := 0; i < outboxDepth; i++ {
+		if err := c.enqueue(frame{text: true, b: []byte("{}")}); err != nil {
+			t.Fatalf("filling the outbox at %d: %v", i, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- c.enqueueWait(frame{text: true, b: []byte("{}")}) }()
+
+	// A peer that has stopped reading is what ends this wait in production:
+	// the writer's own timeout fails the connection, which cancels this
+	// context. Cancelling directly is that outcome without the ten seconds.
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errConnClosed) {
+			t.Fatalf("enqueueWait after the connection ended = %v, want errConnClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueueWait did not give up when the connection ended")
+	}
+}
+
 // readTarget spawns a session rooted at dir, which is what a read's relative
 // paths resolve against.
 func readTarget(t *testing.T, reg *session.Registry, dir string) *session.Session {
@@ -1637,18 +1751,19 @@ func TestReadRefusesAnUnknownSession(t *testing.T) {
 }
 ```
 
-Add `bytes` to `file_test.go`'s imports.
+Add `bytes`, `context`, `errors` and `time` to `file_test.go`'s imports.
 
 - [ ] **Step 2: Run it and watch it fail**
 
 ```
-go test ./internal/daemon/ -run TestRead -v
+go test ./internal/daemon/ -run 'TestRead|TestEnqueueWait' -v
 ```
 
-Expected: the reads are never answered and each test fails on `readUntil`'s
-five-second deadline. `wire.Read` decodes but nothing handles it.
+Expected: compile failure, `undefined: enqueueWait` and `undefined: fileRead`.
+Once those exist, the `TestRead` cases fail on `readUntil`'s five-second
+deadline instead: `wire.Read` decodes but nothing handles it.
 
-- [ ] **Step 3: Give the writer a way to say a frame has gone**
+- [ ] **Step 3: Give the pump somewhere to wait, and the writer a way to say a frame has gone**
 
 In `internal/daemon/conn.go`, add a field to `frame`:
 
@@ -1680,6 +1795,38 @@ must be released, not left parked until the connection's context unwinds):
 			if err != nil || f.last {
 ```
 
+Then add `enqueueWait` directly beneath `enqueue`, so the two rules sit next to
+each other and a future reader sees why there are two:
+
+```go
+// enqueueWait hands a frame to the writer, waiting for room rather than
+// treating a full outbox as the client's fault.
+//
+// enqueue above is right for the producers it serves: an attachment's output
+// pump and another connection's broadcast have nowhere to wait, so a client
+// that has not drained outboxDepth frames has to be dropped rather than
+// allowed to consume this daemon's memory on its behalf.
+//
+// A file read is the one producer that *does* have somewhere to wait — a
+// goroutine of its own, serving one request, whose only job is this file. For
+// it, a full outbox is backpressure rather than a verdict: the terminal is
+// busy, the writer is behind, and the right response is to slow down. Using
+// enqueue here would mean that opening a file during a burst of output drops
+// the session, intermittently, and blames the read.
+//
+// The wait needs no timeout of its own. A peer that has genuinely stopped
+// reading stalls the writer, which trips writeTimeout, which fails the
+// connection and cancels the context this selects on.
+func (c *conn) enqueueWait(f frame) error {
+	select {
+	case c.out <- f:
+		return nil
+	case <-c.ctx.Done():
+		return errConnClosed
+	}
+}
+```
+
 - [ ] **Step 4: Hold reads on the connection**
 
 Still in `conn.go`, add the map beside `attach` in the `conn` struct:
@@ -1696,15 +1843,29 @@ Still in `conn.go`, add the map beside `attach` in the `conn` struct:
 	reads map[uint32]*fileRead
 ```
 
-and build it in `newConn`, beside `attach`:
+and, outside the mutex block, the WaitGroup that makes teardown deterministic:
+
+```go
+	// pumps counts the file pumps still running. closeAll waits on it, so no
+	// goroutine holding a file descriptor outlives serve.
+	//
+	// They do all end on their own — every wait a pump can be in selects on
+	// this connection's context — but "eventually" is not good enough at
+	// teardown: serve returning while a pump is still unwinding puts a race
+	// report in whatever test runs next rather than in the one that caused it.
+	pumps sync.WaitGroup
+```
+
+and build the map in `newConn`, beside `attach`:
 
 ```go
 		attach:    map[uint32]*attachment{},
 		reads:     map[uint32]*fileRead{},
 ```
 
-Then extend `closeAll` so a dropped connection releases its file descriptors.
-Add this after the existing detach loop:
+Then extend `closeAll` so a dropped connection releases its file descriptors
+and waits for the goroutines that held them. Add this after the existing detach
+loop:
 
 ```go
 	c.mu.Lock()
@@ -1716,6 +1877,10 @@ Add this after the existing detach loop:
 	for _, ref := range reads {
 		c.endRead(ref)
 	}
+	// Ending each read first is what makes this wait finite: endRead releases
+	// the pump's done channel and closes its file, so a pump parked on a chunk
+	// stops waiting and one inside a read gets an error back.
+	c.pumps.Wait()
 ```
 
 - [ ] **Step 5: Write the read lifecycle**
@@ -1844,6 +2009,9 @@ func (c *conn) startRead(m wire.Read) {
 		Truncated: fi.Size() > limit,
 		ReqID:     m.ReqID,
 	})
+	// Counted before the goroutine starts, so closeAll cannot observe zero
+	// pumps for a read it has already registered.
+	c.pumps.Add(1)
 	go c.pump(r, limit)
 }
 
@@ -1865,6 +2033,7 @@ func readErrCode(err error) string {
 // than at the size read earlier, because a file can grow between the stat and
 // the read and the cap is the promise that matters.
 func (c *conn) pump(r *fileRead, limit int64) {
+	defer c.pumps.Done()
 	defer c.endRead(r.ref)
 
 	buf := make([]byte, chunkBytes)
@@ -1895,19 +2064,25 @@ func (c *conn) pump(r *fileRead, limit int64) {
 
 // sendChunk queues one chunk and waits for the writer to have written it.
 //
-// The wait is the flow control, and it is doing three jobs. The outbox holds
-// 256 frames and drops a connection that fills it, and an 8 MiB file is
-// exactly 256 chunks — so a pump that queued as fast as it read would drop the
-// connection it was answering. It bounds queued memory to one chunk rather
-// than a whole file. And it bounds what the next keystroke can be queued
-// behind to 32 KiB, on a socket that carries the terminal too.
+// Two waits, for two different reasons, and both matter.
 //
-// It costs nothing in throughput: a websocket write returns when the bytes
-// reach the socket buffer, not when the far end acknowledges them, so this
-// paces the pump against the link rather than against the round trip.
+// enqueueWait is the wait for *room*. The outbox can be full because the
+// terminal is busy, and dropping a client over that would make opening a file
+// during a burst of output an intermittent disconnect. A pump has somewhere to
+// wait, so it waits.
+//
+// The wait on `sent` is the wait for *the writer*, and it is what keeps only
+// one chunk in flight. That bounds queued memory to 32 KiB rather than a whole
+// file, keeps a read from ever filling the outbox by itself — an 8 MiB file is
+// exactly outboxDepth chunks — and bounds what the next keystroke can be
+// queued behind, on a socket that carries the terminal too.
+//
+// Neither costs throughput. A websocket write returns when the bytes reach the
+// socket buffer, not when the far end acknowledges them, so this paces the pump
+// against the link rather than against the round trip.
 func (c *conn) sendChunk(r *fileRead, b []byte) bool {
 	sent := make(chan struct{})
-	if err := c.enqueue(frame{b: wire.EncodeBinary(wire.FrameFile, r.ref, b), sent: sent}); err != nil {
+	if err := c.enqueueWait(frame{b: wire.EncodeBinary(wire.FrameFile, r.ref, b), sent: sent}); err != nil {
 		return false
 	}
 	select {
@@ -1953,10 +2128,10 @@ In `conn.go`'s `handleControl`, after the `case wire.Stat:` block:
 - [ ] **Step 7: Run it and watch it pass**
 
 ```
-go test ./internal/daemon/ -run TestRead -v
+go test ./internal/daemon/ -run 'TestRead|TestEnqueueWait' -v
 ```
 
-Expected: PASS, all four tests.
+Expected: PASS, all seven tests.
 
 - [ ] **Step 8: Run the whole daemon suite with the race detector**
 
