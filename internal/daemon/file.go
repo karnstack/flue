@@ -1,0 +1,98 @@
+package daemon
+
+import (
+	"errors"
+	"path/filepath"
+	"strings"
+)
+
+// Reading a file the session named.
+//
+// The browser sends the text it matched in the terminal; this file turns that
+// text into a path, decides whether it is something a reader can use, and
+// streams it. The split is deliberate: only the daemon knows where the session
+// actually is, and the resolution rules below are not reproducible from a tab.
+//
+// What may be read is anything the daemon's user can read. There is no fence,
+// by decision rather than omission: a connection that reached this code can
+// already spawn a shell in any directory and cat the same file, so a fence
+// would refuse the paths an agent names most often — a scratch file in /tmp, a
+// transcript under ~/.claude, a sibling worktree — while stopping nothing.
+// Nothing here writes.
+const (
+	// chunkBytes is one content frame. Far under the relay's 1 MiB message cap
+	// (relay/src/hub.ts, MAX_CLIENT_MESSAGE), and small enough that a
+	// multi-megabyte read never puts more than 32 KiB in front of the next
+	// keystroke: file content and terminal output share one socket.
+	chunkBytes = 32 << 10
+
+	// maxFileBytes is how much of a text file is sent. Past it the head is
+	// streamed and file.truncated says so.
+	maxFileBytes = 8 << 20
+
+	// maxImageBytes is the ceiling for an image, which is refused rather than
+	// truncated: half a PNG is not a smaller PNG.
+	maxImageBytes = 4 << 20
+
+	// maxReads is how many reads one connection may have open at once. The
+	// bound is on held file descriptors and on how much of the socket a reader
+	// can occupy; two is a viewer and the file it is about to replace.
+	maxReads = 2
+
+	// maxStatPaths bounds one stat. A hovered terminal line has nothing like
+	// this many candidates on it.
+	maxStatPaths = 32
+
+	// maxPathLen is the longest path this will consider. PATH_MAX is 4096 on
+	// Linux and 1024 on Darwin; the larger of the two is the right bound for a
+	// refusal that exists to stop nonsense rather than to enforce a filesystem
+	// limit the filesystem will enforce itself.
+	maxPathLen = 4096
+)
+
+// errBadPath is every way a string fails to be a path worth resolving. One
+// error rather than several: the client's only move is the same in each case,
+// and naming which rule was broken tells a caller nothing it can act on.
+var errBadPath = errors.New("daemon: not a usable path")
+
+// resolvePath turns the text a client matched in the terminal into an absolute
+// path.
+//
+//   - A leading ~ expands to home, the daemon user's own.
+//   - A relative path resolves against cwd, the session's live working
+//     directory, which session.Info re-reads from the kernel on every call.
+//   - The result is cleaned, so exactly one string is opened, reported and
+//     shown.
+//
+// A relative path that does not exist under cwd is a miss. There is no second
+// attempt against the spawn directory or a guessed project root: two
+// resolution rules would make "opened the wrong file" indistinguishable from
+// "opened the right one" to everyone downstream.
+//
+// Symlinks are not resolved here. That needs the filesystem, and this function
+// is pure so the rules above can be tested without one; the caller resolves
+// them when it stats.
+func resolvePath(raw, cwd, home string) (string, error) {
+	p := strings.TrimSpace(raw)
+	if p == "" || len(p) > maxPathLen || strings.ContainsRune(p, 0) {
+		return "", errBadPath
+	}
+	switch {
+	case p == "~":
+		if home == "" {
+			return "", errBadPath
+		}
+		p = home
+	case strings.HasPrefix(p, "~/"):
+		if home == "" {
+			return "", errBadPath
+		}
+		p = filepath.Join(home, p[2:])
+	case !filepath.IsAbs(p):
+		if cwd == "" {
+			return "", errBadPath
+		}
+		p = filepath.Join(cwd, p)
+	}
+	return filepath.Clean(p), nil
+}
