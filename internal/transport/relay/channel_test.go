@@ -1215,3 +1215,109 @@ func expectPairResult(t *testing.T, c *relayConn, id uint64) *relaywire.PairResu
 	}
 	return res
 }
+
+// TestRelayChannelTakesANewNameFromANewerCert.
+//
+// A device's display name lives in its fleet certificate, and the machine that
+// minted that certificate is the only one that can change it. Every other
+// machine took its copy of the name from the blob the device first arrived
+// with — device certs are never published to the directory, so the handshake is
+// the only place a newer one is ever seen. Without this, a machine renaming its
+// own browser renames it exactly nowhere else, forever.
+func TestRelayChannelTakesANewNameFromANewerCert(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv, _ := newDaemonServer(t, id)
+	tr := newChannelTransport(t, r, srv, id, nil)
+	runTransport(t, tr)
+
+	c := r.accept(t)
+	stranger := unpairedKey(t)
+
+	// First arrival: admitted on its cert, and filed under the name that cert
+	// carried.
+	b := attachWithPayload(t, c, 1, stranger, id.key.Public, id.deviceCert(t, stranger.Public, "sibling — this machine's browser"))
+	if _, ok := b.recvControl().(wire.Welcome); !ok {
+		t.Fatal("the fleet-certified device was not welcomed")
+	}
+	dev, ok, err := id.devices.FindByKey(stranger.Public)
+	if err != nil || !ok {
+		t.Fatalf("FindByKey = %v, %v; want the admitted device", ok, err)
+	}
+	if dev.Label != "sibling — this machine's browser" {
+		t.Fatalf("label = %q, want the name the first certificate carried", dev.Label)
+	}
+
+	// Its own machine renames it and re-mints. This one hears about it the only
+	// way it can: the next handshake.
+	renamed := id.deviceCert(t, stranger.Public, "Browser on sibling.local")
+	b = attachWithPayload(t, c, 2, stranger, id.key.Public, renamed)
+	if _, ok := b.recvControl().(wire.Welcome); !ok {
+		t.Fatal("the renamed device was not welcomed")
+	}
+	dev, ok, err = id.devices.FindByKey(stranger.Public)
+	if err != nil || !ok {
+		t.Fatalf("FindByKey = %v, %v; want the device still paired", ok, err)
+	}
+	if dev.Label != "Browser on sibling.local" {
+		t.Errorf("label = %q, want the name the newer certificate carries", dev.Label)
+	}
+	if !bytes.Equal(dev.Cert, renamed) {
+		t.Error("the row kept the old certificate beside the new name")
+	}
+}
+
+// TestRelayChannelRefusesToLetOneDeviceRenameAnother pins the rule that makes
+// the refresh above safe to run on an already-accepted device: a certificate
+// that verifies but names a different key changes nothing.
+//
+// The handshake proves which key is on the other end. A fleet signature makes a
+// name authentic, not a licence to write it onto somebody else's row — and any
+// holder of any certificate could otherwise relabel any device in the fleet.
+func TestRelayChannelRefusesToLetOneDeviceRenameAnother(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv, _ := newDaemonServer(t, id)
+	tr := newChannelTransport(t, r, srv, id, nil)
+	runTransport(t, tr)
+
+	c := r.accept(t)
+
+	victim := unpairedKey(t)
+	b := attachWithPayload(t, c, 1, victim, id.key.Public, id.deviceCert(t, victim.Public, "victim phone"))
+	if _, ok := b.recvControl().(wire.Welcome); !ok {
+		t.Fatal("the fleet-certified device was not welcomed")
+	}
+
+	// A second device, admitted on its own cert, presenting the victim's — with
+	// a name of its choosing on it. Rule 1 accepts the attacker because its key
+	// is now in the registry, which is exactly the path the refresh runs on.
+	attacker := unpairedKey(t)
+	b = attachWithPayload(t, c, 2, attacker, id.key.Public, id.deviceCert(t, attacker.Public, "attacker"))
+	if _, ok := b.recvControl().(wire.Welcome); !ok {
+		t.Fatal("the second device was not welcomed")
+	}
+	stolen := id.deviceCert(t, victim.Public, "owned")
+	b = attachWithPayload(t, c, 3, attacker, id.key.Public, stolen)
+	if _, ok := b.recvControl().(wire.Welcome); !ok {
+		t.Fatal("the second device was not welcomed on its second channel")
+	}
+
+	for _, want := range []struct {
+		key   []byte
+		label string
+	}{
+		{victim.Public, "victim phone"},
+		{attacker.Public, "attacker"},
+	} {
+		dev, ok, err := id.devices.FindByKey(want.key)
+		if err != nil || !ok {
+			t.Fatalf("FindByKey = %v, %v; want the device still paired", ok, err)
+		}
+		if dev.Label != want.label {
+			t.Errorf("label = %q, want %q — a device may rename itself and nothing else", dev.Label, want.label)
+		}
+	}
+}

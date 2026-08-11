@@ -381,6 +381,19 @@ func (t *Transport) serveChannel(s *socket, ch *channel, origin string) {
 		// and meets the same refusal on the way through: AddFromFleetCert
 		// checks the revocation list inside its own write.
 		dev, paired = t.admitByFleetCert(ch, peerStatic, payload)
+	} else {
+		// Known, and possibly known under a name that has since changed. The
+		// row's label came out of the certificate this device presented the
+		// first time it arrived, and the machine that minted that certificate
+		// is the only one that can correct it — so a rename there reaches here
+		// only by riding the handshake, and only if somebody looks.
+		//
+		// Which is a *decision* to look at the payload on a path that
+		// deliberately does not, so it is confined to what it is for. Admission
+		// is already settled above; nothing below consults this, and the worst
+		// a failure costs is a stale display name. What the payload may change
+		// is one string on one row it has a fleet signature for.
+		t.refreshLabel(ch, dev, peerStatic, payload)
 	}
 	if !paired {
 		// Not an error, a state: an unpaired browser cannot attach, and pairing
@@ -486,6 +499,60 @@ func (t *Transport) admitByFleetCert(ch *channel, peerStatic, payload []byte) (c
 	t.log.Info("relay channel admitted a fleet-certified device",
 		"channel", ch.id, "device", dev.ID, "pairedOn", cert.PairedOn)
 	return dev, true
+}
+
+// refreshLabel updates a known device's row when the certificate it just
+// presented names it something else.
+//
+// The case is a machine renaming its own browser — which it does by re-minting
+// the certificate, because the name lives in the signed blob and nowhere else
+// (daemon.relabelEnrolled). Every *other* machine in the fleet took its copy of
+// that name from the blob the browser first showed up with, and has no way of
+// its own to learn better: device certificates are never published to the
+// directory, so the handshake is the only place a new one is ever seen.
+//
+// Everything about it is deliberately narrow, because this runs on the
+// accepted-device path:
+//
+//   - Admission is already decided. This cannot grant, refuse or revoke; it
+//     can change one string on a row the caller has already accepted.
+//   - The certificate must verify under this fleet's key and must name the key
+//     the handshake just proved, exactly as admission requires. A device may
+//     rename itself; it may not rename somebody else.
+//   - The name goes through the same normaliser admission uses, for the same
+//     reason: a fleet signature makes a name authentic, not tame.
+//   - Every failure is silence. A device whose name could not be updated is a
+//     device with a stale label, which is what it had a moment ago.
+//
+// Relabel writes nothing when the label already matches, so the ordinary
+// reconnect — every attach of every device, forever — costs one verify and one
+// registry read and stops there.
+func (t *Transport) refreshLabel(ch *channel, dev crypto.Device, peerStatic, payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	cert, err := fleet.VerifyDevice(t.cfg.FleetPub, payload)
+	if err != nil || !bytes.Equal(cert.Device, peerStatic) {
+		// Not a complaint. A browser pinned straight to this machine presents
+		// no cert, one from another fleet presents one that does not verify,
+		// and neither is a thing to log on every reconnect — admission already
+		// said this device may be here.
+		return
+	}
+	name := daemon.DeviceLabel(cert.Name)
+	if name == dev.Label {
+		return
+	}
+	changed, err := t.devices.Relabel(peerStatic, name, payload)
+	if err != nil {
+		t.log.Warn("could not update a relayed device's name from its certificate",
+			"channel", ch.id, "device", dev.ID, "err", err)
+		return
+	}
+	if changed {
+		t.log.Info("renamed a device from the certificate it presented",
+			"channel", ch.id, "device", dev.ID, "was", dev.Label, "now", name)
+	}
 }
 
 // handshake runs the Noise IK responder over this channel and returns the

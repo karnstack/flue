@@ -720,3 +720,72 @@ func TestDeviceListSaysWhichMachinePairedEachRow(t *testing.T) {
 		}
 	}
 }
+
+// TestEnrolRenamesItsOwnBrowserWhenTheMachineWouldCallItSomethingElse.
+//
+// The name lives in the signed certificate, so this machine is the only one
+// that can change it — every sibling reads its own row's label out of that blob
+// and has no way of its own to learn better. A machine renamed since its
+// browser enrolled, or upgraded across a change to how flue words these labels,
+// is otherwise stuck calling its own browser something untrue everywhere in the
+// fleet, forever.
+func TestEnrolRenamesItsOwnBrowserWhenTheMachineWouldCallItSomethingElse(t *testing.T) {
+	ts, srv, fk := newEnrolServer(t, "karns-mbp-a1b2-0f9a12cd")
+	key := deviceKey(0x61)
+
+	// The row an older flue wrote: generated, and relative in a way that reads
+	// as a claim about whichever machine is displaying it.
+	stale := "karn.local — this machine's browser"
+	old, err := fk.Sign(fleet.DeviceCert{Device: key, Name: stale, PairedOn: "karns-mbp-a1b2-0f9a12cd", IAT: 1})
+	if err != nil {
+		t.Fatalf("signing the old cert: %v", err)
+	}
+	if _, err := srv.identity.Devices.Add(stale, key, old); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	out := enrolOK(t, ts, key)
+
+	list := devices(t, srv)
+	if len(list) != 1 || list[0].Label != enrolLabel(srv.hostname) {
+		t.Fatalf("registry = %+v, want the row renamed to %q", list, enrolLabel(srv.hostname))
+	}
+	// And the certificate with it, because the label alone would leave this
+	// machine calling the device one thing and vouching for it as another.
+	cert, err := fleet.VerifyDevice(fk.Public(), out.DeviceCert)
+	if err != nil {
+		t.Fatalf("the re-minted certificate does not verify: %v", err)
+	}
+	if cert.Name != enrolLabel(srv.hostname) {
+		t.Errorf("certificate name = %q, want %q", cert.Name, enrolLabel(srv.hostname))
+	}
+	if !bytes.Equal(list[0].Cert, out.DeviceCert) {
+		t.Error("the registry kept a different certificate from the one handed back")
+	}
+
+	// Settled: a second enrolment finds the name already right and re-mints
+	// nothing, which is what keeps the browser's own comparison meaningful.
+	again := enrolOK(t, ts, key)
+	if !bytes.Equal(again.DeviceCert, out.DeviceCert) {
+		t.Error("a second enrolment re-minted a certificate that was already correct")
+	}
+}
+
+// TestEnrolLeavesAHumanNamedRowAlone. The registry records what a device is
+// called, not who called it that, so the only guard against a cosmetic
+// migration eating somebody's own word for their device is the closed set of
+// names flue has ever generated.
+func TestEnrolLeavesAHumanNamedRowAlone(t *testing.T) {
+	ts, srv, _ := newEnrolServer(t, "karns-mbp-a1b2-0f9a12cd")
+	key := deviceKey(0x62)
+	if _, err := srv.identity.Devices.Add("Karn's work laptop", key, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	enrolOK(t, ts, key)
+
+	list := devices(t, srv)
+	if len(list) != 1 || list[0].Label != "Karn's work laptop" {
+		t.Errorf("registry = %+v, want the name its owner gave it", list)
+	}
+}

@@ -34,8 +34,10 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/fleet"
 )
 
@@ -268,6 +270,74 @@ func enrolLabel(hostname string) string {
 	return DeviceLabel("Browser on " + hostname)
 }
 
+// generatedEnrolLabel reports whether a label is one flue wrote rather than one
+// a human did.
+//
+// The distinction decides whether a name may be overwritten, and it has to be
+// made from the label alone: the registry records what a device is called, not
+// who called it that. A browser can reach a row two ways — the pairing ceremony,
+// where somebody typed a name, and enrolment, where this machine chose one — and
+// a browser that did both has a row a human named and an enrolment that would
+// otherwise rename it. Losing somebody's word for their own device to a
+// cosmetic migration is worse than leaving a stale generated name in place.
+//
+// So the set is closed, and it is every form enrolLabel has ever produced:
+// today's, the relative one it replaced, and the two an empty hostname gives.
+// A name outside it is somebody's, and stays.
+func generatedEnrolLabel(label string) bool {
+	switch label {
+	case "browser", "this machine's browser":
+		return true
+	}
+	return strings.HasPrefix(label, "Browser on ") ||
+		strings.HasSuffix(label, " — this machine's browser")
+}
+
+// relabelEnrolled corrects the name on an already-enrolled browser's row when
+// this machine would call it something else today, and returns the freshly
+// minted certificate when it did.
+//
+// The name is not a local display string. It is minted into the device
+// certificate, and a sibling machine takes its own row's label straight out of
+// that blob when the browser first reaches it (relay/channel.go,
+// admitByFleetCert) — so a stale name here is a stale name on every Devices
+// screen in the fleet, and none of those machines can fix it, because none of
+// them mints this certificate. This is the only place that can.
+//
+// Best effort throughout, and silent about it: an enrolment that already has a
+// usable certificate must not fail because a cosmetic correction could not be
+// written. Every failure leaves the caller on the stored blob, which is exactly
+// what it had before.
+func (s *Server) relabelEnrolled(dev crypto.Device, key []byte, fi FleetIdentity) ([]byte, bool) {
+	label := enrolLabel(s.hostname)
+	if dev.Label == label || !generatedEnrolLabel(dev.Label) {
+		return nil, false
+	}
+	cert, err := fi.Key.Sign(fleet.DeviceCert{
+		Device:   key,
+		Name:     label,
+		PairedOn: fi.MachineID,
+		IAT:      time.Now().Unix(),
+	})
+	if err != nil {
+		s.logger().Warn("could not re-mint this machine's own browser certificate under its current name",
+			"device", dev.ID, "err", err)
+		return nil, false
+	}
+	changed, err := s.identity.Devices.Relabel(key, label, cert)
+	if err != nil {
+		s.logger().Warn("could not rename this machine's own browser row",
+			"device", dev.ID, "err", err)
+		return nil, false
+	}
+	if !changed {
+		return nil, false
+	}
+	s.logger().Info("renamed this machine's own browser and re-minted its certificate",
+		"device", dev.ID, "was", dev.Label, "now", label)
+	return cert, true
+}
+
 // handleEnrol answers POST EnrolPath.
 //
 // The order is the pairing handler's order minus the ceremony: method, then a
@@ -379,6 +449,20 @@ func (s *Server) handleEnrol(w http.ResponseWriter, r *http.Request) {
 		if len(cert) == 0 {
 			http.Error(w, "this device is registered but its fleet certificate could not be minted", http.StatusInternalServerError)
 			return
+		}
+		// Unless the name is wrong, which is the one thing worth re-minting
+		// for. A machine renamed since it enrolled, or upgraded across a change
+		// to how flue words these labels, is left calling its own browser
+		// something untrue — and the name is *signed*, so every sibling in the
+		// fleet reads the row under the stale wording too, with no way of its
+		// own to learn better. This is where a browser touches its own machine,
+		// so this is where it gets corrected.
+		//
+		// Not on every enrolment, only when it differs: the comparison the
+		// paragraph above is about survives, because a name that already
+		// matches re-mints nothing and the next call finds the same bytes.
+		if fresh, ok := s.relabelEnrolled(dev, key, fi); ok {
+			cert = fresh
 		}
 	} else {
 		label := enrolLabel(s.hostname)

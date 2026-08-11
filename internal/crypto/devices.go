@@ -265,6 +265,61 @@ func (s *DeviceStore) SetCert(publicKey, cert []byte) (bool, error) {
 	return false, nil
 }
 
+// Relabel renames a device and replaces its certificate together, reporting
+// whether anything changed. Missing key, empty label or empty cert: no change,
+// no error.
+//
+// The two move as one because they are one fact. A device's display name is
+// minted *into* its fleet certificate — the name a sibling machine reads it
+// under comes out of that signed blob and nowhere else (relay/channel.go) — so
+// a row renamed without re-minting would be a machine calling a device one
+// thing locally while vouching for it as another everywhere else.
+//
+// It is deliberately not SetCert, which back-fills a missing certificate and
+// refuses to touch one that exists. That refusal is right for the back-fill:
+// re-minting on every reconnect would hand a browser different bytes each time
+// and defeat the comparison it makes against what it holds. This is the other
+// case — a name that has actually changed, which happens when a machine is
+// renamed or when the way flue words these labels changes under an upgrade —
+// and there the stale bytes are the bug, so the new ones are written once and
+// then stay put, because the next call finds the label already matching.
+//
+// Keyed on the bytes rather than the id, for the reason RemoveByKey gives.
+func (s *DeviceStore) Relabel(publicKey []byte, label string, cert []byte) (bool, error) {
+	if len(publicKey) != 32 {
+		return false, fmt.Errorf("crypto: device key must be 32 bytes, got %d", len(publicKey))
+	}
+	if label == "" || len(cert) == 0 {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if revoked, err := s.isRevokedLocked(publicKey); err != nil {
+		return false, err
+	} else if revoked {
+		return false, ErrDeviceRevoked
+	}
+	devices, err := s.load()
+	if err != nil {
+		return false, err
+	}
+	for i := range devices {
+		if !bytes.Equal(devices[i].PublicKey, publicKey) {
+			continue
+		}
+		if devices[i].Label == label && bytes.Equal(devices[i].Cert, cert) {
+			return false, nil
+		}
+		devices[i].Label = label
+		devices[i].Cert = slices.Clone(cert)
+		if err := s.save(devices); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // RemoveByKey unpairs whichever device holds publicKey, reporting whether
 // there was one. Missing is not an error: it is the ordinary answer for a
 // revocation that arrived from the fleet directory naming a device this
