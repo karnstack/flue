@@ -1,0 +1,71 @@
+# Builds the landing site on a pull request, so `check-prose` (site/scripts,
+# run by `pnpm build`) is a gate rather than a report. Before this file the
+# check only ran after a merge: ci.yml's `make lint test` never reaches site/,
+# and deploy-site.yml runs on push to main alone.
+#
+# A file of its own rather than a job in ci.yml because path filtering in
+# Actions lives on the trigger, not on the job — ci.yml runs on everything
+# and cannot carry a `paths:` without narrowing all of it.
+#
+# README.md and scripts/install.sh are in the paths because check-prose reads
+# both by name, so either can turn this red with site/ untouched.
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "README.md"
+      - "scripts/install.sh"
+      - ".github/workflows/site.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - "README.md"
+      - "scripts/install.sh"
+      - ".github/workflows/site.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the toolchain from mise.toml
+        uses: jdx/mise-action@v4
+
+      # mise-action caches the tools it installs, but not the pnpm store;
+      # cache it separately, keyed on the lockfile. site/ is its own pnpm
+      # workspace, so it needs its own key — ci.yml's hashes web/ and relay/.
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-site-${{ runner.os }}-${{ hashFiles('site/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-site-${{ runner.os }}-
+
+      - name: Install the site's dependencies
+        working-directory: site
+        run: pnpm install --frozen-lockfile
+
+      # Build before lint, which looks backwards and is not: `lint` is
+      # tsc --noEmit, and src/routeTree.gen.ts is gitignored and written by the
+      # router's vite plugin, so on a fresh checkout there is no copy to typecheck
+      # against and tsc fails on `Cannot find module './routeTree.gen'`. The build
+      # is also what check-prose reads — it scans the prerendered dist/client.
+      - name: Build the site
+        working-directory: site
+        run: pnpm build
+
+      - name: Lint the site
+        working-directory: site
+        run: pnpm lint
