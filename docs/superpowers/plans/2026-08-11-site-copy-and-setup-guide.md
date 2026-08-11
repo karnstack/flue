@@ -1455,8 +1455,7 @@ Section two:
 <Section title="Every device is another view">
   <P>
     A client only draws, so there can be more than one. Attach from two devices and they
-    mirror live: what you type on the phone appears in the laptop&rsquo;s browser within a
-    frame.
+    mirror live: what you type on the phone appears in the laptop&rsquo;s browser.
   </P>
   <P>
     Size follows the view you are using. Pick up the phone and the session fits the phone.
@@ -1768,8 +1767,8 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     verdict: 'Yes, and they mirror live.',
     body: (
       <P>
-        What you type on the phone appears in the laptop&rsquo;s browser. The phone is 40
-        columns wide, and that does not make the laptop&rsquo;s terminal smaller.
+        What you type on the phone appears in the laptop&rsquo;s browser. The terminal takes the
+        size of whichever view you are using, so neither one is held at the other&rsquo;s size.
       </P>
     ),
   },
