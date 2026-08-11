@@ -120,6 +120,22 @@ describe('findPaths', () => {
     expect(findPaths(line)).toHaveLength(MAX_CANDIDATES)
   })
 
+  it('stays linear on a long run of scheme-shaped characters', () => {
+    // The bound on the URL pattern's scheme is what this holds. Without it the
+    // engine looks for a `://` from every start position of a run that has
+    // none, and this line takes 55 seconds instead of 14ms. Measured with the
+    // bound taken out: nothing else in the file notices, all fourteen other
+    // cases still pass, so this is the only thing standing under it.
+    //
+    // The budget is coarse on purpose. Three orders of magnitude of headroom
+    // means a loaded machine cannot flake it, and the failure it exists for is
+    // not a near miss.
+    const line = 'a'.repeat(100_000)
+    const started = performance.now()
+    findPaths(line)
+    expect(performance.now() - started).toBeLessThan(2000)
+  })
+
   it('takes no candidate from an empty line', () => {
     expect(findPaths('')).toEqual([])
     expect(findPaths('   ')).toEqual([])

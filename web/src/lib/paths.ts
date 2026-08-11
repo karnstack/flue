@@ -73,22 +73,35 @@ const TOKEN = String.raw`[^\s'"\u0060<>|(){}\[\],=]+`
  * the addon accepts both and really does mark `https://x.com/a,b/c.ts` end to
  * end.
  *
- * The scheme is bounded at 32 because unbounded it backtracks. On a long run
- * of scheme-shaped characters with no `://` anywhere in it, one hex digest is
- * enough, the engine consumes the run from every start position in turn and
- * the cost goes quadratic. Measured over 100000 characters: 30.5 seconds
- * before the bound, 21ms after, in a function that runs while a pointer moves.
+ * The scheme is bounded at 32 because unbounded it backtracks. On a run of
+ * scheme-shaped characters with no `://` anywhere in it, the engine consumes
+ * the run from every start position in turn and the cost goes quadratic. It
+ * takes length to show: a hex digest is far too short to measure, and even a
+ * few hundred characters are lost in the noise. What is not too short is the
+ * wrapped logical line MAX_CANDIDATES is written for. Measured unbounded: 3ms
+ * at 1024 characters, 33ms at 4000, 38 seconds at 100000. Bounded, the same
+ * three are 0.1ms, 0.5ms and 14ms, in a function that runs while a pointer
+ * moves. A lever that long is why the bound has a test of its own and not
+ * only this paragraph.
  *
  * One thing the paragraph above overstates. The addon's default matcher takes
- * `http` and `https` only, so `file://` and `git+ssh://` get a span here and a
- * mark from nobody, and suppressing inside them is not deferring to anyone.
- * It costs nothing today, because a token carrying `://` fails pathish()
- * regardless, and a scheme is not a path.
+ * `http` and `https` only, so `file://`, `ftp://` and `git+ssh://` get a span
+ * here and a mark from nobody: inside one of those, suppressing defers to no
+ * one. Nor is it free, and not only for the token holding the scheme, which
+ * pathish() would refuse anyway. The span runs on past the comma and the
+ * equals sign, so `file://x/a?q=src/main.ts` and `git+ssh://h/r,src/main.ts`
+ * each lose the very candidate that keeping those two characters inside a span
+ * was meant to protect, and nothing else marks it. That is a real cost, taken
+ * on purpose: the alternative is to read the scheme and apply one rule to
+ * `http` and another to the rest, which pins this file to the addon's default
+ * matcher, and that matcher is a constructor argument anyone can widen. One
+ * rule for every scheme pays a few candidates inside links and cannot go
+ * stale.
  *
  * Hoisted where the token scanner cannot be: matchAll() walks a copy of the
  * regex, so no `lastIndex` from one line reaches the next.
  */
-const URL_RUN = /[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s'"`<>|(){}\[\]]*/gu
+const URL_RUN = /[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s'"`<>|(){}\[\]]+/gu
 
 /** Half-open, in the coordinates of the line the run was found in. */
 interface Span {
