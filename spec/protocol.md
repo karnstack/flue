@@ -211,10 +211,12 @@ file on screen is the target, which is not always the path that was clicked.
 line rather than one candidate at a time, and a path it cannot resolve is
 `exists: false` rather than an error — "no" is the ordinary answer here. More
 than 32 in one message is **refused** with `error{bad_path}`, which is the
-opposite of what the ceiling on `peek`'s `bytes` does: a clamp there costs a
-shorter preview, while a clamp here would answer some paths and silently drop
-the rest, leaving a client unable to tell which of its candidates it never heard
-about. A client with more than 32 sends a second `stat`.
+opposite of what the ceiling on `peek`'s `bytes` does. The difference is who
+chose the number: an oversized `bytes` is usually a default nobody picked, so
+clamping hands back what there is, while a list of 33 paths is a batch a caller
+assembled deliberately — and 32 is already far more than a hovered line offers,
+so a message past it is not this one being used harder but being used for
+something else. A client with more than 32 sends a second `stat`.
 
 Beside `path` and `exists`, an entry that exists carries `kind` (`file`, `dir`
 or `other`), `size` in bytes and `mtime` in unix **seconds** — the unit
@@ -234,9 +236,13 @@ the same reason.
 `eof` says the stream ended, not that the file arrived whole. The daemon stops
 on a read error exactly as it stops at the end of the file, and says `eof`
 either way, so a partial delivery is indistinguishable on the wire from a
-complete one. A client that cares counts the bytes it received and compares them
-against `file.size`, or against the cap when `file.truncated` is set, rather than
-reading `eof` as a guarantee it does not make.
+complete one. Nor is there a length to check it against: `file.size` is a
+snapshot taken before the stream started, and the daemon reads to the end of the
+file or to the cap rather than to that number. A log or an agent transcript
+still being appended to therefore delivers *more* bytes than `file.size`, quite
+legitimately, and one truncated on disk mid-read delivers fewer — and those are
+exactly the files this exists to open. Comparing the two is a heuristic worth
+showing a reader, not a checksum to refuse a file over.
 
 What may be read is anything the daemon's user can read, and nothing is
 written. That is not a widening: a client that can send `read` can already send
@@ -248,12 +254,13 @@ than truncated. `file.kind` is `text` or `image`, sniffed from the content and
 never from the extension; anything else is refused. Two reads may be open per
 connection.
 
-`cancel` abandons a read by `ref`, and **nothing answers it** — not on success,
-where the stream stopping is the whole of the reply, and not for a ref the
-daemon does not hold, which is ignored rather than refused. A read finishing and
-a client cancelling it cross on the wire routinely, and a race the client cannot
-avoid should not be an error it has to handle. Every read is ended and its file
-closed when the connection drops.
+`cancel` abandons a read by `ref`, and **nothing answers it**: no confirmation
+on success, and no refusal for a ref the daemon does not hold, which is ignored
+rather than rejected. The stream stopping is the whole of the reply — and it
+stops rather than stops dead, which is what the two paragraphs below are about.
+A read finishing and a client cancelling it cross on the wire routinely, and a
+race the client cannot avoid should not be an error it has to handle. Every read
+is ended and its file closed when the connection drops.
 
 A viewer closed before its `file` has arrived has no ref to cancel yet. It
 remembers the `reqId` as abandoned and sends the `cancel` when the ref lands,
