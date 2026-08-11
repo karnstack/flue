@@ -50,9 +50,8 @@ function HowItWorks() {
         </P>
         <P>
           Size follows the view you are using. Pick up the phone and the session fits the phone.
-          Type on the laptop and it fits the laptop again. Neither view is held at the other
-          one&rsquo;s size, which is the failure that makes most screen sharing useless for real
-          work.
+          Type on the laptop and it fits the laptop again. Being held at another view&rsquo;s size
+          is the failure that makes most screen sharing useless for real work.
         </P>
         <Note title="One list, every machine">
           <P>
@@ -92,8 +91,8 @@ function HowItWorks() {
         <Shell
           lines={[
             '$ flue enable',
-            '  login service installed',
-            '  daemon running on 127.0.0.1:7717',
+            '  ✓ login service installed',
+            '  ✓ daemon running on 127.0.0.1:7717',
             '  opening http://127.0.0.1:7717',
           ]}
         />

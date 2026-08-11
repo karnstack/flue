@@ -263,8 +263,8 @@ function How() {
             </p>
             <p className="mt-4 max-w-[56ch] text-lg text-pretty text-muted-foreground">
               Two devices can attach to one session and they mirror live. What you type on the phone
-              appears in the laptop&rsquo;s browser. Size follows the view you are using: pick up
-              the phone and the session fits the phone, type on the laptop and it fits the
+              appears in the laptop&rsquo;s browser. Size follows the view you are using. Pick up
+              the phone and the session fits the phone. Type on the laptop and it fits the
               laptop again.
             </p>
             <a

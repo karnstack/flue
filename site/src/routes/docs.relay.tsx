@@ -21,6 +21,7 @@ const SEES = [
   { can: false, text: "Your daemon's private key, or any device's." },
   { can: true, text: 'Who connected, when, and how much traffic moved each way. Enough to analyse a session, never to read one.' },
   { can: true, text: 'The pairing exchange. It crosses a cleartext control channel carrying a single-use token that lives two minutes.' },
+  { can: true, text: "The fleet directory. It holds each machine's id, name and daemon public key, and the whole revocation history. Reading it needs no credential, so anyone who learns the relay's address can read it, not only the operator." },
 ]
 
 function Relay() {
@@ -54,11 +55,14 @@ function Relay() {
         <Shell
           lines={[
             '$ flue relay setup',
-            '  token verified',
-            '  worker deployed: flue-relay',
-            '  web app uploaded',
-            '  reachable at https://flue-relay.you.workers.dev',
-            '  this machine joined as laptop (laptop-9f3a)',
+            '  ✓ token verified',
+            '  ✓ account: Personal (a1b2c3…)',
+            '  ✓ worker deployed: flue-relay',
+            '  ✓ web app uploaded (128 files)',
+            '  ✓ reachable at https://flue-relay.you.workers.dev',
+            '  ✓ secret set',
+            '  ✓ fleet key minted (stays on your machines; Cloudflare never sees it)',
+            '  ✓ this machine joined as laptop (laptop-9f3a)',
           ]}
         />
         <P>
