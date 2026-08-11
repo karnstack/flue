@@ -105,7 +105,7 @@ func cmdUpdate() error {
 // the daemon so the new build is the one serving.
 //
 // The checker is release.go's: the same fetch, the same semver comparison,
-// and the same HTTP seam the daemon's 12-hourly check uses — no second
+// and the same HTTP seam the daemon's ten-minute check uses — no second
 // GitHub client.
 func runUpdate(w io.Writer, current string, c *releaseChecker) error {
 	if current == "dev" {
@@ -113,7 +113,10 @@ func runUpdate(w io.Writer, current string, c *releaseChecker) error {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
-	tag, _, err := c.fetch(ctx)
+	// Unconditional, with no etag: this is a command someone typed, and it
+	// needs the tag itself to build a download URL from. A 304 would be the
+	// right answer to "has it changed" and no answer at all to "what is it".
+	tag, _, _, err := c.fetch(ctx, "")
 	cancel()
 	if err != nil {
 		return fmt.Errorf("look up the latest release: %w", err)
@@ -144,7 +147,14 @@ func runUpdate(w io.Writer, current string, c *releaseChecker) error {
 		}
 		fmt.Fprintf(w, "\n  ✓ %s\n", brewUpgradeCommand)
 	} else {
-		if err := selfUpdate(w, c.get, tag, latest, target); err != nil {
+		// Adapted rather than threaded through: a download is never
+		// conditional. If-None-Match is the release check's business — asking
+		// "has the tag moved" — and an archive is either fetched or it is not.
+		// Still the one client, which is what the seam is for.
+		download := func(ctx context.Context, url string) (*http.Response, error) {
+			return c.get(ctx, url, "")
+		}
+		if err := selfUpdate(w, download, tag, latest, target); err != nil {
 			return err
 		}
 	}
@@ -162,9 +172,9 @@ func brewOwned(path string) bool {
 	return strings.Contains(path, "/Caskroom/") || strings.Contains(path, "/Cellar/")
 }
 
-// getter matches releaseChecker.get: one HTTP seam for everything the
-// updater downloads, so the tests fake one function and no second GitHub
-// client ever grows here.
+// getter is releaseChecker.get with the conditional-request argument already
+// answered: one HTTP seam for everything the updater downloads, so the tests
+// fake one function and no second GitHub client ever grows here.
 type getter func(context.Context, string) (*http.Response, error)
 
 // selfUpdate downloads the release archive for this OS and architecture,

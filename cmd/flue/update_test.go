@@ -60,8 +60,12 @@ func flueArchive(t *testing.T, bin []byte) []byte {
 
 // fakeGitHub answers from a map of full URL to body — the latest-release
 // JSON and the download assets through the one seam production uses.
-func fakeGitHub(files map[string][]byte) func(context.Context, string) (*http.Response, error) {
-	return func(_ context.Context, url string) (*http.Response, error) {
+//
+// The etag argument is ignored rather than honoured: these are the updater's
+// tests, and `flue update` asks unconditionally. What a replayed etag buys is
+// pinned in release_test.go, where the daemon's repeated check lives.
+func fakeGitHub(files map[string][]byte) func(context.Context, string, string) (*http.Response, error) {
+	return func(_ context.Context, url, _ string) (*http.Response, error) {
 		if b, ok := files[url]; ok {
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(b))}, nil
 		}
@@ -129,7 +133,7 @@ func newVersionedDaemon(t *testing.T, token, ver string) int {
 	t.Helper()
 	srv := daemon.New(session.NewRegistry(time.Now), local.NewAuth(token, 0), uiHandler(), ver, daemon.Identity{})
 	rc := newReleaseChecker(ver)
-	rc.get = func(context.Context, string) (*http.Response, error) {
+	rc.get = func(context.Context, string, string) (*http.Response, error) {
 		return nil, errors.New("no network in tests")
 	}
 	srv.SetReleaseChecker(rc)
@@ -157,7 +161,7 @@ func newVersionedDaemon(t *testing.T, token, ver string) int {
 func TestRunUpdateRefusesADevBuild(t *testing.T) {
 	c := newReleaseChecker("dev")
 	var asked atomic.Bool
-	c.get = func(context.Context, string) (*http.Response, error) {
+	c.get = func(context.Context, string, string) (*http.Response, error) {
 		asked.Store(true)
 		return nil, errors.New("no network in tests")
 	}
@@ -305,11 +309,11 @@ func TestRunUpdateRefusesAnUnwritableTarget(t *testing.T) {
 
 	var downloaded atomic.Bool
 	c := newReleaseChecker("0.5.0")
-	c.get = func(ctx context.Context, url string) (*http.Response, error) {
+	c.get = func(ctx context.Context, url, _ string) (*http.Response, error) {
 		if url != releaseAPI {
 			downloaded.Store(true)
 		}
-		return fakeGitHub(map[string][]byte{releaseAPI: releaseJSON("v0.6.0")})(ctx, url)
+		return fakeGitHub(map[string][]byte{releaseAPI: releaseJSON("v0.6.0")})(ctx, url, "")
 	}
 
 	err := runUpdate(io.Discard, "0.5.0", c)
@@ -349,11 +353,11 @@ func TestRunUpdateHandsABrewInstallToBrew(t *testing.T) {
 
 	var downloaded atomic.Bool
 	c := newReleaseChecker("0.5.0")
-	c.get = func(ctx context.Context, url string) (*http.Response, error) {
+	c.get = func(ctx context.Context, url, _ string) (*http.Response, error) {
 		if url != releaseAPI {
 			downloaded.Store(true)
 		}
-		return fakeGitHub(map[string][]byte{releaseAPI: releaseJSON("v0.6.0")})(ctx, url)
+		return fakeGitHub(map[string][]byte{releaseAPI: releaseJSON("v0.6.0")})(ctx, url, "")
 	}
 
 	var out bytes.Buffer

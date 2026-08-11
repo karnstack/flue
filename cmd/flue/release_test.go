@@ -11,8 +11,8 @@ import (
 )
 
 // answer builds a canned api.github.com reply.
-func answer(status int, body string) func(context.Context, string) (*http.Response, error) {
-	return func(context.Context, string) (*http.Response, error) {
+func answer(status int, body string) func(context.Context, string, string) (*http.Response, error) {
+	return func(context.Context, string, string) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: status,
 			Body:       io.NopCloser(strings.NewReader(body)),
@@ -30,7 +30,7 @@ func TestReleaseIsAnsweredFromCacheNotFromTheNetwork(t *testing.T) {
 	release := make(chan struct{})
 	asked := make(chan struct{}, 1)
 	c := newReleaseChecker("0.4.0")
-	c.get = func(context.Context, string) (*http.Response, error) {
+	c.get = func(context.Context, string, string) (*http.Response, error) {
 		asked <- struct{}{}
 		<-release
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(stable))}, nil
@@ -63,7 +63,7 @@ func TestReleaseAsksOnceWhileACheckIsInFlight(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
 	c := newReleaseChecker("0.4.0")
-	c.get = func(context.Context, string) (*http.Response, error) {
+	c.get = func(context.Context, string, string) (*http.Response, error) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
@@ -110,7 +110,7 @@ func TestReleaseStampsAFailedCheck(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
 	c := newReleaseChecker("0.4.0")
-	c.get = func(context.Context, string) (*http.Response, error) {
+	c.get = func(context.Context, string, string) (*http.Response, error) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
@@ -147,7 +147,7 @@ func TestReleaseAsksAgainOnceTheIntervalIsUp(t *testing.T) {
 		defer mu.Unlock()
 		return now
 	}
-	c.get = func(context.Context, string) (*http.Response, error) {
+	c.get = func(context.Context, string, string) (*http.Response, error) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
@@ -173,13 +173,130 @@ func TestReleaseAsksAgainOnceTheIntervalIsUp(t *testing.T) {
 	})
 }
 
+// TestReleaseReplaysTheETagAndKeepsWhatA304Confirms is what pays for the
+// ten-minute interval. GitHub does not charge a conditional request that comes
+// back 304 against the sixty-an-hour budget an unauthenticated address gets,
+// so the asks between one release and the next cost nothing — but only if the
+// etag is actually replayed, and only if the 304 is read as confirmation
+// rather than as the empty answer its body literally is.
+func TestReleaseReplaysTheETagAndKeepsWhatA304Confirms(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string // the If-None-Match each ask carried
+	now := time.Unix(1_700_000_000, 0)
+	c := newReleaseChecker("0.4.0")
+	c.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	c.get = func(_ context.Context, _, etag string) (*http.Response, error) {
+		mu.Lock()
+		seen = append(seen, etag)
+		n := len(seen)
+		mu.Unlock()
+		if n == 1 {
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Etag": {`W/"tag-v0.5.0"`}},
+				Body:       io.NopCloser(strings.NewReader(stable)),
+			}, nil
+		}
+		// What a real 304 is: a status, no body worth reading.
+		return &http.Response{
+			StatusCode: http.StatusNotModified,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader("")),
+		}, nil
+	}
+
+	c.Release(t.Context())
+	waitFor(t, 2*time.Second, "the first check", func() bool {
+		return c.Release(t.Context()).Latest == "0.5.0"
+	})
+
+	mu.Lock()
+	now = now.Add(releaseInterval + time.Minute)
+	mu.Unlock()
+
+	c.Release(t.Context())
+	waitFor(t, 2*time.Second, "the conditional check", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen) == 2
+	})
+
+	mu.Lock()
+	asked := append([]string(nil), seen...)
+	mu.Unlock()
+	if asked[0] != "" {
+		t.Fatalf("the first ask carried If-None-Match %q, want none — nothing was held to be conditional about", asked[0])
+	}
+	if asked[1] != `W/"tag-v0.5.0"` {
+		t.Fatalf("the second ask carried If-None-Match %q, want the etag GitHub minted", asked[1])
+	}
+	if got := c.Release(t.Context()); got.Latest != "0.5.0" || !got.Update || got.URL == "" {
+		t.Fatalf("after a 304: %+v, want the answer it confirmed", got)
+	}
+}
+
+// TestReleaseKeepsAGoodAnswerThroughAFailedCheck. Six asks an hour rather than
+// two a day is six chances an hour to meet a refused request or a network that
+// blinked, and a daemon runs for weeks. An answer already known must survive
+// them: dropping it would take the notice off the sidebar of someone who had
+// been looking at it, and put it back on the check after.
+func TestReleaseKeepsAGoodAnswerThroughAFailedCheck(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	now := time.Unix(1_700_000_000, 0)
+	c := newReleaseChecker("0.4.0")
+	c.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	c.get = func(context.Context, string, string) (*http.Response, error) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(stable)),
+			}, nil
+		}
+		return nil, http.ErrHandlerTimeout
+	}
+
+	c.Release(t.Context())
+	waitFor(t, 2*time.Second, "the first check", func() bool {
+		return c.Release(t.Context()).Latest == "0.5.0"
+	})
+
+	mu.Lock()
+	now = now.Add(releaseInterval + time.Minute)
+	mu.Unlock()
+
+	c.Release(t.Context())
+	waitFor(t, 2*time.Second, "the failing check", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls == 2
+	})
+
+	if got := c.Release(t.Context()); got.Latest != "0.5.0" || !got.Update {
+		t.Fatalf("after a failed check: %+v, want the last good answer kept", got)
+	}
+}
+
 // TestReleaseIgnoresWhatItCannotUse: an unreachable, refusing or pre-release
 // GitHub all land on the same "nothing known", which is not an error state to
 // render — a version nobody could look up is not news.
 func TestReleaseIgnoresWhatItCannotUse(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		get  func(context.Context, string) (*http.Response, error)
+		get  func(context.Context, string, string) (*http.Response, error)
 	}{
 		{"rate limited", answer(403, "")},
 		{"a draft", answer(200, `{"tag_name":"v9.9.9","draft":true}`)},

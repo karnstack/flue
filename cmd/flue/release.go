@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -15,16 +16,27 @@ import (
 
 // Where the newest release is published, and how often to ask.
 //
-// The interval is long because the fact is: releases are days apart, and a
-// daemon left running for a week should ask a handful of times, not hundreds.
-// Unauthenticated api.github.com allows sixty requests an hour per address —
-// this spends two a day, which leaves the budget to whatever else the
-// machine's operator is doing.
+// Ten minutes, and what makes that affordable is the conditional request
+// below rather than the number itself. Unauthenticated api.github.com allows
+// sixty requests an hour per address, but a request that comes back 304 does
+// not count against that budget — so six asks an hour spend nothing at all
+// between releases, which is every hour but one.
+//
+// The interval used to be twelve hours, on the reasoning that releases are
+// days apart. That is true of releases and false of the thing a reader
+// experiences: a release lands, and the daemon that has already checked today
+// says nothing about it until tomorrow. Half a day of a sidebar quietly
+// knowing the wrong answer is the cost the old number was actually paying.
 const (
 	releaseAPI      = "https://api.github.com/repos/karnstack/flue/releases/latest"
-	releaseInterval = 12 * time.Hour
+	releaseInterval = 10 * time.Minute
 	releaseTimeout  = 10 * time.Second
 )
+
+// errNotModified is GitHub confirming the cache rather than refusing it: the
+// tag has not moved since the ETag was minted. Not a failure — the one
+// outcome that means what is already held is right.
+var errNotModified = errors.New("release: not modified")
 
 // releaseChecker answers "is there a newer flue?" from a cache it refreshes in
 // the background.
@@ -41,12 +53,17 @@ type releaseChecker struct {
 	// now and get exist for the tests, which have neither a clock they can
 	// wait on nor an internet connection they should depend on.
 	now func() time.Time
-	get func(ctx context.Context, url string) (*http.Response, error)
+	get func(ctx context.Context, url, etag string) (*http.Response, error)
 
 	mu      sync.Mutex
 	latest  string
 	url     string
 	checked time.Time
+	// etag is what GitHub last labelled this answer with, replayed as
+	// If-None-Match so an unchanged tag costs a 304 and no rate-limit budget.
+	// Empty until a check has succeeded, which is exactly when there is
+	// nothing to be conditional about.
+	etag string
 	// asking guards against a second refresh while one is in flight — a
 	// screenful of tabs reloading at once is one request, not twenty.
 	asking bool
@@ -56,7 +73,7 @@ func newReleaseChecker(current string) *releaseChecker {
 	return &releaseChecker{
 		current: current,
 		now:     time.Now,
-		get: func(ctx context.Context, url string) (*http.Response, error) {
+		get: func(ctx context.Context, url, etag string) (*http.Response, error) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 			if err != nil {
 				return nil, err
@@ -65,6 +82,12 @@ func newReleaseChecker(current string) *releaseChecker {
 			// answers 403 to a request without one.
 			req.Header.Set("Accept", "application/vnd.github+json")
 			req.Header.Set("User-Agent", "flue")
+			// What buys the ten-minute interval. Go's transport does no caching
+			// of its own, so the 304 arrives here rather than being turned back
+			// into the last 200 behind our backs.
+			if etag != "" {
+				req.Header.Set("If-None-Match", etag)
+			}
 			return http.DefaultClient.Do(req)
 		},
 	}
@@ -99,7 +122,11 @@ func (c *releaseChecker) refresh(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, releaseTimeout)
 	defer cancel()
 
-	tag, url, err := c.fetch(ctx)
+	c.mu.Lock()
+	etag := c.etag
+	c.mu.Unlock()
+
+	tag, url, fresh, err := c.fetch(ctx, etag)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -109,9 +136,14 @@ func (c *releaseChecker) refresh(ctx context.Context) {
 	// would otherwise be permanently stale and would try again on every
 	// single page load, forever.
 	c.checked = c.now()
+	// A 304 lands here as an error and is none: GitHub has just confirmed
+	// what is already held, so the stamp above is the whole of the update.
+	// Keeping the etag is what makes the next ask conditional too — dropping
+	// it would turn every second check back into a full request.
 	if err != nil {
 		return
 	}
+	c.etag = fresh
 	c.latest, c.url = strings.TrimPrefix(tag, "v"), url
 }
 
@@ -120,14 +152,21 @@ func (c *releaseChecker) refresh(ctx context.Context) {
 // download URLs under /releases/download/<tag>/ from it, exactly as
 // install.sh does. Callers that want a version to compare or render trim the
 // v themselves, as refresh does for the cache.
-func (c *releaseChecker) fetch(ctx context.Context) (tag, url string, err error) {
-	res, err := c.get(ctx, releaseAPI)
+// etag comes back alongside, to be replayed on the next ask. It is read from
+// the response rather than assumed to persist: GitHub is free to mint a new
+// one for the same tag, and a client that kept the old one would send a
+// condition that never matches again.
+func (c *releaseChecker) fetch(ctx context.Context, etag string) (tag, url, fresh string, err error) {
+	res, err := c.get(ctx, releaseAPI, etag)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotModified {
+		return "", "", "", errNotModified
+	}
 	if res.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("github answered %d", res.StatusCode)
+		return "", "", "", fmt.Errorf("github answered %d", res.StatusCode)
 	}
 	var body struct {
 		TagName string `json:"tag_name"`
@@ -136,12 +175,12 @@ func (c *releaseChecker) fetch(ctx context.Context) (tag, url string, err error)
 		Pre     bool   `json:"prerelease"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if body.Draft || body.Pre {
-		return "", "", fmt.Errorf("latest release is not a stable one")
+		return "", "", "", fmt.Errorf("latest release is not a stable one")
 	}
-	return body.TagName, body.HTMLURL, nil
+	return body.TagName, body.HTMLURL, res.Header.Get("ETag"), nil
 }
 
 // newer says whether `latest` is a later release than `current`.
