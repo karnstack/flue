@@ -10,6 +10,10 @@ import (
 const (
 	FrameOutput byte = 0x00 // daemon -> client
 	FrameInput  byte = 0x01 // client -> daemon
+	// FrameFile carries one chunk of a file being read, under the ref the
+	// daemon minted for that read. Daemon -> client only: nothing here reads a
+	// file the client sends.
+	FrameFile byte = 0x02 // daemon -> client
 )
 
 const binaryHeaderLen = 5
@@ -31,7 +35,7 @@ func DecodeBinary(b []byte) (typ byte, ref uint32, payload []byte, err error) {
 		return 0, 0, nil, ErrShortFrame
 	}
 	typ = b[0]
-	if typ != FrameOutput && typ != FrameInput {
+	if typ != FrameOutput && typ != FrameInput && typ != FrameFile {
 		return 0, 0, nil, fmt.Errorf("wire: unknown frame type %#x", typ)
 	}
 	ref = binary.BigEndian.Uint32(b[1:5])

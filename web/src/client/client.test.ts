@@ -6,22 +6,27 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   decodeBinary,
   encodeBinary,
+  FRAME_FILE,
   FRAME_INPUT,
   FRAME_OUTPUT,
   PROTOCOL_VERSION,
   type AttachMsg,
   type Attached,
+  type CancelMsg,
   type CloseMsg,
   type DetachMsg,
   type DeviceList,
   type DevicesMsg,
+  type EofMsg,
   type ErrorMsg,
   type Exit,
+  type FileMsg,
   type HelloMsg,
   type ListMsg,
   type PairCancelMsg,
   type Pairing,
   type PairStartMsg,
+  type ReadMsg,
   type ResizeMsg,
   type Revoked,
   type RevokeMsg,
@@ -29,6 +34,8 @@ import {
   type SignalMsg,
   type SizeChanged,
   type SpawnMsg,
+  type StatMsg,
+  type StatsMsg,
   type PeekMsg,
   type Preview,
   type UpdateMsg,
@@ -160,6 +167,27 @@ describe('binary framing', () => {
   it('rejects an unknown frame type, as the Go decoder does', () => {
     expect(() => decodeBinary(new Uint8Array([0x09, 0, 0, 0, 1]).buffer)).toThrow(/frame type/)
   })
+
+  it('decodes a file chunk, which is the third frame type', () => {
+    // The Go and TypeScript frame bytes are mirrored by hand and nothing
+    // cross-checks them: the shared fixture covers control messages only. So a
+    // frame type missing here is a runtime throw in the browser rather than a
+    // build failure, and this is the only place that catches it.
+    const payload = new Uint8Array([0x70, 0x6b, 0x67])
+    const frame = decodeBinary(encodeBinary(FRAME_FILE, 9, payload))
+    expect(frame.type).toBe(FRAME_FILE)
+    expect(frame.ref).toBe(9)
+    expect(Array.from(frame.payload)).toEqual([0x70, 0x6b, 0x67])
+  })
+
+  it('agrees with the daemon on which byte a file chunk is', () => {
+    // The literal, not the symbol. Every other assertion in both suites uses
+    // the constant at both ends, so renumbering it to 0x03 would leave Go and
+    // TypeScript each internally consistent and silently unable to talk to
+    // each other. This line and its Go twin in wire_test.go are the only two
+    // places the number itself is written down as an assertion.
+    expect(FRAME_FILE).toBe(0x02)
+  })
 })
 
 describe('control message golden file', () => {
@@ -225,6 +253,15 @@ describe('control message golden file', () => {
       'deviceListEmpty',
       'pairing',
       'revoked',
+      'stat',
+      'stats',
+      'statsEmpty',
+      'read',
+      'file',
+      'fileTruncated',
+      'fileImage',
+      'eof',
+      'cancel',
     ])
   })
 
@@ -563,6 +600,120 @@ describe('control message golden file', () => {
   it('decodes revoked', () => {
     const want: Revoked = { type: 'revoked', reason: 'revoked by another device' }
     expect(fixture('revoked')).toStrictEqual(want)
+  })
+
+  it('decodes a stat and the stats answering it', () => {
+    const ask: StatMsg = {
+      type: 'stat',
+      id: 'a1b2c3d4e5f60708',
+      paths: ['internal/wire/binary.go', '~/notes.md'],
+      reqId: 11,
+    }
+    expect(fixture('stat')).toStrictEqual(ask)
+
+    // A path that does not exist is `exists: false` and nothing else. Not an
+    // error: "no" is the ordinary answer to this question, and the hover that
+    // asked it simply does not underline.
+    //
+    // All three kinds an entry can carry, because all three are arms of a union
+    // this side switches on. A `dir` is what a click has to offer something
+    // other than a viewer for, and `other` is a socket or a device: real enough
+    // to underline, not a thing that can be read. Pinned here because the
+    // daemon can emit either and nothing else in this suite would notice if the
+    // spelling drifted.
+    const answer: StatsMsg = {
+      type: 'stats',
+      entries: [
+        {
+          path: 'internal/wire/binary.go',
+          exists: true,
+          kind: 'file',
+          size: 1204,
+          mtime: 1754870400,
+        },
+        {
+          path: 'internal/wire',
+          exists: true,
+          kind: 'dir',
+          size: 4096,
+          mtime: 1754870400,
+        },
+        // No `size`: a socket has none, and zero is omitted rather than sent.
+        {
+          path: '/tmp/flue-agent.sock',
+          exists: true,
+          kind: 'other',
+          mtime: 1754870400,
+        },
+        { path: '~/notes.md', exists: false },
+      ],
+      reqId: 11,
+    }
+    expect(fixture('stats')).toStrictEqual(answer)
+
+    // Empty as [] rather than null, for the reason sessions and deviceList
+    // are: this side ranges over the field.
+    const empty: StatsMsg = { type: 'stats', entries: [], reqId: 12 }
+    expect(fixture('statsEmpty')).toStrictEqual(empty)
+  })
+
+  it('decodes a read, and the file that opens its stream', () => {
+    const ask: ReadMsg = {
+      type: 'read',
+      id: 'a1b2c3d4e5f60708',
+      path: 'internal/wire/binary.go',
+      reqId: 13,
+    }
+    expect(fixture('read')).toStrictEqual(ask)
+
+    // `path` here is the resolved one, unlike the echo in a stats entry.
+    const answer: FileMsg = {
+      type: 'file',
+      ref: 4,
+      path: '/home/karn/code/flue/internal/wire/binary.go',
+      size: 1204,
+      mime: 'text/plain; charset=utf-8',
+      kind: 'text',
+      reqId: 13,
+    }
+    expect(fixture('file')).toStrictEqual(answer)
+
+    // `size` stays the file's real size when only its head is coming, so a
+    // viewer can say how much it is not showing.
+    const cut: FileMsg = {
+      type: 'file',
+      ref: 5,
+      path: '/home/karn/big.log',
+      size: 41943040,
+      mime: 'text/plain; charset=utf-8',
+      kind: 'text',
+      truncated: true,
+      reqId: 14,
+    }
+    expect(fixture('fileTruncated')).toStrictEqual(cut)
+
+    // The other kind, and the one a viewer renders differently in every
+    // respect. `truncated` is absent rather than false on purpose: an image is
+    // refused past its cap rather than cut, so a `file` with `kind: 'image'`
+    // that arrives at all is a whole image.
+    const image: FileMsg = {
+      type: 'file',
+      ref: 6,
+      path: '/home/karn/shots/graph.png',
+      size: 184320,
+      mime: 'image/png',
+      kind: 'image',
+      reqId: 15,
+    }
+    expect(fixture('fileImage')).toStrictEqual(image)
+  })
+
+  it('decodes the end of a stream, and the abandonment of one', () => {
+    const done: EofMsg = { type: 'eof', ref: 4 }
+    expect(fixture('eof')).toStrictEqual(done)
+
+    const stop: CancelMsg = { type: 'cancel', ref: 4 }
+    expect(fixture('cancel')).toStrictEqual(stop)
   })
 })
 

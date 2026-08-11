@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -66,6 +67,11 @@ const (
 var (
 	errConnClosed     = errors.New("daemon: connection closed")
 	errConnBacklogged = errors.New("daemon: client is not draining its socket")
+	// errSendAbandoned is a frame the producer gave up on while waiting for
+	// room: a file read that was cancelled, or a connection being torn down.
+	// Distinct from errConnClosed because the connection is usually fine — it
+	// is the thing the frame was for that is gone.
+	errSendAbandoned = errors.New("daemon: the frame's producer gave up on it")
 )
 
 // What a client is told when the device registry fails, in place of the error
@@ -149,6 +155,17 @@ type frame struct {
 	// then close it" would deliver the close and drop the reason. Queued, the
 	// order is the order.
 	last bool
+
+	// sent, when non-nil, is closed once this frame has been handed to the
+	// socket. It is how the file pump paces itself, and it is only ever set on
+	// file chunks.
+	//
+	// Nothing else needs it: every other frame is small and fire-and-forget,
+	// and the outbox absorbs them. A file does not fit that pattern — 8 MiB is
+	// 256 chunks, which is exactly outboxDepth, so a pump that queued as fast
+	// as it read would trip the backlog check and drop the very connection it
+	// was answering.
+	sent chan struct{}
 }
 
 // conn is the per-connection state machine, over whatever transport delivered
@@ -216,6 +233,21 @@ type conn struct {
 	mu      sync.Mutex
 	nextRef uint32
 	attach  map[uint32]*attachment
+	// reads are the file reads in flight, keyed by the ref they stream under.
+	// Same counter as attach, different table: a read is structurally an
+	// attachment (request, handle, binary frames, end) but it holds a file
+	// rather than a subscription, and nothing that walks attachments should
+	// find one.
+	reads map[uint32]*fileRead
+
+	// pumps counts the file pumps still running. closeAll waits on it, so no
+	// goroutine holding a file descriptor outlives serve.
+	//
+	// They do all end on their own — every wait a pump can be in selects on
+	// this connection's context — but "eventually" is not good enough at
+	// teardown: serve returning while a pump is still unwinding puts a race
+	// report in whatever test runs next rather than in the one that caused it.
+	pumps sync.WaitGroup
 }
 
 func newConn(ctx context.Context, cancel context.CancelFunc, mc MessageConn, srv *Server, peer, origin string, deviceKey []byte) *conn {
@@ -229,6 +261,7 @@ func newConn(ctx context.Context, cancel context.CancelFunc, mc MessageConn, srv
 		deviceKey: deviceKey,
 		out:       make(chan frame, outboxDepth),
 		attach:    map[uint32]*attachment{},
+		reads:     map[uint32]*fileRead{},
 	}
 }
 
@@ -238,6 +271,31 @@ func (c *conn) sendControl(msg any) error {
 		return err
 	}
 	return c.enqueue(frame{text: true, b: b})
+}
+
+// sendControlWait is sendControl for a producer that has somewhere to wait: the
+// frame takes the same waiting path a file chunk takes rather than enqueue's
+// drop-the-client verdict.
+//
+// The file pump is the only caller, and it needs this for exactly one frame —
+// the eof that ends a stream. Everything before it went out through sendChunk,
+// which waits. An eof through sendControl would mean a pump can wait politely
+// for room across all 256 chunks of an 8 MiB file and then drop the connection
+// on the single frame that says the file is finished, because the session's
+// output refilled the slot the writer had just freed. That is the same
+// intermittent disconnect enqueueWaitFor exists to prevent, narrowed to one
+// frame in N and no less real for it.
+//
+// Not for control responses in general, and in particular not for the file
+// frame that answers a read. Those are sent on the read loop, where a full
+// outbox does mean the client has stopped draining and enqueue's verdict is the
+// established rule for every reply this daemon makes.
+func (c *conn) sendControlWait(msg any, done <-chan struct{}) error {
+	b, err := wire.EncodeControl(msg)
+	if err != nil {
+		return err
+	}
+	return c.enqueueWaitFor(frame{text: true, b: b}, done)
 }
 
 // sendFinal queues msg as the last thing this connection will say, and ends
@@ -276,6 +334,55 @@ func (c *conn) enqueue(f frame) error {
 	}
 }
 
+// enqueueWaitFor hands a frame to the writer, waiting for room rather than
+// treating a full outbox as the client's fault.
+//
+// enqueue above is right for the producers it serves: an attachment's output
+// pump and another connection's broadcast have nowhere to wait, so a client
+// that has not drained outboxDepth frames has to be dropped rather than
+// allowed to consume this daemon's memory on its behalf.
+//
+// A file read is the one producer that *does* have somewhere to wait — a
+// goroutine of its own, serving one request, whose only job is this file. For
+// it, a full outbox is backpressure rather than a verdict: the terminal is
+// busy, the writer is behind, and the right response is to slow down. Using
+// enqueue here would mean that opening a file during a burst of output drops
+// the session, intermittently, and blames the read.
+//
+// The wait needs no timeout of its own. A peer that has genuinely stopped
+// reading stalls the writer, which trips writeTimeout, which fails the
+// connection and cancels the context this selects on.
+//
+// done is the producer's own end signal — a file read's done channel, closed by
+// endRead. A wait that could not see it would be a wait nothing can interrupt
+// but the connection dying, and two things depend on interrupting it:
+//
+//   - A cancel has to stop the stream now. Without this arm, a client that
+//     closes its viewer while the outbox is full gets endRead returning
+//     promptly and a pump still parked holding an already-encoded chunk, which
+//     is delivered the moment the writer frees a slot — under a ref the client
+//     has already torn down.
+//   - closeAll's wait has to be finite on its own terms. Without this arm it is
+//     finite only because serve cancels the context first, which makes a
+//     correctness property out of the order of two lines in a deferred
+//     function.
+//
+// A nil done never fires, which is exactly the right shape for a producer with
+// no end signal of its own. Every production caller has one, so nil belongs to
+// the tests that exercise the waiting itself and want nothing else in the
+// select. There is deliberately no second function wrapping that argument:
+// one waiting path, one place to read the rules above.
+func (c *conn) enqueueWaitFor(f frame, done <-chan struct{}) error {
+	select {
+	case c.out <- f:
+		return nil
+	case <-done:
+		return errSendAbandoned
+	case <-c.ctx.Done():
+		return errConnClosed
+	}
+}
+
 // fail tears the connection down. Cancelling the context unblocks the read
 // loop, which runs the ordinary cleanup path on its way out.
 func (c *conn) fail() { c.cancel() }
@@ -290,6 +397,12 @@ func (c *conn) runWriter(done chan<- struct{}) {
 			ctx, cancel := context.WithTimeout(c.ctx, writeTimeout)
 			err := c.mc.Write(ctx, f.text, f.b)
 			cancel()
+			// Before the error check, so it fires whether the write succeeded
+			// or not: a pump waiting on a frame that failed must be released,
+			// not left parked until the connection's context unwinds.
+			if f.sent != nil {
+				close(f.sent)
+			}
 			if err != nil || f.last {
 				// A final frame ends the connection here, on the one goroutine
 				// that writes to the socket, so nothing queued behind it can
@@ -518,6 +631,53 @@ func (c *conn) handleControl(msg any) {
 		}
 		data, cols, rows := s.Tail(want)
 		_ = c.sendControl(wire.Preview{ID: m.ID, Data: data, Cols: cols, Rows: rows, ReqID: m.ReqID})
+
+	case wire.Stat:
+		// One message per hovered line rather than one per candidate: the
+		// terminal underlines a path only once it is known to be real, and the
+		// round trip is the cost on a relayed link.
+		s, ok := c.srv.reg.Get(m.ID)
+		if !ok {
+			c.sendErrorFor(m.ReqID, "not_found", "no such session")
+			return
+		}
+		if len(m.Paths) > maxStatPaths {
+			c.sendErrorFor(m.ReqID, "bad_path", "too many paths in one stat")
+			return
+		}
+		home, _ := os.UserHomeDir()
+		cwd := s.Info().Cwd
+		entries := make([]wire.PathEntry, 0, len(m.Paths))
+		for _, p := range m.Paths {
+			entries = append(entries, statEntry(p, cwd, home))
+		}
+		_ = c.sendControl(wire.Stats{Entries: entries, ReqID: m.ReqID})
+
+	case wire.Read:
+		c.startRead(m)
+
+	case wire.Cancel:
+		// A ref this connection does not hold is ignored rather than refused.
+		// A read finishing and a client cancelling it cross on the wire all the
+		// time — a viewer closed as the last chunk lands — and a race the
+		// client cannot avoid must not be an error it has to handle.
+		//
+		// A cancel stops a stream; it does not un-send one. endRead unparks the
+		// pump wherever it is waiting, so the read winds down, but a frame the
+		// outbox has already accepted belongs to the writer, which has no way to
+		// drop it again — and there can be more than the one the pump was
+		// holding. endRead releases the read before it closes the file, and each
+		// wait the pump parks in offers progress on one arm and the cancelled
+		// read on the other, so a select whose arms are both ready may take
+		// either: the pump can take the writer's ack, loop, read again from a
+		// file not yet closed, and queue a further chunk after the cancel was
+		// handled. So a client can receive 0x02 frames for a ref it has already
+		// cancelled, and an eof for one too — eof's "was this cancelled" check is
+		// check-then-act ahead of the same kind of select. All of it must be
+		// discarded rather than treated as a protocol violation, and the ref is
+		// enough to do that unambiguously: refs come from a counter that only
+		// goes up, so a cancelled one never names a later read.
+		c.endRead(m.Ref)
 
 	case wire.Spawn:
 		s, err := c.srv.reg.Spawn(session.SpawnOpts{
@@ -944,4 +1104,26 @@ func (c *conn) closeAll() {
 	for _, ref := range refs {
 		c.detach(ref)
 	}
+
+	c.mu.Lock()
+	reads := make([]uint32, 0, len(c.reads))
+	for ref := range c.reads {
+		reads = append(reads, ref)
+	}
+	c.mu.Unlock()
+	for _, ref := range reads {
+		c.endRead(ref)
+	}
+	// Ending each read first is what makes this wait finite, and it is finite on
+	// its own terms. Every wait a pump can be in selects on that read's done
+	// channel — waiting for outbox room, waiting for the writer to have written
+	// a chunk, waiting for room for the eof — and endRead closes it; endRead
+	// also closes the file, so a pump inside a read gets an error back rather
+	// than a chunk.
+	//
+	// Nothing here leans on the connection's context having been cancelled
+	// first. It has been, by serve's defer, but a closeAll that depended on that
+	// would be one reordering of two lines away from parking the read loop here
+	// forever, and nothing at the call site would say so.
+	c.pumps.Wait()
 }

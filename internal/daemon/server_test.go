@@ -110,6 +110,15 @@ func dialWith(t *testing.T, ts *httptest.Server, header http.Header) *websocket.
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
+	// coder/websocket defaults a client to a 32 KiB read limit, which is
+	// smaller than anything that actually talks to this daemon: a browser's
+	// WebSocket has no such bound, and the relay leg sets 2 MiB
+	// (internal/transport/relay/relay.go). A file chunk is chunkBytes plus the
+	// five-byte binary header, so the default would have this harness refuse a
+	// frame every real client accepts and report it as the daemon's fault.
+	// readLimit is what the daemon allows in the other direction, and a test
+	// client symmetric with the server is the honest stand-in.
+	c.SetReadLimit(readLimit)
 	t.Cleanup(func() { c.Close(websocket.StatusNormalClosure, "") })
 	return c
 }
@@ -125,26 +134,56 @@ func writeControl(t *testing.T, c *websocket.Conn, msg any) {
 	}
 }
 
+// binFrame is one binary frame as it arrived, header and all: the type a client
+// routes on and the ref it routes under, beside the payload.
+type binFrame struct {
+	typ     byte
+	ref     uint32
+	payload []byte
+}
+
 // readUntil reads frames until pred returns true or the deadline passes.
 // Binary payloads are accumulated so callers can assert on output.
 func readUntil(t *testing.T, c *websocket.Conn, pred func(msg any, out []byte) bool) {
+	t.Helper()
+	readUntilFrames(t, c, func(msg any, out []byte, _ []binFrame) bool { return pred(msg, out) })
+}
+
+// readUntilFrames is readUntil with the binary headers kept.
+//
+// readUntil throws the type and the ref away and hands its predicate the
+// payload bytes alone, which is what almost every caller here wants: terminal
+// output is a stream and the assertion is on what the stream said. But it means
+// no test using it can tell one kind of binary frame from another, and the
+// routing is a real part of the contract — file content is 0x02 under the
+// read's ref (spec/protocol.md, "Reading files"), and a client that gets it as
+// 0x01 pastes a file into the terminal it was attached to.
+//
+// So this is a second entry point rather than a wider signature on readUntil.
+// Widening it would edit ninety-odd call sites to add an argument none of them
+// reads, and the diff would say nothing about the one place the header
+// matters. Frames are accumulated in arrival order so a predicate can assert on
+// all of them rather than only on the one that happened to satisfy it.
+func readUntilFrames(t *testing.T, c *websocket.Conn, pred func(msg any, out []byte, frames []binFrame) bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var out []byte
+	var frames []binFrame
 	for {
 		typ, data, err := c.Read(ctx)
 		if err != nil {
 			t.Fatalf("read: %v (output so far %q)", err, out)
 		}
 		if typ == websocket.MessageBinary {
-			_, _, payload, err := wire.DecodeBinary(data)
+			ft, ref, payload, err := wire.DecodeBinary(data)
 			if err != nil {
 				t.Fatalf("DecodeBinary: %v", err)
 			}
 			out = append(out, payload...)
-			if pred(nil, out) {
+			frames = append(frames, binFrame{typ: ft, ref: ref, payload: payload})
+			if pred(nil, out, frames) {
 				return
 			}
 			continue
@@ -153,7 +192,7 @@ func readUntil(t *testing.T, c *websocket.Conn, pred func(msg any, out []byte) b
 		if err != nil {
 			t.Fatalf("DecodeControl: %v", err)
 		}
-		if pred(msg, out) {
+		if pred(msg, out, frames) {
 			return
 		}
 	}

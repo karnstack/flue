@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +46,36 @@ func TestDecodeBinaryRejectsShortFrame(t *testing.T) {
 func TestDecodeBinaryRejectsUnknownType(t *testing.T) {
 	if _, _, _, err := DecodeBinary([]byte{0x7f, 0, 0, 0, 0}); err == nil {
 		t.Fatal("DecodeBinary with type 0x7f err = nil, want an error")
+	}
+}
+
+// TestFileFramesRoundTrip pins the third frame type. Content rides the binary
+// half rather than a base64 field on a control message: a 32 KiB chunk costs
+// 43 KiB as base64 inside JSON, and the client already has a decoder for this
+// layout.
+func TestFileFramesRoundTrip(t *testing.T) {
+	payload := []byte("package main\n")
+	frame := EncodeBinary(FrameFile, 9, payload)
+
+	typ, ref, got, err := DecodeBinary(frame)
+	if err != nil {
+		t.Fatalf("DecodeBinary: %v", err)
+	}
+	if typ != FrameFile {
+		t.Errorf("type = %#x, want %#x", typ, FrameFile)
+	}
+	if ref != 9 {
+		t.Errorf("ref = %d, want 9", ref)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+
+	// The literal, for the reason its TypeScript twin exists: the frame bytes
+	// are mirrored by hand across two languages, and every other assertion in
+	// either suite goes through the symbol.
+	if FrameFile != 0x02 {
+		t.Errorf("FrameFile = %#x, want 0x02; web/src/client/protocol.ts hard-codes it", FrameFile)
 	}
 }
 
@@ -570,6 +601,61 @@ func TestSessionsEncodesEmptyAsArray(t *testing.T) {
 	}
 	if len(s.Sessions) != 0 {
 		t.Fatalf("decoded Sessions has %d entries, want 0", len(s.Sessions))
+	}
+}
+
+// TestStatsEncodesAnEmptyListAsAList follows Sessions and DeviceList: a nil
+// slice marshals to null, the client declares the field an array, and "none of
+// these paths exist" is reached by building the zero value — precisely the
+// path that would ship null.
+func TestStatsEncodesAnEmptyListAsAList(t *testing.T) {
+	b, err := EncodeControl(Stats{ReqID: 3})
+	if err != nil {
+		t.Fatalf("EncodeControl: %v", err)
+	}
+	if !strings.Contains(string(b), `"entries":[]`) {
+		t.Errorf("encoded = %s, want an empty entries array", b)
+	}
+}
+
+// TestFileAndReadRoundTrip pins the read half's discriminators and fields.
+func TestFileAndReadRoundTrip(t *testing.T) {
+	for _, msg := range []any{
+		Stat{ID: "s1", Paths: []string{"internal/wire/binary.go"}, ReqID: 4},
+		// Populated on purpose, and every field of the entry with it: the two
+		// sites that fail at runtime rather than at compile time — the
+		// discriminator case and the deref case — are exercised here, and
+		// every PathEntry field is shown surviving the trip rather than being
+		// quietly dropped.
+		//
+		// What a round trip cannot catch is a tag *renamed on both sides at
+		// once*: encode and decode agree, and the daemon then speaks a dialect
+		// no client understands. Spelling is the golden fixture's job, and the
+		// stat and stats cases in testdata/wire/control.json are where it does
+		// it.
+		//
+		// The *empty* stats cannot join this table. MarshalJSON turns a nil
+		// Entries into [], which decodes back to a non-nil empty slice, so
+		// DeepEqual fails on a message that is perfectly correct — the same
+		// asymmetry Sessions and DeviceList have. It is pinned by
+		// TestStatsEncodesAnEmptyListAsAList instead, which only encodes.
+		Stats{Entries: []PathEntry{{Path: "~/notes.md", Exists: true, Kind: "file", Size: 120, Mtime: 1762800000}}, ReqID: 4},
+		Read{ID: "s1", Path: "~/notes.md", ReqID: 5},
+		Cancel{Ref: 9},
+		File{Ref: 9, Path: "/home/karn/notes.md", Size: 120, Mime: "text/plain; charset=utf-8", Kind: "text", ReqID: 5},
+		Eof{Ref: 9},
+	} {
+		b, err := EncodeControl(msg)
+		if err != nil {
+			t.Fatalf("EncodeControl(%T): %v", msg, err)
+		}
+		got, err := DecodeControl(b)
+		if err != nil {
+			t.Fatalf("DecodeControl(%T): %v", msg, err)
+		}
+		if !reflect.DeepEqual(got, msg) {
+			t.Errorf("round trip of %T = %#v, want %#v", msg, got, msg)
+		}
 	}
 }
 
