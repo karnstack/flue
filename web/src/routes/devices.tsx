@@ -12,6 +12,7 @@ import { TEXT_LINK } from '@/components/text-link'
 import { Button } from '@/components/ui/button'
 import { ago } from '@/lib/time'
 import { cn } from '@/lib/utils'
+import { deviceIdOf, loadOrCreateDeviceKey } from '@/crypto/keys'
 import { MACHINE_ID } from '@/relay/machines'
 import { isRelayOrigin } from '@/relay/mode'
 
@@ -180,12 +181,18 @@ function DeviceRows({
   armed,
   onArm,
   onRevoke,
+  selfId,
+  here,
 }: {
   devices: DeviceInfo[]
   connected: boolean
   armed: string | null
   onArm: (id: string | null) => void
   onRevoke: (id: string) => void
+  /** This browser's own device id, or null before it has been derived. */
+  selfId: string | null
+  /** This machine's relay slot, or null when it is on no relay. */
+  here: string | null
 }) {
   /**
    * The armed row's Confirm, focused as it appears.
@@ -221,118 +228,251 @@ function DeviceRows({
   }
 
   /*
-   * One row per device, in the sessions list's own row language rather than in
-   * a grid of cells.
-   *
-   * What this replaced had four columns, three of which were one short
-   * string each, and a header row spending the top of the screen naming them.
-   * On a phone — which is the device most likely to be *reading* this screen —
-   * it did not fit, so it scrolled sideways, which is how a list of four
-   * phones came to have a horizontal scrollbar. A row that puts the identity
-   * on the left and the details ranged right needs no header to be read, drops
-   * its least useful detail at narrow widths instead of hiding all of them
-   * behind a scroll, and — the part that matters most — makes this screen and
-   * the sessions screen visibly the same app.
+   * Two groups, because a row's provenance decides what its controls mean.
+   * See onTheFleet.
    */
+  const paired = devices.filter((d) => !onTheFleet(d, here))
+  const fleet = devices.filter((d) => onTheFleet(d, here))
+
+  return (
+    <div className="flex flex-col gap-y-6">
+      <Section title="Paired devices" count={paired.length}>
+        {paired.map((d) => (
+          <DeviceRow
+            key={d.id}
+            device={d}
+            connected={connected}
+            armed={armed === d.id}
+            confirmRef={confirm}
+            onArm={onArm}
+            onRevoke={onRevoke}
+            revocable
+          />
+        ))}
+      </Section>
+
+      {/*
+        The rows this machine did not pair, and which therefore answer to a
+        different button. Second, and separated, because the ordering is the
+        argument: what a human set up here comes first, and what the fleet
+        brought in follows — with the sentence that says what revoking one of
+        them costs, before anyone reaches for it.
+      */}
+      {fleet.length > 0 && (
+        <Section title="On the fleet" count={fleet.length} note={FLEET_NOTE}>
+          {fleet.map((d) => (
+            <DeviceRow
+              key={d.id}
+              device={d}
+              connected={connected}
+              armed={armed === d.id}
+              confirmRef={confirm}
+              onArm={onArm}
+              onRevoke={onRevoke}
+              // The one row that is this browser. Revoking it publishes a
+              // revocation the fleet honours and the enrolment endpoint then
+              // refuses this key forever (internal/daemon/fleet.go), so the
+              // button would end this browser's access to every machine with
+              // no way back that does not involve clearing site storage. It is
+              // not a warning's worth of danger; it is not a button.
+              revocable={d.id !== selfId}
+              self={d.id === selfId}
+            />
+          ))}
+        </Section>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Whether a row is here because the fleet vouched for it rather than because
+ * this machine paired it.
+ *
+ * `pairedOn` is read off the row's signed certificate by the daemon, and is
+ * empty when nothing signed says — a device from before the fleet key, or a
+ * certificate that does not verify. Empty reads as this machine's own, which is
+ * the conservative direction: it is the one that does not offer the fleet-wide
+ * revoke. A machine on no relay has no `here` to compare against and no
+ * certificates to compare, so every row lands in the first section and this
+ * screen looks exactly as it did before fleets existed.
+ */
+function onTheFleet(d: DeviceInfo, here: string | null): boolean {
+  return d.pairedOn !== undefined && d.pairedOn !== '' && d.pairedOn !== here
+}
+
+/**
+ * What the fleet section says before anybody reaches for a Revoke.
+ *
+ * Stated up front rather than inside the confirm, because it changes whether
+ * the reader wants to start: a revoke here is not "cut this off my laptop", it
+ * is a revocation published to the fleet directory that every machine honours
+ * from then on, and the key never gets back in.
+ */
+const FLEET_NOTE =
+  'These reached this machine on the fleet’s word, not by pairing here. Revoking one cuts it off every machine in the fleet, and cannot be undone.'
+
+/** A titled group of rows, with the count beside the title. */
+function Section({
+  title,
+  count,
+  note,
+  children,
+}: {
+  title: string
+  count: number
+  note?: string
+  children: React.ReactNode
+}) {
   return (
     <div className="flex flex-col">
       <div className="flex items-center gap-x-1.5 rounded-md px-2 py-1">
-        <span className="text-control font-medium text-zinc-950 dark:text-white">
-          Paired devices
-        </span>
-        <span className="text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
-          {devices.length}
-        </span>
+        <span className="text-control font-medium text-zinc-950 dark:text-white">{title}</span>
+        <span className="text-xs text-zinc-500 tabular-nums dark:text-zinc-400">{count}</span>
       </div>
-      <ul className="mt-1 flex flex-col">
-        {ordered(devices).map((d) => (
-          <li
-            key={d.id}
-            className="group/row flex items-center gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-row-hover"
-          >
-            <span className="min-w-0 flex-1 truncate text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
-              {d.label}
-            </span>
-            {/*
-              Paired first, last seen second, reading right — and the first of
-              the two is what goes at narrow widths. Which was seen when is the
-              live fact, the one somebody checks before revoking; when it was
-              paired is history, and history is what a phone can do without.
-            */}
-            <span className={cn(META_TEXT, 'max-sm:hidden')}>paired {ago(d.pairedAt)}</span>
-            <span className={META_TEXT}>{ago(d.lastSeen)}</span>
-            {armed === d.id ? (
-              <span className="flex shrink-0 items-center gap-x-1">
-                {/*
-                  Named after its own row, as every repeated control in a list
-                  is: without that a screen reader announces "Confirm" as many
-                  times as there are devices, with nothing to tell them apart.
-                  Red at full strength here and only here — this is the click
-                  that actually cuts the device off.
-                */}
-                <Button
-                  ref={confirm}
-                  variant="ghost"
-                  size="sm"
-                  disabled={!connected}
-                  aria-label={`Confirm revoking ${d.label}`}
-                  className="text-destructive hover:text-destructive"
-                  onClick={() => onRevoke(d.id)}
-                >
-                  Confirm
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={`Cancel revoking ${d.label}`}
-                  className={ROW_BUTTON}
-                  onClick={() => onArm(null)}
-                >
-                  Cancel
-                </Button>
-              </span>
-            ) : (
-              /*
-                Quiet until the row is under the pointer, then red: a column of
-                destructive-red buttons would be the loudest thing on a screen
-                whose ordinary use is reading it, and the warning only has to be
-                certain for the row the reader is actually on. It also *hides*
-                until then, the way the sessions list hides its ⋯ — the row is
-                information first and a control second. Keyboard focus reveals
-                it and keeps its own indicator; a coarse pointer, which has no
-                hover to reveal anything with, gets it at full strength.
-
-                Both hover states are named, and the plain one is not redundant:
-                the ghost variant carries `hover:text-foreground`, which twMerge
-                keeps against a `group-hover:` utility because the modifiers
-                differ and which the sheet emits later at equal specificity.
-                Without the pair, the pointer landing on this button would take
-                the red *off* it — the opposite of what the row is saying.
-
-                Held shut while the socket is down, because `revoke` is dropped
-                rather than held there — a click that quietly did nothing would
-                leave the reader believing a device had been cut off when it is
-                still connected.
-              */
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!connected}
-                aria-label={`Revoke ${d.label}`}
-                className={cn(
-                  ROW_BUTTON,
-                  'shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100',
-                  'group-hover/row:text-destructive hover:text-destructive',
-                )}
-                onClick={() => onArm(d.id)}
-              >
-                Revoke
-              </Button>
-            )}
-          </li>
-        ))}
+      {note !== undefined && (
+        <p className="max-w-[70ch] px-2 pb-1 text-xs/5 text-pretty text-zinc-500 dark:text-zinc-400">
+          {note}
+        </p>
+      )}
+      {/*
+        Named after its own heading. Two lists on one page, and a screen reader
+        landing in either announces "list" and nothing else without this — which
+        is exactly the distinction this screen was split to make.
+      */}
+      <ul aria-label={title} className="mt-1 flex flex-col">
+        {children}
       </ul>
     </div>
+  )
+}
+
+/**
+ * One device, in the sessions list's own row language rather than in a grid of
+ * cells.
+ *
+ * What this replaced had four columns, three of which were one short string
+ * each, and a header row spending the top of the screen naming them. On a phone
+ * — which is the device most likely to be *reading* this screen — it did not
+ * fit, so it scrolled sideways, which is how a list of four phones came to have
+ * a horizontal scrollbar. A row that puts the identity on the left and the
+ * details ranged right needs no header to be read, drops its least useful
+ * detail at narrow widths instead of hiding all of them behind a scroll, and —
+ * the part that matters most — makes this screen and the sessions screen
+ * visibly the same app.
+ */
+function DeviceRow({
+  device: d,
+  connected,
+  armed,
+  confirmRef,
+  onArm,
+  onRevoke,
+  revocable,
+  self = false,
+}: {
+  device: DeviceInfo
+  connected: boolean
+  armed: boolean
+  confirmRef: React.RefObject<HTMLButtonElement | null>
+  onArm: (id: string | null) => void
+  onRevoke: (id: string) => void
+  revocable: boolean
+  self?: boolean
+}) {
+  return (
+    <li className="group/row flex items-center gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-row-hover">
+      <span className="min-w-0 flex-1 truncate text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
+        {d.label}
+      </span>
+      {/*
+        Said in the row rather than left to the label, because the label is
+        whatever the machine that minted the certificate wrote and this is a
+        fact about the reader. "This browser" is the whole of why the row has
+        no Revoke, so the two belong beside each other.
+      */}
+      {self && (
+        <span className="shrink-0 rounded-sm bg-zinc-950/5 px-1.5 text-xs/5 text-zinc-500 dark:bg-white/10 dark:text-zinc-400">
+          this browser
+        </span>
+      )}
+      {/*
+        Paired first, last seen second, reading right — and the first of
+        the two is what goes at narrow widths. Which was seen when is the
+        live fact, the one somebody checks before revoking; when it was
+        paired is history, and history is what a phone can do without.
+      */}
+      <span className={cn(META_TEXT, 'max-sm:hidden')}>paired {ago(d.pairedAt)}</span>
+      <span className={META_TEXT}>{ago(d.lastSeen)}</span>
+      {!revocable ? null : armed ? (
+        <span className="flex shrink-0 items-center gap-x-1">
+          {/*
+            Named after its own row, as every repeated control in a list
+            is: without that a screen reader announces "Confirm" as many
+            times as there are devices, with nothing to tell them apart.
+            Red at full strength here and only here — this is the click
+            that actually cuts the device off.
+          */}
+          <Button
+            ref={confirmRef}
+            variant="ghost"
+            size="sm"
+            disabled={!connected}
+            aria-label={`Confirm revoking ${d.label}`}
+            className="text-destructive hover:text-destructive"
+            onClick={() => onRevoke(d.id)}
+          >
+            Confirm
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={`Cancel revoking ${d.label}`}
+            className={ROW_BUTTON}
+            onClick={() => onArm(null)}
+          >
+            Cancel
+          </Button>
+        </span>
+      ) : (
+        /*
+          Quiet until the row is under the pointer, then red: a column of
+          destructive-red buttons would be the loudest thing on a screen
+          whose ordinary use is reading it, and the warning only has to be
+          certain for the row the reader is actually on. It also *hides*
+          until then, the way the sessions list hides its ⋯ — the row is
+          information first and a control second. Keyboard focus reveals
+          it and keeps its own indicator; a coarse pointer, which has no
+          hover to reveal anything with, gets it at full strength.
+
+          Both hover states are named, and the plain one is not redundant:
+          the ghost variant carries `hover:text-foreground`, which twMerge
+          keeps against a `group-hover:` utility because the modifiers
+          differ and which the sheet emits later at equal specificity.
+          Without the pair, the pointer landing on this button would take
+          the red *off* it — the opposite of what the row is saying.
+
+          Held shut while the socket is down, because `revoke` is dropped
+          rather than held there — a click that quietly did nothing would
+          leave the reader believing a device had been cut off when it is
+          still connected.
+        */
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={!connected}
+          aria-label={`Revoke ${d.label}`}
+          className={cn(
+            ROW_BUTTON,
+            'shrink-0 opacity-0 transition-opacity group-hover/row:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100',
+            'group-hover/row:text-destructive hover:text-destructive',
+          )}
+          onClick={() => onArm(d.id)}
+        >
+          Revoke
+        </Button>
+      )}
+    </li>
   )
 }
 
@@ -458,6 +598,33 @@ export function DevicesRoute() {
   // listener below, which hears the pushes as well as the greetings.
   const [relay, setRelay] = useState<RelayInfo>(() => client.relay)
   const [pairing, setPairing] = useState<Pairing | null>(null)
+  /**
+   * This browser's own device id, derived from the key it already holds, or
+   * null until that read comes back.
+   *
+   * It is here so one row on this screen can be recognised as the browser
+   * reading it and drawn without a Revoke. Null while unknown reads as "no row
+   * is me", which errs towards showing a button rather than hiding one — the
+   * safe direction for a control, since the confirm still stands between the
+   * reader and the act, and a permanently missing button on a real device would
+   * be worse than a briefly present one.
+   */
+  const [selfId, setSelfId] = useState<string | null>(null)
+  useEffect(() => {
+    let stopped = false
+    void loadOrCreateDeviceKey()
+      .then((key) => deviceIdOf(key.publicKey))
+      .then((id) => {
+        if (!stopped) setSelfId(id)
+      })
+      // A browser with no IndexedDB — private mode in some engines, a hardened
+      // profile — has no device key and therefore no row of its own to find.
+      // Nothing on this screen depends on the answer arriving.
+      .catch(() => {})
+    return () => {
+      stopped = true
+    }
+  }, [])
   const [left, setLeft] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
   /** The one row currently asking to be confirmed, if any. */
@@ -755,6 +922,8 @@ export function DevicesRoute() {
           armed={armed}
           onArm={setArmed}
           onRevoke={revoke}
+          selfId={selfId}
+          here={relay.machineId ?? null}
         />
       )}
     </div>

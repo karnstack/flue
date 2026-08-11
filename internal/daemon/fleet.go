@@ -246,21 +246,26 @@ type enrolAnswer struct {
 // enrolLabel is what this machine's own browser is called on every Devices
 // screen in the fleet.
 //
-// It says what the row *is*, because it will turn up somewhere surprising: the
+// It names the machine, because the row turns up somewhere surprising: the
 // moment this browser reaches machine B, B admits it on its certificate and
 // writes a row of its own (AddFromFleetCert), so B's Devices screen lists a
-// device belonging to A. That is correct fleet-trust behaviour and it is also
-// exactly the shape of a thing an operator would otherwise squint at. Naming
-// the row after the machine it lives on makes it self-explanatory from
-// anywhere in the fleet.
+// device belonging to A.
+//
+// The name goes into the certificate B reads it from, which is what makes the
+// wording load-bearing rather than cosmetic: whatever this returns is signed
+// here and rendered *there*, on a machine where the word "this" points at
+// something else. It said "<host> — this machine's browser" once, and on B that
+// reads as a claim about B. So the label states the machine and nothing
+// relative, and every screen in the fleet can render it without knowing where
+// it was written.
 //
 // Through DeviceLabel like every other device name, so one rule bounds and
 // normalises a hostname just as it does a name a human typed.
 func enrolLabel(hostname string) string {
 	if hostname == "" {
-		return DeviceLabel("this machine's browser")
+		return DeviceLabel("browser")
 	}
-	return DeviceLabel(hostname + " — this machine's browser")
+	return DeviceLabel("Browser on " + hostname)
 }
 
 // handleEnrol answers POST EnrolPath.

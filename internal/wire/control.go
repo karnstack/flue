@@ -373,6 +373,26 @@ type DeviceInfo struct {
 	Label    string `json:"label"`
 	PairedAt int64  `json:"pairedAt"`
 	LastSeen int64  `json:"lastSeen"`
+	// PairedOn is the machine that ran the ceremony this device came from —
+	// the `pairedOn` of its fleet certificate, read from the signed blob and
+	// not from anything the device said about itself.
+	//
+	// It is here so a Devices screen can tell its two kinds of row apart. A
+	// machine on a fleet lists every device it admitted, and it admits two
+	// ways: the ones it paired itself, and the ones it took on the fleet's word
+	// when they turned up over the relay holding a certificate (rule 2,
+	// spec/fleet-trust.md). Those read identically without this — a phone
+	// paired on the laptop appears on the desktop looking exactly like a phone
+	// paired on the desktop — and they are not identical at all: revoking the
+	// second cuts it off every machine in the fleet, permanently.
+	//
+	// Empty for a device with no certificate (paired before the fleet key
+	// existed) and for one whose certificate does not verify under the fleet
+	// key this machine holds now. Both mean the same thing to a reader: nothing
+	// signed says where this row came from, so it is treated as this machine's
+	// own — the conservative direction, since it is the one that does not offer
+	// a fleet-wide revoke on the strength of a blob that proved nothing.
+	PairedOn string `json:"pairedOn,omitempty"`
 }
 
 // DeviceList answers devices, and follows a revoke that succeeded.

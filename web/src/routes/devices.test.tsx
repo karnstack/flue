@@ -1,8 +1,10 @@
 import { act, screen } from '@testing-library/react'
+import { IDBFactory } from 'fake-indexeddb'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FlueClientProvider } from '@/client/provider'
+import { deviceIdOf, loadOrCreateDeviceKey } from '@/crypto/keys'
 import type { DeviceInfo, Pairing, RelayInfo } from '@/client/protocol'
 import { renderWithRouter } from '@/testing/render'
 import { fakeClient, type FakeSocket } from '@/testing/socket'
@@ -641,5 +643,79 @@ describe('DevicesRoute', () => {
 
     expect(filled).toHaveLength(1)
     expect(filled[0]!.textContent).toBe('Pair device')
+  })
+})
+
+describe('the fleet section', () => {
+  /**
+   * A machine on a fleet lists two kinds of row and they used to read
+   * identically: what it paired itself, and what it admitted on the fleet's
+   * word when a device turned up over the relay holding a certificate. The
+   * second is the other Mac's browser, and the phone paired on the other Mac —
+   * and revoking one of those publishes a revocation the whole fleet honours,
+   * for good. That is not the same button, so it is not the same list.
+   */
+  const HERE = 'blue-mesa-a1b2-0f9a12cd'
+  const THERE = 'attic-pi-c3d4-1b2c3d4e'
+  const ON_RELAY: RelayInfo = { ...RELAY_UP, machineId: HERE, machineName: 'Blue Mesa' }
+
+  it('splits the rows by which machine paired them', async () => {
+    const { sock } = await mountDevices({ relay: ON_RELAY })
+    listed(sock, [
+      device({ id: 'aaa', label: 'iPhone', pairedOn: HERE }),
+      device({ id: 'bbb', label: 'attic phone' }),
+      device({ id: 'ccc', label: 'Browser on attic-pi.local', pairedOn: THERE }),
+    ])
+
+    expect(screen.getByText('On the fleet')).toBeTruthy()
+    // Revoking a fleet row is a different act, and the screen says so before
+    // anyone reaches for the button rather than inside the confirm.
+    expect(screen.getByText(/cuts it off every machine in the fleet/i)).toBeTruthy()
+
+    // Paired here, and paired before this machine had a fleet key at all: both
+    // belong to this machine, and a row with nothing signed on it is read the
+    // conservative way rather than promoted to the fleet.
+    const here = screen.getByRole('list', { name: 'Paired devices' })
+    expect(here.textContent).toContain('iPhone')
+    expect(here.textContent).toContain('attic phone')
+    expect(here.textContent).not.toContain('Browser on attic-pi.local')
+    expect(screen.getByRole('list', { name: 'On the fleet' }).textContent).toContain(
+      'Browser on attic-pi.local',
+    )
+  })
+
+  it('keeps every row in one list on a machine with no relay', async () => {
+    // No fleet, no second section — this screen looks exactly as it did before
+    // fleets existed, which is what the whole `pairedOn` empty case is for.
+    const { sock } = await mountDevices()
+    listed(sock, [device({ id: 'aaa', label: 'iPhone' })])
+
+    expect(screen.queryByText('On the fleet')).toBeNull()
+    expect(screen.queryByRole('list', { name: 'On the fleet' })).toBeNull()
+    expect(screen.getByRole('list', { name: 'Paired devices' }).textContent).toContain('iPhone')
+  })
+
+  it('offers no revoke on the row that is this browser', async () => {
+    // Revoking it publishes a revocation the fleet honours and /api/fleet/enrol
+    // then refuses this key forever, so the browser would lose every machine
+    // with no way back short of clearing storage. A confirm is not enough of a
+    // guard for something that cannot be undone from inside the app.
+    vi.stubGlobal('indexedDB', new IDBFactory())
+    const key = await loadOrCreateDeviceKey()
+    const me = await deviceIdOf(key.publicKey)
+
+    const { sock } = await mountDevices({ relay: ON_RELAY })
+    listed(sock, [
+      device({ id: me, label: 'Browser on blue-mesa.local', pairedOn: THERE }),
+      device({ id: 'ccc', label: 'Browser on attic-pi.local', pairedOn: THERE }),
+    ])
+
+    // The row says which one it is, and carries no button.
+    expect(await screen.findByText('this browser')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Revoke Browser on blue-mesa.local' })).toBeNull()
+    // The sibling's row is untouched: cutting off a machine you cannot reach a
+    // terminal on is the one thing this section is still good for.
+    expect(screen.getByRole('button', { name: 'Revoke Browser on attic-pi.local' })).toBeTruthy()
+    vi.unstubAllGlobals()
   })
 })

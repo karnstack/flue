@@ -435,3 +435,27 @@ async function readBlob(record: string, factory: IDBFactory): Promise<Uint8Array
     db.close()
   }
 }
+
+/**
+ * This browser's device id: the identity the daemon files it under, derived
+ * from the key itself so an entry cannot claim to be a key it does not hold.
+ *
+ * The same derivation as `crypto.DeviceID` in internal/crypto/devices.go —
+ * SHA-256 of the raw public key, hex, first twelve characters — and it has to
+ * stay the same, because matching against it is how a Devices screen picks out
+ * the row that is the browser reading it. That row must not be offered a
+ * revoke: revoking it publishes a revocation the whole fleet honours and the
+ * enrolment endpoint then refuses that key forever, so the button would cut
+ * this browser off every machine with no way back short of clearing storage.
+ *
+ * Derived here rather than kept from the enrolment answer, which does return a
+ * deviceId: a value computed from the key in hand cannot go stale, and a
+ * browser that enrolled before this existed has nothing stored to read.
+ */
+export async function deviceIdOf(publicKey: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', publicKey as BufferSource)
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 12)
+}

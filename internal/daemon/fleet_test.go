@@ -373,10 +373,14 @@ func TestEnrolIsIdempotent(t *testing.T) {
 
 // TestEnrolShowsUpOnTheDevicesScreen, labelled as what it is.
 //
-// The label matters more than it looks: this row appears on *other* machines'
-// Devices screens too, the moment this browser reaches them and they admit it
-// on its certificate (AddFromFleetCert). A row that did not say which machine's
-// browser it was would be an unexplained device on a machine that never saw it.
+// The label matters more than it looks, and it has to survive travelling. This
+// row appears on *other* machines' Devices screens the moment this browser
+// reaches them and they admit it on its certificate (AddFromFleetCert) — and
+// the name they render comes out of that signed certificate, so it is written
+// here and read there. It must name the machine, so the row is not an
+// unexplained device on a machine that never saw it, and it must say nothing
+// relative: "this machine's browser", read on the sibling, is a claim about the
+// sibling.
 func TestEnrolShowsUpOnTheDevicesScreen(t *testing.T) {
 	ts, srv, _ := newEnrolServer(t, "karns-mbp-a1b2-0f9a12cd")
 	enrolOK(t, ts, deviceKey(0x54))
@@ -388,8 +392,11 @@ func TestEnrolShowsUpOnTheDevicesScreen(t *testing.T) {
 	if want := enrolLabel(srv.hostname); list[0].Label != want {
 		t.Errorf("label = %q, want %q", list[0].Label, want)
 	}
-	if !strings.Contains(list[0].Label, "this machine's browser") {
-		t.Errorf("label = %q, want it to say what the row is", list[0].Label)
+	if !strings.Contains(list[0].Label, srv.hostname) {
+		t.Errorf("label = %q, want it to name the machine the browser is on", list[0].Label)
+	}
+	if strings.Contains(list[0].Label, "this machine") {
+		t.Errorf("label = %q, want nothing relative: it is rendered on other machines too", list[0].Label)
 	}
 
 	// And the name the certificate carries is the same one, so a sibling
@@ -625,5 +632,91 @@ func TestEnrolBackfillsACertificateADeviceHasNone(t *testing.T) {
 	list := devices(t, srv)
 	if len(list) != 1 || list[0].Label != "an older pairing" {
 		t.Errorf("registry = %+v, want the existing row untouched", list)
+	}
+}
+
+// TestDeviceListSaysWhichMachinePairedEachRow.
+//
+// A machine on a fleet admits devices two ways — the ones it paired itself, and
+// the ones it took on the fleet's word when they arrived holding a certificate
+// — and on the wire those two used to be indistinguishable. They are not the
+// same thing to act on: revoking the second publishes a revocation the whole
+// fleet honours, permanently, which is a different button from cutting a phone
+// off one laptop.
+//
+// So the answer comes from the certificate, and only from a certificate that
+// verifies. Every other case reads as this machine's own, which is the
+// conservative direction: it is the one that does not offer a fleet-wide revoke
+// on the strength of a blob that proved nothing.
+func TestDeviceListSaysWhichMachinePairedEachRow(t *testing.T) {
+	const here = "karns-mbp-a1b2-0f9a12cd"
+	ts, srv, fk := newEnrolServer(t, here)
+
+	// Paired here, by this machine's own ceremony.
+	mine := deviceKey(0x51)
+	enrolOK(t, ts, mine)
+
+	// Admitted on the fleet's word: the certificate names the sibling that ran
+	// the ceremony, and this machine never saw that ceremony happen.
+	theirs := deviceKey(0x52)
+	sibling, err := fk.Sign(fleet.DeviceCert{
+		Device:   theirs,
+		Name:     "Browser on mac-mini.local",
+		PairedOn: "mac-mini-b3c4-1a2b3c4d",
+		IAT:      time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("signing the sibling's device cert: %v", err)
+	}
+	if _, err := srv.identity.Devices.AddFromFleetCert("Browser on mac-mini.local", theirs, sibling, time.Now()); err != nil {
+		t.Fatalf("AddFromFleetCert: %v", err)
+	}
+
+	// Paired before this machine had a fleet key: a row with no certificate at
+	// all, which is what an upgrade from before fleet trust leaves behind.
+	older := deviceKey(0x53)
+	if _, err := srv.identity.Devices.Add("attic phone", older, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// A certificate from a fleet this machine is not on. It parses, it is
+	// well-formed, and it is signed by the wrong key — so it says nothing, and
+	// must not be read as though it did.
+	stranger := deviceKey(0x55)
+	other, err := fleet.Mint(rand.Reader)
+	if err != nil {
+		t.Fatalf("fleet.Mint: %v", err)
+	}
+	forged, err := other.Sign(fleet.DeviceCert{
+		Device:   stranger,
+		Name:     "somebody else's laptop",
+		PairedOn: "elsewhere-9999-deadbeef",
+		IAT:      time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("signing under the wrong fleet key: %v", err)
+	}
+	if _, err := srv.identity.Devices.Add("stranger", stranger, forged); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	list, err := srv.deviceList()
+	if err != nil {
+		t.Fatalf("deviceList: %v", err)
+	}
+	got := map[string]string{}
+	for _, d := range list.Devices {
+		got[d.Label] = d.PairedOn
+	}
+	want := map[string]string{
+		enrolLabel(srv.hostname):    here,
+		"Browser on mac-mini.local": "mac-mini-b3c4-1a2b3c4d",
+		"attic phone":               "",
+		"stranger":                  "",
+	}
+	for label, on := range want {
+		if got[label] != on {
+			t.Errorf("%q pairedOn = %q, want %q", label, got[label], on)
+		}
 	}
 }

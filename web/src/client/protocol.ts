@@ -107,6 +107,23 @@ export interface DeviceInfo {
   label: string
   pairedAt: number
   lastSeen: number
+  /**
+   * The machine that ran the ceremony this device came from, read by the daemon
+   * off the row's signed fleet certificate.
+   *
+   * It is what lets a Devices screen tell its two kinds of row apart. A machine
+   * on a fleet lists everything it admitted, and it admits two ways: devices it
+   * paired itself, and devices it took on the fleet's word when they arrived
+   * over the relay holding a certificate. Those read identically without this,
+   * and they are not the same thing to revoke — cutting off the second
+   * publishes a revocation every machine in the fleet honours, for good.
+   *
+   * Absent when nothing signed says: no certificate, or one that does not
+   * verify under the fleet key the daemon holds now. Read that as this
+   * machine's own, which is the direction that does not offer a fleet-wide
+   * revoke on the strength of a blob that proved nothing.
+   */
+  pairedOn?: string
 }
 
 // Client -> server.
