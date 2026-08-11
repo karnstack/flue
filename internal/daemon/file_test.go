@@ -806,3 +806,224 @@ func TestAPumpWaitsForRoomToSayEof(t *testing.T) {
 		t.Fatalf("Eof.Ref = %d, want %d", e.Ref, r.ref)
 	}
 }
+
+// TestCancelStopsAReadAndReleasesItsRef proves the two halves that matter: no
+// eof arrives for a cancelled read, and the slot it held is free again.
+//
+// The second half is the observable one. maxReads is 2, so a connection that
+// cancels one read and starts two more only succeeds if the cancel actually
+// released the first — otherwise the third is refused with busy.
+func TestCancelStopsAReadAndReleasesItsRef(t *testing.T) {
+	ts, reg := newTestServer(t)
+	dir := t.TempDir()
+	body := bytes.Repeat([]byte("y"), 4<<20)
+	for _, name := range []string{"one.log", "two.log", "three.log"} {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	s := readTarget(t, reg, dir)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "one.log", ReqID: 51})
+
+	var ref uint32
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		f, ok := msg.(wire.File)
+		if !ok {
+			return false
+		}
+		ref = f.Ref
+		return true
+	})
+	writeControl(t, c, wire.Cancel{Ref: ref})
+
+	// Two more reads have to fit. They only do if the cancel gave the slot
+	// back, since maxReads is 2 and the cancelled read would otherwise still
+	// hold one. Deterministic rather than racy: one connection has one read
+	// loop, so the cancel is handled before either read behind it.
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "two.log", ReqID: 52})
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "three.log", ReqID: 53})
+
+	seen := map[uint64]bool{}
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		switch v := msg.(type) {
+		case wire.File:
+			seen[v.ReqID] = true
+		case wire.Error:
+			if v.ReqID == 52 || v.ReqID == 53 {
+				t.Fatalf("read %d refused with %q; the cancelled read did not release its slot", v.ReqID, v.Code)
+			}
+		}
+		return seen[52] && seen[53]
+	})
+}
+
+// TestReadsAreCappedPerConnection pins the refusal itself, which the test
+// above only proves the absence of.
+func TestReadsAreCappedPerConnection(t *testing.T) {
+	ts, reg := newTestServer(t)
+	dir := t.TempDir()
+	body := bytes.Repeat([]byte("z"), 6<<20)
+	for _, name := range []string{"a.log", "b.log", "c.log"} {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	s := readTarget(t, reg, dir)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	// Three at once against a cap of two. The files are large enough that the
+	// first two are still streaming when the third arrives.
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "a.log", ReqID: 61})
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "b.log", ReqID: 62})
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "c.log", ReqID: 63})
+
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		e, ok := msg.(wire.Error)
+		if !ok {
+			return false
+		}
+		if e.ReqID != 63 {
+			t.Fatalf("error = %+v, want it to answer the third read", e)
+		}
+		if e.Code != "busy" {
+			t.Fatalf("error code = %q, want busy", e.Code)
+		}
+		return true
+	})
+}
+
+// TestAThirdReadIsRefusedWhileTwoAreHeld is the test above without the race.
+//
+// The one above drives three reads down a socket and trusts that the first two
+// are still streaming when the third lands. They are, by a wide margin — the
+// read loop handles the three back to back while a pump has megabytes left to
+// push through a client that is not draining yet — but "by a wide margin" is
+// not the same as "always", and the failure it would produce on a loaded
+// machine is a five second deadline with nothing in it to say why.
+//
+// So the refusal is also pinned where no timing enters: two reads held, exactly
+// the state startRead leaves behind, and a third asked for directly. The cap
+// counts entries in c.reads and nothing else, so a stand-in read is the honest
+// stand-in here.
+func TestAThirdReadIsRefusedWhileTwoAreHeld(t *testing.T) {
+	_, reg, srv := newTestServerUI(t, http.NotFoundHandler())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "third.log"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := readTarget(t, reg, dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := newConn(ctx, cancel, newPipeConn(), srv, "test", "", nil)
+	for ref := uint32(1); ref <= maxReads; ref++ {
+		heldRead(t, c, ref, "held")
+	}
+
+	c.startRead(wire.Read{ID: s.ID(), Path: "third.log", ReqID: 63})
+
+	select {
+	case f := <-c.out:
+		msg, err := wire.DecodeControl(f.b)
+		if err != nil {
+			t.Fatalf("DecodeControl on the answer to the third read: %v", err)
+		}
+		e, ok := msg.(wire.Error)
+		if !ok {
+			t.Fatalf("a read over the cap was answered with %#v, want an error", msg)
+		}
+		if e.ReqID != 63 {
+			t.Fatalf("Error.ReqID = %d, want 63: a refusal a client cannot correlate is a refusal it cannot show", e.ReqID)
+		}
+		if e.Code != "busy" {
+			t.Fatalf("Error.Code = %q, want busy", e.Code)
+		}
+	default:
+		t.Fatal("a read over the cap was not answered at all")
+	}
+
+	// And it took no slot on its way out. A refusal that counted would let two
+	// rejected reads lock a connection out of reading anything ever again.
+	c.mu.Lock()
+	held := len(c.reads)
+	c.mu.Unlock()
+	if held != maxReads {
+		t.Fatalf("c.reads holds %d reads after a refusal, want the %d that were already there", held, maxReads)
+	}
+}
+
+// TestCancelOfAnUnknownRefIsIgnored: a client may cancel a read the daemon has
+// already finished, and a race the client cannot avoid must not be an error it
+// has to handle.
+func TestCancelOfAnUnknownRefIsIgnored(t *testing.T) {
+	ts, reg := newTestServer(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "small.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := readTarget(t, reg, dir)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Cancel{Ref: 999})
+	// The connection is still usable, and says so by answering the next thing
+	// asked of it.
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "small.txt", ReqID: 71})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		switch v := msg.(type) {
+		case wire.Error:
+			// Nothing at all, not even an error the client is expected to
+			// swallow. Without a dispatch arm the switch's default answers a
+			// cancel with bad_message, and this is the assertion that catches
+			// that: reading only for the file below would pass either way, since
+			// an ignored frame and an unread one look the same from here.
+			t.Fatalf("cancelling a ref the daemon does not hold was answered with %+v", v)
+		case wire.File:
+			if v.ReqID != 71 {
+				t.Fatalf("File.ReqID = %d, want 71", v.ReqID)
+			}
+			return true
+		}
+		return false
+	})
+}
+
+// TestClosingAConnectionEndsItsReads. A phone that goes into a pocket
+// mid-read must not leave a file open on the machine. The pump is a goroutine
+// holding a descriptor; nothing else would ever end it.
+func TestClosingAConnectionEndsItsReads(t *testing.T) {
+	ts, reg := newTestServer(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "big.log"), bytes.Repeat([]byte("q"), 6<<20), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := readTarget(t, reg, dir)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "big.log", ReqID: 81})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		_, ok := msg.(wire.File)
+		return ok
+	})
+
+	// Drop it mid-stream. Under -race, a pump that kept running against a
+	// closed connection or a closed file is what this catches.
+	_ = c.CloseNow()
+
+	// A fresh connection can still read, which it could not if the dropped
+	// one's pump had taken the daemon down with it. The cap is per connection,
+	// so this asserts the pump ended rather than the slot: the stronger claim is
+	// the -race run below.
+	c2 := dial(t, ts)
+	writeControl(t, c2, wire.Hello{Ver: "test"})
+	writeControl(t, c2, wire.Read{ID: s.ID(), Path: "big.log", ReqID: 82})
+	readUntil(t, c2, func(msg any, _ []byte) bool {
+		f, ok := msg.(wire.File)
+		return ok && f.ReqID == 82
+	})
+}

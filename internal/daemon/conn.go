@@ -657,6 +657,25 @@ func (c *conn) handleControl(msg any) {
 	case wire.Read:
 		c.startRead(m)
 
+	case wire.Cancel:
+		// A ref this connection does not hold is ignored rather than refused.
+		// A read finishing and a client cancelling it cross on the wire all the
+		// time — a viewer closed as the last chunk lands — and a race the
+		// client cannot avoid must not be an error it has to handle.
+		//
+		// A cancel stops a stream; it does not un-send one. endRead unparks the
+		// pump wherever it is waiting, so nothing further is read from the file,
+		// but the chunk already in the pump's hands can still reach the outbox —
+		// a select offering room on one arm and a closed done on the other may
+		// take either — and a frame the outbox has accepted belongs to the
+		// writer, which has no way to drop it again. So a client can receive a
+		// 0x02 frame for a ref it has already cancelled, and in the crossing
+		// case above an eof for one too. Both must be discarded rather than
+		// treated as a protocol violation, and the ref is enough to do that
+		// unambiguously: refs come from a counter that only goes up, so a
+		// cancelled one never names a later read.
+		c.endRead(m.Ref)
+
 	case wire.Spawn:
 		s, err := c.srv.reg.Spawn(session.SpawnOpts{
 			Cwd: m.Cwd, Cmd: m.Cmd, Cols: m.Cols, Rows: m.Rows,
