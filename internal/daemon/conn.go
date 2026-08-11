@@ -664,16 +664,20 @@ func (c *conn) handleControl(msg any) {
 		// client cannot avoid must not be an error it has to handle.
 		//
 		// A cancel stops a stream; it does not un-send one. endRead unparks the
-		// pump wherever it is waiting, so nothing further is read from the file,
-		// but the chunk already in the pump's hands can still reach the outbox —
-		// a select offering room on one arm and a closed done on the other may
-		// take either — and a frame the outbox has accepted belongs to the
-		// writer, which has no way to drop it again. So a client can receive a
-		// 0x02 frame for a ref it has already cancelled, and in the crossing
-		// case above an eof for one too. Both must be discarded rather than
-		// treated as a protocol violation, and the ref is enough to do that
-		// unambiguously: refs come from a counter that only goes up, so a
-		// cancelled one never names a later read.
+		// pump wherever it is waiting, so the read winds down, but a frame the
+		// outbox has already accepted belongs to the writer, which has no way to
+		// drop it again — and there can be more than the one the pump was
+		// holding. endRead releases the read before it closes the file, and each
+		// wait the pump parks in offers progress on one arm and the cancelled
+		// read on the other, so a select whose arms are both ready may take
+		// either: the pump can take the writer's ack, loop, read again from a
+		// file not yet closed, and queue a further chunk after the cancel was
+		// handled. So a client can receive 0x02 frames for a ref it has already
+		// cancelled, and an eof for one too — eof's "was this cancelled" check is
+		// check-then-act ahead of the same kind of select. All of it must be
+		// discarded rather than treated as a protocol violation, and the ref is
+		// enough to do that unambiguously: refs come from a counter that only
+		// goes up, so a cancelled one never names a later read.
 		c.endRead(m.Ref)
 
 	case wire.Spawn:

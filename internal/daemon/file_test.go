@@ -807,12 +807,18 @@ func TestAPumpWaitsForRoomToSayEof(t *testing.T) {
 	}
 }
 
-// TestCancelStopsAReadAndReleasesItsRef proves the two halves that matter: no
-// eof arrives for a cancelled read, and the slot it held is free again.
+// TestCancelStopsAReadAndReleasesItsRef pins the half of a cancel that is
+// observable from outside: the slot the read held is free again. maxReads is 2,
+// so a connection that cancels one read and starts two more only succeeds if
+// the cancel actually released the first — otherwise the third is refused with
+// busy.
 //
-// The second half is the observable one. maxReads is 2, so a connection that
-// cancels one read and starts two more only succeeds if the cancel actually
-// released the first — otherwise the third is refused with busy.
+// What it deliberately does not assert is that no eof, and no further chunk,
+// arrives under the cancelled ref. Both are legal: the pump can take the
+// writer's arm of a select whose other arm is the cancelled read, and eof's
+// "was this cancelled" check is check-then-act ahead of the same kind of
+// select. A client discards them by ref (spec/protocol.md, "Reading files"), so
+// asserting their absence here would pin a race rather than a rule.
 func TestCancelStopsAReadAndReleasesItsRef(t *testing.T) {
 	ts, reg := newTestServer(t)
 	dir := t.TempDir()
@@ -1015,10 +1021,13 @@ func TestClosingAConnectionEndsItsReads(t *testing.T) {
 	// closed connection or a closed file is what this catches.
 	_ = c.CloseNow()
 
-	// A fresh connection can still read, which it could not if the dropped
-	// one's pump had taken the daemon down with it. The cap is per connection,
-	// so this asserts the pump ended rather than the slot: the stronger claim is
-	// the -race run below.
+	// A fresh connection can still read. That assertion is liveness and nothing
+	// more — the cap is per connection, so it would hold even if the dropped
+	// connection had leaked both its slot and its pump. The property this test
+	// is named for is carried by the race build walking the CloseNow teardown
+	// above, where a pump still running against a closed connection or a closed
+	// file is reported; TestCloseAllWaitsForEveryPump asserts the descriptor
+	// itself, on the path this one drives from outside.
 	c2 := dial(t, ts)
 	writeControl(t, c2, wire.Hello{Ver: "test"})
 	writeControl(t, c2, wire.Read{ID: s.ID(), Path: "big.log", ReqID: 82})
@@ -1026,4 +1035,39 @@ func TestClosingAConnectionEndsItsReads(t *testing.T) {
 		f, ok := msg.(wire.File)
 		return ok && f.ReqID == 82
 	})
+}
+
+// TestStatAndReadAreNotActivityInTheSession. The sessions list orders by
+// LastActive, so either verb touching it would reorder the list under the
+// pointer that is resting on it. peek has the same rule and the same test.
+func TestStatAndReadAreNotActivityInTheSession(t *testing.T) {
+	ts, reg := newTestServer(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# notes\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	s := readTarget(t, reg, dir)
+
+	c := dial(t, ts)
+	writeControl(t, c, wire.Hello{Ver: "test"})
+
+	before := quiet(t, s)
+
+	writeControl(t, c, wire.Stat{ID: s.ID(), Paths: []string{"notes.md"}, ReqID: 91})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		_, ok := msg.(wire.Stats)
+		return ok
+	})
+	if got := s.Info().LastActive; !got.Equal(before) {
+		t.Fatalf("stat moved LastActive from %v to %v", before, got)
+	}
+
+	writeControl(t, c, wire.Read{ID: s.ID(), Path: "notes.md", ReqID: 92})
+	readUntil(t, c, func(msg any, _ []byte) bool {
+		_, ok := msg.(wire.Eof)
+		return ok
+	})
+	if got := s.Info().LastActive; !got.Equal(before) {
+		t.Fatalf("read moved LastActive from %v to %v", before, got)
+	}
 }
