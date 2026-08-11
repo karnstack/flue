@@ -143,6 +143,49 @@ describe('UpdateNotice', () => {
     expect(screen.getByText('flue 0.4.1')).toBeTruthy()
   })
 
+  it('picks up a release that lands while the tab sits open', async () => {
+    // The whole reason this can be seen without a reload. The daemon has no
+    // timer of its own — its check is started *by* a read of
+    // /api/flue/release — so a tab that asked once and never again was a
+    // daemon that checked once and never again, and a machine left running
+    // with flue open never heard about a release at all.
+    const answers = { release: CURRENT, relay: RELAY_MATCHED }
+    stubDaemon(answers)
+    mount()
+
+    expect(await screen.findByText('flue 0.4.1')).toBeTruthy()
+    expect(screen.queryByText('Update available')).toBeNull()
+
+    // The release lands, and the daemon's next answer says so.
+    answers.release = BEHIND
+    act(() => {
+      window.dispatchEvent(new Event('focus'))
+    })
+
+    expect(await screen.findByText('Update available')).toBeTruthy()
+  })
+
+  it('asks again on a timer, for a tab that is never left and never returned to', async () => {
+    // A focused tab fires no focus events, and flue's is the tab people leave
+    // focused. Without the interval the listener above covers everyone except
+    // the person most likely to be looking.
+    vi.useFakeTimers()
+    try {
+      stubDaemon({ release: CURRENT, relay: RELAY_MATCHED })
+      mount()
+      await vi.advanceTimersByTimeAsync(0)
+
+      const asks = () =>
+        vi.mocked(fetch).mock.calls.filter(([input]) => String(input).startsWith(RELEASE)).length
+      expect(asks()).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+      expect(asks()).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('renders nothing at all on a daemon too old to answer', async () => {
     // A 404 from either endpoint is the ordinary case for an older daemon,
     // and for one that cannot reach GitHub. Neither is an error worth a
