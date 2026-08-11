@@ -2,14 +2,23 @@
  * Fail if an em-dash or en-dash reached anything a reader sees.
  *
  * Scans every text asset under dist/client — the prerendered HTML, and the
- * files copied there from public/ such as llms.txt, install.sh and the
- * diagrams — plus the repository README. Source files are deliberately not
- * scanned: code comments keep their own voice, and scanning the build output
- * is the only way to check exactly what a visitor is served.
+ * files copied there from public/ such as llms.txt and the diagrams — plus
+ * two files named outright: the repository README, and scripts/install.sh.
+ * Code comments keep their own voice and are never scanned; for everything
+ * the site itself renders, the build output is the only honest thing to read,
+ * because it is exactly what a visitor is served.
  *
- * install.sh is why this is an extension list rather than just .html. It is
- * piped into a shell straight off flue.sh, so its die() messages are copy a
- * reader sees, and a gate that only read the pages missed them.
+ * install.sh is the exception, and it is named from source on purpose.
+ * flue.sh/install.sh is piped into a shell by anyone following the homepage
+ * or the README, so its die() messages are copy a reader sees. But the copy
+ * under dist/client is generated: site/public/install.sh is gitignored and
+ * staged by `make site-dev`, and `make site-deploy` copies the installer into
+ * dist/client *after* this check has already run (Makefile). So a fresh
+ * checkout has no copy to scan, and the copy that ships is not the copy that
+ * was scanned. Reading scripts/install.sh, the canonical source the release
+ * infra owns, is the only way the gate covers it whatever the staging order.
+ * The built copy is still scanned when it is there, which costs nothing and
+ * catches the two drifting apart.
  *
  * Run by `pnpm check:prose`, and by `pnpm build` once the site is clean.
  */
@@ -20,6 +29,17 @@ import { fileURLToPath } from 'node:url'
 const SITE = join(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(SITE, 'dist', 'client')
 const README = resolve(SITE, '..', 'README.md')
+const INSTALLER = resolve(SITE, '..', 'scripts', 'install.sh')
+
+/**
+ * What a hit is called. Both named files live outside dist/client, so the
+ * `relative(DIST, ...)` the built assets use would print a path climbing out
+ * of the build directory instead of the one somebody has to go and edit.
+ */
+const LABELS = new Map([
+  [README, 'README.md'],
+  [INSTALLER, 'scripts/install.sh'],
+])
 
 /** The characters the house style forbids. A plain hyphen is fine. */
 const BANNED = [
@@ -87,14 +107,17 @@ const prerendered = await targets()
 
 /**
  * A dist/client with no HTML in it means the build did not finish, and
- * scanning only the README would report clean having checked almost nothing.
- * Count the pages, not the list: the README is always on the end of it.
+ * scanning only the named files would report clean having checked almost
+ * nothing. Asked of `prerendered` and never of `files`, which is the whole
+ * point: the README and the installer are appended below and are always
+ * readable, so a guard that counted the scan list could be satisfied by two
+ * files that say nothing about whether vite ran.
  */
 if (!prerendered.some((file) => file.endsWith('.html'))) {
   throw new Error('check-prose: no prerendered pages under dist/client, did vite build run?')
 }
 
-const files = [...prerendered, README]
+const files = [...prerendered, README, INSTALLER]
 
 /** One entry per file that has hits, in scan order, each with every hit. */
 const found = []
@@ -102,7 +125,7 @@ let total = 0
 
 for (const file of files) {
   const text = await readFile(file, 'utf8')
-  const label = file === README ? 'README.md' : relative(DIST, file)
+  const label = LABELS.get(file) ?? relative(DIST, file)
   const hits = []
 
   let line = 1

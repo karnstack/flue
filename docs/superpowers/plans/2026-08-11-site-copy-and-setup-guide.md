@@ -443,7 +443,7 @@ Replace the `PATH` bodies and the lead paragraph:
 const PATH = [
   {
     title: 'Your machine',
-    body: 'The daemon owns the terminals and holds the only long-lived key. It listens on loopback and nothing else.',
+    body: 'The daemon owns the terminals and holds the key your browser pins. It listens on loopback and nothing else.',
     mono: '127.0.0.1:7717',
     icon: HardDrive,
   },
@@ -1218,7 +1218,7 @@ function Setup() {
                 '  web app uploaded',
                 '  reachable at https://flue-relay.you.workers.dev',
                 '  fleet key minted (Cloudflare never sees it)',
-                '  this machine joined as laptop (laptop-9f3a)',
+                '  this machine joined as laptop (laptop-9f3a-3f9a12cd)',
               ]}
             />
             <Note title="Run flue relay setup once, and only once">
@@ -1229,8 +1229,9 @@ function Setup() {
               </P>
               <P>
                 That resets the fleet. Every other machine is left holding a secret the relay no
-                longer accepts, and every device has to pair again, because the new fleet key
-                retires every device certificate the old one signed.
+                longer accepts, and rejoins under a fresh machine id. Every device has to pair
+                again, because a browser will not swap a fleet key it has already pinned, and
+                pairing is the one thing that replaces it.
               </P>
               <P>
                 So the way back is forwards. Take the join line the most recent setup printed, run
@@ -1599,7 +1600,7 @@ The setting-it-up section now defers to the guide rather than half-repeating it,
       '  worker deployed: flue-relay',
       '  web app uploaded',
       '  reachable at https://flue-relay.you.workers.dev',
-      '  this machine joined as laptop (laptop-9f3a)',
+      '  this machine joined as laptop (laptop-9f3a-3f9a12cd)',
     ]}
   />
   <P>
