@@ -33,7 +33,7 @@ you missed.
 - **Sessions outlive the tab.** Close it and the build keeps running.
 - **One list, every machine.** Name, tag, pin, group and search the whole
   fleet from one place. Hover a session to see what it is doing.
-- **One keystroke to any of them.** `⌘K`, or `Ctrl+Shift+K` elsewhere, opens
+- **One keystroke to any of them.** `⌘K`, or `Ctrl+Shift+K` anywhere, opens
   every session on every machine. The highlighted row shows its own last
   fourteen lines, so you can see which one is the build. `Ctrl+Shift+1` to `9`
   jumps to a pinned session.
@@ -99,8 +99,8 @@ flue version       # print the version (also --version, -v)
 
 ## Remote access
 
-The daemon binds loopback and nothing else, so reaching it from elsewhere is
-opt-in and takes one command:
+The daemon listens on loopback and nothing else, so reaching it from somewhere
+else is opt-in and takes one command:
 
 ```sh
 flue relay setup                                                 # machine 1: paste a Cloudflare token
@@ -108,7 +108,7 @@ flue relay join wss://<your-relay> --secret <...> --fleet <...>  # every other m
 ```
 
 That deploys a Worker **and** this web app into your own Cloudflare account,
-on the free tier. The same deploy is a card on the UI's Remote screen. One
+on the free plan. The same deploy is a card on the UI's Remote screen. One
 relay fronts every machine you own, and pairing a device covers the whole
 fleet rather than one machine.
 
