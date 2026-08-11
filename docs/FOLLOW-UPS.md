@@ -479,15 +479,12 @@ documented promise depends on.
   Distinct from item 10, which is the daemon's own outbound queue rather than the
   relay's.
 
-  **Still open, and it changes character on a hosted relay.** Self-hosted, the
-  person streaming `yes` and the person holding the Cloudflare account are the
-  same person, so the missing cap costs them their own free tier and nothing
-  else. On flue.sh one Worker's allowance is shared by everybody: one account's
-  runaway session is spent against every other account's availability as well
-  as against the operator's bill. Nothing about a multi-tenant relay makes the
-  cap harder to write — it makes it the first thing the scale pass has to do,
-  and the counters that would size it now have to be read off a deployment
-  rather than off a dogfooding month.
+  **Still open.** Every relay is one you deployed into your own Cloudflare
+  account, so the person streaming `yes` and the person holding the account are
+  the same person: the missing cap costs them their own free tier and nobody
+  else's. That is what keeps this a follow-up rather than a blocker. The
+  counters that would size the cap come off a dogfooding month, which is the
+  work this item is waiting on.
 - **`POST /api/pair` is credential-less and internet-reachable, and nothing
   rate limits it.** It has to be credential-less — the device presenting a
   pairing token is by definition a device holding no credential — and the
