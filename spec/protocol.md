@@ -8,12 +8,16 @@ frames carry data.** There is no additional framing layer.
 ```
 [1 byte type][4 bytes ref, big-endian][payload]
 
-0x00  output  daemon -> client
-0x01  input   client -> daemon
+0x00  output      daemon -> client
+0x01  input       client -> daemon
+0x02  file chunk  daemon -> client
 ```
 
 `ref` is a `uint32` assigned by the daemon at attach time, so keystrokes do
 not carry session IDs.
+
+A `0x02` frame's `ref` is a read's handle rather than an attachment's, minted
+from the same counter. A client routes on the frame type, not on the ref.
 
 ## Control messages
 
@@ -33,6 +37,9 @@ Every control message is a JSON object with a `type` discriminator.
 | `close` | `ref` *or* `id` | end the session |
 | `update` | `id`, `name?`, `tags[]?`, `pinned?` | edit a session's human-owned metadata |
 | `peek` | `id`, `bytes?`, `reqId?` | read the tail of a session's scrollback without attaching |
+| `stat` | `id`, `paths[]`, `reqId?` | ask whether paths exist, relative to a session |
+| `read` | `id`, `path`, `reqId?` | start reading one |
+| `cancel` | `ref` | abandon a read in flight |
 | `devices` | — | list the paired devices |
 | `revoke` | `deviceId` | unpair a device and cut its connections |
 | `pairStart` | — | enter pairing mode |
@@ -49,6 +56,9 @@ Every control message is a JSON object with a `type` discriminator.
 | `sizeChanged` | `ref`, `cols`, `rows`, `primary` | the PTY's dimensions changed |
 | `error` | `code`, `msg`, `reqId?` | a request failed, or a stream did |
 | `preview` | `id`, `data`, `cols`, `rows`, `reqId?` | answers `peek` |
+| `stats` | `entries[]`, `reqId?` | answers `stat` |
+| `file` | `ref`, `path`, `size`, `mime`, `kind`, `truncated?`, `reqId?` | answers `read`; content follows as `0x02` frames |
+| `eof` | `ref` | that read has sent every byte |
 | `deviceList` | `devices[]` | answers `devices`, and is broadcast after a pairing or a `revoke` |
 | `pairing` | `token`, `url`, `daemonPub`, `expiresAt` | answers `pairStart` |
 | `revoked` | `reason` | this device was unpaired; the connection is about to close |
@@ -172,6 +182,74 @@ so a preview that counted as activity would sort the row under the reader's
 pointer to the top of the list underneath it. An `id` the daemon does not hold
 is answered with `error{not_found}`, correlated by `reqId` — a list peeks at
 many rows at once and the refusals have to find their own askers.
+
+### Reading files
+
+`stat` and `read` answer the two questions a terminal cannot: is this text a
+real path, and what is in it. They exist because an agent session names files
+constantly and the reader is often on a device with no other window to open
+one in.
+
+Resolution is the daemon's. A leading `~` expands to the daemon user's home, a
+relative path resolves against the session's live working directory, and the
+result is cleaned; `file.path` reports the resolved path, while each
+`stats.entries[].path` echoes the text that was asked about, in the order it
+was asked. A relative path that does not exist under the session's cwd is a
+miss, with no second attempt against the spawn directory: two resolution rules
+would make "opened the wrong file" indistinguishable from "opened the right
+one".
+
+`stat` takes up to 32 paths at once, because a client verifies a whole hovered
+line rather than one candidate at a time, and a path it cannot resolve is
+`exists: false` rather than an error — "no" is the ordinary answer here. Beside
+`path` and `exists`, an entry that exists carries `kind` (`file`, `dir` or
+`other`), `size` in bytes and `mtime` in unix **seconds**, the unit
+`deviceList` uses rather than the RFC 3339 strings `sessions[]` does.
+
+`read` mints a `ref` from the same counter `attach` uses and answers `file`,
+after which the content arrives as `0x02` frames under that ref and ends with
+`eof`. Chunks are 32 KiB: a WebSocket message is capped at 1 MiB, and file
+content shares one socket with the terminal, so a larger frame would sit in
+front of the next keystroke. The daemon keeps one chunk in flight at a time for
+the same reason.
+
+What may be read is anything the daemon's user can read, and nothing is
+written. That is not a widening: a client that can send `read` can already send
+`spawn` and run `cat`, and both run as the same user.
+
+Text is sent to 8 MiB, past which `file.truncated` is true, `file.size` remains
+the real size, and only the head arrives. An image is refused past 4 MiB rather
+than truncated. `file.kind` is `text` or `image`, sniffed from the content and
+never from the extension; anything else is refused. Two reads may be open per
+connection.
+
+`cancel` abandons a read by `ref`. A ref the daemon does not hold is ignored:
+a read finishing and a client cancelling it cross on the wire routinely, and a
+race the client cannot avoid should not be an error it has to handle. Every
+read is ended and its file closed when the connection drops.
+
+**A cancel stops a stream; it does not un-send one.** Cancelling unparks the
+pump wherever it is waiting and closes the file under it, so the read winds
+down, but a frame the outbox has already accepted belongs to the writer, which
+has no way to drop it again. More than that: the pump parks in selects that
+offer progress on one arm — room in the outbox, or the chunk it queued having
+been written — and the cancelled read on the other, and a select whose arms are
+both ready may take either, so the pump can go round again and queue a further
+chunk *after* the cancel was handled. The same is true of `eof`, whose "was this
+cancelled" check is check-then-act ahead of the same kind of select.
+
+A client must therefore discard `0x02` frames and an `eof` naming a ref it has
+cancelled, rather than treat either as a protocol violation. The ref is enough
+to do that unambiguously: refs come from a counter that only ever goes up, so a
+cancelled ref never names a later read.
+
+Neither verb is activity in the session: `lastActive` does not move for a `stat`
+or a `read`, for the reason a `peek` does not move it — the list orders by that
+stamp, and a hover that reordered the list under the pointer would be the hover
+losing the row it was aimed at.
+
+Refusals are `not_found`, `is_dir`, `too_large`, `denied`, `bad_path`, `busy`
+and `unsupported`, each correlated by `reqId`.
 
 ## Pairing
 
