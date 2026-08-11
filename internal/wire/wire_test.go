@@ -48,6 +48,29 @@ func TestDecodeBinaryRejectsUnknownType(t *testing.T) {
 	}
 }
 
+// TestFileFramesRoundTrip pins the third frame type. Content rides the binary
+// half rather than a base64 field on a control message: a 32 KiB chunk costs
+// 43 KiB as base64 inside JSON, and the client already has a decoder for this
+// layout.
+func TestFileFramesRoundTrip(t *testing.T) {
+	payload := []byte("package main\n")
+	frame := EncodeBinary(FrameFile, 9, payload)
+
+	typ, ref, got, err := DecodeBinary(frame)
+	if err != nil {
+		t.Fatalf("DecodeBinary: %v", err)
+	}
+	if typ != FrameFile {
+		t.Errorf("type = %#x, want %#x", typ, FrameFile)
+	}
+	if ref != 9 {
+		t.Errorf("ref = %d, want 9", ref)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("payload = %q, want %q", got, payload)
+	}
+}
+
 func TestDecodeControlDispatchesByType(t *testing.T) {
 	msg, err := DecodeControl([]byte(`{"type":"attach","id":"abc","lastSeq":42}`))
 	if err != nil {
