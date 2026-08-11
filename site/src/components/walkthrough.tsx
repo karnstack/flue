@@ -33,13 +33,16 @@ import { cn } from '@/lib/utils'
 export function Walkthrough({
   align = 'left',
   className,
+  id,
 }: {
   /** Follows the section it lands in, the same way InstallBlock does. */
   align?: 'left' | 'center'
   className?: string
+  /** Set when something on the page links to the player. */
+  id?: string
 }) {
   return (
-    <figure className={className}>
+    <figure id={id} className={className}>
       <div className="relative aspect-video overflow-hidden rounded-xl bg-zinc-950 ring-1 ring-zinc-950/10 dark:ring-white/10">
         <MuxPlayer
           playbackId={WALKTHROUGH_PLAYBACK_ID}

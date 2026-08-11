@@ -1,6 +1,6 @@
 import { Fragment } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
-import { ArrowRight, Cloud, HardDrive, Lock, Plus, Smartphone } from 'lucide-react'
+import { ArrowRight, Cloud, HardDrive, Lock, Play, Plus, Smartphone } from 'lucide-react'
 
 import { CopyCommand } from '@/components/copy-command'
 import { FleetWindow, PhoneFrame } from '@/components/mock/fleet'
@@ -8,9 +8,10 @@ import { SwitcherWindow } from '@/components/mock/switcher'
 import { MockTerminal, ok, output, prompt } from '@/components/mock/terminal'
 import { SiteFooter } from '@/components/site-footer'
 import { SiteHeader } from '@/components/site-header'
+import { Button } from '@/components/ui/button'
 import { Walkthrough } from '@/components/walkthrough'
 import { GithubMark } from '@/components/wordmark'
-import { BREW_CMD, INSTALL_CMD, REPO_URL } from '@/lib/site'
+import { BREW_CMD, INSTALL_CMD, REPO_URL, WALKTHROUGH_RUNTIME } from '@/lib/site'
 
 export const Route = createFileRoute('/')({
   component: Home,
@@ -139,6 +140,29 @@ function InstallBlock({ align = 'left' }: { align?: 'left' | 'center' }) {
 }
 
 /**
+ * The hero's second action, and deliberately the quieter one.
+ *
+ * Copying the install line is the thing this page is for, so the command keeps
+ * the loud treatment and this gets an outline. It points at the recording
+ * further down the page rather than at /docs/setup: the reader who wants to
+ * see it work before running a script into their shell is answered in place,
+ * without losing the page they were on.
+ */
+function WatchWalkthrough() {
+  return (
+    <Button asChild variant="outline" size="lg" className="mt-8">
+      <a href="#walkthrough">
+        <Play className="size-4" aria-hidden="true" />
+        Watch the setup walkthrough
+        <span className="font-mono text-sm tabular-nums text-muted-foreground">
+          {WALKTHROUGH_RUNTIME}
+        </span>
+      </a>
+    </Button>
+  )
+}
+
+/**
  * The two halves of the claim in one picture: the fleet on a machine, and the
  * ringed row of it open on a phone. They sit beside each other rather than
  * overlapping, since an overlap covers the rows the phone is meant to point
@@ -175,6 +199,7 @@ function Hero() {
           <div className="w-full">
             <InstallBlock align="center" />
           </div>
+          <WatchWalkthrough />
         </div>
         <div className="mt-16 lg:mt-20">
           <ProofMock />
@@ -445,8 +470,12 @@ function Install() {
           {/* Full width, the way the switcher above sits full width in a
               section that is otherwise columns. The caption is centred with
               the rest of this section rather than left aligned, since it is
-              the only line here that would have read off axis. */}
-          <Walkthrough align="center" className="mt-10 w-full" />
+              the only line here that would have read off axis.
+
+              The id is the hero button's target, and scroll-mt clears the
+              sticky header so the jump lands on the player rather than under
+              the bar. */}
+          <Walkthrough align="center" id="walkthrough" className="mt-10 w-full scroll-mt-20" />
           <div className="w-full">
             <InstallBlock align="center" />
           </div>
