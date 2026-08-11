@@ -409,8 +409,8 @@ Replace the heading and the two paragraphs inside `How`:
 </p>
 <p className="mt-4 max-w-[56ch] text-lg text-pretty text-muted-foreground">
   Two devices can attach to one session and they mirror live. What you type on the phone
-  appears in the laptop&rsquo;s browser. A phone might be about 40 columns wide, and that does not make
-  the laptop&rsquo;s terminal smaller.
+  appears in the laptop&rsquo;s browser. Size follows the view you are using: pick up the phone
+  and the session fits the phone, type on the laptop and it fits the laptop again.
 </p>
 ```
 
@@ -1459,9 +1459,10 @@ Section two:
     frame.
   </P>
   <P>
-    Size is negotiated, not shared. A phone might be about 40 columns wide, and that does not make the
-    laptop&rsquo;s terminal smaller. Sharing the size is the failure that makes most screen
-    sharing useless for real work.
+    Size follows the view you are using. Pick up the phone and the session fits the phone.
+    Type on the laptop and it fits the laptop again. Neither view is held at the other
+    one&rsquo;s size, which is the failure that makes most screen sharing useless for real
+    work.
   </P>
   <Note title="One list, every machine">
     <P>
@@ -1883,8 +1884,8 @@ you missed.
   fourteen lines, so you can see which one is the build. `Ctrl+Shift+1` to `9`
   jumps to a pinned session.
 - **Reachable from anything you own.** Pair a phone with a QR code, once for
-  the whole fleet. Two devices on one session mirror live, and the phone's 40
-  columns do not make the laptop's terminal smaller.
+  the whole fleet. Two devices on one session mirror live, and the size follows
+  whichever view you are using.
 - **No hosted service.** Remote access runs through a relay you deploy into
   your own Cloudflare account, end-to-end encrypted, with the daemon's key
   pinned at pairing. flue.sh is a landing page and is never part of the data
