@@ -1,6 +1,6 @@
 <h1 align="center">flue</h1>
 
-<p align="center"><strong>The desk stops mattering.</strong></p>
+<p align="center"><strong>Continue your Claude Code and Codex sessions on any screen.</strong></p>
 
 <p align="center">
   <a href="https://github.com/karnstack/flue/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/karnstack/flue/ci.yml?branch=main&label=ci" alt="CI status"></a>
@@ -24,11 +24,13 @@
   </picture>
 </p>
 
-Builds, agents and SSH sessions keep running on the machine that owns them.
-Every one of them is one tab away, on any screen you have. A small Go daemon
-holds the shells and their scrollback, and a web app draws them. Closing the
-tab does not kill a session. It only detaches it, and reattaching replays what
-you missed.
+Start on your laptop. Check in from your phone or iPad. Pick up again at your
+desk. The shell stays on the machine; flue moves the view.
+
+A small Go daemon holds the shells and their scrollback, and a web app draws
+them. Closing the tab does not kill a session. It only detaches it: the agent
+keeps working, the build keeps running, the SSH session stays up, and
+reattaching replays what you missed.
 
 - **Sessions outlive the tab.** Close it and the build keeps running.
 - **One list, every machine.** Name, tag, pin, group and search the whole

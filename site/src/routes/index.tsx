@@ -1,6 +1,6 @@
 import { Fragment } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
-import { ArrowRight, Cloud, HardDrive, Lock, Plus, Smartphone } from 'lucide-react'
+import { ArrowRight, Cloud, HardDrive, Lock, Play, Plus, Smartphone } from 'lucide-react'
 
 import { CopyCommand } from '@/components/copy-command'
 import { FleetWindow, PhoneFrame } from '@/components/mock/fleet'
@@ -8,9 +8,10 @@ import { SwitcherWindow } from '@/components/mock/switcher'
 import { MockTerminal, ok, output, prompt } from '@/components/mock/terminal'
 import { SiteFooter } from '@/components/site-footer'
 import { SiteHeader } from '@/components/site-header'
+import { Button } from '@/components/ui/button'
 import { Walkthrough } from '@/components/walkthrough'
 import { GithubMark } from '@/components/wordmark'
-import { BREW_CMD, INSTALL_CMD, REPO_URL } from '@/lib/site'
+import { BREW_CMD, INSTALL_CMD, REPO_URL, WALKTHROUGH_RUNTIME } from '@/lib/site'
 
 export const Route = createFileRoute('/')({
   component: Home,
@@ -105,8 +106,8 @@ function Eyebrow() {
 
 function Headline() {
   return (
-    <h1 className="max-w-[24ch] text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl">
-      The desk stops mattering.
+    <h1 className="max-w-[22ch] text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl">
+      Continue your Claude Code and Codex sessions on any screen.
     </h1>
   )
 }
@@ -114,8 +115,8 @@ function Headline() {
 function Subline() {
   return (
     <p className="mt-5 max-w-[52ch] text-lg text-pretty text-muted-foreground">
-      Builds, agents and SSH sessions keep running on the machine that owns them. Every one of them
-      is one tab away, on any screen you have.
+      Start on your laptop. Check in from your phone or iPad. Pick up again at your desk. The shell
+      stays on the machine; flue moves the view.
     </p>
   )
 }
@@ -135,6 +136,29 @@ function InstallBlock({ align = 'left' }: { align?: 'left' | 'center' }) {
         macOS, Linux, WSL. One static Go binary. No Node, no Python, no toolchain.
       </p>
     </div>
+  )
+}
+
+/**
+ * The hero's second action, and deliberately the quieter one.
+ *
+ * Copying the install line is the thing this page is for, so the command keeps
+ * the loud treatment and this gets an outline. It points at the recording
+ * further down the page rather than at /docs/setup: the reader who wants to
+ * see it work before running a script into their shell is answered in place,
+ * without losing the page they were on.
+ */
+function WatchWalkthrough() {
+  return (
+    <Button asChild variant="outline" size="lg" className="mt-8">
+      <a href="#walkthrough">
+        <Play className="size-4" aria-hidden="true" />
+        Watch the setup walkthrough
+        <span className="font-mono text-sm tabular-nums text-muted-foreground">
+          {WALKTHROUGH_RUNTIME}
+        </span>
+      </a>
+    </Button>
   )
 }
 
@@ -175,6 +199,7 @@ function Hero() {
           <div className="w-full">
             <InstallBlock align="center" />
           </div>
+          <WatchWalkthrough />
         </div>
         <div className="mt-16 lg:mt-20">
           <ProofMock />
@@ -205,8 +230,8 @@ function Sessions() {
             <p className="font-mono text-sm tracking-wide text-primary uppercase">Why it exists</p>
             <blockquote className="mt-6 border-l-2 border-primary/40 pl-5">
               <p className="max-w-[48ch] text-lg text-pretty">
-                I wanted my 10,000 steps. Coding agents had other plans, and I am not buying a
-                walking pad. So now I start the run on my machine, go for the walk, and read the
+                I wanted my 10,000 steps. Claude Code and Codex had other plans, and I am not buying
+                a walking pad. So now I start the run on my machine, go for the walk, and read the
                 answer on my phone.
               </p>
               <footer className="mt-3 text-base text-muted-foreground sm:text-sm">
@@ -221,8 +246,8 @@ function Sessions() {
             </h2>
             <p className="mt-5 max-w-[48ch] text-lg text-pretty text-muted-foreground">
               A small Go daemon holds the terminals and their scrollback. Closing the tab does not
-              kill the session. It only detaches it. Reattach and the daemon replays what you
-              missed.
+              kill the session. It only detaches it: the agent keeps working, the build keeps
+              running, the SSH session stays up. Reattach and the daemon replays what you missed.
             </p>
             <p className="mt-4 max-w-[48ch] text-lg text-pretty text-muted-foreground">
               Two devices can attach to one session and mirror live. Size follows the view you used
@@ -236,7 +261,7 @@ function Sessions() {
             drawing occupies the same measure the drawing does. */}
         <div className="mt-20 grid grid-cols-[minmax(0,1fr)] gap-x-10 gap-y-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-10">
           <h3 className="max-w-[40ch] text-2xl font-semibold tracking-tight text-balance">
-            Finding one of them is the other half.
+            One keystroke to any session on any machine.
           </h3>
           <div>
             <p className="max-w-[48ch] text-lg text-pretty text-muted-foreground">
@@ -429,7 +454,7 @@ function Install() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="flex flex-col items-center text-center">
           <h2 className="max-w-[30ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            Install it, then close the tab on purpose.
+            Install flue on the machine that runs the work.
           </h2>
           <p className="mt-5 max-w-[48ch] text-lg text-pretty text-muted-foreground">
             <code className="font-mono text-foreground">flue enable</code> installs a login service,
@@ -445,8 +470,12 @@ function Install() {
           {/* Full width, the way the switcher above sits full width in a
               section that is otherwise columns. The caption is centred with
               the rest of this section rather than left aligned, since it is
-              the only line here that would have read off axis. */}
-          <Walkthrough align="center" className="mt-10 w-full" />
+              the only line here that would have read off axis.
+
+              The id is the hero button's target, and scroll-mt clears the
+              sticky header so the jump lands on the player rather than under
+              the bar. */}
+          <Walkthrough align="center" id="walkthrough" className="mt-10 w-full scroll-mt-20" />
           <div className="w-full">
             <InstallBlock align="center" />
           </div>

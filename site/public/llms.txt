@@ -1,6 +1,6 @@
 # flue
 
-> flue keeps your terminal sessions alive on the machine that owns them and hands them back on any device you have. A small Go daemon owns the shells and their scrollback, and a web app draws them. Closing the tab does not kill a session. It only detaches it, so a build, an agent run or an SSH session keeps going, and reattaching replays what was missed. One keystroke opens every session on every machine at once.
+> flue lets you continue your Claude Code and Codex sessions on any screen: start on your laptop, check in from your phone or iPad, pick up again at your desk. A small Go daemon owns the shells and their scrollback, and a web app draws them, so the shell stays on the machine and flue only moves the view. Closing the tab does not kill a session. It only detaches it, so a build, an agent run or an SSH session keeps going, and reattaching replays what was missed. One keystroke opens every session on every machine at once.
 
 flue is open source (MIT), pre-1.0, and free. It installs as one static Go
 binary on macOS, Linux and WSL, with no Node, Python or other toolchain.
@@ -13,10 +13,10 @@ the daemon's static key pinned when a browser pairs, so the Worker forwards
 ciphertext it holds no key for. flue.sh serves docs and downloads and is never
 part of the data path.
 
-Status: the local terminal, the login service, the fleet-wide sessions list and
-the end-to-end pairing all work. The Cloudflare relay is built and deployable
-but has not been through its manual end-to-end gate against a real account.
-It is ready to try rather than ready to rely on.
+Status: released and in daily use. The local terminal, the login service, the
+fleet-wide sessions list, pairing and the Cloudflare relay all work, and the
+relay has been through its manual end-to-end gate against a real account. It is
+0.x, so commands, flags and the config file can still change between releases.
 
 ## Install
 
