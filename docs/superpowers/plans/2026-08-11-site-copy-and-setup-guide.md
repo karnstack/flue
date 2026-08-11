@@ -1325,10 +1325,18 @@ function Setup() {
           service and the sessions it can see.
         </P>
         <P>
-          A machine missing from the list is usually one of three things: it is asleep, it never
-          ran <Code>flue relay join</Code>, or it joined a second relay by mistake. Run{' '}
-          <Code>flue relay status</Code> on the machine that is missing and check the address
-          matches the one your other machines use.
+          A machine missing from the list is usually one of three things. It is asleep or
+          offline. It never ran <Code>flue relay join</Code>. Or somebody ran{' '}
+          <Code>flue relay setup</Code> a second time, which reset the relay and left this
+          machine holding a secret the relay no longer accepts.
+        </P>
+        <P>
+          Run <Code>flue relay status</Code> on the machine that is missing, and read the fleet
+          line rather than the address. A reset does not change the address, so an address that
+          matches tells you nothing. The real signals are in `cmd/flue/relay.go`: a 401 prints
+          `fleet: unreachable (the relay refused this machine's credential...)`, a fleet-key
+          mismatch prints `entries are signed by something else`, and an unpublished machine
+          prints `this machine is not in the directory`.
         </P>
         <P>
           Sessions that vanish after you log out of a Linux box mean lingering is off. Run{' '}
