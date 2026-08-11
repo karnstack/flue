@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
-import { LayoutGridIcon, PlusIcon } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { ArrowLeftRightIcon, LayoutGridIcon, PlusIcon } from 'lucide-react'
 
 import { useFlueClient } from '@/client/provider'
 import { ExitOverlay } from '@/components/exit-overlay'
@@ -23,6 +23,8 @@ import { createKeyboardModes, type KeyboardMode } from '@/lib/keyboard'
 import { barKeyBytes, ctrlTransform, type BarKey } from '@/lib/keys'
 import { cn } from '@/lib/utils'
 import { trackVisualViewport, zoomedIn } from '@/lib/viewport'
+import { isApplePlatform, openChordLabel } from '@/switcher/keys'
+import { useSwitcher } from '@/switcher/provider'
 
 /** What the view is showing, which is not the same as what the socket is doing. */
 type Phase = 'connecting' | 'live' | 'reconnecting' | 'exited' | 'gone' | 'revoked'
@@ -124,6 +126,10 @@ export function Terminal({
   onClosed,
 }: TerminalProps) {
   const client = useFlueClient()
+  const switcher = useSwitcher()
+  // Which modifier this keyboard actually has, for the chip's tooltip. Once per
+  // mount: nobody swaps a Mac for a ThinkPad mid-session.
+  const chordLabel = useMemo(() => openChordLabel(isApplePlatform()), [])
   const paneRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
   const surfaceRef = useRef<HTMLDivElement>(null)
@@ -855,6 +861,29 @@ export function Terminal({
       <div className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
         <ThemeMenu value={themeId} dark={dark} onChange={handleTheme} />
         {/*
+          The way to another session without leaving this one.
+
+          A button and not only a chord, and that is the whole reason it is
+          here: a phone has no Ctrl and no Cmd, so a switcher reachable only by
+          keystroke would be a feature laptops have. The tooltip carries the
+          chord for the keyboards that do have one, which is how anybody learns
+          it — the connecting pill's hint is gone in a hundred milliseconds on
+          a local daemon.
+        */}
+        <button
+          type="button"
+          onClick={() => switcher.open()}
+          title={`Switch session · ${chordLabel}`}
+          className={cn(
+            'rounded-lg px-2.5 py-1.5',
+            'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
+            'transition-colors hover:text-(--chip-fg)',
+          )}
+        >
+          <ArrowLeftRightIcon aria-hidden="true" className="size-4" />
+          <span className="sr-only">Switch session</span>
+        </button>
+        {/*
           A real link, so a middle or cmd click behaves browser-natively. It
           opens in a new tab by default so this session stays put; the root
           route spawns into ?cwd= on mount and navigates itself.
@@ -924,9 +953,17 @@ export function Terminal({
               {NOTICE[phase]}
             </span>
             {phase === 'connecting' && (
-              <span className="mt-0.5 block pl-3.5 text-xs/5 font-normal text-(--chip-dim)">
-                <kbd className="font-mono">{TERMINAL_SHORTCUT_HINT}</kbd> for focus mode
-              </span>
+              <>
+                <span className="mt-0.5 block pl-3.5 text-xs/5 font-normal text-(--chip-dim)">
+                  <kbd className="font-mono">{TERMINAL_SHORTCUT_HINT}</kbd> for focus mode
+                </span>
+                {/* The chord, said once where somebody waiting has a moment to
+                    read it. The chip above is what teaches it the rest of the
+                    time, and on a fast daemon this pill is gone before it can. */}
+                <span className="block pl-3.5 text-xs/5 font-normal text-(--chip-dim)">
+                  <kbd className="font-mono">{chordLabel}</kbd> to switch session
+                </span>
+              </>
             )}
             {phase === 'revoked' && revokedWhy !== null && revokedWhy !== '' && (
               // The daemon's reason, in the slot the connecting hint uses:
