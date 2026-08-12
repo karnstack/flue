@@ -906,16 +906,33 @@ describe('Terminal', () => {
       expect(menu()).toBeNull()
     })
 
-    it('shows nothing where there is no word to show it for', () => {
-      // A press on the blank half of a line. A menu offering to copy an empty
-      // selection is a menu of buttons that do nothing.
+    it('offers Paste over blank space, which is where a paste is wanted', () => {
+      // The press that matters most lands on an empty prompt, and there is
+      // nothing there to select. A menu that only opened over a word would
+      // leave the terminal with no way to paste into it at all.
       const { em } = mountSelectable('')
 
       press(125, 105)
       hold()
 
       expect(em.live().wordPresses).toHaveLength(1)
-      expect(menu()).toBeNull()
+      expect(menu()).not.toBeNull()
+      expect(screen.getByText('Paste')).toBeTruthy()
+      // And no Copy, because there is nothing for it to act on.
+      expect(screen.queryByText('Copy')).toBeNull()
+    })
+
+    it('leaves a press on blank space as a scroll it can still become', () => {
+      // Nothing was selected, so there is no range for a drag to widen. The
+      // scrollback is the only thing left for the finger to do.
+      const { em } = mountSelectable('')
+      press(125, 300)
+      hold()
+
+      act(() => void inset().dispatchEvent(touch('touchmove', [200], 16, [125])))
+
+      expect(em.live().extensions).toEqual([])
+      expect(em.live().scrolled).not.toBe(0)
     })
 
     it('widens the range as the finger travels, instead of scrolling', () => {

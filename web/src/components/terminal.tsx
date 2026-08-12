@@ -187,9 +187,14 @@ export function Terminal({
   const ctrlArmedRef = useRef(ctrlArmed)
   ctrlArmedRef.current = ctrlArmed
   const [exitCode, setExitCode] = useState<number | null>(null)
-  // Which end the selection menu is showing at, or null for not showing.
-  // One state and not two: there is no menu without a selection.
-  const [menuEnd, setMenuEnd] = useState<MenuEnd | null>(null)
+  // The touch menu: which end of the terminal it is at, and whether the
+  // press it came from found anything to copy. Null for not showing.
+  //
+  // Both, because the menu outlives the selection. Paste needs no selection
+  // at all — it is the whole reason to long-press an empty prompt — so a
+  // press on blank space still opens this, offering the one verb that means
+  // something there.
+  const [menu, setMenu] = useState<{ at: MenuEnd; canCopy: boolean } | null>(null)
   const [clipProblem, setClipProblem] = useState<string | null>(null)
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
@@ -526,7 +531,7 @@ export function Terminal({
     }
     const dismissSelection = () => {
       emulator.clearSelection()
-      setMenuEnd(null)
+      setMenu(null)
       setClipProblem(null)
     }
     const beginSelection = () => {
@@ -536,22 +541,25 @@ export function Terminal({
       const cell = cellUnder(from.x, from.y)
       if (cell === null) return
       emulator.selectWordAt(cell)
-      // Blank space holds no word, and a press on it selects nothing. Leaving
-      // the menu away is the honest answer: a Copy over an empty selection is
-      // a button that does nothing.
-      if (emulator.selection() === '') return
-      selectDrag = true
+      // Blank space holds no word. The menu still opens, because Paste is
+      // the reason to press an empty prompt in the first place, and only
+      // Copy has nothing to act on — see SelectionMenu.
+      const held = emulator.selection() !== ''
       swallowMouse = true
-      // Whatever this gesture was going to be, it is a selection now.
-      touchY = null
-      touchCarry = 0
-      flick = []
-      glide?.()
-      glide = null
+      if (held) {
+        // Whatever this gesture was going to be, it is a selection now, and
+        // the scroll it might have become is given up for the rest of it.
+        selectDrag = true
+        touchY = null
+        touchCarry = 0
+        flick = []
+        glide?.()
+        glide = null
+      }
       const box = inner.getBoundingClientRect()
       // Away from the half the finger is in, so the menu never covers the
       // words it is offering to copy.
-      setMenuEnd(from.y > box.y + box.height / 2 ? 'top' : 'bottom')
+      setMenu({ at: from.y > box.y + box.height / 2 ? 'top' : 'bottom', canCopy: held })
     }
     // The flick record: the last few moves' clocks and positions, enough to
     // read a release velocity from. Cleared whenever a gesture starts.
@@ -1086,9 +1094,10 @@ export function Terminal({
           onKey={(k) => actionsRef.current?.sendKey(k)}
         />
       )}
-      {menuEnd !== null && (
+      {menu !== null && (
         <SelectionMenu
-          at={menuEnd}
+          at={menu.at}
+          canCopy={menu.canCopy}
           onCopy={() => actionsRef.current?.copy()}
           onPaste={() => actionsRef.current?.paste()}
           onCancel={() => actionsRef.current?.dismiss()}

@@ -30,11 +30,21 @@ export type MenuEnd = 'top' | 'bottom'
  */
 export function SelectionMenu({
   at,
+  canCopy,
   onCopy,
   onPaste,
   onCancel,
 }: {
   at: MenuEnd
+  /**
+   * Whether the press found a word.
+   *
+   * False leaves Copy out rather than showing it greyed, because the press
+   * that opens an empty prompt is a press asking to paste: the shortest menu
+   * that answers it is the right one, and a disabled button is a thing to
+   * read past on the way to the button you wanted.
+   */
+  canCopy: boolean
   onCopy: () => void
   onPaste: () => void
   onCancel: () => void
@@ -62,17 +72,24 @@ export function SelectionMenu({
         at === 'top' ? 'top-16' : 'bottom-20',
       )}
     >
-      <button
-        type="button"
-        {...press(onCopy)}
-        className={cn(chip, 'font-medium text-(--chip-fg) active:bg-(--chip-wash)')}
-      >
-        Copy
-      </button>
+      {canCopy && (
+        <button
+          type="button"
+          {...press(onCopy)}
+          className={cn(chip, 'font-medium text-(--chip-fg) active:bg-(--chip-wash)')}
+        >
+          Copy
+        </button>
+      )}
       <button
         type="button"
         {...press(onPaste)}
-        className={cn(chip, 'text-(--chip-dim) active:bg-(--chip-wash)')}
+        className={cn(
+          chip,
+          'active:bg-(--chip-wash)',
+          // Whichever verb the press was asking for reads as the loud one.
+          canCopy ? 'text-(--chip-dim)' : 'font-medium text-(--chip-fg)',
+        )}
       >
         Paste
       </button>
