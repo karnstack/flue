@@ -169,7 +169,6 @@ export function Terminal({
   const ctrlArmedRef = useRef(ctrlArmed)
   ctrlArmedRef.current = ctrlArmed
   const [exitCode, setExitCode] = useState<number | null>(null)
-  const [pasteProblem, setPasteProblem] = useState<string | null>(null)
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
   const [cwd, setCwd] = useState<string | null>(null)
@@ -195,7 +194,6 @@ export function Terminal({
     restart: (dir: string | null) => void
     applyTheme: (id: string) => void
     sendKey: (key: BarKey) => void
-    paste: () => void
   } | null>(null)
   // The latest onRestarted, readable from inside the effect without putting
   // a prop identity in its dependency array.
@@ -246,7 +244,6 @@ export function Terminal({
 
     const palette = resolveTheme(themeIdRef.current, prefersDark())
     const emulator = createEmulator({ cols: 80, rows: 24, theme: palette })
-    let alive = true
     emulator.attachTo(surface)
     emulator.focus()
     paintGround(palette.background)
@@ -271,6 +268,19 @@ export function Terminal({
     // the shell's stdin. head === seq on a fresh spawn opens it immediately.
     let consumed = 0
     let muteUntil = 0
+    // Whether a replayed backlog is still arriving under this attachment.
+    //
+    // The gate above keeps the emulator's *answers* off the wire while the
+    // scrollback replays. This is the other half of the same problem: a
+    // replay also re-runs every mode change in that scrollback, and the
+    // modes outlive it. A shell killed with the daemon inside a
+    // mouse-tracking program wrote the sequence that turned tracking on and
+    // never the one that turns it off, so replaying its snapshot leaves this
+    // emulator reporting the pointer at a fresh prompt — see stopReporting.
+    // Turned off the moment the backlog has been consumed, which is where
+    // the reset goes; false already on a fresh spawn, whose head === seq
+    // means there is nothing replayed to answer for.
+    let replaying = false
     // The attachment's epoch, stepped with every reseed. Each done callback
     // below closes over the value it was written under: one enqueued under a
     // previous attachment can fire after the reseed, and its bytes are
@@ -620,6 +630,7 @@ export function Terminal({
         epoch++
         consumed = a.seq
         muteUntil = a.head
+        replaying = a.head > a.seq
         if (a.truncated) emulator.write(RESET)
         emulator.resize(a.cols, a.rows)
         tabOsc = a.title
@@ -636,7 +647,15 @@ export function Terminal({
         if (r !== ref) return
         const e = epoch
         emulator.write(bytes, () => {
-          if (e === epoch) consumed += bytes.length
+          if (e !== epoch) return
+          consumed += bytes.length
+          // In the done callback and not at frame arrival, for the same
+          // reason the gate is: this has to land after the parser has read
+          // the backlog, or the modes it clears are set again behind it.
+          if (replaying && consumed >= muteUntil) {
+            replaying = false
+            emulator.stopReporting()
+          }
         })
       }),
     )
@@ -766,37 +785,6 @@ export function Terminal({
         }
         client.sendInput(ref, bytes)
       },
-      paste: () => {
-        if (ref === null || consumed < muteUntil) {
-          setPasteProblem('The terminal is not ready for input yet.')
-          return
-        }
-        const clipboard = navigator.clipboard
-        if (!clipboard?.readText) {
-          setPasteProblem('This browser does not allow reading the clipboard here.')
-          return
-        }
-        // A latched hardware modifier does not alter a clipboard paste. Clear
-        // ours before xterm emits the prepared text through onData, or a
-        // one-character paste such as "c" could turn into Ctrl+C.
-        ctrlArmedRef.current = false
-        setCtrlArmed(false)
-        void clipboard.readText().then(
-          (text) => {
-            if (!alive) return
-            if (text === '') {
-              setPasteProblem('The clipboard is empty.')
-              return
-            }
-            setPasteProblem(null)
-            emulator.paste(text)
-            emulator.focus()
-          },
-          () => {
-            if (alive) setPasteProblem('This browser would not hand flue the clipboard.')
-          },
-        )
-      },
     }
 
     // Another tab choosing a theme lands here: the preference is global, and
@@ -817,7 +805,6 @@ export function Terminal({
     client.list()
 
     return () => {
-      alive = false
       actionsRef.current = null
       for (const off of offs) off()
       inner.removeEventListener('touchstart', touchStart)
@@ -893,7 +880,7 @@ export function Terminal({
         data-flue-inset=""
         className={cn(
           'flue-term-gesture absolute inset-3 transition-opacity',
-          coarse && 'bottom-20',
+          coarse && 'bottom-16',
           phase === 'exited' && 'opacity-60',
         )}
       >
@@ -908,21 +895,12 @@ export function Terminal({
           ctrl={ctrlArmed}
           onCtrl={() => setCtrlArmed((v) => !v)}
           onKey={(k) => actionsRef.current?.sendKey(k)}
-          onPaste={() => actionsRef.current?.paste()}
         />
-      )}
-      {pasteProblem !== null && (
-        <p
-          role="alert"
-          className="absolute right-3 bottom-20 left-3 z-20 rounded-md bg-(--chip-bg) px-3 py-2 text-center text-sm text-(--chip-fg) shadow-lg ring-1 ring-(--chip-ring)"
-        >
-          {pasteProblem}
-        </p>
       )}
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar
           eats their clicks. */}
-      <div className="absolute top-3 right-3 z-10 flex max-w-[calc(100%-1.5rem)] items-start gap-x-2 overflow-x-auto overscroll-x-contain">
+      <div className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
         <ThemeMenu value={themeId} dark={dark} onChange={handleTheme} />
         {/*
           The way to another session without leaving this one.
@@ -939,7 +917,7 @@ export function Terminal({
           onClick={() => switcher.open()}
           title={`Switch session · ${chordLabel}`}
           className={cn(
-            'inline-flex size-12 shrink-0 items-center justify-center rounded-lg sm:size-auto sm:px-2.5 sm:py-1.5',
+            'rounded-lg px-2.5 py-1.5',
             'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             'transition-colors hover:text-(--chip-fg)',
           )}
@@ -959,7 +937,7 @@ export function Terminal({
           rel="noopener"
           title="Open the dashboard"
           className={cn(
-            'inline-flex size-12 shrink-0 items-center justify-center rounded-lg sm:size-auto sm:px-2.5 sm:py-1.5',
+            'rounded-lg px-2.5 py-1.5',
             'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             'transition-colors hover:text-(--chip-fg)',
           )}
@@ -983,7 +961,7 @@ export function Terminal({
           onClick={() => onNewSession?.(cwd)}
           title="New session here"
           className={cn(
-            'inline-flex size-12 shrink-0 items-center justify-center rounded-lg sm:size-auto sm:px-2.5 sm:py-1.5',
+            'rounded-lg px-2.5 py-1.5',
             'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             'transition-colors hover:text-(--chip-fg)',
           )}
@@ -1004,7 +982,7 @@ export function Terminal({
             className={cn(
               // /4 line-height: 16px text box + py-1.5 = the same 28px as the
               // icon buttons beside it (size-4 in py-1.5), one strip height.
-              'shrink-0 rounded-lg px-3 py-1.5 text-base/4 font-medium sm:text-sm/4',
+              'rounded-lg px-3 py-1.5 text-base/4 font-medium sm:text-sm/4',
               'bg-(--chip-bg) text-(--chip-fg) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             )}
           >

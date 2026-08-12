@@ -45,6 +45,19 @@ export const TERMINAL_FONT_FAMILY =
 export const NEWLINE_CHORD_BYTES = '\x1b\r'
 
 /**
+ * Every mouse protocol off, every mouse encoding off, focus reporting off.
+ *
+ * The set is exhaustive on purpose. The protocols (1000 press-only, 1002
+ * drag, 1003 any motion) and the encodings (1005 UTF-8, 1006 SGR, 1015
+ * urxvt, 1016 SGR-pixels) are separate switches in the terminal, and a
+ * program may have set any combination of them; clearing the protocol a
+ * particular program happened to use is how this fix would work on one
+ * machine and not the next.
+ */
+const STOP_REPORTING =
+  '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l'
+
+/**
  * xterm.js behind the Emulator seam.
  *
  * The palette is passed in rather than chosen here: which colours a terminal
@@ -171,9 +184,19 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       term.onData((data) => cb(encoder.encode(data)))
     },
 
-    paste(text: string) {
+    stopReporting() {
       if (disposed) return
-      term.paste(text)
+      // Written as output rather than set on xterm's services, because the
+      // parser is the only supported way in and because it keeps the ordering
+      // honest: this lands in the stream where the caller put it, so live
+      // output arriving after it is applied after it. A program that turns
+      // tracking back on a moment later still gets tracking.
+      term.write(STOP_REPORTING)
+    },
+
+    reportsPointer() {
+      if (disposed) return false
+      return term.modes.mouseTrackingMode !== 'none'
     },
 
     attachTo(el: HTMLElement) {

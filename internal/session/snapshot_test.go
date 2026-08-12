@@ -103,6 +103,54 @@ func TestReviveRestoresIdentityAndScrollback(t *testing.T) {
 	}
 }
 
+// TestReviveSettlesTheModesTheDeadShellLeftBehind is the fix for a session
+// that came back reporting the pointer.
+//
+// The shell that died was inside a program holding mouse tracking on, and a
+// killed program writes no reset. Replay that ring into a client and its
+// emulator turns mouse reporting on with a fresh prompt behind it: every
+// pointer move becomes an SGR report typed at the shell, which is what
+// "35;61;22M35;61;21M…" at a prompt is. The same is true of focus reporting
+// and of a leftover scrolling region or charset, none of which the new shell
+// asked for and none of which it will clear.
+func TestReviveSettlesTheModesTheDeadShellLeftBehind(t *testing.T) {
+	r := NewRegistry(nil)
+	s, err := r.Revive(Snapshot{
+		V:    1,
+		ID:   "cafebabe00000006",
+		Cwd:  t.TempDir(),
+		Ring: []byte("a program was here\x1b[?1003h\x1b[?1006h\x1b[?1004h"),
+	})
+	if err != nil {
+		t.Fatalf("Revive: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	sub := s.Subscribe(0)
+	defer s.Unsubscribe(sub)
+
+	for _, mode := range []string{
+		"\x1b[?1000l", "\x1b[?1002l", "\x1b[?1003l",
+		"\x1b[?1005l", "\x1b[?1006l", "\x1b[?1015l", "\x1b[?1016l",
+		"\x1b[?1004l", "\x1b[?2004l", "\x1b[?1l",
+		"\x1b[?7h", "\x1b[?25h", "\x1b[r", "\x1b(B", "\x1b[m",
+	} {
+		if !bytes.Contains(sub.Backlog, []byte(mode)) {
+			t.Fatalf("the revived backlog never clears %q: %q", mode, sub.Backlog)
+		}
+	}
+
+	// Order is the whole point: clearing before the replay would be undone by
+	// the very bytes it exists to answer for.
+	settle := bytes.Index(sub.Backlog, []byte("\x1b[?1003l"))
+	stale := bytes.Index(sub.Backlog, []byte("\x1b[?1003h"))
+	marker := bytes.Index(sub.Backlog, []byte("daemon restarted"))
+	if stale < 0 || !(stale < settle && settle < marker) {
+		t.Fatalf("want the stale set, then the reset, then the marker; got %d, %d, %d in %q",
+			stale, settle, marker, sub.Backlog)
+	}
+}
+
 func TestReviveFallsBackToHomeWhenTheCwdIsGone(t *testing.T) {
 	r := NewRegistry(nil)
 	s, err := r.Revive(Snapshot{V: 1, ID: "cafebabe00000002", Cwd: "/no/such/dir/anywhere"})

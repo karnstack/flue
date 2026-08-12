@@ -65,6 +65,46 @@ type Snapshot struct {
 var reviveMarker = []byte(
 	"\r\n\x1b[2m── daemon restarted · previous shell ended here ──\x1b[0m\r\n\r\n")
 
+// settleModes puts the emulator back into a state a fresh shell can be
+// trusted in, and is written after the replayed scrollback and before the
+// marker.
+//
+// A snapshot's ring is the bytes the dead shell wrote, and a program that was
+// killed with the daemon wrote no epilogue: the sequence that turned a mode
+// on is in the ring and the sequence that turns it back off was never
+// written at all. Replay that into a client and its emulator ends the replay
+// holding modes that belong to a program which no longer exists, with a
+// brand new prompt behind them.
+//
+// The mouse block is the one that bites hardest, because it puts bytes on the
+// wire with nobody typing. Mouse tracking left on means every pointer move
+// over the terminal is encoded and sent, and the shell has no idea what an
+// SGR report is, so it lands at the prompt as "35;61;22M35;61;21M…" — one
+// run per pixel of travel. Focus reporting is the same trick with fewer
+// bytes: ^[[I and ^[[O every time the tab is looked at. Application cursor
+// keys is the quiet one, where the arrows send SS3 to a shell expecting CSI.
+//
+// The rest is display state rather than input, and is here because a shell
+// nobody can read is its own kind of broken: a leftover scrolling region
+// pins the new prompt inside a window the old program chose, the line-drawing
+// charset renders every word as box art, and a hidden cursor stays hidden.
+//
+// The alternate screen is deliberately *not* left, though a dead full-screen
+// program will have been in it. Leaving it would swap in a main buffer whose
+// contents were evicted from the ring long ago, so the price of a tidier
+// terminal would be showing the person an empty one where their scrollback
+// used to be. What they have now is the last frame of the program that died,
+// which is at least what they were looking at.
+var settleModes = []byte(
+	// Mouse reporting, every protocol and every encoding.
+	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" +
+		// Focus reporting, bracketed paste, application cursor keys.
+		"\x1b[?1004l\x1b[?2004l\x1b[?1l" +
+		// Autowrap, a visible cursor, the full scrolling region.
+		"\x1b[?7h\x1b[?25h\x1b[r" +
+		// US-ASCII back in G0, and default attributes.
+		"\x1b(B\x1b[m")
+
 // reviveNote writes the seam, plus — when the snapshot knew of one — the
 // command that picks the interrupted conversation back up.
 //
@@ -156,8 +196,11 @@ func (r *Registry) Revive(snap Snapshot) (*Session, error) {
 		cwd, _ = os.UserHomeDir()
 	}
 	note := reviveNote(snap.ClaudeSession)
-	preload := make([]byte, 0, len(snap.Ring)+len(note))
+	preload := make([]byte, 0, len(snap.Ring)+len(settleModes)+len(note))
 	preload = append(preload, snap.Ring...)
+	// After the scrollback, so the replay cannot undo it, and before the
+	// marker, so the seam is the first thing the settled terminal draws.
+	preload = append(preload, settleModes...)
 	preload = append(preload, note...)
 	return r.start(
 		SpawnOpts{Cwd: cwd, Cols: snap.Cols, Rows: snap.Rows},
