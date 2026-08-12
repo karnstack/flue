@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { FleetSession } from '@/fleet/types'
 import type { RecentVisit } from '@/switcher/recents'
@@ -88,6 +88,10 @@ describe('SessionSwitcher', () => {
     )
   })
 
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('shows nothing at all while shut', () => {
     mount({ open: false })
     expect(screen.queryByRole('combobox')).toBeNull()
@@ -103,6 +107,20 @@ describe('SessionSwitcher', () => {
     expect(rowNames().join(' ')).toContain('pnpm build')
     expect(rowNames().join(' ')).toContain('ssh vps')
     expect(screen.queryByText(/loading/i)).toBeNull()
+  })
+
+  it('does not summon the keyboard when opened on mobile', async () => {
+    vi.stubGlobal('innerWidth', 390)
+    mount()
+
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => expect(document.activeElement).toBe(dialog))
+    expect(dialog.className).toContain('max-md:max-w-none')
+    expect(screen.getByRole('listbox').parentElement!.className).toContain('min-w-0')
+
+    // Search remains available by explicit intent.
+    await userEvent.setup().click(field())
+    expect(document.activeElement).toBe(field())
   })
 
   it('reads pinned first, under its own heading, with the chord on the row', () => {

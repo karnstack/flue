@@ -10,6 +10,8 @@ import { createFakeEmulator, type FakeEmulator } from '@/testing/emulator'
 import { attached, fakeClient, sizeChanged, type FakeSocket } from '@/testing/socket'
 import { RESIZE_SETTLE_MS, Terminal, TERMINAL_SHORTCUT_HINT } from './terminal'
 
+const REAL_CLIPBOARD = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+
 /**
  * One emulator per mount, all of them kept.
  *
@@ -117,6 +119,8 @@ afterEach(() => {
   document.documentElement.style.backgroundColor = ''
   document.body.style.backgroundColor = ''
   localStorage.clear()
+  if (REAL_CLIPBOARD) Object.defineProperty(navigator, 'clipboard', REAL_CLIPBOARD)
+  else Reflect.deleteProperty(navigator, 'clipboard')
 })
 
 /**
@@ -634,6 +638,33 @@ describe('Terminal', () => {
       // 34px of finger over a 17px line: two lines toward the newer end.
       expect(em.live().scrolled).toBe(2)
       expect(move.defaultPrevented).toBe(true)
+    })
+
+    it('scrolls when the gesture starts in usable pane space outside xterm', () => {
+      // A cross-device screen can be scaled smaller than its inset, and the
+      // inset itself has breathing room around the cells. The whole terminal
+      // area must scroll; whether the first pixel hit xterm cannot decide it.
+      const { em } = mountDraggable()
+
+      act(() => void inset().dispatchEvent(touch('touchstart', [200])))
+      const move = touch('touchmove', [166])
+      act(() => void inset().dispatchEvent(move))
+
+      expect(em.live().scrolled).toBe(2)
+      expect(move.defaultPrevented).toBe(true)
+    })
+
+    it('does not resume a one-finger drag after a second finger interrupts it', () => {
+      const { em } = mountDraggable()
+      const surface = surfaceEl()
+
+      act(() => {
+        surface.dispatchEvent(touch('touchstart', [200]))
+        surface.dispatchEvent(touch('touchmove', [166, 240]))
+        surface.dispatchEvent(touch('touchmove', [140]))
+      })
+
+      expect(em.live().scrolled).toBe(0)
     })
 
     it('leaves the gesture to the browser while the page is pinch-zoomed', () => {
@@ -1430,6 +1461,61 @@ describe('Terminal', () => {
       expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
     })
 
+    it('pastes through the emulator from the mobile clipboard', async () => {
+      coarsePointer()
+      const readText = vi.fn().mockResolvedValue('git status\n')
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { readText },
+      })
+      const { sock, em } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('paste'))
+
+      await waitFor(() => expect(em.live().pasted).toEqual(['git status\n']))
+      expect(readText).toHaveBeenCalledTimes(1)
+      expect(sock.input()).toEqual([{ ref: 1, text: 'git status\n' }])
+    })
+
+    it('does not apply the latched Ctrl modifier to a one-character paste', async () => {
+      coarsePointer()
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { readText: vi.fn().mockResolvedValue('c') },
+      })
+      const { sock } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('ctrl'))
+      fireEvent.pointerDown(key('paste'))
+
+      await waitFor(() => expect(sock.input()).toEqual([{ ref: 1, text: 'c' }]))
+      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
+    })
+
+    it('explains when the browser refuses the clipboard', async () => {
+      coarsePointer()
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { readText: vi.fn().mockRejectedValue(new Error('denied')) },
+      })
+      const { sock } = mountTerminal((e) => (
+        <Terminal sessionId="s1" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+
+      fireEvent.pointerDown(key('paste'))
+
+      expect((await screen.findByRole('alert')).textContent).toBe(
+        'This browser would not hand flue the clipboard.',
+      )
+    })
+
     it('drops bar keys pressed before the attach comes back', () => {
       coarsePointer()
       const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
@@ -1440,7 +1526,7 @@ describe('Terminal', () => {
     it('reserves bottom room in the inset so the bar covers no rows', () => {
       coarsePointer()
       mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
-      expect(inset().className).toContain('bottom-16')
+      expect(inset().className).toContain('bottom-20')
     })
   })
 })

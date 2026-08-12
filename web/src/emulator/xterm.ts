@@ -171,6 +171,11 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       term.onData((data) => cb(encoder.encode(data)))
     },
 
+    paste(text: string) {
+      if (disposed) return
+      term.paste(text)
+    },
+
     attachTo(el: HTMLElement) {
       term.open(el)
       // Best-effort GPU rendering; the DOM renderer is a fine fallback, and

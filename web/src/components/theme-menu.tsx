@@ -48,7 +48,7 @@ export function ThemeMenu({
           title="Terminal theme"
           style={chipStyle}
           className={cn(
-            'rounded-lg px-2.5 py-1.5',
+            'inline-flex size-12 shrink-0 items-center justify-center rounded-lg sm:size-auto sm:px-2.5 sm:py-1.5',
             'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             'transition-colors hover:text-(--chip-fg) data-[state=open]:text-(--chip-fg)',
           )}

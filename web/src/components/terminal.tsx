@@ -169,6 +169,7 @@ export function Terminal({
   const ctrlArmedRef = useRef(ctrlArmed)
   ctrlArmedRef.current = ctrlArmed
   const [exitCode, setExitCode] = useState<number | null>(null)
+  const [pasteProblem, setPasteProblem] = useState<string | null>(null)
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
   const [cwd, setCwd] = useState<string | null>(null)
@@ -194,6 +195,7 @@ export function Terminal({
     restart: (dir: string | null) => void
     applyTheme: (id: string) => void
     sendKey: (key: BarKey) => void
+    paste: () => void
   } | null>(null)
   // The latest onRestarted, readable from inside the effect without putting
   // a prop identity in its dependency array.
@@ -244,6 +246,7 @@ export function Terminal({
 
     const palette = resolveTheme(themeIdRef.current, prefersDark())
     const emulator = createEmulator({ cols: 80, rows: 24, theme: palette })
+    let alive = true
     emulator.attachTo(surface)
     emulator.focus()
     paintGround(palette.background)
@@ -461,6 +464,8 @@ export function Terminal({
       // it says. So while zoomed this takes no gesture at all.
       if (e.touches.length !== 1 || zoomedIn(window.visualViewport)) {
         touchY = null
+        touchCarry = 0
+        flick = []
         return
       }
       touchY = e.touches[0]!.clientY
@@ -472,7 +477,13 @@ export function Terminal({
       flick.push({ t: e.timeStamp, y: touchY })
     }
     const touchMove = (e: TouchEvent) => {
-      if (touchY === null || e.touches.length !== 1) return
+      if (e.touches.length !== 1) {
+        touchY = null
+        touchCarry = 0
+        flick = []
+        return
+      }
+      if (touchY === null) return
       // The zoom can arrive after the finger is already down, so the same
       // question is asked again here. Dropping the anchor rather than merely
       // returning keeps a later unzoom from scrolling by the whole distance
@@ -532,10 +543,10 @@ export function Terminal({
       touchCarry = 0
       flick = []
     }
-    surface.addEventListener('touchstart', touchStart, { passive: true })
-    surface.addEventListener('touchmove', touchMove, { passive: false })
-    surface.addEventListener('touchend', touchEnd, { passive: true })
-    surface.addEventListener('touchcancel', touchCancel, { passive: true })
+    inner.addEventListener('touchstart', touchStart, { passive: true })
+    inner.addEventListener('touchmove', touchMove, { passive: false })
+    inner.addEventListener('touchend', touchEnd, { passive: true })
+    inner.addEventListener('touchcancel', touchCancel, { passive: true })
 
     // The pane hugs the visual viewport: a phone keyboard shrinks it and the
     // ResizeObserver below refits the terminal above the keyboard. While
@@ -543,6 +554,7 @@ export function Terminal({
     const untrackViewport = trackVisualViewport({
       pane,
       surface,
+      gestureArea: inner,
       viewport: window.visualViewport,
     })
 
@@ -754,6 +766,37 @@ export function Terminal({
         }
         client.sendInput(ref, bytes)
       },
+      paste: () => {
+        if (ref === null || consumed < muteUntil) {
+          setPasteProblem('The terminal is not ready for input yet.')
+          return
+        }
+        const clipboard = navigator.clipboard
+        if (!clipboard?.readText) {
+          setPasteProblem('This browser does not allow reading the clipboard here.')
+          return
+        }
+        // A latched hardware modifier does not alter a clipboard paste. Clear
+        // ours before xterm emits the prepared text through onData, or a
+        // one-character paste such as "c" could turn into Ctrl+C.
+        ctrlArmedRef.current = false
+        setCtrlArmed(false)
+        void clipboard.readText().then(
+          (text) => {
+            if (!alive) return
+            if (text === '') {
+              setPasteProblem('The clipboard is empty.')
+              return
+            }
+            setPasteProblem(null)
+            emulator.paste(text)
+            emulator.focus()
+          },
+          () => {
+            if (alive) setPasteProblem('This browser would not hand flue the clipboard.')
+          },
+        )
+      },
     }
 
     // Another tab choosing a theme lands here: the preference is global, and
@@ -774,12 +817,13 @@ export function Terminal({
     client.list()
 
     return () => {
+      alive = false
       actionsRef.current = null
       for (const off of offs) off()
-      surface.removeEventListener('touchstart', touchStart)
-      surface.removeEventListener('touchmove', touchMove)
-      surface.removeEventListener('touchend', touchEnd)
-      surface.removeEventListener('touchcancel', touchCancel)
+      inner.removeEventListener('touchstart', touchStart)
+      inner.removeEventListener('touchmove', touchMove)
+      inner.removeEventListener('touchend', touchEnd)
+      inner.removeEventListener('touchcancel', touchCancel)
       glide?.()
       untrackViewport()
       window.removeEventListener('storage', onStorage)
@@ -848,8 +892,8 @@ export function Terminal({
         ref={innerRef}
         data-flue-inset=""
         className={cn(
-          'absolute inset-3 transition-opacity',
-          coarse && 'bottom-16',
+          'flue-term-gesture absolute inset-3 transition-opacity',
+          coarse && 'bottom-20',
           phase === 'exited' && 'opacity-60',
         )}
       >
@@ -864,12 +908,21 @@ export function Terminal({
           ctrl={ctrlArmed}
           onCtrl={() => setCtrlArmed((v) => !v)}
           onKey={(k) => actionsRef.current?.sendKey(k)}
+          onPaste={() => actionsRef.current?.paste()}
         />
+      )}
+      {pasteProblem !== null && (
+        <p
+          role="alert"
+          className="absolute right-3 bottom-20 left-3 z-20 rounded-md bg-(--chip-bg) px-3 py-2 text-center text-sm text-(--chip-fg) shadow-lg ring-1 ring-(--chip-ring)"
+        >
+          {pasteProblem}
+        </p>
       )}
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar
           eats their clicks. */}
-      <div className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
+      <div className="absolute top-3 right-3 z-10 flex max-w-[calc(100%-1.5rem)] items-start gap-x-2 overflow-x-auto overscroll-x-contain">
         <ThemeMenu value={themeId} dark={dark} onChange={handleTheme} />
         {/*
           The way to another session without leaving this one.
@@ -886,7 +939,7 @@ export function Terminal({
           onClick={() => switcher.open()}
           title={`Switch session · ${chordLabel}`}
           className={cn(
-            'rounded-lg px-2.5 py-1.5',
+            'inline-flex size-12 shrink-0 items-center justify-center rounded-lg sm:size-auto sm:px-2.5 sm:py-1.5',
             'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             'transition-colors hover:text-(--chip-fg)',
           )}
@@ -906,7 +959,7 @@ export function Terminal({
           rel="noopener"
           title="Open the dashboard"
           className={cn(
-            'rounded-lg px-2.5 py-1.5',
+            'inline-flex size-12 shrink-0 items-center justify-center rounded-lg sm:size-auto sm:px-2.5 sm:py-1.5',
             'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             'transition-colors hover:text-(--chip-fg)',
           )}
@@ -930,7 +983,7 @@ export function Terminal({
           onClick={() => onNewSession?.(cwd)}
           title="New session here"
           className={cn(
-            'rounded-lg px-2.5 py-1.5',
+            'inline-flex size-12 shrink-0 items-center justify-center rounded-lg sm:size-auto sm:px-2.5 sm:py-1.5',
             'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             'transition-colors hover:text-(--chip-fg)',
           )}
@@ -951,7 +1004,7 @@ export function Terminal({
             className={cn(
               // /4 line-height: 16px text box + py-1.5 = the same 28px as the
               // icon buttons beside it (size-4 in py-1.5), one strip height.
-              'rounded-lg px-3 py-1.5 text-base/4 font-medium sm:text-sm/4',
+              'shrink-0 rounded-lg px-3 py-1.5 text-base/4 font-medium sm:text-sm/4',
               'bg-(--chip-bg) text-(--chip-fg) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
             )}
           >

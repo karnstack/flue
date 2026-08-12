@@ -107,6 +107,15 @@ export interface Emulator {
    */
   onData(cb: (bytes: Uint8Array) => void): void
   /**
+   * Paste text as terminal input.
+   *
+   * This is distinct from feeding raw bytes: a terminal normalises pasted
+   * newlines and wraps the text when the program has enabled bracketed-paste
+   * mode. Mobile clipboard controls must go through the emulator so they keep
+   * those semantics.
+   */
+  paste(text: string): void
+  /**
    * Mount into the DOM.
    *
    * One emulator, one mount. Mounting twice opens a second renderer over the

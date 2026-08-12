@@ -123,6 +123,37 @@ describe('Emulator interface', () => {
     em.dispose()
   })
 
+  it('normalises pasted newlines through xterm', () => {
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const em = createXtermEmulator({ cols: 10, rows: 4 })
+    em.attachTo(el)
+    const seen: string[] = []
+    em.onData((b) => seen.push(new TextDecoder().decode(b)))
+
+    em.paste('one\ntwo\r\nthree')
+
+    expect(seen.join('')).toBe('one\rtwo\rthree')
+    em.dispose()
+    el.remove()
+  })
+
+  it('honours a program that enabled bracketed-paste mode', async () => {
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const em = createXtermEmulator({ cols: 10, rows: 4 })
+    em.attachTo(el)
+    const seen: string[] = []
+    em.onData((b) => seen.push(new TextDecoder().decode(b)))
+    await settled(em, '\x1b[?2004h')
+
+    em.paste('safe')
+
+    expect(seen.join('')).toBe('\x1b[200~safe\x1b[201~')
+    em.dispose()
+    el.remove()
+  })
+
   it('reports no measurement before it is mounted', () => {
     // The sizing policy divides by whatever this returns. A zero-sized answer
     // dressed up as a real one becomes an Infinity one line later; jsdom lays
@@ -156,6 +187,7 @@ describe('Emulator interface', () => {
     em.dispose()
 
     expect(() => em.focus()).not.toThrow()
+    expect(() => em.paste('ignored')).not.toThrow()
     expect(() => em.setTheme({ background: '#000000' })).not.toThrow()
     expect(em.contentSize()).toBeNull()
     expect(() => em.answerQueries(true)).not.toThrow()

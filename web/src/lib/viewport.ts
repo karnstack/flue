@@ -55,17 +55,20 @@ export function zoomedIn(viewport: ViewportLike | null | undefined): boolean {
 export function trackVisualViewport(opts: {
   pane: HTMLElement
   surface: HTMLElement
+  gestureArea?: HTMLElement
   viewport: ViewportLike | null
 }): () => void {
-  const { pane, surface, viewport } = opts
+  const { pane, surface, gestureArea = surface, viewport } = opts
   if (!viewport) return () => {}
 
   const apply = () => {
     if (zoomedIn(viewport)) {
       surface.style.touchAction = 'auto'
+      gestureArea.style.touchAction = 'auto'
       return
     }
     surface.style.touchAction = ''
+    gestureArea.style.touchAction = ''
     pane.style.height = `${viewport.height}px`
     pane.style.translate = `0px ${viewport.offsetTop}px`
   }
@@ -83,6 +86,7 @@ export function trackVisualViewport(opts: {
     if (viewport.onresize === apply) viewport.onresize = null
     if (viewport.onscroll === apply) viewport.onscroll = null
     surface.style.touchAction = ''
+    gestureArea.style.touchAction = ''
     pane.style.height = ''
     pane.style.translate = ''
   }
