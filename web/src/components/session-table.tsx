@@ -184,7 +184,17 @@ function SessionRow({
     <Link
       to={TERMINAL_PATH}
       params={{ deviceId: s.machineId, sessionId: s.id }}
-      aria-label={`Open ${name}`}
+      // A tab of its own, because a session is a tab: this list is the thing
+      // people come back to between sessions, and opening one over it meant
+      // the way back was the browser's back button — which drops the terminal
+      // and its scrollback with it. The router hands the click straight to the
+      // browser once a target is set, so this is a real new tab and not a
+      // navigation dressed up as one.
+      target="_blank"
+      rel="noopener"
+      // Said out loud rather than left to the target attribute, which screen
+      // readers announce inconsistently and some not at all.
+      aria-label={`Open ${name} in a new tab`}
       className="flex min-w-0 flex-1 items-baseline gap-x-2 outline-none after:absolute after:inset-0 after:rounded-md focus-visible:after:outline-2 focus-visible:after:-outline-offset-1 focus-visible:after:outline-ring"
     >
       <span className="truncate text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">

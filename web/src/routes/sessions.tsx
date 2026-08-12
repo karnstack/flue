@@ -5,6 +5,7 @@ import { ChevronDownIcon } from '@heroicons/react/16/solid'
 import type { FlueClient } from '@/client/client'
 import { BulkBar } from '@/components/bulk-bar'
 import { DisplayOptions } from '@/components/display-options'
+import { NewSessionDialog } from '@/components/new-session-dialog'
 import { PageHeader } from '@/components/page-header'
 import { RenameDialog } from '@/components/rename-dialog'
 import { SessionSearch } from '@/components/session-search'
@@ -26,6 +27,7 @@ import { keyOf, LOCAL_MACHINE_ID, type FleetSession, type MachineState } from '@
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
 import { takeCwd } from '@/lib/url'
 import { cn } from '@/lib/utils'
+import { useOpenNewSession, type NewSessionOrigin } from '@/sessions/open-new-session'
 import {
   applyView,
   DEFAULT_VIEW,
@@ -154,6 +156,7 @@ interface PendingSpawn {
 export function SessionsRoute() {
   const fleet = useFleet()
   const navigate = useNavigate()
+  const openNewSession = useOpenNewSession()
 
   /**
    * The fleet's last word: null until it has said anything at all, which is
@@ -222,12 +225,20 @@ export function SessionsRoute() {
   const [notice, setNotice] = useState<string | null>(null)
 
   /**
+   * What the new-session dialog is open on, or null for closed. The value is
+   * whatever the press implied — a machine, a directory, a tag — and it is the
+   * dialog's starting point rather than its answer.
+   */
+  const [creating, setCreating] = useState<NewSessionOrigin | null>(null)
+
+  /**
    * The spawns this screen asked for and has not yet seen answered. A ref,
-   * because their listeners settle them without re-rendering anything but
-   * `starting`, which shadows its emptiness for the one button that renders.
+   * because their listeners settle them without re-rendering anything: this
+   * screen no longer spawns from a button, so the only entry that ever lands
+   * here is the one `flue open` hands over in `?cwd=`, and nothing on screen
+   * is waiting on it.
    */
   const pending = useRef(new Set<PendingSpawn>())
-  const [starting, setStarting] = useState(false)
 
   /**
    * The directory flue open asked for, taken from the URL exactly once —
@@ -243,25 +254,23 @@ export function SessionsRoute() {
    * and write it off when its connection goes. The listeners are registered
    * per spawn, on the client that carries it, because the fleet grows machines
    * over time and a single mount-time subscription could not name them all.
+   *
+   * The one caller left is `flue open`'s handover below. Every spawn a *press*
+   * asks for is made by the new-session page instead, in the tab it opens —
+   * see sessions/new-session.ts for why that has to be a page and not a reply
+   * this screen waits on.
    */
   const adopt = useCallback(
-    (client: FlueClient, machineId: string, reqId: number, tag?: string) => {
+    (client: FlueClient, machineId: string, reqId: number) => {
       const entry: PendingSpawn = { reqId, client, offs: [] }
       const settle = () => {
         if (!pending.current.delete(entry)) return
         for (const off of entry.offs) off()
-        setStarting(pending.current.size > 0)
       }
       entry.offs.push(
         client.onAttached((a) => {
           if (a.reqId !== reqId) return
           settle()
-          // A session started from a tag's heading belongs under that heading,
-          // and `spawn` carries no metadata — so the tag is applied the moment
-          // the session exists and not before. It has to be here rather than
-          // beside the spawn for the obvious reason: until `attached` lands
-          // there is no id to address the edit to.
-          if (tag !== undefined) client.update({ id: a.id, tags: [tag] })
           // Hand the ref straight back: this screen renders no terminal, and
           // the route it navigates to attaches on its own.
           client.detach(a.ref)
@@ -283,25 +292,8 @@ export function SessionsRoute() {
         }),
       )
       pending.current.add(entry)
-      setStarting(true)
     },
     [navigate],
-  )
-
-  const spawnOn = useCallback(
-    (machineId: string | undefined, opts: { cwd?: string; tag?: string } = {}) => {
-      setNotice(null)
-      const client = machineId === undefined ? null : fleet.clientFor(machineId)
-      // 80x24 is a starting point, not a decision; the terminal corrects it
-      // the moment it can measure a pane.
-      const reqId = client?.spawn({ cwd: opts.cwd, cols: 80, rows: 24 }) ?? null
-      if (client === null || reqId === null || machineId === undefined) {
-        setNotice('Not connected to the flue daemon, so nothing was started.')
-        return
-      }
-      adopt(client, machineId, reqId, opts.tag)
-    },
-    [adopt, fleet],
   )
 
   const spawnPendingCwd = useCallback(() => {
@@ -442,12 +434,20 @@ export function SessionsRoute() {
    * test rather than by clicking headings. Only the machine is resolved here,
    * because only this screen knows which machine a heading that names none
    * should fall back to — the same `primaryTarget` the toolbar's own button
-   * spawns on.
+   * opens on.
+   *
+   * What the heading implies is a prefill and not a decision: the dialog opens
+   * on it and the reader may edit any of it, which is how a `+` under "api"
+   * can still start something tagged `api` and `staging`.
    */
   const spawnInGroup = (group: Group) => {
     const want = spawnFromGroup(view.grouping, group.key)
     if (want === null) return
-    spawnOn(want.machineId ?? primaryTarget, { cwd: want.cwd, tag: want.tag })
+    setCreating({
+      machineId: want.machineId ?? primaryTarget,
+      cwd: want.cwd,
+      tags: want.tag === undefined ? [] : [want.tag],
+    })
   }
 
   /**
@@ -655,14 +655,15 @@ export function SessionsRoute() {
             <DisplayOptions view={view} onChange={setView} />
             {/*
               The one filled control on this screen, and a split one: the
-              primary half spawns where a new session most likely belongs —
-              the machine this tab rides, else the first one up — and the
-              chevron half names the rest of the fleet. It takes its teal
+              primary half opens on the machine a new session most likely
+              belongs to — the one this tab rides, else the first one up — and
+              the chevron half names the rest of the fleet. It takes its teal
               from --primary rather than naming a colour.
 
-              Held shut while a spawn is unanswered. Without it, a second
-              click starts a second shell whose `attached` arrives after this
-              screen has navigated away on the first.
+              Neither half starts anything by itself any more. Both open the
+              dialog, which is where a name and a tag can be chosen while
+              there is still a form to choose them on; the session itself is
+              started by the page that dialog opens.
             */}
             {/*
               The default size, not `sm`, and that is a fact about the row
@@ -675,8 +676,7 @@ export function SessionsRoute() {
             */}
             <div className="flex items-center">
               <Button
-                disabled={starting}
-                onClick={() => spawnOn(primaryTarget)}
+                onClick={() => setCreating({ machineId: primaryTarget })}
                 className="rounded-r-none"
               >
                 New session
@@ -684,7 +684,6 @@ export function SessionsRoute() {
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
-                    disabled={starting}
                     aria-label="Choose a machine for the new session"
                     className="-ml-px rounded-l-none px-1"
                   >
@@ -696,7 +695,7 @@ export function SessionsRoute() {
                     <DropdownMenuItem disabled>No machine is reachable</DropdownMenuItem>
                   ) : (
                     online.map((m) => (
-                      <DropdownMenuItem key={m.id} onSelect={() => spawnOn(m.id)}>
+                      <DropdownMenuItem key={m.id} onSelect={() => setCreating({ machineId: m.id })}>
                         {m.name || m.id}
                       </DropdownMenuItem>
                     ))
@@ -766,6 +765,21 @@ export function SessionsRoute() {
 
       {view.grouping === 'machine' &&
         revoked.map((m) => <RevokedBand key={m.id} machines={[m]} />)}
+
+      {/*
+        One dialog for every way of asking, and it takes the whole fleet's
+        online machines rather than the one a press implied: the press is a
+        prefill, and a reader who opened it under the wrong heading should not
+        have to close it to fix that.
+      */}
+      <NewSessionDialog
+        open={creating !== null}
+        initial={creating ?? {}}
+        machines={online.map((m) => ({ id: m.id, name: m.name }))}
+        known={knownTags}
+        onSubmit={openNewSession}
+        onClose={() => setCreating(null)}
+      />
 
       <RenameDialog
         open={renaming !== null}

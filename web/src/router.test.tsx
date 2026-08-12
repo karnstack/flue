@@ -1,11 +1,32 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { RouterProvider } from '@tanstack/react-router'
+import type { SessionInfo } from './client/protocol'
 import { FlueClientProvider } from './client/provider'
 import { FleetClient } from './fleet/fleet'
 import { FleetProvider } from './fleet/provider'
 import { fakeClient } from './testing/socket'
 import { createFlueRouter, TERMINAL_ROUTE_ID } from './router'
+
+/** One session row, with everything a case did not care about filled in. */
+function session(over: Partial<SessionInfo> & { id: string }): SessionInfo {
+  return {
+    title: 'zsh',
+    name: '',
+    tags: [],
+    pinned: false,
+    cwd: '/Users/karn/code/flue',
+    cmd: ['zsh', '-l'],
+    state: 'running',
+    exitCode: 0,
+    cols: 80,
+    rows: 24,
+    createdAt: '2026-07-28T09:00:00Z',
+    lastActive: '2026-07-28T10:00:00Z',
+    ...over,
+  }
+}
 
 function routeIds(path: string): string[] {
   return createFlueRouter()
@@ -257,15 +278,14 @@ describe('createFlueRouter', () => {
     expect(screen.queryByRole('navigation')).toBeNull()
     expect(screen.queryByRole('main')).toBeNull()
     expect(document.querySelector('[data-slot="sidebar"]')).toBeNull()
-    // The only links are the terminal's own control strip — the way back to
-    // the dashboard and the new-session control, both part of the terminal,
-    // not chrome around it. Anything beyond these two is chrome creeping
-    // back in.
+    // The only link is the terminal's own way back to the dashboard: part of
+    // the terminal, not chrome around it. Anything beyond it is chrome
+    // creeping back in. The new-session control beside it is a button, not a
+    // link, because it asks for a name and tags before anything is started.
     const links = screen.queryAllByRole('link')
-    expect(links).toHaveLength(2)
-    const texts = links.map((l) => l.textContent ?? '')
-    expect(texts.some((t) => t.includes('dashboard'))).toBe(true)
-    expect(texts.some((t) => t.includes('New session'))).toBe(true)
+    expect(links).toHaveLength(1)
+    expect(links[0]!.textContent ?? '').toContain('dashboard')
+    expect(screen.getByRole('button', { name: 'New session in this directory' })).toBeTruthy()
   })
 
   it('hands the session id from the path to the terminal', async () => {
@@ -361,6 +381,48 @@ describe('createFlueRouter', () => {
       { type: 'attach', id: 'abc123', lastSeq: 0, reqId: 1 },
     ])
     expect(local.sockets[0]!.ofType('attach')).toEqual([])
+  })
+
+  it('starts a session from inside a terminal without going via the dashboard', async () => {
+    // The `+` in the control strip used to be a link to `/?cwd=`, which is the
+    // sessions dashboard — so a session started from a terminal came up behind
+    // the whole list. It asks first now, and the address it opens is the
+    // new-session page, which renders one pill on the terminal's own ground.
+    //
+    // At the router level rather than in the component, because the pieces
+    // that have to agree live in three files: the chip reports the directory,
+    // the route hosts the form and the fleet fills it, and the builder writes
+    // the address.
+    const open = vi.fn().mockReturnValue({})
+    vi.stubGlobal('open', open)
+    const user = userEvent.setup()
+    const { local, attic } = await renderFleet('/d/local/s/abc123')
+    act(() => local.sockets[0]!.open())
+    act(() => attic.sockets[0]!.open())
+    act(() =>
+      local.sockets[0]!.emitControl({
+        type: 'sessions',
+        sessions: [session({ id: 'abc123', cwd: '/srv/app', tags: ['api'] })],
+      }),
+    )
+
+    await user.click(screen.getByRole('button', { name: 'New session in this directory' }))
+
+    // This session's machine and this session's directory, because that is
+    // what a `+` inside a session means.
+    expect(screen.getByLabelText('Directory')).toHaveProperty('value', '/srv/app')
+    // And the fleet behind it: the other machine is on offer, and the tag this
+    // fleet already uses is a click rather than a sentence of typing.
+    expect(screen.getByRole('combobox', { name: 'Machine' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: 'Add api' }))
+    await user.click(screen.getByRole('button', { name: 'Start session' }))
+
+    const url = new URL(open.mock.calls[0]![0] as string, 'http://localhost')
+    expect(url.pathname).toBe('/new')
+    expect(url.searchParams.get('d')).toBe('local')
+    expect(url.searchParams.get('cwd')).toBe('/srv/app')
+    expect(JSON.parse(url.searchParams.get('tags')!)).toEqual(['api'])
+    expect(open.mock.calls[0]![1]).toBe('_blank')
   })
 
   it('mounts the terminal the moment the fleet adopts the machine', async () => {

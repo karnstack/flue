@@ -88,7 +88,7 @@ async function mountSessions({ open = true, strict = false, solo = false } = {})
     ...['/', '/sessions'].map((path) =>
       createRoute({ getParentRoute: () => rootRoute, path, component: routeComponent }),
     ),
-    ...['/devices', '/settings', '/d/$deviceId/s/$sessionId'].map((path) =>
+    ...['/devices', '/settings', '/new', '/d/$deviceId/s/$sessionId'].map((path) =>
       createRoute({ getParentRoute: () => rootRoute, path, component: () => null }),
     ),
   ])
@@ -189,7 +189,7 @@ describe('SessionsRoute', () => {
 
     expect(screen.queryByText('mesa.local', { selector: '[data-slot="badge"]' })).toBeNull()
     // The row is still there and still named — only the chip went.
-    expect(screen.getByRole('link', { name: 'Open zsh' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Open zsh in a new tab' })).toBeTruthy()
     solo.unmount()
 
     // Two machines, and it is back: it now tells two rows apart.
@@ -271,12 +271,16 @@ describe('SessionsRoute', () => {
     listed(sock, [])
 
     // The row is a link, not a button: its href carries the machine that owns
-    // the session, which is also what a Ctrl/Cmd click hands the browser.
-    const row = screen.getByRole('link', { name: 'Open remote-one' })
+    // the session, and it opens in a tab of its own so this list — the thing
+    // people come back to between sessions — stays where it was.
+    const row = screen.getByRole('link', { name: 'Open remote-one in a new tab' })
     expect(row.getAttribute('href')).toBe('/d/attic-pi/s/abc123')
-    await userEvent.click(row)
+    expect(row.getAttribute('target')).toBe('_blank')
 
-    await waitFor(() => expect(router.state.location.pathname).toBe('/d/attic-pi/s/abc123'))
+    // And the router stands aside for it, which is what makes that a real new
+    // tab rather than a navigation wearing the attribute.
+    await userEvent.click(row)
+    expect(router.state.location.pathname).toBe('/sessions')
   })
 
   describe('metadata actions', () => {
@@ -585,7 +589,7 @@ describe('SessionsRoute', () => {
       expect(screen.queryByText(/this fleet/)).toBeNull()
       // And the machine itself is on screen, working, which is the whole of
       // what that state is.
-      expect(screen.getByRole('link', { name: 'Open zsh' })).toBeTruthy()
+      expect(screen.getByRole('link', { name: 'Open zsh in a new tab' })).toBeTruthy()
     })
 
     it('takes the band down when its machine leaves the relay', async () => {
@@ -689,44 +693,113 @@ describe('SessionsRoute', () => {
   })
 
   describe('starting sessions', () => {
-    it('spawns on the ridden machine from the primary button, only on a click', async () => {
+    /**
+     * Watch the tab this screen opens.
+     *
+     * Nothing on this screen spawns any more: a press opens the new-session
+     * dialog, and submitting it opens `/new` in a tab of its own, which is
+     * where the spawn happens. See sessions/new-session.ts for why that has to
+     * be a page rather than a reply this screen waits on.
+     */
+    function watchOpen() {
+      const open = vi.fn().mockReturnValue({})
+      vi.stubGlobal('open', open)
+      return {
+        opened: () => (open.mock.calls[0]?.[0] as string | undefined) ?? null,
+        target: () => open.mock.calls[0]?.[1] as string | undefined,
+        count: () => open.mock.calls.length,
+      }
+    }
+
+    /** Fill nothing in and press Start. */
+    const start = () => userEvent.click(screen.getByRole('button', { name: 'Start session' }))
+
+    it('opens the dialog on the ridden machine, and starts nothing by itself', async () => {
+      const tabs = watchOpen()
       const { sock } = await mountSessions()
-      expect(sock.ofType('spawn')).toEqual([])
 
       await userEvent.click(newSession())
 
-      expect(sock.ofType('spawn')).toEqual([{ type: 'spawn', cols: 80, rows: 24, reqId: 1 }])
+      // A form, not a shell: the press has asked a question, and the daemon
+      // has not been told anything yet.
+      expect(screen.getByRole('dialog')).toBeTruthy()
+      expect(sock.ofType('spawn')).toEqual([])
+      expect(tabs.count()).toBe(0)
+
+      await start()
+
+      expect(sock.ofType('spawn')).toEqual([])
+      expect(tabs.opened()).toBe('/new?d=local')
+      expect(tabs.target()).toBe('_blank')
     })
 
-    it('spawns on the first online machine when the ridden one is down', async () => {
+    it('falls back to the first online machine when the ridden one is down', async () => {
+      const tabs = watchOpen()
       const { attic } = await mountSessions({ open: false })
       act(() => attic.sockets[0]!.open())
 
       await userEvent.click(newSession())
+      await start()
 
-      expect(attic.sockets[0]!.ofType('spawn')).toHaveLength(1)
+      expect(tabs.opened()).toBe('/new?d=attic-pi')
     })
 
-    it('spawns on the machine picked from the chevron menu, then opens there', async () => {
+    it('opens on the machine picked from the chevron menu', async () => {
+      const tabs = watchOpen()
       const user = userEvent.setup()
-      const { sock, attic, router } = await mountSessions()
+      const { attic } = await mountSessions()
       act(() => attic.sockets[0]!.open())
 
       await user.click(
         screen.getByRole('button', { name: 'Choose a machine for the new session' }),
       )
       await user.click(screen.getByRole('menuitem', { name: 'Attic Pi' }))
+      await start()
 
-      expect(attic.sockets[0]!.ofType('spawn')).toHaveLength(1)
-      expect(sock.ofType('spawn')).toEqual([])
-
-      act(() => attic.sockets[0]!.emitControl(attached({ ref: 4, id: 'fresh9', reqId: 1 })))
-
-      expect(attic.sockets[0]!.ofType('detach')).toEqual([{ type: 'detach', ref: 4 }])
-      await waitFor(() => expect(router.state.location.pathname).toBe('/d/attic-pi/s/fresh9'))
+      expect(tabs.opened()).toBe('/new?d=attic-pi')
     })
 
-    it('spawns into a machine group from its heading', async () => {
+    it('carries a name and tags the reader typed', async () => {
+      // The whole reason the dialog is in front of the press: `spawn` carries
+      // no metadata, so a name and a tag can only be applied after the session
+      // exists — and nobody goes back to a list to do that. Asked here, they
+      // ride the address to the page that starts it.
+      const tabs = watchOpen()
+      const user = userEvent.setup()
+      await mountSessions()
+
+      await user.click(newSession())
+      await user.type(screen.getByLabelText('Name'), 'deploy')
+      await user.type(screen.getByLabelText('Tags'), 'ops{Enter}')
+      await start()
+
+      const url = new URL(tabs.opened()!, 'http://localhost')
+      expect(url.pathname).toBe('/new')
+      expect(url.searchParams.get('name')).toBe('deploy')
+      // An array, JSON-shaped, because that is what the router's own search
+      // serialiser writes and what the page parses back — so a tag with a
+      // comma in it survives the trip.
+      expect(JSON.parse(url.searchParams.get('tags')!)).toEqual(['ops'])
+    })
+
+    it('counts a tag typed but never entered as part of the answer', async () => {
+      // Somebody who typed a tag and reached straight for Start is done.
+      // Throwing that keystroke away would be disagreeing with them in
+      // silence — the chips are gone before anyone can read what was sent.
+      const tabs = watchOpen()
+      const user = userEvent.setup()
+      await mountSessions()
+
+      await user.click(newSession())
+      await user.type(screen.getByLabelText('Tags'), 'staging')
+      await start()
+
+      const url = new URL(tabs.opened()!, 'http://localhost')
+      expect(JSON.parse(url.searchParams.get('tags')!)).toEqual(['staging'])
+    })
+
+    it('prefills the dialog from a machine heading', async () => {
+      const tabs = watchOpen()
       const { attic, sock, welcomeLocal } = await mountSessions()
       welcomeLocal()
       act(() => attic.sockets[0]!.open())
@@ -734,15 +807,17 @@ describe('SessionsRoute', () => {
       listed(attic.sockets[0]!, [info({ id: 's2' })])
 
       await userEvent.click(screen.getByRole('button', { name: 'New session on Attic Pi' }))
+      await start()
 
-      expect(attic.sockets[0]!.ofType('spawn')).toHaveLength(1)
-      expect(sock.ofType('spawn')).toEqual([])
+      expect(tabs.opened()).toBe('/new?d=attic-pi')
     })
 
-    it('spawns into a tag group tagged with that group\'s tag', async () => {
+    it("prefills the dialog with a tag heading's own tag", async () => {
       // The heading names a property its rows share, so the `+` on it makes
       // one of *these* — which for a tag means a session that will land under
-      // the same heading rather than under "No tag" beside it.
+      // the same heading rather than under "No tag" beside it. It is a prefill
+      // and not a decision: the chip is there to be taken off again.
+      const tabs = watchOpen()
       const user = userEvent.setup()
       const { sock, welcomeLocal } = await mountSessions()
       welcomeLocal()
@@ -753,20 +828,16 @@ describe('SessionsRoute', () => {
 
       await user.click(screen.getByRole('button', { name: 'New session tagged api' }))
 
-      expect(sock.ofType('spawn')).toHaveLength(1)
-      // `spawn` carries no metadata, so the tag can only be applied once the
-      // session exists — which is the `attached` that answers it.
-      expect(sock.ofType('update')).toEqual([])
-      // Async, unlike the emits above: this `attached` answers a spawn, so it
-      // also starts the navigation to the new session, and the router's
-      // continuations land a microtask after a synchronous act exits. The
-      // update frame itself is sent synchronously, before the screen changes.
-      await act(async () => sock.emitControl(attached({ ref: 3, id: 'fresh1', reqId: 1 })))
+      expect(screen.getByRole('button', { name: 'Remove api' })).toBeTruthy()
 
-      expect(sock.ofType('update')).toEqual([{ type: 'update', id: 'fresh1', tags: ['api'] }])
+      await start()
+
+      const url = new URL(tabs.opened()!, 'http://localhost')
+      expect(JSON.parse(url.searchParams.get('tags')!)).toEqual(['api'])
     })
 
-    it('spawns into a directory group in that group\'s directory', async () => {
+    it("prefills the dialog with a directory heading's own directory", async () => {
+      const tabs = watchOpen()
       const user = userEvent.setup()
       const { sock, welcomeLocal } = await mountSessions()
       welcomeLocal()
@@ -779,9 +850,28 @@ describe('SessionsRoute', () => {
         screen.getByRole('button', { name: 'New session in /Users/karn/code/flue' }),
       )
 
-      expect(sock.ofType('spawn')).toEqual([
-        { type: 'spawn', cwd: '/Users/karn/code/flue', cols: 80, rows: 24, reqId: 1 },
-      ])
+      expect(screen.getByLabelText('Directory')).toHaveProperty('value', '/Users/karn/code/flue')
+
+      await start()
+
+      const url = new URL(tabs.opened()!, 'http://localhost')
+      expect(url.searchParams.get('cwd')).toBe('/Users/karn/code/flue')
+    })
+
+    it('forgets an abandoned draft rather than carrying it to the next press', async () => {
+      // One dialog serves every way of asking. A name half-typed under one
+      // heading and then cancelled must not turn up under the next — the worst
+      // kind of bug, the kind that saves.
+      const user = userEvent.setup()
+      await mountSessions()
+
+      await user.click(newSession())
+      await user.type(screen.getByLabelText('Name'), 'abandoned')
+      await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+      await user.click(newSession())
+
+      expect(screen.getByLabelText('Name')).toHaveProperty('value', '')
     })
 
     it('offers no spawn control on the Exited heading', async () => {
@@ -805,20 +895,6 @@ describe('SessionsRoute', () => {
       expect(screen.getAllByRole('button', { name: 'New session' })).toHaveLength(2)
     })
 
-    it('hands back the attachment the daemon gave it, then opens the new session', async () => {
-      // The daemon attaches whoever spawns. This screen renders no terminal,
-      // and the terminal route attaches on its own — so keeping the ref would
-      // leave one tab holding two attachments to one session, the one shape
-      // FlueClient's reattach plan cannot carry.
-      const { sock, router } = await mountSessions()
-      await userEvent.click(newSession())
-
-      act(() => sock.emitControl(attached({ ref: 4, id: 'fresh1', reqId: 1 })))
-
-      expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 4 }])
-      await waitFor(() => expect(router.state.location.pathname).toBe('/d/local/s/fresh1'))
-    })
-
     it('ignores an attached it did not ask for', async () => {
       const { sock, router } = await mountSessions()
 
@@ -828,59 +904,25 @@ describe('SessionsRoute', () => {
       expect(router.state.location.pathname).toBe('/sessions')
     })
 
-    it('starts one session per click, not one per impatient click', async () => {
-      const { sock } = await mountSessions()
-
-      await userEvent.click(newSession())
-      await userEvent.click(newSession())
-
-      expect(sock.ofType('spawn')).toHaveLength(1)
-    })
-
-    it('lets the user try again once a spawn has been answered', async () => {
-      const { sock } = await mountSessions()
-      await userEvent.click(newSession())
-      act(() => sock.emitControl({ type: 'error', code: 'spawn_failed', msg: 'nope', reqId: 1 }))
-
-      await userEvent.click(newSession())
-
-      expect(sock.ofType('spawn')).toHaveLength(2)
-    })
-
-    it('hands back a spawn answered after the screen has gone', async () => {
-      const { sock, goTo } = await mountSessions()
-      await userEvent.click(newSession())
-
-      await goTo('/settings')
-      expect(onScreen()).toBe(false)
-      act(() => sock.emitControl(attached({ ref: 7, id: 'orphan', reqId: 1 })))
-
-      expect(sock.ofType('detach')).toEqual([{ type: 'detach', ref: 7 }])
-    })
-
-    it('says so when the daemon refuses to start a session', async () => {
-      const { sock } = await mountSessions()
-      await userEvent.click(newSession())
-
-      act(() =>
-        sock.emitControl({
-          type: 'error',
-          code: 'spawn_failed',
-          msg: 'chdir /nope: no such file',
-          reqId: 1,
-        }),
-      )
-
-      expect(screen.getByRole('status').textContent).toContain('chdir /nope')
-    })
-
-    it('does not silently drop a spawn when no machine is reachable', async () => {
+    it('refuses in words when no machine is reachable', async () => {
+      // The dialog opens from a button that was pressed, so a form that
+      // silently did nothing would leave the reader pressing Start at a fleet
+      // that is not there.
+      const tabs = watchOpen()
       const { sock } = await mountSessions({ open: false })
 
       await userEvent.click(newSession())
 
+      expect(screen.getByText(/no machine is reachable/i)).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Start session' })).toHaveProperty(
+        'disabled',
+        true,
+      )
+
+      await start()
+
       expect(sock.ofType('spawn')).toEqual([])
-      expect(screen.getByRole('status').textContent).toMatch(/not connected/i)
+      expect(tabs.count()).toBe(0)
     })
 
     it('keeps the teal on the new-session control alone', async () => {
