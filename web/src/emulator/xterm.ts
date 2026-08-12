@@ -28,6 +28,23 @@ export const TERMINAL_FONT_FAMILY =
   "ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, monospace"
 
 /**
+ * What a "newline, do not send yet" chord puts on the wire: ESC then CR.
+ *
+ * There is no such thing at the VT level. Enter is a carriage return and
+ * Shift does not change that — xterm.js is faithful to the hardware and
+ * encodes both the same way, which is why Shift+Enter in a browser terminal
+ * submits an agent's prompt rather than adding a line to it.
+ *
+ * ESC CR is the sequence the CLIs themselves settled on. A line editor reads
+ * it as Alt+Enter, `claude /terminal-setup` writes exactly these two bytes
+ * into VS Code's keybindings.json for `shift+enter`, and iTerm2, Ghostty,
+ * WezTerm, Kitty, Warp and Windows Terminal send it out of the box — which is
+ * what "Shift+Enter is natively supported" means in those tools. So this is
+ * flue matching a convention, not inventing one.
+ */
+export const NEWLINE_CHORD_BYTES = '\x1b\r'
+
+/**
  * xterm.js behind the Emulator seam.
  *
  * The palette is passed in rather than chosen here: which colours a terminal
@@ -63,6 +80,32 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
   // The addon's matcher only produces http(s) URIs; the handler still goes
   // through the same guard so there is exactly one place that opens links.
   term.loadAddon(new WebLinksAddon((_event, uri) => openTerminalLink(uri)))
+
+  /*
+   * Shift+Enter, which xterm has no notion of.
+   *
+   * Here rather than in the terminal view, and that is the whole argument for
+   * this seam: the view's own keydown handler has no way to put bytes on the
+   * wire without reaching past it. `term.input` sends them through onData, so
+   * the key bar's latched Ctrl and the replay mute gate both still apply, and
+   * the daemon counts the keystroke as activity exactly as it would any other.
+   *
+   * keydown alone — keyup and keypress arrive for the same press, and either
+   * would send the sequence a second time. Ctrl, Alt and Cmd are all excluded:
+   * Ctrl+Shift+Enter is the view's focus-mode chord, and Alt+Enter already
+   * produces these bytes through xterm's own encoder.
+   */
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== 'keydown') return true
+    if (e.key !== 'Enter' || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return true
+    // xterm keeps the caret in a real textarea, and refusing the event is not
+    // the same as cancelling it: left to the browser, this Enter writes a line
+    // into that element and xterm's input listener then reads a value nothing
+    // typed. xterm's own cancel never runs, because `false` returns above it.
+    e.preventDefault()
+    term.input(NEWLINE_CHORD_BYTES, true)
+    return false
+  })
 
   const encoder = new TextEncoder()
   let disposed = false

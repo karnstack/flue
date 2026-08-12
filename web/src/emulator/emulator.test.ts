@@ -3,7 +3,14 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Terminal } from '@xterm/xterm'
 import { describe, expect, it, vi } from 'vitest'
-import { createXtermEmulator, extractGrid, loadWebglRenderer, openTerminalLink, TERMINAL_FONT_FAMILY } from './xterm'
+import {
+  createXtermEmulator,
+  extractGrid,
+  loadWebglRenderer,
+  NEWLINE_CHORD_BYTES,
+  openTerminalLink,
+  TERMINAL_FONT_FAMILY,
+} from './xterm'
 import type { Emulator } from './types'
 
 /**
@@ -256,6 +263,98 @@ describe('openTerminalLink', () => {
     openTerminalLink('HTTPS//not-a-scheme')
     expect(open).not.toHaveBeenCalled()
     vi.unstubAllGlobals()
+  })
+})
+
+describe('Shift+Enter', () => {
+  /**
+   * Mount an emulator and hand back what it sends and the element xterm
+   * listens for keys on.
+   *
+   * The helper textarea is where every real keystroke lands: xterm keeps the
+   * caret in it and reads keydown from it, so dispatching anywhere else would
+   * measure a listener nobody uses.
+   */
+  function mounted() {
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const em = createXtermEmulator({ cols: 20, rows: 4 })
+    em.attachTo(el)
+    const out: string[] = []
+    em.onData((b) => out.push(new TextDecoder().decode(b)))
+    const textarea = el.querySelector('textarea')!
+    const press = (init: KeyboardEventInit) =>
+      textarea.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          keyCode: 13,
+          bubbles: true,
+          cancelable: true,
+          ...init,
+        }),
+      )
+    return {
+      press,
+      sent: () => out.join(''),
+      done: () => {
+        em.dispose()
+        el.remove()
+      },
+    }
+  }
+
+  it('sends ESC CR, so an agent CLI takes a newline instead of a submit', () => {
+    // The bug this exists for: xterm encodes Enter as a bare CR whatever
+    // Shift is doing, and Claude Code and Codex both read a bare CR as
+    // "send this message". A newline mid-prompt was unreachable in a browser.
+    const t = mounted()
+    t.press({ shiftKey: true })
+    expect(t.sent()).toBe(NEWLINE_CHORD_BYTES)
+    t.done()
+  })
+
+  it('leaves the browser out of it, so no line break lands in the helper', () => {
+    // xterm's caret lives in a real textarea. An Enter left to the browser
+    // puts a line break in that element's value, and xterm's own input
+    // listener then reads a value it never wrote.
+    const t = mounted()
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      keyCode: 13,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    document.querySelector('textarea')!.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(true)
+    t.done()
+  })
+
+  it('leaves a plain Enter as the carriage return every shell expects', () => {
+    const t = mounted()
+    t.press({})
+    expect(t.sent()).toBe('\r')
+    t.done()
+  })
+
+  it('keeps its hands off the focus-mode chord', () => {
+    // Ctrl+Shift+Enter belongs to the terminal view, which takes it on the
+    // way down (components/terminal.tsx). Claiming it here as a newline would
+    // mean the two agree only by accident of listener order.
+    const t = mounted()
+    t.press({ shiftKey: true, ctrlKey: true })
+    expect(t.sent()).not.toBe(NEWLINE_CHORD_BYTES)
+    t.done()
+  })
+
+  it('sends the same bytes for Alt+Enter, which is xterm doing it', () => {
+    // Not a claim about this handler — a check that the sequence chosen is
+    // the one xterm already emits for the other chord that means "newline",
+    // so both spellings arrive at the CLI as one thing.
+    const t = mounted()
+    t.press({ altKey: true })
+    expect(t.sent()).toBe(NEWLINE_CHORD_BYTES)
+    t.done()
   })
 })
 
