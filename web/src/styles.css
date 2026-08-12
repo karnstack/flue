@@ -506,5 +506,15 @@
     caret-color: transparent;
     background-color: transparent;
     -webkit-text-fill-color: transparent;
+    /* No focus ring, and no accessibility owed by dropping it. A browser
+     * draws one around a focused control to say where typing will land, and
+     * this control is a proxy: it has the terminal's box, so the ring is a
+     * blue line around the whole terminal, and what it would be announcing
+     * is already announced by the block cursor blinking in the cells. It
+     * only became visible when the box did — parked off-page at zero size,
+     * this element had been focused and outlined all along. */
+    outline: none !important;
+    /* Safari draws its own, separately, and ignores the line above. */
+    -webkit-tap-highlight-color: transparent;
   }
 }

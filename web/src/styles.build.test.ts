@@ -132,7 +132,14 @@ describe('compiled stylesheet', () => {
     const at = css.lastIndexOf('.xterm-helper-textarea')
     expect(at).toBeGreaterThan(-1)
     const rule = css.slice(at, css.indexOf('}', at))
-    for (const decl of ['inline-size:100%!important', 'block-size:100%!important']) {
+    for (const decl of [
+      'inline-size:100%!important',
+      'block-size:100%!important',
+      // Without this the browser rings the focused element, and the element
+      // now has the terminal's box — so it reads as a blue line drawn around
+      // the whole terminal for as long as the session is being typed into.
+      'outline:none!important',
+    ]) {
       expect(rule).toContain(decl)
     }
     // And only where there is no mouse to lose a text selection to.
