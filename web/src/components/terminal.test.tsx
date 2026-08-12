@@ -8,7 +8,7 @@ import type { SessionInfo } from '@/client/protocol'
 import { GUTTER_PX } from '@/lib/geometry'
 import { createFakeEmulator, type FakeEmulator } from '@/testing/emulator'
 import { attached, fakeClient, sizeChanged, type FakeSocket } from '@/testing/socket'
-import { RESIZE_SETTLE_MS, Terminal, TERMINAL_SHORTCUT_HINT } from './terminal'
+import { LONG_PRESS_MS, RESIZE_SETTLE_MS, Terminal, TERMINAL_SHORTCUT_HINT } from './terminal'
 
 /**
  * One emulator per mount, all of them kept.
@@ -90,9 +90,12 @@ function touch(
   type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel',
   ys: number[],
   at?: number,
+  xs: number[] = [],
 ) {
   const e = new Event(type, { bubbles: true, cancelable: true })
-  Object.defineProperty(e, 'touches', { value: ys.map((clientY) => ({ clientY })) })
+  Object.defineProperty(e, 'touches', {
+    value: ys.map((clientY, i) => ({ clientY, clientX: xs[i] ?? 0 })),
+  })
   if (at !== undefined) Object.defineProperty(e, 'timeStamp', { value: at })
   return e
 }
@@ -848,6 +851,186 @@ describe('Terminal', () => {
 
       expect(em.live().scrolled).toBe(0)
       expect(move.defaultPrevented).toBe(false)
+    })
+  })
+
+  describe('touch selection', () => {
+    /**
+     * Attached, measured, and told where its screen sits on the glass.
+     *
+     * The screen box is what a touch is measured against, and jsdom lays
+     * nothing out, so it is stated here: 80x24 over 800x408 puts a cell at
+     * 10 x 17. `selected` is what the emulator will claim it selected, which
+     * a fake cannot work out for itself.
+     */
+    function mountSelectable(selected = 'c1ff4c66') {
+      const mounted = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => mounted.sock.emitControl(attached({ ref: 1, id: 's1', cols: 80, rows: 24 })))
+      const em = mounted.em.live()
+      em.measured = { width: 800, height: 408 }
+      em.onGlass = { x: 0, y: 0, width: 800, height: 408 }
+      em.word = selected
+      return mounted
+    }
+
+    const press = (x: number, y: number) =>
+      act(() => void inset().dispatchEvent(touch('touchstart', [y], 0, [x])))
+    const hold = () => act(() => void vi.advanceTimersByTime(LONG_PRESS_MS))
+    const menu = () => screen.queryByRole('toolbar', { name: 'Selection' })
+
+    beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }))
+    afterEach(() => vi.useRealTimers())
+
+    it('lifts the word under a finger that holds still', () => {
+      const { em } = mountSelectable()
+
+      press(125, 105)
+      hold()
+
+      // 10px columns and 17px rows, so that point is column 12, row 6.
+      expect(em.live().wordPresses).toEqual([{ col: 12, row: 6 }])
+      expect(menu()).not.toBeNull()
+    })
+
+    it('reads a finger that sets off as a scroll and not as a press', () => {
+      // The two gestures share a surface and are the same event until they
+      // are not. Travel inside the hold is what tells them apart.
+      const { em } = mountSelectable()
+
+      press(125, 300)
+      act(() => void inset().dispatchEvent(touch('touchmove', [200], 16, [125])))
+      hold()
+
+      expect(em.live().wordPresses).toEqual([])
+      expect(em.live().scrolled).not.toBe(0)
+      expect(menu()).toBeNull()
+    })
+
+    it('shows nothing where there is no word to show it for', () => {
+      // A press on the blank half of a line. A menu offering to copy an empty
+      // selection is a menu of buttons that do nothing.
+      const { em } = mountSelectable('')
+
+      press(125, 105)
+      hold()
+
+      expect(em.live().wordPresses).toHaveLength(1)
+      expect(menu()).toBeNull()
+    })
+
+    it('widens the range as the finger travels, instead of scrolling', () => {
+      const { em } = mountSelectable()
+      press(125, 105)
+      hold()
+
+      const move = touch('touchmove', [190], 16, [305])
+      act(() => void inset().dispatchEvent(move))
+
+      expect(em.live().extensions).toEqual([{ col: 30, row: 11 }])
+      // The scrollback stays where it was: one drag cannot both grade a
+      // selection and move what is under it.
+      expect(em.live().scrolled).toBe(0)
+      expect(move.defaultPrevented).toBe(true)
+    })
+
+    it('does not send the scrollback coasting when a selection lifts', () => {
+      const { em } = mountSelectable()
+      press(125, 300)
+      hold()
+
+      act(() => {
+        inset().dispatchEvent(touch('touchmove', [200], 16, [125]))
+        inset().dispatchEvent(touch('touchmove', [100], 32, [125]))
+        inset().dispatchEvent(touch('touchend', [], 40))
+      })
+
+      expect(em.live().scrolled).toBe(0)
+    })
+
+    it('swallows the mouse press the browser replays behind the gesture', () => {
+      // A touch nothing cancelled comes back as a mouse, and xterm answers a
+      // mousedown by starting a selection of its own — clearing this one a
+      // frame after it was made. A press that never moved has no touchmove
+      // to cancel, so the mouse event is the only place left to stop it.
+      mountSelectable()
+      press(125, 105)
+      hold()
+
+      const replay = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+      act(() => void surfaceEl().dispatchEvent(replay))
+
+      expect(replay.defaultPrevented).toBe(true)
+      expect(menu()).not.toBeNull()
+    })
+
+    it('puts the selection away when a finger lands again', () => {
+      const { em } = mountSelectable()
+      press(125, 105)
+      hold()
+
+      press(125, 105)
+
+      expect(em.live().selectionClears).toBeGreaterThan(0)
+      expect(menu()).toBeNull()
+    })
+
+    it('copies the selection to the clipboard', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+      const { em } = mountSelectable('claude --resume c1ff4c66')
+      press(125, 105)
+      hold()
+
+      fireEvent.pointerDown(screen.getByText('Copy'))
+
+      expect(writeText).toHaveBeenCalledWith('claude --resume c1ff4c66')
+      await waitFor(() => expect(menu()).toBeNull())
+      expect(em.live().selectionClears).toBeGreaterThan(0)
+    })
+
+    it('pastes through the emulator, so bracketed paste survives', async () => {
+      const readText = vi.fn().mockResolvedValue('git status\n')
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText } })
+      const { sock, em } = mountSelectable()
+      press(125, 105)
+      hold()
+
+      fireEvent.pointerDown(screen.getByText('Paste'))
+
+      await waitFor(() => expect(em.live().pasted).toEqual(['git status\n']))
+      expect(sock.input()).toEqual([{ ref: 1, text: 'git status\n' }])
+    })
+
+    it('says so when the browser refuses the clipboard', async () => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+      })
+      mountSelectable()
+      press(125, 105)
+      hold()
+
+      fireEvent.pointerDown(screen.getByText('Copy'))
+
+      expect((await screen.findByRole('alert')).textContent).toBe(
+        'This browser would not take the copy.',
+      )
+    })
+
+    it('sits at the end of the terminal the finger is not at', () => {
+      // So the menu never covers the words it is offering to copy.
+      mountSelectable()
+      vi.spyOn(inset(), 'getBoundingClientRect').mockReturnValue({
+        x: 0,
+        y: 0,
+        width: 800,
+        height: 400,
+      } as DOMRect)
+
+      press(125, 380)
+      hold()
+
+      expect(menu()!.className).toContain('top-16')
     })
   })
 

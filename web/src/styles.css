@@ -435,6 +435,12 @@
    * first. The pinch stays with the browser — `none` here once made the
    * page unzoomable on phones, which is too much to take. */
   touch-action: pinch-zoom;
+  /* A long press is ours too — it selects a word and opens flue's own Copy
+   * and Paste menu (terminal.tsx, selection-menu.tsx). iOS answers the same
+   * press with a callout of its own over anything it thinks it can act on,
+   * which would arrive on top of that menu offering a different set of verbs
+   * for the same gesture. */
+  -webkit-touch-callout: none;
 }
 
 /* xterm v6's overlay scrollbar, hidden. It draws over the last column and
@@ -443,78 +449,4 @@
  * this design pays for twice and uses never. */
 .flue-term-surface .xterm .xterm-scrollable-element > .scrollbar {
   display: none;
-}
-
-/*
- * A long press that reaches real editable text, so a phone offers its own
- * Paste.
- *
- * A terminal is a div, and no operating system offers a paste menu over a
- * div. xterm does keep its input in a real textarea, but ships it as a
- * zero-sized box parked off to the far side of the page — enough for a
- * keyboard to type into, never enough for a finger to land on. So a phone
- * has nowhere to press, which is why flue grew a paste chip in the key bar
- * instead, and why that chip fired on pointerdown and threw the clipboard
- * into the terminal whenever a thumb brushed the bar.
- *
- * Giving the textarea the terminal's own box hands the press somewhere to
- * go. The callout is the platform's, so what it offers is what the platform
- * decided to offer; the paste that comes back travels xterm's own paste
- * path, which is what keeps newline handling and bracketed-paste mode
- * right. Typing is unmoved: the same element received it before.
- *
- * Coarse pointers only. On a desktop this element would sit over the screen
- * and eat the drag that selects text.
- *
- * `!important` throughout, and unavoidable: xterm writes this element's
- * placement and stacking as inline style every time the cursor moves, to
- * park an IME popup beside the caret. The cost is that the popup is now
- * placed against the whole terminal rather than the caret, which on a phone
- * is a keyboard the OS positions for itself.
- */
-@media (pointer: coarse) {
-  .flue-term-surface .xterm .xterm-helpers {
-    inline-size: 100%;
-    block-size: 100%;
-    /* The layer is a coordinate space, not a target. Only its textarea
-     * answers a touch, or this would swallow every press meant for the
-     * terminal underneath. */
-    pointer-events: none;
-  }
-
-  .flue-term-surface .xterm .xterm-helper-textarea {
-    inset-block-start: 0 !important;
-    inset-inline-start: 0 !important;
-    inline-size: 100% !important;
-    block-size: 100% !important;
-    line-height: normal !important;
-    /* Sixteen pixels exactly, and it is not a typographic choice: iOS zooms
-     * the whole page in when a person focuses a form control smaller than
-     * this, and a terminal that jumped to 150% on every tap would be a worse
-     * bug than the one above. Nothing renders it — the element is empty and
-     * its ink is transparent — so this is a threshold, not a size. */
-    font-size: 16px !important;
-    /* Above xterm's own canvases, which is what the helpers layer is for;
-     * xterm's inline -5 would put it behind them. */
-    z-index: 1 !important;
-    pointer-events: auto;
-    /* Present rather than see-through: a fully transparent control is not
-     * reliably offered a callout. Nothing shows, because the element is
-     * empty except mid-composition and every ink colour here is none. */
-    opacity: 1 !important;
-    color: transparent;
-    caret-color: transparent;
-    background-color: transparent;
-    -webkit-text-fill-color: transparent;
-    /* No focus ring, and no accessibility owed by dropping it. A browser
-     * draws one around a focused control to say where typing will land, and
-     * this control is a proxy: it has the terminal's box, so the ring is a
-     * blue line around the whole terminal, and what it would be announcing
-     * is already announced by the block cursor blinking in the cells. It
-     * only became visible when the box did — parked off-page at zero size,
-     * this element had been focused and outlined all along. */
-    outline: none !important;
-    /* Safari draws its own, separately, and ignores the line above. */
-    -webkit-tap-highlight-color: transparent;
-  }
 }

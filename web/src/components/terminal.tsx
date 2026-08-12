@@ -4,6 +4,7 @@ import { ArrowLeftRightIcon, LayoutGridIcon, PlusIcon } from 'lucide-react'
 import { useFlueClient } from '@/client/provider'
 import { ExitOverlay } from '@/components/exit-overlay'
 import { KeyBar } from '@/components/key-bar'
+import { SelectionMenu, type MenuEnd } from '@/components/selection-menu'
 import { ThemeMenu } from '@/components/theme-menu'
 import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
 import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
@@ -11,6 +12,7 @@ import type { Emulator } from '@/emulator/types'
 import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
 import { loadThemePref, saveThemePref, THEME_PREF_KEY } from '@/lib/theme-pref'
 import {
+  cellAt,
   cellBox,
   cellsThatFit,
   fitFactor,
@@ -92,6 +94,22 @@ const EXIT_NOTICE = (code: number) =>
 export const RESIZE_SETTLE_MS = 150
 
 /**
+ * How long a finger must hold still before the press counts as a selection.
+ *
+ * Exported for the test, which cannot wait it out in real time and must not
+ * hard-code a number this file is free to change.
+ */
+export const LONG_PRESS_MS = 450
+
+/**
+ * How far a finger may wander in that time and still be holding still.
+ *
+ * Nobody keeps a thumb inside a pixel, and a zero here would mean the
+ * gesture only ever worked for people whose hands did not shake.
+ */
+const PRESS_SLOP = 10
+
+/**
  * The terminal, full bleed, one session.
  *
  * This renders outside AppShell on purpose: a session *is* the tab, so sidebar
@@ -169,6 +187,10 @@ export function Terminal({
   const ctrlArmedRef = useRef(ctrlArmed)
   ctrlArmedRef.current = ctrlArmed
   const [exitCode, setExitCode] = useState<number | null>(null)
+  // Which end the selection menu is showing at, or null for not showing.
+  // One state and not two: there is no menu without a selection.
+  const [menuEnd, setMenuEnd] = useState<MenuEnd | null>(null)
+  const [clipProblem, setClipProblem] = useState<string | null>(null)
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
   const [cwd, setCwd] = useState<string | null>(null)
@@ -194,6 +216,9 @@ export function Terminal({
     restart: (dir: string | null) => void
     applyTheme: (id: string) => void
     sendKey: (key: BarKey) => void
+    copy: () => void
+    paste: () => void
+    dismiss: () => void
   } | null>(null)
   // The latest onRestarted, readable from inside the effect without putting
   // a prop identity in its dependency array.
@@ -244,6 +269,9 @@ export function Terminal({
 
     const palette = resolveTheme(themeIdRef.current, prefersDark())
     const emulator = createEmulator({ cols: 80, rows: 24, theme: palette })
+    // Read by the clipboard callbacks, which settle a promise later and
+    // must not write state into a view that has gone away.
+    let alive = true
     emulator.attachTo(surface)
     emulator.focus()
     paintGround(palette.background)
@@ -455,6 +483,76 @@ export function Terminal({
     // every other scrolling surface on a phone does.
     let touchY: number | null = null
     let touchCarry = 0
+    /*
+     * Long press to select, drag to widen it.
+     *
+     * Copying off a terminal is the one thing a phone could not do here at
+     * all, and it is not for want of a control: the screen is painted to a
+     * canvas, so there is no text on the page for the operating system to
+     * offer its own Copy over, and `user-select` is off across xterm besides.
+     * Nothing but flue can know that those pixels are characters.
+     *
+     * The gesture has to be told apart from the scroll that shares the
+     * surface with it, and the two are the same event until they are not. A
+     * press that holds still for `LONG_PRESS_MS` is a selection; a finger
+     * that travels more than `PRESS_SLOP` before then is a scroll, and the
+     * slop is what keeps a thumb resting on glass from being read as a drag.
+     * Once a selection has begun the scroll path is abandoned for the rest of
+     * the gesture — a drag that both grew a range and scrolled the scrollback
+     * under it would be unusable.
+     */
+    let pressTimer: ReturnType<typeof setTimeout> | null = null
+    let pressFrom: { x: number; y: number } | null = null
+    let selectDrag = false
+    /*
+     * The compatibility mousedown behind a press that selected.
+     *
+     * A touch the page did not cancel is replayed as a mouse, and xterm's own
+     * mousedown handler begins a fresh selection of its own — clearing the
+     * one the press just made, a frame after making it. A long press that
+     * never moved has no touchmove to cancel, so the only place left to stop
+     * it is the mouse event itself. Capture phase on the inset, which is an
+     * ancestor of the element xterm listens on, so this runs first.
+     */
+    let swallowMouse = false
+    const cellUnder = (x: number, y: number) => {
+      const box = emulator.screenBox()
+      return box ? cellAt({ x, y }, box, dims) : null
+    }
+    const endPress = () => {
+      if (pressTimer !== null) clearTimeout(pressTimer)
+      pressTimer = null
+      pressFrom = null
+    }
+    const dismissSelection = () => {
+      emulator.clearSelection()
+      setMenuEnd(null)
+      setClipProblem(null)
+    }
+    const beginSelection = () => {
+      pressTimer = null
+      const from = pressFrom
+      if (from === null) return
+      const cell = cellUnder(from.x, from.y)
+      if (cell === null) return
+      emulator.selectWordAt(cell)
+      // Blank space holds no word, and a press on it selects nothing. Leaving
+      // the menu away is the honest answer: a Copy over an empty selection is
+      // a button that does nothing.
+      if (emulator.selection() === '') return
+      selectDrag = true
+      swallowMouse = true
+      // Whatever this gesture was going to be, it is a selection now.
+      touchY = null
+      touchCarry = 0
+      flick = []
+      glide?.()
+      glide = null
+      const box = inner.getBoundingClientRect()
+      // Away from the half the finger is in, so the menu never covers the
+      // words it is offering to copy.
+      setMenuEnd(from.y > box.y + box.height / 2 ? 'top' : 'bottom')
+    }
     // The flick record: the last few moves' clocks and positions, enough to
     // read a release velocity from. Cleared whenever a gesture starts.
     let flick: Array<{ t: number; y: number }> = []
@@ -472,12 +570,21 @@ export function Terminal({
       // is not enough to give it back: touch-action only says the browser
       // *may* pan, while the preventDefault() below cancels that pan whatever
       // it says. So while zoomed this takes no gesture at all.
+      // A finger anywhere on the terminal puts a showing selection away.
+      // The menu is outside this element, so tapping Copy does not come
+      // through here and does not dismiss the thing it is copying.
+      selectDrag = false
+      endPress()
+      dismissSelection()
       if (e.touches.length !== 1 || zoomedIn(window.visualViewport)) {
         touchY = null
         touchCarry = 0
         flick = []
         return
       }
+      const press = e.touches[0]!
+      pressFrom = { x: press.clientX, y: press.clientY }
+      pressTimer = setTimeout(beginSelection, LONG_PRESS_MS)
       touchY = e.touches[0]!.clientY
       touchCarry = 0
       // The anchor counts as a sample. A flick is often three moves long at a
@@ -491,7 +598,23 @@ export function Terminal({
         touchY = null
         touchCarry = 0
         flick = []
+        // A second finger ends the drag but keeps what it selected: the range
+        // is on screen and the menu is up, and throwing both away because
+        // somebody steadied the phone would be its own bug.
+        selectDrag = false
+        endPress()
         return
+      }
+      const moved = e.touches[0]!
+      if (selectDrag) {
+        e.preventDefault()
+        const cell = cellUnder(moved.clientX, moved.clientY)
+        if (cell !== null) emulator.extendSelectionTo(cell)
+        return
+      }
+      if (pressFrom !== null) {
+        const travel = Math.hypot(moved.clientX - pressFrom.x, moved.clientY - pressFrom.y)
+        if (travel > PRESS_SLOP) endPress()
       }
       if (touchY === null) return
       // The zoom can arrive after the finger is already down, so the same
@@ -515,6 +638,16 @@ export function Terminal({
       if (lines !== 0) emulator.scrollLines(lines)
     }
     const touchEnd = (e: TouchEvent) => {
+      endPress()
+      if (selectDrag) {
+        // The lift leaves the range and the menu standing; there is nothing
+        // here to coast.
+        selectDrag = false
+        touchY = null
+        touchCarry = 0
+        flick = []
+        return
+      }
       const wasDragging = touchY !== null
       touchY = null
       touchCarry = 0
@@ -552,11 +685,20 @@ export function Terminal({
       touchY = null
       touchCarry = 0
       flick = []
+      selectDrag = false
+      endPress()
+    }
+    const swallowSyntheticMouse = (e: MouseEvent) => {
+      if (!swallowMouse) return
+      swallowMouse = false
+      e.preventDefault()
+      e.stopPropagation()
     }
     inner.addEventListener('touchstart', touchStart, { passive: true })
     inner.addEventListener('touchmove', touchMove, { passive: false })
     inner.addEventListener('touchend', touchEnd, { passive: true })
     inner.addEventListener('touchcancel', touchCancel, { passive: true })
+    inner.addEventListener('mousedown', swallowSyntheticMouse, true)
 
     // The pane hugs the visual viewport: a phone keyboard shrinks it and the
     // ResizeObserver below refits the terminal above the keyboard. While
@@ -785,6 +927,50 @@ export function Terminal({
         }
         client.sendInput(ref, bytes)
       },
+      copy: () => {
+        const text = emulator.selection()
+        // Nothing selected is not a failure worth a message; the menu only
+        // exists because something was, and this is the race where a
+        // relayout ate it in between.
+        if (text === '') return dismissSelection()
+        const clipboard = navigator.clipboard
+        if (!clipboard?.writeText) {
+          return setClipProblem('This browser does not allow reading the clipboard here.')
+        }
+        void clipboard.writeText(text).then(
+          () => alive && dismissSelection(),
+          () => alive && setClipProblem('This browser would not take the copy.'),
+        )
+      },
+      paste: () => {
+        if (ref === null || consumed < muteUntil) {
+          return setClipProblem('The terminal is not ready for input yet.')
+        }
+        const clipboard = navigator.clipboard
+        if (!clipboard?.readText) {
+          return setClipProblem('This browser does not allow reading the clipboard here.')
+        }
+        // A latched hardware modifier does not alter a clipboard paste. Clear
+        // ours before xterm emits the prepared text through onData, or a
+        // one-character paste such as "c" would turn into Ctrl+C.
+        ctrlArmedRef.current = false
+        setCtrlArmed(false)
+        void clipboard.readText().then(
+          (text) => {
+            if (!alive) return
+            if (text === '') return setClipProblem('The clipboard is empty.')
+            dismissSelection()
+            // Through the emulator, so the newlines are normalised and a
+            // program in bracketed-paste mode is told what it asked to be
+            // told. Sending these bytes straight down the wire would let a
+            // pasted command with a newline in it run itself.
+            emulator.paste(text)
+            emulator.focus()
+          },
+          () => alive && setClipProblem('This browser would not hand flue the clipboard.'),
+        )
+      },
+      dismiss: dismissSelection,
     }
 
     // Another tab choosing a theme lands here: the preference is global, and
@@ -805,12 +991,15 @@ export function Terminal({
     client.list()
 
     return () => {
+      alive = false
       actionsRef.current = null
       for (const off of offs) off()
       inner.removeEventListener('touchstart', touchStart)
       inner.removeEventListener('touchmove', touchMove)
       inner.removeEventListener('touchend', touchEnd)
       inner.removeEventListener('touchcancel', touchCancel)
+      inner.removeEventListener('mousedown', swallowSyntheticMouse, true)
+      endPress()
       glide?.()
       untrackViewport()
       window.removeEventListener('storage', onStorage)
@@ -896,6 +1085,22 @@ export function Terminal({
           onCtrl={() => setCtrlArmed((v) => !v)}
           onKey={(k) => actionsRef.current?.sendKey(k)}
         />
+      )}
+      {menuEnd !== null && (
+        <SelectionMenu
+          at={menuEnd}
+          onCopy={() => actionsRef.current?.copy()}
+          onPaste={() => actionsRef.current?.paste()}
+          onCancel={() => actionsRef.current?.dismiss()}
+        />
+      )}
+      {clipProblem !== null && (
+        <p
+          role="alert"
+          className="absolute right-3 bottom-20 left-3 z-20 rounded-md bg-(--chip-bg) px-3 py-2 text-center text-sm text-(--chip-fg) shadow-lg ring-1 ring-(--chip-ring)"
+        >
+          {clipProblem}
+        </p>
       )}
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar
