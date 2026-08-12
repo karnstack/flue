@@ -10,8 +10,6 @@ import { createFakeEmulator, type FakeEmulator } from '@/testing/emulator'
 import { attached, fakeClient, sizeChanged, type FakeSocket } from '@/testing/socket'
 import { RESIZE_SETTLE_MS, Terminal, TERMINAL_SHORTCUT_HINT } from './terminal'
 
-const REAL_CLIPBOARD = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
-
 /**
  * One emulator per mount, all of them kept.
  *
@@ -119,8 +117,6 @@ afterEach(() => {
   document.documentElement.style.backgroundColor = ''
   document.body.style.backgroundColor = ''
   localStorage.clear()
-  if (REAL_CLIPBOARD) Object.defineProperty(navigator, 'clipboard', REAL_CLIPBOARD)
-  else Reflect.deleteProperty(navigator, 'clipboard')
 })
 
 /**
@@ -185,6 +181,43 @@ describe('Terminal', () => {
     // assumptions about scroll region, character set, or attributes, and
     // ESC[2J leaves every one of those where the evicted output left them.
     expect(em.live().text()).toBe('\x1bcfresh')
+  })
+
+  it('stops reporting the pointer once the replayed backlog has drained', () => {
+    // The bug: a daemon restart replays a snapshot's scrollback, and that
+    // scrollback carries the mouse-tracking sequence of a program that was
+    // killed with the daemon and so never wrote its own reset. The emulator
+    // ends the replay armed, with a brand new shell behind it, and every
+    // pointer move over the terminal is an SGR report typed at the prompt.
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 8 })))
+    act(() => sock.emitOutput(1, 'backlog!'))
+
+    // After the backlog, never before it: clearing the modes first would be
+    // undone by the very bytes that set them.
+    expect(em.live().reportingStops).toEqual([1])
+  })
+
+  it('leaves the modes alone until the whole backlog is in', () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 12 })))
+    act(() => sock.emitOutput(1, 'part'))
+
+    expect(em.live().reportingStops).toEqual([])
+  })
+
+  it('says nothing about the modes when there is no backlog to replay', () => {
+    // A freshly spawned session has head === seq. Nothing was replayed, so
+    // there is no stale state to answer for, and a program that armed
+    // tracking on its first line must keep it.
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0 })))
+    act(() => sock.emitOutput(1, '\x1b[?1003h'))
+
+    expect(em.live().reportingStops).toEqual([])
   })
 
   it('does not reset when the attach is an ordinary continuation', () => {
@@ -1461,61 +1494,6 @@ describe('Terminal', () => {
       expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
     })
 
-    it('pastes through the emulator from the mobile clipboard', async () => {
-      coarsePointer()
-      const readText = vi.fn().mockResolvedValue('git status\n')
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: { readText },
-      })
-      const { sock, em } = mountTerminal((e) => (
-        <Terminal sessionId="s1" createEmulator={e.create} />
-      ))
-      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
-
-      fireEvent.pointerDown(key('paste'))
-
-      await waitFor(() => expect(em.live().pasted).toEqual(['git status\n']))
-      expect(readText).toHaveBeenCalledTimes(1)
-      expect(sock.input()).toEqual([{ ref: 1, text: 'git status\n' }])
-    })
-
-    it('does not apply the latched Ctrl modifier to a one-character paste', async () => {
-      coarsePointer()
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: { readText: vi.fn().mockResolvedValue('c') },
-      })
-      const { sock } = mountTerminal((e) => (
-        <Terminal sessionId="s1" createEmulator={e.create} />
-      ))
-      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
-
-      fireEvent.pointerDown(key('ctrl'))
-      fireEvent.pointerDown(key('paste'))
-
-      await waitFor(() => expect(sock.input()).toEqual([{ ref: 1, text: 'c' }]))
-      expect(key('ctrl').getAttribute('aria-pressed')).toBe('false')
-    })
-
-    it('explains when the browser refuses the clipboard', async () => {
-      coarsePointer()
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: { readText: vi.fn().mockRejectedValue(new Error('denied')) },
-      })
-      const { sock } = mountTerminal((e) => (
-        <Terminal sessionId="s1" createEmulator={e.create} />
-      ))
-      act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
-
-      fireEvent.pointerDown(key('paste'))
-
-      expect((await screen.findByRole('alert')).textContent).toBe(
-        'This browser would not hand flue the clipboard.',
-      )
-    })
-
     it('drops bar keys pressed before the attach comes back', () => {
       coarsePointer()
       const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
@@ -1526,7 +1504,7 @@ describe('Terminal', () => {
     it('reserves bottom room in the inset so the bar covers no rows', () => {
       coarsePointer()
       mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
-      expect(inset().className).toContain('bottom-20')
+      expect(inset().className).toContain('bottom-16')
     })
   })
 })
