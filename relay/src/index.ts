@@ -24,6 +24,23 @@ export interface Env {
    * closes it, in ms — the same test seam. Unset in production, where the hub
    * defaults to five minutes (src/hub.ts, CLIENT_IDLE_MS). */
   CLIENT_IDLE_TIMEOUT_MS?: string | number
+  /** How many entries one fleet directory will hold — the same test seam
+   * (vitest binds a small number). Unset in production, where it is 512
+   * (src/directory.ts, MAX_ENTRIES), and the reasoning for that number is
+   * written down beside it.
+   *
+   * It is a seam because the cap is only reachable by filling it, and filling
+   * it is 512 sequential round trips through a Durable Object — five seconds
+   * of a runner's time on a good day, and over vitest's own deadline on a
+   * loaded one. Binding it is the difference between a test about the cap and
+   * a bet on how fast the machine is. */
+  DIRECTORY_MAX_ENTRIES?: string | number
+  /** How many push sockets one fleet directory will hold — the same test seam
+   * for the same reason. Unset in production, where it is 256
+   * (src/directory.ts, MAX_DAEMON_SOCKETS). Reaching that cap means opening
+   * 256 WebSockets one at a time and holding them all open, which is the other
+   * test in this file that timed out on CI and passed on a laptop. */
+  DIRECTORY_MAX_DAEMON_SOCKETS?: string | number
   /** The version of the flue that deployed this Worker, stamped by the
    * deploy as a plain-text binding (internal/relaydeploy, VersionVar) and
    * reported on /api/health. It is how a daemon sees that this relay is

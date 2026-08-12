@@ -129,7 +129,11 @@ describe('SessionTable', () => {
       })
 
       const names = screen.getAllByRole('link').map((a) => a.getAttribute('aria-label'))
-      expect(names).toEqual(['Open zeta', 'Open alpha', 'Open mid'])
+      expect(names).toEqual([
+        'Open zeta in a new tab',
+        'Open alpha in a new tab',
+        'Open mid in a new tab',
+      ])
     })
 
     it('asks for a toggle rather than deciding one', async () => {
@@ -170,7 +174,7 @@ describe('SessionTable', () => {
       // 'name' as always on, whatever the columns preference says.
       await renderTable({ columns: ['state'] })
 
-      expect(screen.getByRole('link', { name: 'Open zsh' })).toBeTruthy()
+      expect(screen.getByRole('link', { name: 'Open zsh in a new tab' })).toBeTruthy()
       expect(screen.getByText('zsh')).toBeTruthy()
     })
 
@@ -364,25 +368,28 @@ describe('SessionTable', () => {
   })
 
   describe('opening', () => {
-    it('makes the whole row one link to its session', async () => {
-      const { router } = await renderTable()
+    it('makes the whole row one link to its session, in a tab of its own', async () => {
+      await renderTable()
 
-      const link = screen.getByRole('link', { name: 'Open zsh' })
+      const link = screen.getByRole('link', { name: 'Open zsh in a new tab' })
       // A real href on a real anchor: this is what a middle click, a copied
       // address and a Ctrl/Cmd click all read.
       expect(link.getAttribute('href')).toBe('/d/m1/s/a1')
-
-      await userEvent.click(link)
-      expect(router.state.location.pathname).toBe('/d/m1/s/a1')
+      expect(link.getAttribute('target')).toBe('_blank')
+      expect(link.getAttribute('rel')).toBe('noopener')
     })
 
-    it('leaves a modified click to the browser, which owns the new tab', async () => {
-      // Ctrl/Cmd and middle clicks mean "a new tab" and only the browser can
-      // honour that. The router must not swallow them — TanStack's Link
-      // stands aside for a modified click, so the location holds still here
-      // while a real browser would be opening the terminal beside this tab.
+    it('leaves the click to the browser, which owns the new tab', async () => {
+      // A target the router honours by standing aside — TanStack's Link hands
+      // any click with a target other than _self straight to the browser — so
+      // the location holds still here while a real browser opens the terminal
+      // beside this list. Ctrl, Cmd and middle clicks were already the
+      // browser's, and stay that way.
       const { router } = await renderTable()
-      const link = screen.getByRole('link', { name: 'Open zsh' })
+      const link = screen.getByRole('link', { name: 'Open zsh in a new tab' })
+
+      await userEvent.click(link)
+      expect(router.state.location.pathname).toBe('/sessions')
 
       fireEvent.click(link, { ctrlKey: true })
       expect(router.state.location.pathname).toBe('/sessions')

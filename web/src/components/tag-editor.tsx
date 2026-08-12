@@ -1,7 +1,6 @@
-import { useId, useRef, useState, type RefObject } from 'react'
-import { PlusIcon, XMarkIcon } from '@heroicons/react/16/solid'
+import { useRef, useState, type RefObject } from 'react'
 
-import { Badge } from '@/components/ui/badge'
+import { TagField, withTag } from '@/components/tag-field'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -11,7 +10,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
 
 export interface TagEditorProps {
   open: boolean
@@ -87,25 +85,6 @@ export function TagEditor({ open, current, known, onSubmit, onClose }: TagEditor
 }
 
 /**
- * The set with one more tag in it: trimmed, and unchanged if the tag is blank
- * or already there.
- *
- * Three routes reach this rule and it cannot hold for two of them — a typed
- * Enter, a clicked suggestion, and Save over a field the reader never pressed
- * Enter on. That third one is the reason this is a function rather than four
- * lines inside the first handler that needed them.
- *
- * The comparison is exact rather than case-folded: `API` and `api` are two
- * strings until the daemon says otherwise, and folding them here would drop a
- * tag the reader had just watched themselves type.
- */
-function withTag(held: string[], tag: string): string[] {
-  const clean = tag.trim()
-  if (clean === '' || held.includes(clean)) return held
-  return [...held, clean]
-}
-
-/**
  * The chips, the field, the suggestions, and the two buttons.
  *
  * Deliberately not a form element, unlike the rename dialog's body. Enter here
@@ -117,7 +96,8 @@ function withTag(held: string[], tag: string): string[] {
  * State seeded once from `current` and never resynced: the content this sits
  * in is unmounted on close, so the seeding happens exactly when the dialog
  * opens and a set abandoned on one session cannot follow the reader to the
- * next.
+ * next. The draft is held here rather than inside the field for the reason
+ * Save's own comment gives — it is part of the answer.
  */
 function TagForm({
   field,
@@ -132,100 +112,19 @@ function TagForm({
   onSubmit(tags: string[]): void
   onCancel(): void
 }) {
-  const fieldId = useId()
-  const suggestionsId = useId()
   const [tags, setTags] = useState<string[]>(() => [...current])
   const [draft, setDraft] = useState('')
 
-  /** A typed Enter and a clicked suggestion, both of which empty the field. */
-  const add = (tag: string) => {
-    setDraft('')
-    setTags((held) => withTag(held, tag))
-  }
-
-  // What the fleet knows, minus what this session already carries, narrowed by
-  // what has been typed so far. A prefix rather than a substring: a reader
-  // typing `de` is reaching for a tag they can already half-remember, and
-  // matching the middle of words would answer with tags they were not naming.
-  const needle = draft.trim().toLowerCase()
-  const offered = known.filter(
-    (tag) => !tags.includes(tag) && tag.toLowerCase().startsWith(needle),
-  )
-
   return (
     <div className="grid gap-4">
-      <div className="flex flex-wrap items-center gap-1.5">
-        {tags.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No tags yet.</p>
-        ) : (
-          tags.map((tag) => (
-            /*
-              The chip is the remove control, which is why its accessible name
-              says so: the word on screen is the tag, and a reader hearing
-              only "api, button" would have no idea that pressing it takes the
-              tag away. The X, and the destructive tint under the pointer, say
-              the same thing to the eye.
-            */
-            <Badge key={tag} asChild variant="secondary">
-              <button
-                type="button"
-                aria-label={`Remove ${tag}`}
-                onClick={() => setTags((held) => held.filter((other) => other !== tag))}
-                className="cursor-pointer hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/20"
-              >
-                {tag}
-                <XMarkIcon data-icon="inline-end" aria-hidden="true" />
-              </button>
-            </Badge>
-          ))
-        )}
-      </div>
-
-      <div className="grid gap-1.5">
-        <label htmlFor={fieldId} className="text-sm font-medium text-zinc-950 dark:text-white">
-          Add tag
-        </label>
-        <Input
-          id={fieldId}
-          ref={field}
-          value={draft}
-          autoComplete="off"
-          placeholder="Type a tag, then press Enter"
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key !== 'Enter') return
-            // Nothing above would submit on Enter today, but this field will
-            // one day sit inside something that does.
-            event.preventDefault()
-            add(draft)
-          }}
-        />
-      </div>
-
-      {offered.length > 0 && (
-        <div role="group" aria-labelledby={suggestionsId} className="grid gap-1.5">
-          <p id={suggestionsId} className="text-xs text-muted-foreground">
-            Suggestions
-          </p>
-          {/* Capped in height and scrolled: a fleet with forty tags in it
-              must not push Save off the bottom of the screen. */}
-          <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto">
-            {offered.map((tag) => (
-              <Button
-                key={tag}
-                type="button"
-                variant="outline"
-                size="xs"
-                aria-label={`Add ${tag}`}
-                onClick={() => add(tag)}
-              >
-                <PlusIcon data-icon="inline-start" aria-hidden="true" />
-                {tag}
-              </Button>
-            ))}
-          </div>
-        </div>
-      )}
+      <TagField
+        field={field}
+        tags={tags}
+        onTags={setTags}
+        draft={draft}
+        onDraft={setDraft}
+        known={known}
+      />
 
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onCancel}>

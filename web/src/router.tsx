@@ -10,11 +10,13 @@ import { FleetProvider } from '@/fleet/provider'
 import { AppShell } from '@/components/app-shell'
 import { DevicesRoute } from '@/routes/devices'
 import { MachinesRoute } from '@/routes/machines'
+import { NewSessionRoute } from '@/routes/new-session'
 import { PairRoute } from '@/routes/pair'
 import { RemoteRoute } from '@/routes/remote'
 import { SessionsRoute } from '@/routes/sessions'
 import { SettingsRoute } from '@/routes/settings'
 import { TerminalRoute } from '@/routes/terminal'
+import { NEW_SESSION_PATH, validateNewSessionSearch } from '@/sessions/new-session'
 import { SwitcherProvider } from '@/switcher/provider'
 
 /** The pairing page's path. Its own constant because two routing decisions
@@ -203,6 +205,22 @@ const terminalRoute = createRoute({
 })
 
 /**
+ * The page that starts a session, beside the terminal and outside the shell on
+ * purpose: it is the terminal a moment before there is one, it replaces itself
+ * with that terminal, and app chrome around it would be a dashboard flashing
+ * past on the way — which is the exact complaint it was built to answer.
+ *
+ * The schema is `validateNewSessionSearch`'s, so the narrowing lives beside
+ * the builder that writes these links and the two cannot drift.
+ */
+const newSessionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: NEW_SESSION_PATH,
+  validateSearch: validateNewSessionSearch,
+  component: NewSessionRoute,
+})
+
+/**
  * The machine picker's own address, beside the terminal and outside the shell:
  * it is the relay door, and a door with a sidebar of links to one machine's
  * sessions would be chrome answering the very question the screen is asking.
@@ -262,6 +280,7 @@ const pairRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   shellRoute.addChildren([indexRoute, sessionsRoute, devicesRoute, remoteRoute, settingsRoute]),
   terminalRoute,
+  newSessionRoute,
   machinesRoute,
   pairRoute,
 ])

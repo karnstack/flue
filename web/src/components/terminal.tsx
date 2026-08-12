@@ -51,6 +51,16 @@ export interface TerminalProps {
   onRestarted?: (sessionId: string) => void
   /** Called after Close has closed the dead session; navigate away here. */
   onClosed?: () => void
+  /**
+   * Called by the `+` in the control strip, with this session's directory when
+   * the list has said what it is.
+   *
+   * The dialog it opens lives above this component, not in it, and that is the
+   * same bargain the rest of the file keeps: the form needs the fleet's
+   * machines and the fleet's tags, and a terminal that knew the fleet existed
+   * would be a terminal that could not be mounted without one.
+   */
+  onNewSession?: (cwd: string | null) => void
 }
 
 /** Named so the test and the markup cannot drift apart. */
@@ -124,6 +134,7 @@ export function Terminal({
   createEmulator = createXtermEmulator,
   onRestarted,
   onClosed,
+  onNewSession,
 }: TerminalProps) {
   const client = useFlueClient()
   const switcher = useSwitcher()
@@ -884,14 +895,10 @@ export function Terminal({
           <span className="sr-only">Switch session</span>
         </button>
         {/*
-          A real link, so a middle or cmd click behaves browser-natively. It
-          opens in a new tab by default so this session stays put; the root
-          route spawns into ?cwd= on mount and navigates itself.
-        */}
-        {/*
           The way back to the rest of flue — sessions, devices, remote — in
-          the same chip the strip's other controls wear. A new tab, like the
-          + beside it: this tab is a session and stays one.
+          the same chip the strip's other controls wear. A real link, so a
+          middle or cmd click behaves browser-natively, and a new tab by
+          default: this tab is a session and stays one.
         */}
         <a
           href="/"
@@ -907,13 +914,21 @@ export function Terminal({
           <LayoutGridIcon aria-hidden="true" className="size-4" />
           <span className="sr-only">Open the flue dashboard</span>
         </a>
-        <a
-          href={cwd ? `/?cwd=${encodeURIComponent(cwd)}` : '/'}
-          target="_blank"
-          rel="noopener"
+        {/*
+          A button, and it used to be a link to `/?cwd=` — which is the
+          dashboard, so a session started from here came up behind the whole
+          list for as long as the daemon took to answer. It asks first now:
+          the dialog above this component collects a name and tags while there
+          is still a form to collect them on, and the page it opens starts the
+          session on its own ground.
+
+          The same box as the theme trigger — an icon in px-2.5 py-1.5 — so the
+          cluster reads as one control strip, not two heights.
+        */}
+        <button
+          type="button"
+          onClick={() => onNewSession?.(cwd)}
           title="New session here"
-          // The same box as the theme trigger — an icon in px-2.5 py-1.5 —
-          // so the cluster reads as one control strip, not two heights.
           className={cn(
             'rounded-lg px-2.5 py-1.5',
             'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
@@ -922,7 +937,7 @@ export function Terminal({
         >
           <PlusIcon aria-hidden="true" className="size-4" />
           <span className="sr-only">New session in this directory</span>
-        </a>
+        </button>
         {phase !== 'live' && (
           // Dark in both themes, like the pane it floats over usually is; the
           // translucent ground and backdrop-blur keep it legible over whatever

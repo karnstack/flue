@@ -1,5 +1,6 @@
 import { StrictMode, type ReactNode } from 'react'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FlueClientProvider } from '@/client/provider'
@@ -1658,9 +1659,16 @@ describe('the terminal theme', () => {
   })
 })
 
-describe('the new-session link', () => {
-  it('carries the session’s directory and opens a new tab', () => {
-    const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
+describe('the new-session control', () => {
+  it('hands this session’s directory up, for whoever owns the form', async () => {
+    // It used to be a link to `/?cwd=`, which is the dashboard — so a session
+    // started from a terminal came up behind the whole list. The chip asks
+    // above it now, and the directory is the one thing only this component
+    // knows: the list is where a session's cwd arrives.
+    const onNewSession = vi.fn()
+    const { sock } = mountTerminal((em) => (
+      <Terminal sessionId="s1" createEmulator={em.create} onNewSession={onNewSession} />
+    ))
 
     // Asked for on mount: the list is where the cwd comes from.
     expect(sock.ofType('list')).toHaveLength(1)
@@ -1669,8 +1677,22 @@ describe('the new-session link', () => {
       sock.emitControl({ type: 'sessions', sessions: [session({ cwd: '/tmp/with space' })] }),
     )
 
-    const link = screen.getByRole('link', { name: 'New session in this directory' })
-    expect(link.getAttribute('href')).toBe(`/?cwd=${encodeURIComponent('/tmp/with space')}`)
-    expect(link.getAttribute('target')).toBe('_blank')
+    await userEvent.click(screen.getByRole('button', { name: 'New session in this directory' }))
+
+    expect(onNewSession).toHaveBeenCalledWith('/tmp/with space')
+  })
+
+  it('says so rather than guessing when the list has not answered yet', async () => {
+    // Null, not ''. The form prefills its directory field from this, and an
+    // empty string there reads as "the reader cleared it" — which is a
+    // different instruction to the daemon than "nothing is known".
+    const onNewSession = vi.fn()
+    mountTerminal((em) => (
+      <Terminal sessionId="s1" createEmulator={em.create} onNewSession={onNewSession} />
+    ))
+
+    await userEvent.click(screen.getByRole('button', { name: 'New session in this directory' }))
+
+    expect(onNewSession).toHaveBeenCalledWith(null)
   })
 })
