@@ -42,6 +42,17 @@ export default defineConfig({
           HANDSHAKE_TIMEOUT_MS: 600_000,
           CLIENT_IDLE_TIMEOUT_MS: 600_000,
           PAIR_TIMEOUT_MS: 250,
+          // The directory's entry cap, bound small for the same reason the
+          // deadlines above are bound at all: the only way to test a cap is to
+          // reach it, and reaching the production 512 is 512 sequential round
+          // trips through a Durable Object — five seconds on a quiet machine
+          // and past vitest's own deadline on a loaded one. test/directory.ts
+          // mirrors this number; production binds nothing and gets 512.
+          DIRECTORY_MAX_ENTRIES: 64,
+          // And the socket ceiling, bound small for the same reason: reaching
+          // 256 means opening 256 WebSockets one at a time and holding every
+          // one of them open. test/directory.ts mirrors this number too.
+          DIRECTORY_MAX_DAEMON_SOCKETS: 8,
           DAEMON_SECRET: 'test-secret',
           // The deploy stamps this (internal/relaydeploy, VersionVar); binding
           // it here is what lets the health test pin the passthrough.

@@ -20,11 +20,33 @@ import { BASE, Leg, machineId, sleep, TEST_SECRET, within } from './harness'
 /** Mirrors MAX_BLOB_BYTES in src/directory.ts. */
 const MAX_BLOB_BYTES = 4096
 
-/** Mirrors MAX_ENTRIES in src/directory.ts. */
-const MAX_ENTRIES = 512
+/**
+ * Mirrors DIRECTORY_MAX_ENTRIES in vitest.config.ts, *not* MAX_ENTRIES in
+ * src/directory.ts — the cap is a test seam, and this is the bound half of it.
+ *
+ * Production is 512, and the arithmetic that picks it is written down beside
+ * the constant. It is not the number to test against: the only way to test a
+ * cap is to reach it, and reaching 512 is 512 sequential round trips through a
+ * Durable Object — around five seconds on a quiet machine and past vitest's
+ * own five-second deadline on a loaded one, which is how these tests came to
+ * fail in CI and pass on a laptop. This reaches the same branch in a fraction
+ * of that; what is under test is the refusal, not the size of the number.
+ *
+ * It has headroom on purpose. The shared directory — the one `SELF` routes to,
+ * which nearly every other test in this file writes into — holds ten entries
+ * by the end of the run, and a bound it could reach would start refusing PUTs
+ * in tests that are not about the cap at all. That failure reads as "the push
+ * never came", nowhere near the number that caused it.
+ */
+const MAX_ENTRIES = 64
 
-/** Mirrors MAX_DAEMON_SOCKETS in src/directory.ts. */
-const MAX_DAEMON_SOCKETS = 256
+/**
+ * Mirrors DIRECTORY_MAX_DAEMON_SOCKETS in vitest.config.ts, for the reason
+ * MAX_ENTRIES above is bound: production is 256, and reaching it means opening
+ * 256 WebSockets one at a time and holding all of them open. What is under
+ * test is the refusal at the ceiling, not where the ceiling is.
+ */
+const MAX_DAEMON_SOCKETS = 8
 
 const DIRECTORY = `${BASE}/directory`
 

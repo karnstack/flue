@@ -107,7 +107,7 @@ export class FleetDirectory extends DurableObject<Env> {
     // one PUT, which is one send per socket, against a fleet that has left
     // half-dead sockets behind or a secret-holder opening them in a loop. A
     // one-operator fleet reaches double digits.
-    if (this.ctx.getWebSockets('daemon').length >= MAX_DAEMON_SOCKETS) {
+    if (this.ctx.getWebSockets('daemon').length >= this.maxDaemonSockets()) {
       return new Response('{"error":"too many directory sockets"}', {
         status: 503,
         headers: JSON_NO_STORE,
@@ -155,7 +155,7 @@ export class FleetDirectory extends DurableObject<Env> {
       return stored(key, 200)
     }
     const count = (have.get(COUNT_KEY) as number | undefined) ?? 0
-    if (count >= MAX_ENTRIES) return full()
+    if (count >= this.maxEntries()) return full()
     const version = (have.get(VERSION_KEY) as number | undefined) ?? 0
     // One multi-key put: the blob, the count and the version land together or
     // not at all.
@@ -326,6 +326,23 @@ export class FleetDirectory extends DurableObject<Env> {
     } catch {
       // Already closing.
     }
+  }
+
+  /**
+   * The cap, read the way the hub reads its deadlines: the binding when there
+   * is one, the constant when there is not, and the constant again for a
+   * binding that is not a usable number. Nothing in production binds it; see
+   * DIRECTORY_MAX_ENTRIES in src/index.ts for why the seam exists at all.
+   */
+  private maxEntries(): number {
+    const n = Number(this.env.DIRECTORY_MAX_ENTRIES ?? MAX_ENTRIES)
+    return Number.isFinite(n) && n > 0 ? n : MAX_ENTRIES
+  }
+
+  /** The socket ceiling, read exactly as the entry cap above is. */
+  private maxDaemonSockets(): number {
+    const n = Number(this.env.DIRECTORY_MAX_DAEMON_SOCKETS ?? MAX_DAEMON_SOCKETS)
+    return Number.isFinite(n) && n > 0 ? n : MAX_DAEMON_SOCKETS
   }
 }
 
