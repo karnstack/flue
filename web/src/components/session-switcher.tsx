@@ -91,6 +91,7 @@ export function SessionSwitcher({
 }: SessionSwitcherProps) {
   const [search, setSearch] = useState('')
   const [highlight, setHighlight] = useState<string | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
   const mobile = useIsMobile()
   const apple = useMemo(() => isApplePlatform(), [])
 
@@ -225,15 +226,25 @@ export function SessionSwitcher({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
+        ref={dialogRef}
         showCloseButton={false}
         aria-describedby={undefined}
+        onOpenAutoFocus={(e) => {
+          // Opening the switcher from its touch control is for choosing a row,
+          // not an implicit request to search. Keep the software keyboard down
+          // until the person explicitly taps the field.
+          if (mobile) {
+            e.preventDefault()
+            dialogRef.current?.focus({ preventScroll: true })
+          }
+        }}
         // Anchored high rather than centred: a palette grows downwards as it
         // fills, and one pinned to the middle of the window would slide its own
         // search field up the screen while somebody types into it.
         className={cn(
-          'top-[12vh] w-[56rem] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-2rem)]',
-          'max-h-[76vh] max-md:top-auto max-md:bottom-0 max-md:h-[85vh] max-md:max-h-none',
-          'max-md:w-full max-md:rounded-b-none',
+          'top-[12vh] w-[56rem] grid-rows-[auto_minmax(0,1fr)_auto] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-2rem)]',
+          'max-h-[76vh] max-md:top-auto max-md:bottom-0 max-md:h-[85dvh] max-md:max-h-none',
+          'max-md:w-full max-md:max-w-none max-md:rounded-b-none',
         )}
       >
         <DialogTitle className="sr-only">Switch session</DialogTitle>
@@ -241,7 +252,7 @@ export function SessionSwitcher({
         <div className="flex items-center gap-x-2.5 border-b border-hairline px-3.5">
           <MagnifyingGlassIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
           <input
-            autoFocus
+            autoFocus={!mobile}
             type="text"
             role="combobox"
             aria-expanded="true"
@@ -258,10 +269,10 @@ export function SessionSwitcher({
           />
         </div>
 
-        <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1">
           <div
             className={cn(
-              'min-h-0 flex-1 overflow-y-auto py-1.5',
+              'min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain py-1.5',
               // The pane beside it only exists where there is width for one.
               'md:w-[24rem] md:flex-none md:border-r md:border-hairline',
             )}
@@ -328,7 +339,7 @@ export function SessionSwitcher({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-hairline bg-muted/40 px-3.5 py-2 text-[0.6875rem] text-muted-foreground">
+        <div className="hidden flex-wrap items-center gap-x-4 gap-y-1 border-t border-hairline bg-muted/40 px-3.5 py-2 text-[0.6875rem] text-muted-foreground md:flex">
           <Hint keys="↑↓" what="move" />
           <Hint keys="↵" what="open" />
           <Hint keys={apple ? '⌃⇧1-9' : 'Ctrl+Shift+1-9'} what="pinned" />
@@ -386,7 +397,7 @@ function Row({
       onPointerMove={onHighlight}
       onClick={onPick}
       className={cn(
-        'relative flex h-8 cursor-pointer items-center gap-x-2.5 px-3.5 text-control',
+        'relative flex h-12 cursor-pointer items-center gap-x-2.5 px-3.5 text-base md:h-8 md:text-control',
         active && 'bg-row-hover',
       )}
     >
@@ -408,7 +419,7 @@ function Row({
       >
         {rowLabel(row)}
       </span>
-      <span className="truncate font-mono text-xs text-muted-foreground">{rowCwd(row)}</span>
+      <span className="hidden truncate font-mono text-xs text-muted-foreground sm:inline">{rowCwd(row)}</span>
       <span className="ml-auto flex shrink-0 items-center gap-x-2 pl-2">
         {row.current && <span className="text-xs text-muted-foreground">current</span>}
         <span className="font-mono text-xs text-muted-foreground">{rowMachine(row)}</span>

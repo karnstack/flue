@@ -90,7 +90,8 @@ describe('trackVisualViewport', () => {
 
   it('releases the surface to the browser while pinch-zoomed', () => {
     const vv = fakeViewport({ height: 700 })
-    trackVisualViewport({ pane, surface, viewport: vv })
+    const gestureArea = document.createElement('div')
+    trackVisualViewport({ pane, surface, gestureArea, viewport: vv })
 
     vv.scale = 2
     vv.height = 350
@@ -101,12 +102,14 @@ describe('trackVisualViewport', () => {
     // a zoom is not a layout change: the pane keeps its unzoomed size, so the
     // pty never refits on a pinch.
     expect(surface.style.touchAction).toBe('auto')
+    expect(gestureArea.style.touchAction).toBe('auto')
     expect(pane.style.height).toBe('700px')
 
     vv.scale = 1
     vv.height = 700
     vv.fire()
     expect(surface.style.touchAction).toBe('')
+    expect(gestureArea.style.touchAction).toBe('')
     expect(pane.style.height).toBe('700px')
   })
 

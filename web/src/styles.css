@@ -424,6 +424,12 @@
 @utility flue-term-surface {
   block-size: 100%;
   inline-size: 100%;
+}
+
+/* The inset is the gesture surface, including any blank space beside a
+ * cross-device scaled screen. Keeping this on the full usable pane means a
+ * scroll does not depend on whether the first pixel happened to hit xterm. */
+@utility flue-term-gesture {
   /* Single-finger gestures are ours: touches become scrollLines() calls
    * (terminal.tsx), and a browser allowed to pan the page would eat them
    * first. The pinch stays with the browser — `none` here once made the

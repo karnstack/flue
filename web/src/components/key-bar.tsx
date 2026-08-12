@@ -32,13 +32,15 @@ export function KeyBar(props: {
   ctrl: boolean
   onCtrl: () => void
   onKey: (key: BarKey) => void
+  onPaste: () => void
 }) {
-  const chip = 'rounded-md px-2.5 py-1.5 font-mono text-sm/4 transition-colors select-none'
+  const chip =
+    'min-h-12 shrink-0 rounded-md px-3 py-1.5 font-mono text-sm/4 transition-colors select-none'
   return (
     <div
       data-flue-keybar=""
       className={cn(
-        'absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-x-1',
+        'absolute bottom-3 left-1/2 z-10 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-x-1 overflow-x-auto overscroll-x-contain',
         'rounded-lg bg-(--chip-bg) p-1 shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
       )}
     >
@@ -61,6 +63,20 @@ export function KeyBar(props: {
         )}
       >
         ctrl
+      </button>
+      <button
+        type="button"
+        title="Paste from clipboard"
+        onPointerDown={(e) => {
+          e.preventDefault()
+          props.onPaste()
+        }}
+        onClick={(e) => {
+          if (e.detail === 0) props.onPaste()
+        }}
+        className={cn(chip, 'text-(--chip-dim) hover:text-(--chip-fg) active:bg-(--chip-wash)')}
+      >
+        paste
       </button>
       {KEYS.map((k) => (
         <button

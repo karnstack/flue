@@ -27,6 +27,8 @@ export interface FakeEmulator extends Emulator {
   appCursor: boolean
   /** Simulate the user typing. */
   send(text: string): void
+  /** Text handed to paste(), in order. */
+  readonly pasted: string[]
 }
 
 /**
@@ -45,11 +47,13 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
   const written: string[] = []
   const themes: TerminalTheme[] = []
   const queryAnswers: boolean[] = []
+  const pasted: string[] = []
 
   const self: FakeEmulator = {
     written,
     themes,
     queryAnswers,
+    pasted,
     cols: opts.cols ?? 80,
     rows: opts.rows ?? 24,
     mountedOn: null,
@@ -88,6 +92,11 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
 
     onData(cb: (bytes: Uint8Array) => void) {
       listeners.push(cb)
+    },
+
+    paste(text: string) {
+      pasted.push(text)
+      self.send(text)
     },
 
     attachTo(el: HTMLElement) {
