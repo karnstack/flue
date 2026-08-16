@@ -21,12 +21,19 @@ export type MenuEnd = 'top' | 'bottom'
  * the page for a press to land on, and the browser has no idea the glyphs it
  * drew are text at all.
  *
- * Presses land on pointerdown for the same reason the key bar's do: the press
- * must not take focus from xterm's textarea, because losing it closes the
- * keyboard. The onClick beside each is the assistive-technology path, where a
- * double-tap synthesises a click and dispatches no pointer event; `detail` is
- * 0 for exactly those and keeps a finger's own follow-up click from firing
- * the action twice.
+ * The buttons act on click and cancel their pointerdown, which is not what
+ * the key bar does and is deliberate. Cancelling the pointerdown is what
+ * keeps the press from taking focus off xterm's textarea, because losing it
+ * closes the keyboard — that much the key bar wants too. Acting on the click
+ * rather than on that same pointerdown is for Safari: reading the clipboard
+ * needs a user activation it accepts, and a cancelled pointerdown is not one,
+ * which is why Copy worked from there and Paste silently did not. Writing the
+ * clipboard is held to a far looser rule than reading it, and one menu that
+ * behaves the same way throughout beats two that differ for a reason nobody
+ * reading the markup could see. Cancelling a pointerdown suppresses the
+ * compatibility mouse events and never the click, so there is still a click
+ * to act on — and assistive technology's synthesised double-tap, which
+ * dispatches no pointer event at all, arrives here as one too.
  */
 export function SelectionMenu({
   at,
@@ -51,13 +58,8 @@ export function SelectionMenu({
 }) {
   const chip = 'rounded-md px-3 py-1.5 text-sm/4 transition-colors select-none'
   const press = (act: () => void) => ({
-    onPointerDown: (e: React.PointerEvent) => {
-      e.preventDefault()
-      act()
-    },
-    onClick: (e: React.MouseEvent) => {
-      if (e.detail === 0) act()
-    },
+    onPointerDown: (e: React.PointerEvent) => e.preventDefault(),
+    onClick: () => act(),
   })
   return (
     <div

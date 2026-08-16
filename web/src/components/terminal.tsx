@@ -4,6 +4,7 @@ import { ArrowLeftRightIcon, LayoutGridIcon, PlusIcon } from 'lucide-react'
 import { useFlueClient } from '@/client/provider'
 import { ExitOverlay } from '@/components/exit-overlay'
 import { KeyBar } from '@/components/key-bar'
+import { PasteBox } from '@/components/paste-box'
 import { SelectionMenu, type MenuEnd } from '@/components/selection-menu'
 import { ThemeMenu } from '@/components/theme-menu'
 import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
@@ -196,6 +197,9 @@ export function Terminal({
   // something there.
   const [menu, setMenu] = useState<{ at: MenuEnd; canCopy: boolean } | null>(null)
   const [clipProblem, setClipProblem] = useState<string | null>(null)
+  // Whether the fallback paste field is up, because the browser refused to
+  // read the clipboard for us. See PasteBox.
+  const [pasteBox, setPasteBox] = useState(false)
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
   const [cwd, setCwd] = useState<string | null>(null)
@@ -223,6 +227,7 @@ export function Terminal({
     sendKey: (key: BarKey) => void
     copy: () => void
     paste: () => void
+    pasteText: (text: string) => void
     dismiss: () => void
   } | null>(null)
   // The latest onRestarted, readable from inside the effect without putting
@@ -529,10 +534,28 @@ export function Terminal({
       pressTimer = null
       pressFrom = null
     }
+    /*
+     * Put pasted text on the wire, through the emulator.
+     *
+     * Through it and not straight down the wire, because a terminal
+     * normalises the newlines in pasted text and wraps the whole of it when
+     * the program has asked for bracketed-paste mode. Skipping that would let
+     * a pasted command with a newline in it run itself.
+     */
+    const sendPaste = (text: string) => {
+      emulator.paste(text)
+      emulator.focus()
+    }
+    const openPasteBox = () => {
+      setMenu(null)
+      setClipProblem(null)
+      setPasteBox(true)
+    }
     const dismissSelection = () => {
       emulator.clearSelection()
       setMenu(null)
       setClipProblem(null)
+      setPasteBox(false)
     }
     const beginSelection = () => {
       pressTimer = null
@@ -955,9 +978,10 @@ export function Terminal({
           return setClipProblem('The terminal is not ready for input yet.')
         }
         const clipboard = navigator.clipboard
-        if (!clipboard?.readText) {
-          return setClipProblem('This browser does not allow reading the clipboard here.')
-        }
+        // No clipboard to read, or no permission to read it: both end at the
+        // field the person can paste into themselves, which is the one route
+        // no browser gates.
+        if (!clipboard?.readText) return openPasteBox()
         // A latched hardware modifier does not alter a clipboard paste. Clear
         // ours before xterm emits the prepared text through onData, or a
         // one-character paste such as "c" would turn into Ctrl+C.
@@ -968,16 +992,12 @@ export function Terminal({
             if (!alive) return
             if (text === '') return setClipProblem('The clipboard is empty.')
             dismissSelection()
-            // Through the emulator, so the newlines are normalised and a
-            // program in bracketed-paste mode is told what it asked to be
-            // told. Sending these bytes straight down the wire would let a
-            // pasted command with a newline in it run itself.
-            emulator.paste(text)
-            emulator.focus()
+            sendPaste(text)
           },
-          () => alive && setClipProblem('This browser would not hand flue the clipboard.'),
+          () => alive && openPasteBox(),
         )
       },
+      pasteText: sendPaste,
       dismiss: dismissSelection,
     }
 
@@ -1101,6 +1121,15 @@ export function Terminal({
           onCopy={() => actionsRef.current?.copy()}
           onPaste={() => actionsRef.current?.paste()}
           onCancel={() => actionsRef.current?.dismiss()}
+        />
+      )}
+      {pasteBox && (
+        <PasteBox
+          onText={(text) => {
+            setPasteBox(false)
+            actionsRef.current?.pasteText(text)
+          }}
+          onCancel={() => setPasteBox(false)}
         />
       )}
       {clipProblem !== null && (

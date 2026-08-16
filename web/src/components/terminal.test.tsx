@@ -991,6 +991,28 @@ describe('Terminal', () => {
       expect(menu()).toBeNull()
     })
 
+    it('acts on the click and not on the pointerdown behind it', () => {
+      // Safari will not read the clipboard for a cancelled pointerdown, and
+      // that cancel is load-bearing: without it the press takes focus off
+      // xterm and the keyboard closes under the menu. So the cancel stays and
+      // the click is what acts — which is also one press, one action, rather
+      // than an action on the way down and another on the way up.
+      const readText = vi.fn().mockResolvedValue('x')
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText } })
+      mountSelectable()
+      press(125, 105)
+      hold()
+
+      const down = new PointerEvent('pointerdown', { bubbles: true, cancelable: true })
+      act(() => void screen.getByText('Paste').dispatchEvent(down))
+
+      expect(down.defaultPrevented).toBe(true)
+      expect(readText).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByText('Paste'))
+      expect(readText).toHaveBeenCalledTimes(1)
+    })
+
     it('copies the selection to the clipboard', async () => {
       const writeText = vi.fn().mockResolvedValue(undefined)
       Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
@@ -998,7 +1020,7 @@ describe('Terminal', () => {
       press(125, 105)
       hold()
 
-      fireEvent.pointerDown(screen.getByText('Copy'))
+      fireEvent.click(screen.getByText('Copy'))
 
       expect(writeText).toHaveBeenCalledWith('claude --resume c1ff4c66')
       await waitFor(() => expect(menu()).toBeNull())
@@ -1012,13 +1034,13 @@ describe('Terminal', () => {
       press(125, 105)
       hold()
 
-      fireEvent.pointerDown(screen.getByText('Paste'))
+      fireEvent.click(screen.getByText('Paste'))
 
       await waitFor(() => expect(em.live().pasted).toEqual(['git status\n']))
       expect(sock.input()).toEqual([{ ref: 1, text: 'git status\n' }])
     })
 
-    it('says so when the browser refuses the clipboard', async () => {
+    it('says so when the browser refuses the copy', async () => {
       Object.defineProperty(navigator, 'clipboard', {
         configurable: true,
         value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
@@ -1027,11 +1049,50 @@ describe('Terminal', () => {
       press(125, 105)
       hold()
 
-      fireEvent.pointerDown(screen.getByText('Copy'))
+      fireEvent.click(screen.getByText('Copy'))
 
       expect((await screen.findByRole('alert')).textContent).toBe(
         'This browser would not take the copy.',
       )
+    })
+
+    it('offers a field to paste into when the browser refuses to be read', async () => {
+      // Safari answers a clipboard read it does not approve of by doing
+      // nothing, so a message would be flue guessing. Pasting into a text
+      // field is not a permission at all — it is somebody using their own
+      // clipboard — and that is the route this falls back to.
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { readText: vi.fn().mockRejectedValue(new Error('NotAllowedError')) },
+      })
+      const { sock, em } = mountSelectable()
+      press(125, 105)
+      hold()
+
+      fireEvent.click(screen.getByText('Paste'))
+
+      const field = await screen.findByLabelText('Paste here')
+      expect(menu()).toBeNull()
+
+      fireEvent.paste(field, { clipboardData: { getData: () => 'git status' } })
+
+      await waitFor(() => expect(em.live().pasted).toEqual(['git status']))
+      expect(sock.input()).toEqual([{ ref: 1, text: 'git status' }])
+      expect(screen.queryByLabelText('Paste here')).toBeNull()
+    })
+
+    it('takes a keyboard that inserts the paste as ordinary typing', async () => {
+      // Clipboard managers and dictation do not always raise a paste event.
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {} })
+      const { em } = mountSelectable()
+      press(125, 105)
+      hold()
+
+      fireEvent.click(screen.getByText('Paste'))
+      const field = await screen.findByLabelText('Paste here')
+      fireEvent.input(field, { target: { value: 'ls -al' } })
+
+      await waitFor(() => expect(em.live().pasted).toEqual(['ls -al']))
     })
 
     it('sits at the end of the terminal the finger is not at', () => {
