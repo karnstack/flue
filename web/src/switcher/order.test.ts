@@ -389,3 +389,75 @@ describe('the cycle', () => {
     expect(stepCycle(order, 'local/over', 1)?.id).toBe('a')
   })
 })
+
+describe('the group section', () => {
+  const anchor = s({ id: 'a', name: 'api' })
+  const member = s({ id: 'm1', name: 'logs', group: 'a', createdAt: '2026-01-02T00:00:00Z' })
+  const other = s({ id: 'x', name: 'elsewhere' })
+
+  it('leads the resting palette with the current group’s other terminals', () => {
+    const palette = buildPalette({
+      sessions: [other, member, anchor],
+      recents: [],
+      search: '',
+      currentKey: 'local/a',
+    })
+    expect(sectionKeys(palette)[0]).toBe('group')
+    const group = palette.sections[0]!
+    expect(group.label).toBe('This session')
+    // The session the tab is on gets no *group* row — this section is a
+    // take-me-there control, and here is not a there — though it keeps its
+    // ordinary row further down, marked current, as it always has. The
+    // sibling does not resurface below.
+    expect(group.rows.map((r) => r.key)).toEqual(['local/m1'])
+    const all = palette.sections.find((sec) => sec.key === 'all')!
+    expect(all.rows.map((r) => r.key)).toEqual(['local/a', 'local/x'])
+  })
+
+  it('resolves the group from a member’s own tab too', () => {
+    const palette = buildPalette({
+      sessions: [anchor, member],
+      recents: [],
+      search: '',
+      currentKey: 'local/m1',
+    })
+    expect(palette.sections[0]!.rows.map((r) => r.key)).toEqual(['local/a'])
+  })
+
+  it('is absent outside a session and for a group of one', () => {
+    for (const currentKey of [null, 'local/x']) {
+      const palette = buildPalette({
+        sessions: [anchor, member, other],
+        recents: [],
+        search: '',
+        currentKey,
+      })
+      expect(sectionKeys(palette)).not.toContain('group')
+    }
+  })
+
+  it('leaves a pinned sibling to the Pinned run — the number chords hang off it', () => {
+    const pinnedMember = s({ id: 'm2', name: 'pinned one', group: 'a', pinned: true })
+    const palette = buildPalette({
+      sessions: [anchor, member, pinnedMember],
+      recents: [],
+      search: '',
+      currentKey: 'local/a',
+    })
+    const group = palette.sections.find((sec) => sec.key === 'group')!
+    const pinned = palette.sections.find((sec) => sec.key === 'pinned')!
+    expect(group.rows.map((r) => r.key)).toEqual(['local/m1'])
+    expect(pinned.rows.map((r) => r.key)).toEqual(['local/m2'])
+  })
+
+  it('never crosses machines, however the ids collide', () => {
+    const farMember = s({ id: 'm1', group: 'a', machineId: 'far', machineName: 'far' })
+    const palette = buildPalette({
+      sessions: [anchor, farMember],
+      recents: [],
+      search: '',
+      currentKey: 'local/a',
+    })
+    expect(sectionKeys(palette)).not.toContain('group')
+  })
+})

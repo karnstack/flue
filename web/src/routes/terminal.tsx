@@ -8,10 +8,16 @@ import { SessionGroup } from '@/components/session-group'
 import { Terminal } from '@/components/terminal'
 import { useFleet } from '@/fleet/provider'
 import type { FleetSession, MachineState } from '@/fleet/types'
-import { matchNewTabChord, matchSplitChord, type GroupLayout } from '@/lib/split-keys'
+import {
+  matchNewTabChord,
+  matchSplitChord,
+  matchTabCycleChord,
+  type GroupLayout,
+} from '@/lib/split-keys'
 import { anchorIdOf, groupMembers } from '@/sessions/groups'
 import { useIsMobile } from '@/hooks/use-mobile'
 import {
+  leafIds,
   loadTabs,
   reconcileTabs,
   saveTabs,
@@ -89,13 +95,12 @@ export function TerminalRoute() {
   // spawn a stranger next to the session instead of a pane in it.
   const canMultiplex = useHasCap(client, 'multiplex')
 
-  // Panes this view has been asked to stop showing: a member whose exit
-  // overlay was closed, or one replaced by its own Restart. The row lingers
-  // in the daemon's list for the exited retention, so "closed" has to be
-  // this view's own fact. Never reset — session ids do not recur, a stale
-  // entry for a reaped session matches nothing, and a reset keyed on the
-  // anchor was measured resurrecting dismissed panes when a Restart's
-  // navigation made the anchor flap for a beat.
+  // Panes whose shells exited while this view watched, folded away. The row
+  // lingers in the daemon's list for the exited retention, so "closed" has
+  // to be this view's own fact. Never reset — session ids do not recur, a
+  // stale entry for a reaped session matches nothing, and a reset keyed on
+  // the anchor was measured resurrecting dismissed panes when navigation
+  // made the anchor flap for a beat.
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(() => new Set())
 
   // The URL keeps naming the session that was opened; the group is resolved
@@ -300,12 +305,47 @@ export function TerminalRoute() {
     return () => window.removeEventListener('keydown', onKey, true)
   }, [canMultiplex])
 
+  /*
+   * Walking the tabs: ⌥⌘←/→ (Ctrl+Alt+←/→ off a Mac) steps to the
+   * neighbouring tab — of trees on a desktop, of panes on a phone. Purely
+   * client-side, so it works against any daemon, and mounted once with every
+   * moving part behind a ref.
+   */
+  const tabsRef = useRef(tabTrees)
+  tabsRef.current = tabTrees
+  const shownRef = useRef(sessionId)
+  const mobileRef = useRef(isMobile)
+  mobileRef.current = isMobile
+  useEffect(() => {
+    const apple = isApplePlatform()
+    const onKey = (e: KeyboardEvent) => {
+      const step = matchTabCycleChord(e, apple)
+      if (step === null) return
+      const ids = paneIdsRef.current
+      if (ids.length <= 1) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (mobileRef.current) {
+        const at = Math.max(0, ids.indexOf(shownRef.current))
+        setActive(ids[(at + step + ids.length) % ids.length]!)
+        return
+      }
+      const tabs = tabsRef.current
+      if (tabs.length <= 1) return
+      const at = Math.max(0, tabOf(tabs, shownRef.current))
+      setActive(leafIds(tabs[(at + step + tabs.length) % tabs.length]!)[0]!)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
+
   // Which pane wears the control strip. The chips belong to the surface,
   // not to a pane — a strip on every pane is four chips times N, and one
   // pinned to the URL pane floats mid-screen and dies with it. So they sit
   // on whichever pane owns the surface's top-right corner — of the tab in
   // front, on a desktop — and pass along when that pane goes.
   const shownTab = panes.some((p) => p.id === active) ? active : panes[0]!.id
+  shownRef.current = shownTab
   const activeTree = tabTrees[Math.max(0, tabOf(tabTrees, shownTab))]
   const chipsPane = isMobile || activeTree === undefined ? shownTab : topRightLeaf(activeTree)
 
@@ -342,26 +382,15 @@ export function TerminalRoute() {
             // splits whichever pane holds the keyboard, so the chips'
             // placement costs a sibling nothing but the pointer route.
             chrome={id === chipsPane ? 'full' : 'minimal'}
-            restartGroup={id === anchorId ? undefined : anchorId}
-            // replace, both ways: the dead session's URL is not worth a Back
-            // stop. A member pane restarting stays where it is — the new
-            // member takes the pane over through the refreshed list.
-            onRestarted={(newId) => {
-              setDismissed((prev) => new Set(prev).add(id))
-              client.list()
-              if (id === sessionId) {
-                // A member's replacement is in this same group; seed the
-                // held anchor so the surface stays put across the
-                // navigation instead of collapsing until the list lands. An
-                // anchor's replacement is a fresh standalone session, which
-                // is exactly what the unseeded fallback resolves.
-                if (id !== anchorId) anchorRef.current = { resolvedFor: newId, anchor: anchorId }
-                goTo(newId)
-              } else setActive(newId)
-            }}
             onClosed={() => {
+              // Fired by the exit itself — there is no overlay any more. A
+              // session that was already over when this view opened is being
+              // *read*, which is what the daemon's exited-retention window
+              // is for, so only a shell seen alive here folds its pane away.
+              if (!seenRunning.current.has(id)) return
               const remaining = paneIds.filter((p) => p !== id)
               if (remaining.length === 0) {
+                // replace: a dead session's URL is not worth a Back stop.
                 void navigate({ to: '/', replace: true })
                 return
               }

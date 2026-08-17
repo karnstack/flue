@@ -6,8 +6,16 @@ import { THEME_SYSTEM } from '@/emulator/themes'
  * Global on purpose — choosing a theme in one session applies to all of
  * them, and a session spawned out of another wears the same clothes with no
  * inheritance machinery at all. Per-session themes can come back later by
- * suffixing the key; the storage-event listeners in the terminal views are
- * what make a change land in every open tab the moment it is made.
+ * suffixing the key.
+ *
+ * A change travels two ways, because the browser splits the audience in two.
+ * The storage event reaches every *other* tab — and only them; the document
+ * that wrote never hears it. The listeners below are the other half: every
+ * terminal mounted in *this* document — the panes of a split, the scratch
+ * modal — hears a save the moment it is made. Before splits there was one
+ * terminal per document and the first half sufficed; a theme picked from a
+ * split's menu then repainted exactly one pane and left its siblings in the
+ * old clothes until remount.
  *
  * Client-side because the daemon holds what a terminal *is*; what it looks
  * like in this browser is this browser's business. Every access is guarded:
@@ -33,5 +41,24 @@ export function saveThemePref(themeId: string): void {
     else localStorage.setItem(THEME_PREF_KEY, themeId)
   } catch {
     // Nothing to do: the theme still applies for this view's lifetime.
+  }
+  // Announced whether or not the write stuck: the panes on screen should
+  // follow the choice even where storage refuses to remember it.
+  for (const cb of [...listeners]) cb(themeId)
+}
+
+type ThemePrefListener = (themeId: string) => void
+
+const listeners = new Set<ThemePrefListener>()
+
+/**
+ * Hear theme choices made in this document — the half the storage event
+ * cannot deliver. Every mounted terminal subscribes; the returned
+ * unsubscribe retires exactly this registration.
+ */
+export function onThemePref(cb: ThemePrefListener): () => void {
+  listeners.add(cb)
+  return () => {
+    listeners.delete(cb)
   }
 }

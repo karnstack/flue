@@ -71,3 +71,22 @@ export function matchNewTabChord(e: KeyboardEvent, apple: boolean): boolean {
 export function newTabChordLabel(apple: boolean): string {
   return apple ? '⌥⌘T' : 'Ctrl+Alt+T'
 }
+
+/**
+ * Which neighbouring tab a keystroke asked for, or null. ⌥⌘←/→ on a Mac and
+ * Ctrl+Alt+←/→ elsewhere — the same family as the new-tab chord, because
+ * they are the same subject, and the browser owns every conventional
+ * spelling (Ctrl+Tab, ⌘⇧[ and ]). The switcher's ⌃⇧[ ] keeps meaning
+ * *sessions*; this one walks the tabs inside the group on screen.
+ */
+export function matchTabCycleChord(e: KeyboardEvent, apple: boolean): -1 | 1 | null {
+  const step = e.code === 'ArrowRight' ? 1 : e.code === 'ArrowLeft' ? -1 : null
+  if (step === null) return null
+  if (apple) return e.metaKey && e.altKey && !e.ctrlKey && !e.shiftKey ? step : null
+  return e.ctrlKey && e.altKey && !e.shiftKey && !e.metaKey ? step : null
+}
+
+/** How the tab-cycle pair is printed. */
+export function tabCycleChordLabel(apple: boolean): string {
+  return apple ? '⌥⌘← →' : 'Ctrl+Alt+← →'
+}

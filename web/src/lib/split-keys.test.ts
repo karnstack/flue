@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { matchSplitChord, splitChordLabel } from './split-keys'
+import {
+  matchNewTabChord,
+  matchSplitChord,
+  matchTabCycleChord,
+  newTabChordLabel,
+  splitChordLabel,
+  tabCycleChordLabel,
+} from './split-keys'
 
 function key(over: Partial<KeyboardEvent>): KeyboardEvent {
   return {
@@ -62,11 +69,60 @@ describe('matchSplitChord', () => {
   })
 })
 
-describe('splitChordLabel', () => {
-  it('prints the platform spelling', () => {
+describe('matchNewTabChord', () => {
+  it('reads ⌥⌘T on a Mac — through the † the layout makes of Alt+T', () => {
+    expect(matchNewTabChord(key({ metaKey: true, altKey: true, key: '†', code: 'KeyT' }), true)).toBe(
+      true,
+    )
+  })
+
+  it('reads Ctrl+Alt+T elsewhere and never the browser-owned spellings', () => {
+    expect(
+      matchNewTabChord(key({ ctrlKey: true, altKey: true, key: 't', code: 'KeyT' }), false),
+    ).toBe(true)
+    // ⌘T and Ctrl+T open a browser tab; ⇧ variants reopen one. All refused.
+    expect(matchNewTabChord(key({ metaKey: true, key: 't', code: 'KeyT' }), true)).toBe(false)
+    expect(matchNewTabChord(key({ ctrlKey: true, key: 't', code: 'KeyT' }), false)).toBe(false)
+    expect(
+      matchNewTabChord(
+        key({ ctrlKey: true, altKey: true, shiftKey: true, key: 'T', code: 'KeyT' }),
+        false,
+      ),
+    ).toBe(false)
+  })
+})
+
+describe('matchTabCycleChord', () => {
+  it('steps right and left on the same modifier family as new-tab', () => {
+    const mods = { metaKey: true, altKey: true }
+    expect(matchTabCycleChord(key({ ...mods, key: 'ArrowRight', code: 'ArrowRight' }), true)).toBe(1)
+    expect(matchTabCycleChord(key({ ...mods, key: 'ArrowLeft', code: 'ArrowLeft' }), true)).toBe(-1)
+    const other = { ctrlKey: true, altKey: true }
+    expect(matchTabCycleChord(key({ ...other, key: 'ArrowRight', code: 'ArrowRight' }), false)).toBe(
+      1,
+    )
+  })
+
+  it('leaves plain and shifted arrows to the shell and the browser', () => {
+    expect(matchTabCycleChord(key({ key: 'ArrowRight', code: 'ArrowRight' }), true)).toBeNull()
+    expect(
+      matchTabCycleChord(
+        key({ metaKey: true, altKey: true, shiftKey: true, key: 'ArrowLeft', code: 'ArrowLeft' }),
+        true,
+      ),
+    ).toBeNull()
+  })
+})
+
+describe('chord labels', () => {
+  it('print the platform spelling', () => {
     expect(splitChordLabel(true, 'row')).toBe('⌘D')
     expect(splitChordLabel(true, 'column')).toBe('⇧⌘D')
     expect(splitChordLabel(false, 'row')).toBe('Ctrl+Shift+D')
     expect(splitChordLabel(false, 'column')).toBe('Ctrl+Alt+Shift+D')
+    expect(newTabChordLabel(true)).toBe('⌥⌘T')
+    expect(newTabChordLabel(false)).toBe('Ctrl+Alt+T')
+    expect(tabCycleChordLabel(true)).toBe('⌥⌘← →')
+    expect(tabCycleChordLabel(false)).toBe('Ctrl+Alt+← →')
   })
 })

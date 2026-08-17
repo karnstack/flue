@@ -206,9 +206,10 @@ function SessionRow({
       {paneCount !== undefined && paneCount > 1 && (
         // The whole group folded to this one row (sessions/groups.ts), and
         // the fold has to say so — a group that reads as one plain session
-        // is N-1 terminals nobody can account for.
+        // is N-1 terminals nobody can account for. "Terminals", not panes
+        // or tabs: those are per-device renderings of the same group.
         <span className="shrink-0 self-center rounded-sm bg-zinc-950/5 px-1.5 text-xs/5 text-zinc-500 tabular-nums dark:bg-white/10 dark:text-zinc-400">
-          {paneCount} panes
+          {paneCount} terminals
         </span>
       )}
       <span className="truncate font-mono text-xs/6 text-zinc-500 max-sm:hidden dark:text-zinc-400">

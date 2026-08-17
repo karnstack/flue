@@ -315,13 +315,11 @@ export function ScratchProvider({ children }: { children: ReactNode }) {
                     sessionId={open.sessionId}
                     chrome="minimal"
                     ownsTitle={false}
-                    restartGroup={open.parentId}
-                    restartEphemeral
                     fitViewport={isMobile}
                     viewportInset={isMobile ? HEADER_PX : 0}
-                    onRestarted={(id) =>
-                      setOpen({ machineId: open.machineId, sessionId: id, parentId: open.parentId })
-                    }
+                    // The exit is the close now: typing `exit` in a scratch
+                    // puts the modal away, and the fast ephemeral reap does
+                    // the rest.
                     onClosed={dismiss}
                   />
                 </FlueClientContext.Provider>

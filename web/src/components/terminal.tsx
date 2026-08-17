@@ -11,7 +11,6 @@ import {
 } from 'lucide-react'
 
 import { useFlueClient } from '@/client/provider'
-import { ExitOverlay } from '@/components/exit-overlay'
 import { KeyBar } from '@/components/key-bar'
 import { PasteBox } from '@/components/paste-box'
 import { SelectionMenu, type MenuEnd } from '@/components/selection-menu'
@@ -20,7 +19,7 @@ import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
 import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
 import type { Emulator } from '@/emulator/types'
 import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
-import { loadThemePref, saveThemePref, THEME_PREF_KEY } from '@/lib/theme-pref'
+import { loadThemePref, onThemePref, saveThemePref, THEME_PREF_KEY } from '@/lib/theme-pref'
 import {
   cellAt,
   cellBox,
@@ -59,11 +58,13 @@ export interface TerminalProps {
    */
   createEmulator?: (opts: XtermOptions) => Emulator
   /**
-   * Called with the new session's id once a Restart's spawn has attached.
-   * The route supplies navigation; the component never touches the router.
+   * Called the moment the shell exits, and by nothing else. What "closed"
+   * means belongs to the view above: a split pane folds away, the scratch
+   * modal dismisses, a lone session leaves for the dashboard — and a session
+   * that was *already* exited when it was opened is the caller's to keep on
+   * screen, which is why the daemon's whole exited-retention window exists.
+   * The component never touches the router.
    */
-  onRestarted?: (sessionId: string) => void
-  /** Called after Close has closed the dead session; navigate away here. */
   onClosed?: () => void
   /**
    * Called by the `+` in the control strip, with this session's directory when
@@ -85,19 +86,6 @@ export interface TerminalProps {
    * verbs.
    */
   onSplit?: (cwd: string | null, layout: GroupLayout) => void
-  /**
-   * The group a Restart should spawn back into. A member pane that restarts
-   * without this would come back as a stranger outside its own group; the
-   * route knows the anchor, the terminal just carries it to the spawn.
-   */
-  restartGroup?: string
-  /**
-   * Whether a Restart spawns another ephemeral session. True only inside the
-   * scratch modal, whose restarted shell must stay a scratch — bound to the
-   * same parent, hidden from the same lists — rather than climb out of the
-   * modal as a real session.
-   */
-  restartEphemeral?: boolean
   /**
    * How much floating chrome to draw. `minimal` is for the scratch modal,
    * which has its own frame and its own dismiss: the status pill stays — a
@@ -215,12 +203,9 @@ const PRESS_SLOP = 10
 export function Terminal({
   sessionId,
   createEmulator = createXtermEmulator,
-  onRestarted,
   onClosed,
   onNewSession,
   onSplit,
-  restartGroup,
-  restartEphemeral = false,
   chrome = 'full',
   fitViewport = true,
   viewportInset = 0,
@@ -259,7 +244,6 @@ export function Terminal({
   const [ctrlArmed, setCtrlArmed] = useState(false)
   const ctrlArmedRef = useRef(ctrlArmed)
   ctrlArmedRef.current = ctrlArmed
-  const [exitCode, setExitCode] = useState<number | null>(null)
   // The touch menu: which end of the terminal it is at, and whether the
   // press it came from found anything to copy. Null for not showing.
   //
@@ -294,7 +278,6 @@ export function Terminal({
   // ends, and an exited session reaps itself after ExitedRetention — Close
   // just leaves.
   const actionsRef = useRef<{
-    restart: (dir: string | null) => void
     applyTheme: (id: string) => void
     sendKey: (key: BarKey) => void
     copy: () => void
@@ -302,18 +285,12 @@ export function Terminal({
     pasteText: (text: string) => void
     dismiss: () => void
   } | null>(null)
-  // The latest onRestarted, readable from inside the effect without putting
-  // a prop identity in its dependency array.
-  const restartedRef = useRef(onRestarted)
-  restartedRef.current = onRestarted
-  // Same treatment for the group a Restart spawns back into, and whether it
-  // stays a scratch.
-  const restartGroupRef = useRef(restartGroup)
-  restartGroupRef.current = restartGroup
-  const restartEphemeralRef = useRef(restartEphemeral)
-  restartEphemeralRef.current = restartEphemeral
-  // And for tab-title ownership, which flips without a remount when the URL
-  // moves between two panes of one group.
+  // The latest onClosed, readable from inside the effect without putting a
+  // prop identity in its dependency array.
+  const closedRef = useRef(onClosed)
+  closedRef.current = onClosed
+  // Same treatment for tab-title ownership, which flips without a remount
+  // when the URL moves between two panes of one group.
   const ownsTitleRef = useRef(ownsTitle)
   ownsTitleRef.current = ownsTitle
 
@@ -419,9 +396,6 @@ export function Terminal({
     // reconnect must not walk the pill back to "Reconnecting…" and imply that
     // waiting will help.
     let over = false
-    // The reqId of a Restart's spawn, unanswered. Doubles as the click guard:
-    // one restart in flight at a time, per mount.
-    let restartReq: number | null = null
     let frame = 0
     // The pty-resize debounce. A browser sidebar sliding open resizes the
     // pane on every animation frame, and each new pty size is a SIGWINCH the
@@ -870,16 +844,6 @@ export function Terminal({
 
     offs.push(
       client.onAttached((a) => {
-        if (restartReq !== null && a.reqId === restartReq) {
-          // The Restart's own spawn. Hand the new ref straight back — the
-          // route this navigates to attaches for itself — and go. The dead
-          // session needs nothing: the exit already retired its ref on both
-          // ends, and the daemon reaps it after ExitedRetention.
-          restartReq = null
-          client.detach(a.ref)
-          restartedRef.current?.(a.id)
-          return
-        }
         // One client serves the whole tab, so every listener sees every reply.
         if (a.id !== sessionId) return
         ref = a.ref
@@ -945,8 +909,14 @@ export function Terminal({
         if (r !== ref) return
         over = true
         emulator.write(EXIT_NOTICE(code))
-        setExitCode(code)
         setPhase('exited')
+        // The view above decides what an exit closes — a pane, a modal, the
+        // whole route — or keeps: a session opened after it had already
+        // exited is being read, and reading is the point of the daemon's
+        // exited-retention window. There is no overlay in between; a shell
+        // that ends is over, and asking Restart-or-Close on every `exit 0`
+        // answered a question nobody was asking.
+        closedRef.current?.()
       }),
     )
 
@@ -1036,20 +1006,6 @@ export function Terminal({
     media?.addEventListener?.('change', onScheme)
 
     actionsRef.current = {
-      // Click-driven only, for the same StrictMode reason session creation
-      // lives on the sessions screen: a spawn fired from a mount effect runs
-      // twice and can only ever detach one of its shells.
-      restart: (dir) => {
-        if (restartReq !== null) return
-        const reqId = client.spawn({
-          cwd: dir ?? undefined,
-          cols: dims.cols,
-          rows: dims.rows,
-          group: restartGroupRef.current,
-          ephemeral: restartEphemeralRef.current || undefined,
-        })
-        if (reqId !== null) restartReq = reqId
-      },
       applyTheme: (id) => {
         const next = resolveTheme(id, prefersDark())
         emulator.setTheme(next)
@@ -1113,9 +1069,8 @@ export function Terminal({
 
     // Another tab choosing a theme lands here: the preference is global, and
     // a change should sweep every open terminal, not just the one clicked.
-    // The storage event only ever fires in *other* tabs; the clicking tab
-    // goes through handleTheme. A null key is storage.clear() — back to
-    // system either way.
+    // The storage event only ever fires in *other* tabs. A null key is
+    // storage.clear() — back to system either way.
     const onStorage = (e: StorageEvent) => {
       if (e.key !== null && e.key !== THEME_PREF_KEY) return
       const id = e.newValue ?? THEME_SYSTEM
@@ -1123,6 +1078,15 @@ export function Terminal({
       actionsRef.current?.applyTheme(id)
     }
     window.addEventListener('storage', onStorage)
+    // And a choice made in *this* document lands here — the half the storage
+    // event cannot deliver. With splits and the scratch modal, several
+    // terminals share one document, and the menu that took the click sits on
+    // exactly one of them; without this, that pane repainted and its
+    // siblings kept the old clothes until remount.
+    const offThemePref = onThemePref((id) => {
+      setThemeId(id)
+      actionsRef.current?.applyTheme(id)
+    })
 
     client.attach(sessionId, 0)
     // For the cwd: `attached` does not carry it, the session list does.
@@ -1141,6 +1105,7 @@ export function Terminal({
       glide?.()
       untrackViewport()
       window.removeEventListener('storage', onStorage)
+      offThemePref()
       window.removeEventListener('keydown', onKey, true)
       observer.disconnect()
       media?.removeEventListener?.('change', onScheme)
@@ -1169,12 +1134,11 @@ export function Terminal({
     // this component on them anyway.
   }, [client, sessionId, createEmulator, fitViewport, viewportInset])
 
-  const handleRestart = () => actionsRef.current?.restart(cwd)
-  const handleClose = () => onClosed?.()
   const handleTheme = (id: string) => {
     setThemeId(id)
+    // The save announces to every terminal in this document — this pane
+    // included — so the apply is not repeated here.
     saveThemePref(id)
-    actionsRef.current?.applyTheme(id)
   }
 
   // What the floating controls wear: the resolved theme's own surfaces,
@@ -1394,9 +1358,6 @@ export function Terminal({
           </div>
         )}
       </div>
-      {phase === 'exited' && exitCode !== null && (
-        <ExitOverlay code={exitCode} onRestart={handleRestart} onClose={handleClose} />
-      )}
     </div>
   )
 }
