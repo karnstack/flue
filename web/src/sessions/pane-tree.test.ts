@@ -106,6 +106,14 @@ describe('tabs of trees', () => {
     expect(next[1]).toEqual({ split: 'column', ratio: 0.5, a: leaf('c'), b: leaf('d') })
   })
 
+  it('declines with the same array when no tab holds the target', () => {
+    // Same reference, not just same contents: the caller holds this in React
+    // state and saves it to localStorage, so a clone would cost a render and
+    // a write for a split that placed nothing.
+    const tabs = [AB, leaf('c')]
+    expect(splitInTabs(tabs, 'missing', 'row', 'd')).toBe(tabs)
+  })
+
   it('reconciles: prunes emptied tabs, gives an unplaced newcomer its own tab', () => {
     const tabs = [AB, leaf('c')]
     const next = reconcileTabs(tabs, ['a', 'b', 'x'])

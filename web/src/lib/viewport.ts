@@ -81,29 +81,79 @@ export function trackVisualViewport(opts: {
     pane.style.translate = `0px ${viewport.offsetTop}px`
   }
 
-  // The handlers this tracker is replacing, put back on dispose. The slots
-  // are single-occupancy by design (see ViewportLike on why they are
-  // properties), and two panes legitimately overlap now: the scratch modal's
-  // terminal mounts over the route's, and a dispose that nulled the slot
-  // would leave the surviving pane deaf to the keyboard for the rest of its
-  // life. Restoring what was found keeps the trackers a stack.
-  const prevResize = viewport.onresize
-  const prevScroll = viewport.onscroll
+  // The slots are single-occupancy by design (see ViewportLike on why they
+  // are properties), and trackers legitimately overlap now: the scratch
+  // modal's terminal mounts over the route's, and split panes stack several
+  // more. A dispose that nulled the slot would leave every survivor deaf to
+  // the keyboard — and a dispose that restored "whatever it found on
+  // install" resurrects a dead tracker's handler the moment they tear down
+  // out of install order. So the stack is explicit: one shared record per
+  // viewport, disposal removes exactly its own entry, and the slot always
+  // belongs to the newest entry still alive (or to whatever non-flue handler
+  // held it before the first tracker arrived).
+  const rec = stackFor(viewport)
+  const me = { apply }
+  rec.stack.push(me)
   viewport.onresize = apply
   viewport.onscroll = apply
   apply()
 
   return () => {
-    // Each slot is surrendered only if it is still this tracker's. Restoring
-    // unconditionally would be a disposer reaching past its own lifetime:
-    // a remount can install the replacement before tearing down the old
-    // tracker, and the old one would then strip the handlers the new one
-    // just wired, leaving the pane stuck at whatever the keyboard last did.
-    if (viewport.onresize === apply) viewport.onresize = prevResize
-    if (viewport.onscroll === apply) viewport.onscroll = prevScroll
     surface.style.touchAction = ''
     gestureArea.style.touchAction = ''
     pane.style.height = ''
     pane.style.translate = ''
+    const i = rec.stack.indexOf(me)
+    if (i === -1) return // disposed twice
+    const wasTop = i === rec.stack.length - 1
+    rec.stack.splice(i, 1)
+    if (rec.stack.length === 0) stacks.delete(viewport)
+    // A tracker below the top never held the slot, so it has nothing to hand
+    // over; and each slot is surrendered only if it is still this tracker's —
+    // a remount can install the replacement before tearing down the old
+    // tracker, and the old one must not strip the handlers the new one just
+    // wired, leaving the pane stuck at whatever the keyboard last did.
+    if (!wasTop) return
+    const next = rec.stack[rec.stack.length - 1]
+    let handedOver = false
+    if (viewport.onresize === apply) {
+      viewport.onresize = next ? next.apply : rec.prevResize
+      handedOver = next !== undefined
+    }
+    if (viewport.onscroll === apply) {
+      viewport.onscroll = next ? next.apply : rec.prevScroll
+      handedOver = handedOver || next !== undefined
+    }
+    // The successor takes the state over now, not on the next keyboard move:
+    // its pane may have been styled for a viewport several trackers ago.
+    if (handedOver) next!.apply()
   }
+}
+
+/** One tracker on a viewport: what disposal needs to find and remove. */
+interface Tracker {
+  apply: () => void
+}
+
+/**
+ * The live trackers per viewport, newest last, plus the handlers the first
+ * of them displaced — restored when the last one leaves. A WeakMap because
+ * the real page has one visualViewport forever, but every test conjures its
+ * own; keying on the object keeps them from sharing a stack.
+ */
+interface TrackerStack {
+  stack: Tracker[]
+  prevResize: ViewportLike['onresize']
+  prevScroll: ViewportLike['onscroll']
+}
+
+const stacks = new WeakMap<ViewportLike, TrackerStack>()
+
+function stackFor(viewport: ViewportLike): TrackerStack {
+  let rec = stacks.get(viewport)
+  if (rec === undefined) {
+    rec = { stack: [], prevResize: viewport.onresize, prevScroll: viewport.onscroll }
+    stacks.set(viewport, rec)
+  }
+  return rec
 }

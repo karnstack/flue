@@ -158,7 +158,14 @@ func (s *readingServer) ServeConn(ctx context.Context, mc daemon.MessageConn, me
 	}()
 
 	if s.block != nil {
-		<-s.block
+		// As the real ServeConn would: blocked or not, the context ending is
+		// the end of the connection. Run joins these goroutines on its way
+		// out now, so a block that ignored ctx would deadlock every teardown
+		// whose cleanup closes the block after stopping the transport.
+		select {
+		case <-s.block:
+		case <-ctx.Done():
+		}
 		return
 	}
 	for {
@@ -891,6 +898,92 @@ func TestRelayChannelBackpressureClosesOneChannelNotTheSocket(t *testing.T) {
 	attach(t, c, 2, id.deviceKey, id.key.Public)
 }
 
+// laggingServer is a Server whose ServeConn keeps working past its context —
+// the shape of a connection's tail writes (a last-seen stamp, a back-filled
+// certificate) landing after Run was told to stop. It deliberately ignores
+// ctx: the real daemon honours it, but honouring it is exactly what would
+// hide a Run that returns without waiting.
+type laggingServer struct {
+	release chan struct{}
+
+	mu     sync.Mutex
+	served int
+}
+
+func (s *laggingServer) ServeConn(_ context.Context, mc daemon.MessageConn, _ daemon.ConnMeta) {
+	s.mu.Lock()
+	s.served++
+	s.mu.Unlock()
+	<-s.release
+	_ = mc.Close()
+}
+
+func (s *laggingServer) PairDevice([]byte, string) daemon.PairOutcome {
+	return daemon.PairRefusal()
+}
+
+func (s *laggingServer) SetRelayStatus(string, string) {}
+
+func (s *laggingServer) waitServed(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(waitFor)
+	for {
+		s.mu.Lock()
+		n := s.served
+		s.mu.Unlock()
+		if n >= 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no connection was handed to ServeConn")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestRunWaitsForServedConnections: Run's return is the transport's promise
+// that nothing of it is still running. The goroutines serving channels write
+// into the device registry (a last-seen stamp on every attach), so a Run that
+// returns while one is still going leaves those writes racing whatever the
+// caller does next — in the daemon that is shutdown, in these tests it is the
+// harness deleting the registry's directory out from under the write.
+func TestRunWaitsForServedConnections(t *testing.T) {
+	t.Parallel()
+	r := newFakeRelay(t, "s")
+	id := newIdentity(t)
+	srv := &laggingServer{release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(srv.release) }) }
+	t.Cleanup(release)
+
+	tr := newChannelTransport(t, r, srv, id, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- tr.Run(ctx) }()
+
+	c := r.accept(t)
+	attach(t, c, 1, id.deviceKey, id.key.Public)
+	srv.waitServed(t)
+
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("Run returned while a connection was still being served")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run returned %v after its context was cancelled, want nil", err)
+		}
+	case <-time.After(waitFor):
+		t.Fatal("Run did not return after the last served connection ended")
+	}
+}
+
 // panickingServer stands in for any unhandled failure on the serve path.
 // daemon.ServeConn propagates a panic to its caller by design; on loopback that
 // caller is net/http, which recovers per connection.
@@ -1146,9 +1239,12 @@ func TestRelayPairingRunsOffTheReadLoop(t *testing.T) {
 		<-release
 		return daemon.PairRefusal()
 	}}
-	t.Cleanup(func() { close(release) })
 	tr := newChannelTransport(t, r, srv, id, nil)
 	runTransport(t, tr)
+	// After runTransport, deliberately: cleanups run last-first, and Run now
+	// waits for the parked ceremony on its way out, so the park must be
+	// released before the transport is stopped.
+	t.Cleanup(func() { close(release) })
 
 	c := r.accept(t)
 	c.sendControl(t, relaywire.Pair{ID: 1, Origin: testOrigin, Body: pairingBody(t, "t", unpairedKey(t).Public)})

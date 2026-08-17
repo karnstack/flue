@@ -460,6 +460,15 @@ func (r *Registry) Reap() {
 		DeleteMeta(dir, s.ID())
 	}
 	for _, s := range orphans {
+		// Between collection under r.mu and this Close, a Keep may have
+		// landed: UpdateMeta clears Ephemeral without r.mu, and a session
+		// promoted in that window is an ordinary member now — killing it
+		// would be the sweep spending a decision the user just reversed.
+		// Re-read the flag at the last moment; the promotion path never sets
+		// it back, so a stale read here can only spare, never kill.
+		if _, _, ephemeral := s.exitStatus(); !ephemeral {
+			continue
+		}
 		// Close, not delete: the kill lands now, the exit is recorded by the
 		// session's own supervisor, and the next sweep reaps the row through
 		// the ordinary path above.

@@ -309,7 +309,11 @@ func (t *Transport) openChannel(s *socket, m *relaywire.Open) {
 		// everything, and there is nobody left to answer.
 		return
 	}
-	go t.serveChannel(s, ch, m.Origin)
+	t.serving.Add(1)
+	go func() {
+		defer t.serving.Done()
+		t.serveChannel(s, ch, m.Origin)
+	}()
 }
 
 // canServeChannels reports whether this daemon has what a channel needs: a
@@ -644,7 +648,9 @@ func (t *Transport) pair(s *socket, m *relaywire.Pair) {
 	// path parses; decoding the control message already copied it out of the
 	// read buffer.
 	body := m.Body
+	t.serving.Add(1)
 	go func() {
+		defer t.serving.Done()
 		defer func() { <-t.pairings }()
 		t.answerPair(s, m.ID, t.srv.PairDevice(body, relayPeer))
 	}()

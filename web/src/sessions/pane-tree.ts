@@ -155,7 +155,9 @@ export function splitInTabs(
       return out
     }
   }
-  return [...tabs]
+  // The same reference, as promised above: this lives in React state, and a
+  // clone would spend a render (and a localStorage write) on a no-op.
+  return tabs as PaneTree[]
 }
 
 /** The index of the tab holding `id`, or -1. */
@@ -206,14 +208,14 @@ export function nodeAt(t: PaneTree, path: TreePath): PaneTree | null {
  * names no split.
  */
 export function withRatio(t: PaneTree, path: TreePath, ratio: number): PaneTree {
-  const clamped = Math.min(0.85, Math.max(0.15, ratio))
   if (path.length === 0) {
+    const clamped = Math.min(0.85, Math.max(0.15, ratio))
     if ('leaf' in t || t.ratio === clamped) return t
     return { ...t, ratio: clamped }
   }
   if ('leaf' in t) return t
   const step = path[0]!
-  const child = withRatio(t[step], path.slice(1), clamped)
+  const child = withRatio(t[step], path.slice(1), ratio)
   if (child === t[step]) return t
   return { ...t, [step]: child }
 }

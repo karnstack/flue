@@ -100,6 +100,11 @@ export function ScratchProvider({ children }: { children: ReactNode }) {
   // One resolution in flight at a time: a chord tapped thrice while the list
   // round-trip is out must not spawn three scratches.
   const resolving = useRef(false)
+  // Where the user is *now*, for a resolution that started somewhere else:
+  // the list round-trip can outlive the route it was asked from, and a modal
+  // that pops over the next session carries a scratch about the last one.
+  const routeRef = useRef({ machineId, parentId })
+  routeRef.current = { machineId, parentId }
   const openRef = useRef(open)
   openRef.current = open
 
@@ -129,16 +134,29 @@ export function ScratchProvider({ children }: { children: ReactNode }) {
     }
 
     const anchor = parentId
+    // True while the user is still where the chord was tapped. Checked at
+    // every landing, not once: each answer arrives on its own tick, and the
+    // route may have moved during any of the waits.
+    const stillHere = () =>
+      routeRef.current.parentId === anchor && routeRef.current.machineId === machineId
     const adopt = (rows: SessionInfo[]) => {
       const existing = rows.find(
         (s) => s.group === anchor && s.ephemeral === true && s.state === 'running',
       )
       if (existing !== undefined) {
         settle()
+        if (!stillHere()) return
         setOpen({ machineId, sessionId: existing.id, parentId: anchor })
         return
       }
-      const cwd = rows.find((s) => s.id === anchor)?.cwd
+      const parent = rows.find((s) => s.id === anchor)
+      if (parent === undefined || parent.state !== 'running' || !stillHere()) {
+        // No running parent to belong to (the daemon's sweep would close the
+        // newborn within seconds anyway), or the user has already left.
+        settle()
+        return
+      }
+      const cwd = parent.cwd
       const reqId = client.spawn({
         cwd,
         cols: SPAWN_COLS,
@@ -157,6 +175,10 @@ export function ScratchProvider({ children }: { children: ReactNode }) {
           // Hand the ref straight back — the modal's Terminal attaches for
           // itself, exactly as every navigation target does.
           client.detach(a.ref)
+          // Left during the spawn: the scratch exists and keeps running
+          // under its parent — the next chord over that session adopts it —
+          // but it is not popped over whatever screen the user is on now.
+          if (!stillHere()) return
           setOpen({ machineId, sessionId: a.id, parentId: anchor })
         }),
         client.onError((e) => {

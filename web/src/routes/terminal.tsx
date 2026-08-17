@@ -389,6 +389,11 @@ export function TerminalRoute() {
               // is for, so only a shell seen alive here folds its pane away.
               if (!seenRunning.current.has(id)) return
               const remaining = paneIds.filter((p) => p !== id)
+              // The chord must never aim at this pane again. Its ref is
+              // cleared now rather than left to the next focusin, because a
+              // chord in the gap would read the dead pane's id and fall
+              // through to whatever the paneIds guard makes of it.
+              if (focusedPane.current === id) focusedPane.current = remaining[0] ?? null
               if (remaining.length === 0) {
                 // replace: a dead session's URL is not worth a Back stop.
                 void navigate({ to: '/', replace: true })
