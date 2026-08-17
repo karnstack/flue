@@ -375,6 +375,12 @@ function Hint({ keys, what }: { keys: string; what: string }) {
  * a machine this browser cannot reach right now can say nothing about what is
  * happening inside it, and a confident green dot over an unreachable machine
  * would be the list inventing news.
+ *
+ * An ended row also says so in a word — "exited", the sessions screen's own
+ * word for it — as a ghost says "unreachable". It can afford the space: ended
+ * rows only appear as search results (switcher/order.ts keeps them out of the
+ * resting palette), where the reader is choosing between matches and "this
+ * one is over" is the fact that decides.
  */
 function Row({
   row,
@@ -425,6 +431,8 @@ function Row({
         <span className="font-mono text-xs text-muted-foreground">{rowMachine(row)}</span>
         {ghost ? (
           <span className="text-xs text-muted-foreground">unreachable</span>
+        ) : ended ? (
+          <span className="text-xs text-muted-foreground">exited</span>
         ) : row.badge !== null ? (
           <kbd className="font-mono text-xs text-muted-foreground">⌃⇧{row.badge}</kbd>
         ) : null}

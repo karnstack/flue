@@ -89,6 +89,15 @@ export interface BuildOptions {
  * A search collapses all of that into one run: once someone is typing, headings
  * are furniture between them and the match. Ghosts sort to the end of it, since
  * a session that can be opened right now beats one whose machine is asleep.
+ *
+ * Exited sessions are not offered at rest at all. This palette is a "take me
+ * there" control, and a dead session is not a there — every ended row is one
+ * more press between somebody and the session they meant. A search brings them
+ * back: typing the exact name of a session you know ended and getting nothing
+ * would be its own kind of wrong, so a match is shown, marked as ended, and
+ * ranked after everything running. Ghosts are a different kind of unreachable
+ * and keep their resting rows — an offline machine comes back, an exited shell
+ * does not.
  */
 export function buildPalette({
   sessions,
@@ -114,15 +123,23 @@ function restingSections(
   live: Map<string, FleetSession>,
   currentKey: string | null,
 ): SwitcherSection[] {
-  const pinned = pinnedOrder(sessions)
+  // The dead do not rest here — see the ended-sessions note on buildPalette.
+  const usable = sessions.filter((s) => s.state !== 'exited')
+  const pinned = pinnedOrder(usable)
   const spoken = new Set(pinned.map(keyOf))
 
   const recentRows: SwitcherRow[] = []
   for (const visit of recents) {
     const key = visitKey(visit)
     if (spoken.has(key)) continue
+    // Spoken for even when the next line skips it: a session deliberately
+    // left out of Recent must not resurface further down the palette.
     spoken.add(key)
     const session = live.get(key)
+    // A visited session the fleet reports as exited is remembered, not
+    // offered: its machine is answering, so unlike a ghost there is no
+    // sleeping laptop this row could wake.
+    if (session !== undefined && session.state === 'exited') continue
     recentRows.push(
       session
         ? { kind: 'live', key, session, badge: null, current: key === currentKey }
@@ -134,7 +151,7 @@ function restingSections(
   // in the sessions screen's own default order so the two screens agree about
   // what "recently busy" means.
   const rest = orderSessions(
-    sessions.filter((s) => !spoken.has(keyOf(s))),
+    usable.filter((s) => !spoken.has(keyOf(s))),
     'lastActive',
   ).map((session) => liveRow(session, null, currentKey))
 
@@ -153,9 +170,14 @@ function searchSections(
   needle: string,
   currentKey: string | null,
 ): SwitcherSection[] {
-  const hits = orderSessions(filterSessions(sessions, needle), 'lastActive').map((s) =>
-    liveRow(s, null, currentKey),
-  )
+  // Ended sessions rejoin the list once they are named, ranked after
+  // everything running: a match that can be switched to beats one that can
+  // only be read about.
+  const matched = orderSessions(filterSessions(sessions, needle), 'lastActive')
+  const hits = [
+    ...matched.filter((s) => s.state !== 'exited'),
+    ...matched.filter((s) => s.state === 'exited'),
+  ].map((s) => liveRow(s, null, currentKey))
   const ghosts = recents
     .filter((v) => !live.has(visitKey(v)) && matchesVisit(v, needle))
     .map((visit) => ({
@@ -258,10 +280,14 @@ export function openingRow(palette: Palette): SwitcherRow | null {
  *
  * Live sessions only, and that asymmetry with the palette is on purpose. A row
  * a reader deliberately picked out of a list can be a sleeping machine — they
- * saw what they chose. A blind hop must land somewhere usable.
+ * saw what they chose. A blind hop must land somewhere usable — which also
+ * rules out exited sessions, here and not only here: the palette excludes
+ * them from its resting rows and its pinned badges, so a cycle that kept them
+ * would have ⌃⇧2 mean one session with the palette open and another with it
+ * shut.
  */
 export function cycleOrder(sessions: FleetSession[]): FleetSession[] {
-  return [...sessions].sort(
+  return sessions.filter((s) => s.state !== 'exited').sort(
     (a, b) =>
       Number(b.pinned) - Number(a.pinned) ||
       Date.parse(a.createdAt) - Date.parse(b.createdAt) ||
