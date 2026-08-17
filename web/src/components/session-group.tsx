@@ -1,4 +1,4 @@
-import { useCallback, useRef, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, type ReactNode } from 'react'
 import { PlusIcon } from 'lucide-react'
 
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -149,12 +149,30 @@ function Strip({
   onPick: (key: string) => void
   onNewTab?: () => void
 }) {
+  // The selected tab keeps itself in view: the cycle chord can land on a tab
+  // the strip has scrolled past, and a selection nobody can see reads as the
+  // chord doing nothing. By hand rather than scrollIntoView, which walks
+  // every scrollable ancestor and would be free to nudge the page.
+  const selectedEl = useRef<HTMLButtonElement | null>(null)
+  const selectedKey = tabs.find((t) => t.selected)?.key
+  useEffect(() => {
+    const el = selectedEl.current
+    const strip = el?.parentElement
+    if (el == null || strip == null) return
+    const left = el.offsetLeft
+    const right = left + el.offsetWidth
+    if (left < strip.scrollLeft) strip.scrollLeft = left - 8
+    else if (right > strip.scrollLeft + strip.clientWidth) {
+      strip.scrollLeft = right - strip.clientWidth + 8
+    }
+  }, [selectedKey])
+
   return (
     <div
       role="tablist"
       aria-label="Terminals in this group"
       className={cn(
-        'flex shrink-0 items-center gap-x-1 overflow-x-auto border-b border-zinc-950/10 bg-white px-1.5 dark:border-white/10 dark:bg-zinc-950',
+        'flex shrink-0 items-center gap-x-1 overflow-x-auto overscroll-x-contain border-b border-zinc-950/10 bg-white px-1.5 dark:border-white/10 dark:bg-zinc-950',
         height === 'mobile' ? 'h-11' : 'h-9',
       )}
     >
@@ -164,9 +182,15 @@ function Strip({
           type="button"
           role="tab"
           aria-selected={t.selected}
+          ref={(el) => {
+            if (t.selected) selectedEl.current = el
+          }}
           onClick={() => onPick(t.key)}
+          // shrink-0 is what makes the strip scroll at all: shrinkable flex
+          // children absorb the overflow by squeezing each other into
+          // slivers, and a strip that never overflows has nothing to pan.
           className={cn(
-            'max-w-48 truncate rounded-md whitespace-nowrap',
+            'max-w-48 shrink-0 truncate rounded-md whitespace-nowrap',
             height === 'mobile' ? 'px-3 py-1.5 text-base/5' : 'px-2.5 py-1 text-sm/5',
             t.selected
               ? 'bg-zinc-950/5 text-zinc-950 dark:bg-white/10 dark:text-white'
