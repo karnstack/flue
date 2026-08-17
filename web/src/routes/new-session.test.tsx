@@ -28,9 +28,10 @@ import { NewSessionRoute } from './new-session'
  * moment it mounts and the spawn cannot go out until the socket is up.
  *
  * `from` is the other arrival: a tab that is already connected and navigates
- * here, which is what a blocked popup falls back to. The page then mounts into
- * an open socket and spawns from its effect body rather than from a status
- * change — a different code path, and the one the double-mount guard is for.
+ * here, as a pasted address or a history-restored one does. The page then
+ * mounts into an open socket and spawns from its effect body rather than from
+ * a status change — a different code path, and the one the double-mount guard
+ * is for.
  */
 async function mountNew(
   url: string,
