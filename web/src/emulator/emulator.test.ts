@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Terminal } from '@xterm/xterm'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createXtermEmulator,
   extractGrid,
@@ -546,6 +546,12 @@ describe('copy and paste chords', () => {
     }
   }
 
+  afterEach(() => {
+    // jsdom ships no navigator.clipboard; the stubs below must not outlive
+    // this block into tests that read the absence.
+    delete (navigator as { clipboard?: unknown }).clipboard
+  })
+
   it('stands aside on Ctrl+C over a selection, so the browser copies', async () => {
     // The bug this exists for: xterm encodes Ctrl+C as ETX with no notion of
     // a selection, so copying output interrupted the program instead.
@@ -642,30 +648,35 @@ describe('copy and paste chords', () => {
     t.done()
   })
 
-  it('claims Ctrl+Shift+V: pastes the clipboard through the terminal', async () => {
-    const readText = vi.fn(() => Promise.resolve('pasted text'))
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText } })
-    const t = await screen('hello')
+  it('keeps the selection when the clipboard write is refused', async () => {
+    // A failed copy that also cleared the selection would leave nothing on
+    // the clipboard and nothing to try again with. The selection staying is
+    // what makes the retry possible.
+    const writeText = vi.fn(() => Promise.reject(new Error('denied')))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const t = await screen('hello world')
+    t.em.selectWordAt({ col: 0, row: 0 })
 
-    const event = t.press('V', { ctrlKey: true, shiftKey: true })
+    t.press('C', { ctrlKey: true, shiftKey: true })
     await new Promise((r) => setTimeout(r, 0))
 
-    // Through term.paste, not raw injection, so bracketed paste mode is
-    // honoured when a program has turned it on.
-    expect(t.sent()).toBe('pasted text')
-    expect(event.defaultPrevented).toBe(true)
+    expect(t.em.selection()).toBe('hello')
     t.done()
   })
 
-  it('sends nothing when the clipboard refuses to be read', async () => {
-    const readText = vi.fn(() => Promise.reject(new Error('denied')))
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText } })
+  it('stands aside on Ctrl+Shift+V, where the browser paste is the paste', async () => {
+    // Chromium and Firefox on Windows and Linux bind the chord to a
+    // plain-text paste themselves and fire a trusted paste event at the
+    // helper textarea, which xterm's own paste handler consumes — bracketed
+    // paste included. Claiming it and reading the async clipboard instead
+    // would cost a permission prompt on the platforms that press it, and go
+    // dead outright on insecure origins.
     const t = await screen('hello')
 
-    t.press('V', { ctrlKey: true, shiftKey: true })
-    await new Promise((r) => setTimeout(r, 0))
+    const event = t.press('V', { ctrlKey: true, shiftKey: true })
 
     expect(t.sent()).toBe('')
+    expect(event.defaultPrevented).toBe(false)
     t.done()
   })
 })

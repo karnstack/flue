@@ -171,7 +171,11 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       e.preventDefault()
       const text = term.getSelection()
       if (text !== '') {
-        void navigator.clipboard?.writeText(text).then(
+        // The write can fail — no clipboard API on an insecure origin, or
+        // permission refused. The selection is only cleared once the text
+        // is really on the clipboard, so a failed copy leaves something to
+        // try again with.
+        void navigator.clipboard?.writeText?.(text).then(
           () => {
             if (!disposed) term.clearSelection()
           },
@@ -182,22 +186,17 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
     }
 
     /*
-     * Ctrl+Shift+V: paste, the chord the fingers that just learned
-     * Ctrl+Shift+C reach for next. Through term.paste rather than raw
-     * injection, so bracketed paste mode is honoured. A clipboard that
-     * cannot be read — no API, no permission — pastes nothing; the view's
-     * paste affordances remain the fallback.
+     * Ctrl+Shift+V: stand aside, the chord the fingers that just learned
+     * Ctrl+Shift+C reach for next. Chromium and Firefox on Windows and
+     * Linux bind it to a plain-text paste themselves and fire a trusted
+     * paste event at the helper textarea, which xterm's own paste handler
+     * consumes — bracketed paste included. Claiming it and reading the
+     * async clipboard here instead would cost a permission prompt on the
+     * platforms that press it, and go dead outright on insecure origins,
+     * where navigator.clipboard does not exist. On a Mac the chord is bound
+     * to nothing, and Cmd+V already pastes.
      */
-    if (key === 'v' && e.shiftKey) {
-      e.preventDefault()
-      void navigator.clipboard?.readText?.().then(
-        (text) => {
-          if (!disposed && text !== '') term.paste(text)
-        },
-        () => {},
-      )
-      return false
-    }
+    if (key === 'v' && e.shiftKey) return false
 
     return true
   })
