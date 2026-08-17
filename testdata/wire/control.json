@@ -30,6 +30,29 @@
     }
   },
   {
+    "name": "spawnScratch",
+    "json": {
+      "type": "spawn",
+      "cwd": "/home/karn/code",
+      "cols": 120,
+      "rows": 40,
+      "reqId": 21,
+      "group": "a1b2c3d4e5f60718",
+      "ephemeral": true
+    }
+  },
+  {
+    "name": "spawnSplit",
+    "json": {
+      "type": "spawn",
+      "cwd": "/home/karn/code",
+      "cols": 120,
+      "rows": 40,
+      "reqId": 22,
+      "group": "a1b2c3d4e5f60718"
+    }
+  },
+  {
     "name": "attach",
     "json": {
       "type": "attach",
@@ -95,6 +118,14 @@
         "feat-x"
       ],
       "pinned": true
+    }
+  },
+  {
+    "name": "updateKeepScratch",
+    "json": {
+      "type": "update",
+      "id": "a1b2c3d4e5f60708",
+      "ephemeral": false
     }
   },
   {
@@ -186,6 +217,18 @@
     }
   },
   {
+    "name": "welcomeCaps",
+    "json": {
+      "type": "welcome",
+      "daemonId": "local",
+      "host": "macbook",
+      "ver": "0.1.0",
+      "caps": [
+        "multiplex"
+      ]
+    }
+  },
+  {
     "name": "welcomeRelay",
     "json": {
       "type": "welcome",
@@ -255,6 +298,26 @@
           "rows": 24,
           "createdAt": "2026-07-28T07:15:00Z",
           "lastActive": "2026-07-28T09:00:00Z"
+        },
+        {
+          "id": "s3",
+          "title": "htop",
+          "name": "",
+          "tags": [],
+          "pinned": false,
+          "cwd": "/home/karn/code",
+          "cmd": [
+            "zsh",
+            "-l"
+          ],
+          "state": "running",
+          "exitCode": 0,
+          "cols": 120,
+          "rows": 40,
+          "createdAt": "2026-07-28T10:00:00Z",
+          "lastActive": "2026-07-28T10:31:00Z",
+          "group": "s1",
+          "ephemeral": true
         }
       ]
     }

@@ -20,6 +20,13 @@ import (
 // output remains readable before the registry reaps it.
 const ExitedRetention = 10 * time.Minute
 
+// EphemeralRetention is ExitedRetention for a session marked ephemeral: long
+// enough for the client that owns it to hear the exit, and no longer. It is
+// not an expiry on a running scratch terminal — a dismissed scratch keeps
+// running until its parent session ends (see Registry.Reap) — it only keeps
+// exited ones from waiting out ten minutes hidden from every list.
+const EphemeralRetention = 10 * time.Second
+
 // DefaultRingSize is the default scrollback capacity per session.
 const DefaultRingSize = 2 << 20 // 2 MiB
 
@@ -51,6 +58,21 @@ type SpawnOpts struct {
 	Cols     uint16
 	Rows     uint16
 	RingSize int // zero means DefaultRingSize
+
+	// Group is the id of the session this one is grouped under — the anchor a
+	// client renders it beside as a split or a tab. It is metadata and nothing
+	// more: the daemon never resolves it, never requires the anchor to exist,
+	// and never treats members differently. Empty is every session spawned
+	// before the field existed, and every session that stands alone.
+	Group string
+	// Ephemeral marks a session a client considers disposable — a scratch
+	// terminal, spawned with Group naming the session it was opened from. Its
+	// life is tied to that parent: dismissing the scratch UI merely detaches,
+	// and the shell runs on until the parent session ends, at which point the
+	// registry closes it (see Reap). Server-side it is otherwise only the
+	// shorter exited retention; whether to hide it from a list is a client
+	// decision.
+	Ephemeral bool
 }
 
 // Info is a snapshot of session state safe to serialise.
@@ -79,6 +101,10 @@ type Info struct {
 	Rows       uint16    `json:"rows"`
 	CreatedAt  time.Time `json:"createdAt"`
 	LastActive time.Time `json:"lastActive"`
+	// Group and Ephemeral mirror SpawnOpts; see there. Both omitempty, so a
+	// session that carries neither serialises exactly as it always has.
+	Group     string `json:"group,omitempty"`
+	Ephemeral bool   `json:"ephemeral,omitempty"`
 }
 
 // MetaPatch is a partial update to a session's human-owned metadata: a nil
@@ -93,6 +119,10 @@ type MetaPatch struct {
 	Name   *string
 	Tags   *[]string
 	Pinned *bool
+	// Ephemeral is here for exactly one edit: a scratch terminal being kept.
+	// Clearing the flag promotes it to an ordinary session — listable by the
+	// client's rules and back on the ordinary exited retention.
+	Ephemeral *bool
 }
 
 // Sub is one subscriber's view of a session's output stream. Backlog plus
@@ -212,6 +242,15 @@ type Session struct {
 
 func (s *Session) ID() string { return s.id }
 
+// groupID reads the session's group link under s.mu. It is set at spawn and
+// never rewritten, but the lock keeps the read on the right side of the rule
+// rather than leaning on that.
+func (s *Session) groupID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.info.Group
+}
+
 // Info returns a snapshot of the session's state, and is also where the
 // child's cwd is refreshed — the kernel is the only party that knows where a
 // `cd` left the shell, so every snapshot asks it.
@@ -258,6 +297,9 @@ func (s *Session) ApplyMeta(p MetaPatch) Info {
 	}
 	if p.Pinned != nil {
 		s.info.Pinned = *p.Pinned
+	}
+	if p.Ephemeral != nil {
+		s.info.Ephemeral = *p.Ephemeral
 	}
 	return s.info
 }
@@ -871,13 +913,14 @@ func masterReadable(f *os.File) bool {
 	return readable
 }
 
-// exitStatus reports whether the child has exited and, if so, when — the two
-// fields Registry.Reap needs. It is a plain read of two fields under s.mu,
-// which is never held across anything that can block.
-func (s *Session) exitStatus() (bool, time.Time) {
+// exitStatus reports whether the child has exited, when, and whether the
+// session is ephemeral — the fields Registry.Reap needs to pick a retention.
+// It is a plain read of fields under s.mu, which is never held across
+// anything that can block.
+func (s *Session) exitStatus() (exited bool, at time.Time, ephemeral bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.info.State == "exited", s.exitedAt
+	return s.info.State == "exited", s.exitedAt, s.info.Ephemeral
 }
 
 // signalGroup delivers sig to the process group led by the child. A group that

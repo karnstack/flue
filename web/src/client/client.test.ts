@@ -221,6 +221,8 @@ describe('control message golden file', () => {
       'hello',
       'list',
       'spawn',
+      'spawnScratch',
+      'spawnSplit',
       'attach',
       'detach',
       'resize',
@@ -229,6 +231,7 @@ describe('control message golden file', () => {
       'closeById',
       'update',
       'updateTagsAndPinned',
+      'updateKeepScratch',
       'updateClearTags',
       'updateClearName',
       'peek',
@@ -240,6 +243,7 @@ describe('control message golden file', () => {
       'pairStart',
       'pairCancel',
       'welcome',
+      'welcomeCaps',
       'welcomeRelay',
       'welcomeRelayConnecting',
       'sessions',
@@ -285,6 +289,31 @@ describe('control message golden file', () => {
       reqId: 6,
     }
     expect(fixture('spawn')).toStrictEqual(want)
+  })
+
+  it('decodes spawn with the scratch fields — group and ephemeral', () => {
+    const want: SpawnMsg = {
+      type: 'spawn',
+      cwd: '/home/karn/code',
+      cols: 120,
+      rows: 40,
+      reqId: 21,
+      group: 'a1b2c3d4e5f60718',
+      ephemeral: true,
+    }
+    expect(fixture('spawnScratch')).toStrictEqual(want)
+  })
+
+  it('decodes spawn with a group alone — a split pane', () => {
+    const want: SpawnMsg = {
+      type: 'spawn',
+      cwd: '/home/karn/code',
+      cols: 120,
+      rows: 40,
+      reqId: 22,
+      group: 'a1b2c3d4e5f60718',
+    }
+    expect(fixture('spawnSplit')).toStrictEqual(want)
   })
 
   it('decodes attach', () => {
@@ -392,6 +421,15 @@ describe('control message golden file', () => {
     expect(got.pinned).toBe(false)
   })
 
+  it('decodes an update keeping a scratch terminal', () => {
+    // `ephemeral: false` is the promotion — the same explicit-falsy hazard as
+    // clearing a name, and the only edit the field exists for.
+    const want: UpdateMsg = { type: 'update', id: 'a1b2c3d4e5f60708', ephemeral: false }
+    const got = fixture('updateKeepScratch') as UpdateMsg
+    expect(got).toStrictEqual(want)
+    expect(got.ephemeral).toBe(false)
+  })
+
   it('decodes devices', () => {
     const want: DevicesMsg = { type: 'devices' }
     expect(fixture('devices')).toStrictEqual(want)
@@ -417,6 +455,17 @@ describe('control message golden file', () => {
     // interface must declare it optional rather than required.
     const want: Welcome = { type: 'welcome', daemonId: 'local', host: 'macbook', ver: '0.1.0' }
     expect(fixture('welcome')).toStrictEqual(want)
+  })
+
+  it('decodes welcome with capabilities — how multiplex is feature-detected', () => {
+    const want: Welcome = {
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'macbook',
+      ver: '0.1.0',
+      caps: ['multiplex'],
+    }
+    expect(fixture('welcomeCaps')).toStrictEqual(want)
   })
 
   it('decodes welcome with a live relay', () => {
@@ -487,6 +536,26 @@ describe('control message golden file', () => {
           rows: 24,
           createdAt: '2026-07-28T07:15:00Z',
           lastActive: '2026-07-28T09:00:00Z',
+        },
+        {
+          // A scratch terminal: grouped under s1 and ephemeral. Both fields
+          // are omitempty on the Go side, which is why the two rows above
+          // must keep decoding without them.
+          id: 's3',
+          title: 'htop',
+          name: '',
+          tags: [],
+          pinned: false,
+          cwd: '/home/karn/code',
+          cmd: ['zsh', '-l'],
+          state: 'running',
+          exitCode: 0,
+          cols: 120,
+          rows: 40,
+          createdAt: '2026-07-28T10:00:00Z',
+          lastActive: '2026-07-28T10:31:00Z',
+          group: 's1',
+          ephemeral: true,
         },
       ],
     }
@@ -1647,6 +1716,46 @@ describe('FlueClient sending', () => {
     expect(c.spawn({ cols: 80, rows: 24 })).toBeNull()
     sockets[0]!.open()
     expect(c.spawn({ cols: 80, rows: 24 })).toBe(1)
+  })
+
+  it('carries group and ephemeral on a spawn that names them, and neither otherwise', () => {
+    const { c, sockets } = harness()
+    c.connect()
+    sockets[0]!.open()
+    c.spawn({ cols: 80, rows: 24, group: 'anchor1', ephemeral: true })
+    c.spawn({ cols: 80, rows: 24 })
+
+    const spawns = sockets[0]!.sentControl().filter((m) => m.type === 'spawn')
+    expect(spawns).toStrictEqual([
+      { type: 'spawn', cols: 80, rows: 24, group: 'anchor1', ephemeral: true, reqId: 1 },
+      { type: 'spawn', cols: 80, rows: 24, reqId: 2 },
+    ])
+  })
+
+  it('carries an explicit ephemeral: false on update — the keep edit', () => {
+    const { c, sockets } = harness()
+    c.connect()
+    sockets[0]!.open()
+    c.update({ id: 's1', ephemeral: false })
+    expect(sockets[0]!.sentControl().filter((m) => m.type === 'update')).toStrictEqual([
+      { type: 'update', id: 's1', ephemeral: false },
+    ])
+  })
+
+  it('answers hasCap from the welcome, and not before one', () => {
+    const { c, sockets } = harness()
+    c.connect()
+    sockets[0]!.open()
+    expect(c.hasCap('multiplex')).toBe(false)
+    sockets[0]!.emitControl({
+      type: 'welcome',
+      daemonId: 'local',
+      host: 'h',
+      ver: '1',
+      caps: ['multiplex'],
+    })
+    expect(c.hasCap('multiplex')).toBe(true)
+    expect(c.hasCap('something-else')).toBe(false)
   })
 
   it('drops rather than holds a spawn issued while the socket is down', async () => {

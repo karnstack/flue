@@ -36,7 +36,13 @@ type Snapshot struct {
 	Name   string   `json:"name"`
 	Tags   []string `json:"tags"`
 	Pinned bool     `json:"pinned"`
-	Cwd    string   `json:"cwd"`
+	// Group travels so a split survives a restart as a split: members are just
+	// sessions, and this is the one fact that makes them members. omitempty
+	// keeps the ungrouped snapshot byte-compatible with what earlier daemons
+	// wrote and read. There is no Ephemeral beside it, because an ephemeral
+	// session is never snapshotted at all — see Session.Snapshot.
+	Group string `json:"group,omitempty"`
+	Cwd   string `json:"cwd"`
 	Cols   uint16   `json:"cols"`
 	Rows   uint16   `json:"rows"`
 	// The ring's retained bytes. encoding/json carries []byte as base64.
@@ -133,11 +139,14 @@ func reviveNote(claudeSession string) []byte {
 }
 
 // Snapshot captures what a revival needs. ok is false for an exited or
-// closed session: those end with the daemon rather than coming back.
+// closed session — those end with the daemon rather than coming back — and
+// for an ephemeral one: a scratch terminal's life is bound to its parent's
+// process, and the parent's revival is a fresh shell the old scratch has no
+// standing beside.
 func (s *Session) Snapshot() (Snapshot, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.info.State != "running" {
+	if s.closed || s.info.State != "running" || s.info.Ephemeral {
 		return Snapshot{}, false
 	}
 	ring, _ := s.ring.Since(s.ring.BaseSeq()) // a fresh copy, per Since
@@ -148,6 +157,7 @@ func (s *Session) Snapshot() (Snapshot, bool) {
 		Name:   s.info.Name,
 		Tags:   s.info.Tags,
 		Pinned: s.info.Pinned,
+		Group:  s.info.Group,
 		Cwd:    s.info.Cwd,
 		Cols:   s.info.Cols,
 		Rows:   s.info.Rows,
@@ -210,6 +220,7 @@ func (r *Registry) Revive(snap Snapshot) (*Session, error) {
 			Name:      snap.Name,
 			Tags:      snap.Tags,
 			Pinned:    snap.Pinned,
+			Group:     snap.Group,
 			CreatedAt: snap.CreatedAt,
 		},
 	)

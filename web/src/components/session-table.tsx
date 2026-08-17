@@ -164,6 +164,7 @@ const TAG_CAP = 3
  */
 function SessionRow({
   s,
+  paneCount,
   shown,
   selected,
   onToggleSelect,
@@ -171,6 +172,8 @@ function SessionRow({
   peek,
 }: {
   s: FleetSession
+  /** Panes folded into this row, when its group has more than one. */
+  paneCount?: number
   shown: ColumnKey[]
   selected: ReadonlySet<string>
   onToggleSelect: (key: string) => void
@@ -200,6 +203,14 @@ function SessionRow({
       <span className="truncate text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
         {name}
       </span>
+      {paneCount !== undefined && paneCount > 1 && (
+        // The whole group folded to this one row (sessions/groups.ts), and
+        // the fold has to say so — a group that reads as one plain session
+        // is N-1 terminals nobody can account for.
+        <span className="shrink-0 self-center rounded-sm bg-zinc-950/5 px-1.5 text-xs/5 text-zinc-500 tabular-nums dark:bg-white/10 dark:text-zinc-400">
+          {paneCount} panes
+        </span>
+      )}
       <span className="truncate font-mono text-xs/6 text-zinc-500 max-sm:hidden dark:text-zinc-400">
         {s.cmd.join(' ')}
       </span>
@@ -387,6 +398,7 @@ function PinnedRule() {
  */
 export function SessionTable({
   groups,
+  panes,
   columns,
   selected,
   onToggleSelect,
@@ -398,6 +410,12 @@ export function SessionTable({
   peek,
 }: {
   groups: Group[]
+  /**
+   * keyOf(row) -> how many panes that row's session group folded into it,
+   * from foldGroups. Rows it does not name are ordinary sessions; the badge
+   * only renders past one.
+   */
+  panes?: ReadonlyMap<string, number>
   columns: ColumnKey[]
   selected: ReadonlySet<string>
   onToggleSelect(key: string): void
@@ -533,6 +551,7 @@ export function SessionTable({
                     {at === boundary && at > 0 && <PinnedRule />}
                     <SessionRow
                       s={s}
+                      paneCount={panes?.get(keyOf(s))}
                       shown={shown}
                       selected={selected}
                       onToggleSelect={onToggleSelect}

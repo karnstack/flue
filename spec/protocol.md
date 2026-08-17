@@ -29,13 +29,13 @@ Every control message is a JSON object with a `type` discriminator.
 |---|---|---|
 | `hello` | `ver`, `caps[]` | open the conversation |
 | `list` | — | list the daemon's sessions |
-| `spawn` | `cwd`, `cmd[]`, `cols`, `rows`, `reqId?` | start a session and attach to it |
+| `spawn` | `cwd`, `cmd[]`, `cols`, `rows`, `reqId?`, `group?`, `ephemeral?` | start a session and attach to it |
 | `attach` | `id`, `lastSeq`, `reqId?` | attach to an existing session |
 | `detach` | `ref` | release an attachment |
 | `resize` | `ref`, `cols`, `rows`, `primary` | report this view's dimensions |
 | `signal` | `ref`, `sig` | send a signal to the session's process |
 | `close` | `ref` *or* `id` | end the session |
-| `update` | `id`, `name?`, `tags[]?`, `pinned?` | edit a session's human-owned metadata |
+| `update` | `id`, `name?`, `tags[]?`, `pinned?`, `ephemeral?` | edit a session's human-owned metadata |
 | `peek` | `id`, `bytes?`, `reqId?` | read the tail of a session's scrollback without attaching |
 | `stat` | `id`, `paths[]`, `reqId?` | ask whether paths exist, relative to a session |
 | `read` | `id`, `path`, `reqId?` | start reading one |
@@ -91,6 +91,47 @@ broadcast output. It has no effect on dimensions.
 Each record of `deviceList.devices[]` carries `id`, `label`, `pairedAt` and
 `lastSeen`. Both timestamps are unix **seconds**, not the RFC 3339 strings
 `sessions[]` uses.
+
+### Groups and ephemeral sessions
+
+Both fields are **optional and additive**, and a plain session — no `group`,
+no `ephemeral` — behaves exactly as it always has. An old daemon ignores the
+unknown spawn fields and the session simply starts ungrouped; an old client
+ignores the unknown `sessions[]` fields and grouped or ephemeral sessions
+show up as ordinary rows. `welcome.caps` containing `"multiplex"` is how a
+client learns the daemon understands them; without it a client should hide
+its split and scratch affordances rather than spawn sessions whose fields
+silently dropped.
+
+`spawn.group` links the new session under an anchor session — the daemon
+records the id on the session's `sessions[]` row and does nothing else with
+it. It never resolves the anchor, never requires it to exist, and never
+treats members differently: grouping is a rendering instruction to clients
+(splits on a desktop, tabs on a phone), not a server concept. Groups are
+flat — a member's `group` names its anchor, and nothing nests.
+
+`spawn.ephemeral` marks a scratch terminal, and it is the one place the
+daemon does act:
+
+- A **running** ephemeral session whose `group` parent has exited (or been
+  reaped) is closed by the daemon's periodic sweep. That is the whole
+  lifecycle: dismissing a scratch terminal in a client is a detach, never a
+  close, so the shell inside it — a dev server, a watch loop — keeps running
+  until the session it was opened from ends.
+- An **exited** ephemeral session is reaped after seconds rather than the
+  usual ten minutes, so hidden scratch rows do not pile up behind lists that
+  fold them away.
+- A running ephemeral session with **no** `group` is left entirely alone.
+
+`update.ephemeral` exists for one edit: `false` clears the flag and keeps the
+scratch — an ordinary member of its group from then on, on ordinary
+retention, no longer bound to its parent. Ephemeral sessions are never
+snapshotted for revival; grouped non-ephemeral sessions revive with their
+`group` intact.
+
+Whether to hide ephemeral sessions or fold a group into one row is a client
+decision. The read-only `GET /api/sessions` and the CLI keep reporting every
+session, fields included.
 
 `welcome.relay`, when present, is `{status, origin?}` — the state of the
 daemon's relay leg at the moment this connection was accepted. `status` is

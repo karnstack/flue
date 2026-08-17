@@ -57,8 +57,16 @@ export function trackVisualViewport(opts: {
   surface: HTMLElement
   gestureArea?: HTMLElement
   viewport: ViewportLike | null
+  /**
+   * Chrome in normal flow above the pane — the group view's tab strip. The
+   * formula below assumes the pane's layout box starts at the top of the
+   * page; a pane that starts topInset pixels down must be that much shorter,
+   * or its bottom rows (and the prompt) land behind the keyboard by exactly
+   * the strip's height.
+   */
+  topInset?: number
 }): () => void {
-  const { pane, surface, gestureArea = surface, viewport } = opts
+  const { pane, surface, gestureArea = surface, viewport, topInset = 0 } = opts
   if (!viewport) return () => {}
 
   const apply = () => {
@@ -69,22 +77,30 @@ export function trackVisualViewport(opts: {
     }
     surface.style.touchAction = ''
     gestureArea.style.touchAction = ''
-    pane.style.height = `${viewport.height}px`
+    pane.style.height = `${Math.max(0, viewport.height - topInset)}px`
     pane.style.translate = `0px ${viewport.offsetTop}px`
   }
 
+  // The handlers this tracker is replacing, put back on dispose. The slots
+  // are single-occupancy by design (see ViewportLike on why they are
+  // properties), and two panes legitimately overlap now: the scratch modal's
+  // terminal mounts over the route's, and a dispose that nulled the slot
+  // would leave the surviving pane deaf to the keyboard for the rest of its
+  // life. Restoring what was found keeps the trackers a stack.
+  const prevResize = viewport.onresize
+  const prevScroll = viewport.onscroll
   viewport.onresize = apply
   viewport.onscroll = apply
   apply()
 
   return () => {
-    // Each slot is surrendered only if it is still this tracker's. Nulling
+    // Each slot is surrendered only if it is still this tracker's. Restoring
     // unconditionally would be a disposer reaching past its own lifetime:
     // a remount can install the replacement before tearing down the old
     // tracker, and the old one would then strip the handlers the new one
     // just wired, leaving the pane stuck at whatever the keyboard last did.
-    if (viewport.onresize === apply) viewport.onresize = null
-    if (viewport.onscroll === apply) viewport.onscroll = null
+    if (viewport.onresize === apply) viewport.onresize = prevResize
+    if (viewport.onscroll === apply) viewport.onscroll = prevScroll
     surface.style.touchAction = ''
     gestureArea.style.touchAction = ''
     pane.style.height = ''
