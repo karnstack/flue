@@ -505,6 +505,171 @@ describe('Shift+Enter', () => {
   })
 })
 
+describe('copy and paste chords', () => {
+  /**
+   * A mounted terminal with `text` on screen, a keyboard to press, and a
+   * record of what went to the pty.
+   *
+   * Keys are dispatched on the helper textarea for the same reason as in the
+   * Shift+Enter block above: it is where xterm listens. `keyCode` is set
+   * because xterm's encoder reads it — a KeyboardEvent built without one
+   * encodes as nothing and the test would pass for the wrong reason.
+   */
+  async function screen(text: string, opts: { macKeyboard?: boolean } = {}) {
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const em = createXtermEmulator({ cols: 40, rows: 6, ...opts })
+    em.attachTo(el)
+    await settled(em, text)
+    const out: string[] = []
+    em.onData((b) => out.push(new TextDecoder().decode(b)))
+    const textarea = el.querySelector('textarea')!
+    const press = (key: string, init: KeyboardEventInit = {}) => {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        keyCode: key.toUpperCase().charCodeAt(0),
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      })
+      textarea.dispatchEvent(event)
+      return event
+    }
+    return {
+      em,
+      press,
+      sent: () => out.join(''),
+      done: () => {
+        em.dispose()
+        el.remove()
+      },
+    }
+  }
+
+  it('stands aside on Ctrl+C over a selection, so the browser copies', async () => {
+    // The bug this exists for: xterm encodes Ctrl+C as ETX with no notion of
+    // a selection, so copying output interrupted the program instead.
+    const t = await screen('hello world')
+    t.em.selectWordAt({ col: 0, row: 0 })
+
+    const event = t.press('c', { ctrlKey: true })
+
+    // Nothing on the wire — the program under the selection keeps running —
+    // and the default not prevented, because the browser's own copy is the
+    // copy. xterm fills the clipboard from its copy listener.
+    expect(t.sent()).toBe('')
+    expect(event.defaultPrevented).toBe(false)
+    t.done()
+  })
+
+  it('clears a copied selection, so the next Ctrl+C interrupts', async () => {
+    // Without this a held selection would make SIGINT unreachable from the
+    // keyboard: every Ctrl+C would copy, forever.
+    const t = await screen('hello world')
+    t.em.selectWordAt({ col: 0, row: 0 })
+
+    t.press('c', { ctrlKey: true })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(t.em.selection()).toBe('')
+    t.press('c', { ctrlKey: true })
+    expect(t.sent()).toBe('\x03')
+    t.done()
+  })
+
+  it('keeps Ctrl+C as the interrupt when nothing is selected', async () => {
+    const t = await screen('hello')
+
+    t.press('c', { ctrlKey: true })
+
+    expect(t.sent()).toBe('\x03')
+    t.done()
+  })
+
+  it('keeps Ctrl+C as the interrupt on a Mac keyboard, selection or not', async () => {
+    // Cmd+C owns copy on a Mac and already works — no ctrlKey, so xterm's
+    // encoder ignores it and the browser copies. Taking Ctrl+C too would
+    // swallow the key entirely: macOS browsers do not copy on Ctrl+C, so the
+    // press would neither copy nor interrupt.
+    const t = await screen('hello world', { macKeyboard: true })
+    t.em.selectWordAt({ col: 0, row: 0 })
+
+    t.press('c', { ctrlKey: true })
+
+    expect(t.sent()).toBe('\x03')
+    t.done()
+  })
+
+  it('leaves Cmd+C alone, which is the browser copy working today', async () => {
+    const t = await screen('hello world')
+    t.em.selectWordAt({ col: 0, row: 0 })
+
+    const event = t.press('c', { metaKey: true })
+
+    expect(t.sent()).toBe('')
+    expect(event.defaultPrevented).toBe(false)
+    t.done()
+  })
+
+  it('claims Ctrl+Shift+C: copies the selection and clears it', async () => {
+    const writeText = vi.fn(() => Promise.resolve())
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const t = await screen('hello world')
+    t.em.selectWordAt({ col: 0, row: 0 })
+
+    const event = t.press('C', { ctrlKey: true, shiftKey: true })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(writeText).toHaveBeenCalledWith('hello')
+    expect(t.em.selection()).toBe('')
+    expect(t.sent()).toBe('')
+    // Claimed even from the browser: on Windows and Linux the unclaimed
+    // chord opens the DevTools inspector over the terminal.
+    expect(event.defaultPrevented).toBe(true)
+    t.done()
+  })
+
+  it('swallows Ctrl+Shift+C over no selection rather than opening DevTools', async () => {
+    const writeText = vi.fn(() => Promise.resolve())
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const t = await screen('hello')
+
+    const event = t.press('C', { ctrlKey: true, shiftKey: true })
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(t.sent()).toBe('')
+    expect(event.defaultPrevented).toBe(true)
+    t.done()
+  })
+
+  it('claims Ctrl+Shift+V: pastes the clipboard through the terminal', async () => {
+    const readText = vi.fn(() => Promise.resolve('pasted text'))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText } })
+    const t = await screen('hello')
+
+    const event = t.press('V', { ctrlKey: true, shiftKey: true })
+    await new Promise((r) => setTimeout(r, 0))
+
+    // Through term.paste, not raw injection, so bracketed paste mode is
+    // honoured when a program has turned it on.
+    expect(t.sent()).toBe('pasted text')
+    expect(event.defaultPrevented).toBe(true)
+    t.done()
+  })
+
+  it('sends nothing when the clipboard refuses to be read', async () => {
+    const readText = vi.fn(() => Promise.reject(new Error('denied')))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText } })
+    const t = await screen('hello')
+
+    t.press('V', { ctrlKey: true, shiftKey: true })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(t.sent()).toBe('')
+    t.done()
+  })
+})
+
 describe('device-query suppression', () => {
   const bytes = (s: string) => new TextEncoder().encode(s)
 

@@ -6,6 +6,13 @@ export interface XtermOptions {
   cols?: number
   rows?: number
   theme?: TerminalTheme
+  /**
+   * Whether this is a Mac keyboard, which decides one thing here: Ctrl+C
+   * stays the interrupt even over a selection, because Cmd+C owns copy on a
+   * Mac and macOS browsers do not copy on Ctrl+C — claiming it would swallow
+   * the key: no copy, no interrupt.
+   */
+  macKeyboard?: boolean
 }
 
 /**
@@ -94,8 +101,11 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
   // through the same guard so there is exactly one place that opens links.
   term.loadAddon(new WebLinksAddon((_event, uri) => openTerminalLink(uri)))
 
+  const encoder = new TextEncoder()
+  let disposed = false
+
   /*
-   * Shift+Enter, which xterm has no notion of.
+   * The keys xterm has no notion of: Shift+Enter, and copy and paste chords.
    *
    * Here rather than in the terminal view, and that is the whole argument for
    * this seam: the view's own keydown handler has no way to put bytes on the
@@ -104,24 +114,93 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
    * the daemon counts the keystroke as activity exactly as it would any other.
    *
    * keydown alone — keyup and keypress arrive for the same press, and either
-   * would send the sequence a second time. Ctrl, Alt and Cmd are all excluded:
-   * Ctrl+Shift+Enter is the view's focus-mode chord, and Alt+Enter already
-   * produces these bytes through xterm's own encoder.
+   * would send the sequence a second time.
    */
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== 'keydown') return true
-    if (e.key !== 'Enter' || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return true
-    // xterm keeps the caret in a real textarea, and refusing the event is not
-    // the same as cancelling it: left to the browser, this Enter writes a line
-    // into that element and xterm's input listener then reads a value nothing
-    // typed. xterm's own cancel never runs, because `false` returns above it.
-    e.preventDefault()
-    term.input(NEWLINE_CHORD_BYTES, true)
-    return false
-  })
 
-  const encoder = new TextEncoder()
-  let disposed = false
+    /*
+     * Shift+Enter. Ctrl, Alt and Cmd are all excluded: Ctrl+Shift+Enter is
+     * the view's focus-mode chord, and Alt+Enter already produces these
+     * bytes through xterm's own encoder.
+     */
+    if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      // xterm keeps the caret in a real textarea, and refusing the event is
+      // not the same as cancelling it: left to the browser, this Enter writes
+      // a line into that element and xterm's input listener then reads a
+      // value nothing typed. xterm's own cancel never runs, because `false`
+      // returns above it.
+      e.preventDefault()
+      term.input(NEWLINE_CHORD_BYTES, true)
+      return false
+    }
+
+    // `key` is 'C' when Shift is down and 'c' when it is not; Cmd chords are
+    // left alone throughout — on a Mac the browser's own copy and paste
+    // already work, because xterm's encoder ignores metaKey.
+    const key = e.key.toLowerCase()
+    if (e.metaKey || e.altKey || !e.ctrlKey) return true
+
+    /*
+     * Ctrl+C over a selection: stand aside instead of encoding ETX, and the
+     * browser's own copy runs — xterm fills the clipboard from its copy
+     * listener on the helper textarea. Not on a Mac (see XtermOptions), and
+     * never with nothing selected: an empty selection must still interrupt,
+     * because Ctrl+C is how anybody stops a program.
+     *
+     * The clear is deferred past the copy: xterm reads the selection when
+     * the copy event lands, which is during this keydown's default action,
+     * so clearing synchronously here would copy nothing. Cleared at all so
+     * the next Ctrl+C interrupts — a held selection must not make SIGINT
+     * unreachable from the keyboard.
+     */
+    if (key === 'c' && !e.shiftKey && !opts.macKeyboard && term.hasSelection()) {
+      setTimeout(() => {
+        if (!disposed) term.clearSelection()
+      }, 0)
+      return false
+    }
+
+    /*
+     * Ctrl+Shift+C: copy, claimed on every platform. xterm's encoder
+     * produces no key for it, so left alone nothing calls preventDefault and
+     * Chrome opens the DevTools inspector over the terminal — which is also
+     * why the empty-selection press is swallowed rather than passed on.
+     */
+    if (key === 'c' && e.shiftKey) {
+      e.preventDefault()
+      const text = term.getSelection()
+      if (text !== '') {
+        void navigator.clipboard?.writeText(text).then(
+          () => {
+            if (!disposed) term.clearSelection()
+          },
+          () => {},
+        )
+      }
+      return false
+    }
+
+    /*
+     * Ctrl+Shift+V: paste, the chord the fingers that just learned
+     * Ctrl+Shift+C reach for next. Through term.paste rather than raw
+     * injection, so bracketed paste mode is honoured. A clipboard that
+     * cannot be read — no API, no permission — pastes nothing; the view's
+     * paste affordances remain the fallback.
+     */
+    if (key === 'v' && e.shiftKey) {
+      e.preventDefault()
+      void navigator.clipboard?.readText?.().then(
+        (text) => {
+          if (!disposed && text !== '') term.paste(text)
+        },
+        () => {},
+      )
+      return false
+    }
+
+    return true
+  })
   // The word a long press anchored, in buffer rows: where a drag extends
   // from, and what it falls back to when the finger comes back inside it.
   // `to` is the column after the last cell, the way a range end usually is.
