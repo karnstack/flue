@@ -383,10 +383,24 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       if (disposed) return null
       const screen = term.element?.querySelector(SCREEN_SELECTOR)
       if (!(screen instanceof HTMLElement)) return null
-      // offsetWidth/offsetHeight rather than getBoundingClientRect, because a
-      // non-primary view is scaled by CSS: the rect would report the scaled
-      // box, and dividing the pane by that converges on nothing.
-      const size = { width: screen.offsetWidth, height: screen.offsetHeight }
+      // The style attribute, which both renderers write the screen's exact
+      // size into, rather than either measurement the browser offers. The
+      // rect is out because a non-primary view is scaled by CSS: it reports
+      // the scaled box, and dividing the pane by that converges on nothing.
+      // And offsetWidth — unscaled, the obvious next choice — rounds to
+      // whole pixels, when on a Retina display the true width is fractional:
+      // a cell is a whole count of device pixels divided by the pixel ratio.
+      // The half-pixel it drops, divided into a cell width and multiplied
+      // back out across the pane, can flip cellsThatFit between N and N+1
+      // columns depending on the dimensions the screen currently wears; the
+      // pty then answers each flip with the other one — a sizing loop that
+      // redraws the prompt several times a second for as long as the pane
+      // keeps that width. (Style, not "the obvious CSS word for it": see the
+      // Tailwind scanner note in src/styles.css.)
+      const size = {
+        width: parseFloat(screen.style.width) || screen.offsetWidth,
+        height: parseFloat(screen.style.height) || screen.offsetHeight,
+      }
       return size.width > 0 && size.height > 0 ? size : null
     },
 

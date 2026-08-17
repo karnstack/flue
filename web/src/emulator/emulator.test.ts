@@ -277,6 +277,31 @@ describe('Emulator interface', () => {
     em.dispose()
   })
 
+  it('reports the exact laid-out size, not whole pixels', () => {
+    // The renderer writes the screen's true size into its style attribute,
+    // and on a Retina display that value is fractional: a cell is a whole
+    // count of device pixels, divided by the pixel ratio. offsetWidth rounds
+    // it to an integer, and that half-pixel, divided into a cell width and
+    // multiplied back out across the pane, is enough to flip cellsThatFit
+    // between N and N+1 columns depending on the dimensions the screen
+    // happens to wear — each answer reshapes the pty, the new dimensions
+    // re-round the other way, and the pane flickers with prompt redraws
+    // forever.
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const em = createXtermEmulator({ cols: 100, rows: 24 })
+    em.attachTo(el)
+    // jsdom lays nothing out, so the renderer's write is stated by hand:
+    // 100 columns of a 7.8125px cell, 24 rows of a 17.02083…px line.
+    const screen = el.querySelector<HTMLElement>('.xterm-screen')!
+    screen.style.width = '781.25px'
+    screen.style.height = '408.5px'
+
+    expect(em.contentSize()).toEqual({ width: 781.25, height: 408.5 })
+    em.dispose()
+    el.remove()
+  })
+
   it('takes a colour palette at build time and again afterwards', () => {
     // Both matter. The option is what stops a terminal painting one frame in
     // xterm's own colours before flue's land; setTheme is what lets a running
