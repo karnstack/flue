@@ -19,6 +19,7 @@ import {
   PlusIcon,
   StarIcon,
 } from '@heroicons/react/16/solid'
+import { GripVerticalIcon } from 'lucide-react'
 
 import { SessionPreview } from '@/components/session-preview'
 import { Badge } from '@/components/ui/badge'
@@ -205,6 +206,7 @@ function SessionRow({
   s,
   groupKey,
   drag,
+  handle,
   paneCount,
   shown,
   selected,
@@ -217,6 +219,8 @@ function SessionRow({
   groupKey: string
   /** The drag layer's contract, when the caller offers one. See DragToGroup. */
   drag?: DragToGroup
+  /** Whether to show the grip — only when a drop could land somewhere. */
+  handle: boolean
   /** Panes folded into this row, when its group has more than one. */
   paneCount?: number
   shown: ColumnKey[]
@@ -296,6 +300,30 @@ function SessionRow({
         drag !== undefined && 'select-none [-webkit-touch-callout:none]',
       )}
     >
+      {/*
+        The grip is how the drag says it exists before anyone has tried it —
+        the gesture works from anywhere on the row, so this is an
+        advertisement rather than the handle it looks like. Quiet until the
+        row is hovered, exactly as the checkbox and the ⋯ trigger are, and at
+        full strength for a coarse pointer, which has no hover and no grab
+        cursor to learn from. Rendered only when a drop could land somewhere
+        (see SessionTable): a grip on a row whose every target refuses would
+        advertise a gesture that only ever says no. z-10 so it takes its own
+        pointer — the grab cursor is half the signal, and under the link's
+        overlay it would read as one more place to click. aria-hidden because
+        it is not operable on its own: the keyboard path is the tag editor,
+        and a focusable handle no key can lift would be a lie told to exactly
+        the people who rely on it.
+      */}
+      {handle && (
+        <span
+          aria-hidden="true"
+          title="Drag to move to another group"
+          className="relative z-10 -mr-1 flex size-4 shrink-0 cursor-grab items-center justify-center text-zinc-400 opacity-0 transition-opacity group-hover/row:opacity-100 active:cursor-grabbing pointer-coarse:opacity-100 dark:text-zinc-500"
+        >
+          <GripVerticalIcon className="size-3.5" />
+        </span>
+      )}
       <Checkbox
         checked={selected.has(key)}
         onCheckedChange={() => onToggleSelect(key)}
@@ -569,6 +597,12 @@ export function SessionTable({
   // The pinned rule only makes sense where there are no headings to do the
   // separating: the single 'all' group of the ungrouped view.
   const ungrouped = groups.length === 1 && groups[0]!.key === 'all'
+  // Whether the rows wear a grip: only while some heading on screen would
+  // actually take the drop. The gesture itself stays live either way — the
+  // refusals are part of what it says — but an advertisement is a promise,
+  // and a grip down a list with nowhere to go promises a move that every
+  // release would refuse.
+  const liftable = drag !== undefined && groups.some((g) => drag.droppable(g))
 
   /*
    * The drag layer's own bookkeeping, all of it about saying things: who the
@@ -630,6 +664,7 @@ export function SessionTable({
              */
             spawn={onSpawnIn === undefined ? undefined : spawnLabel?.(g)}
             drag={drag}
+            handle={liftable}
             panes={panes}
             shown={shown}
             selected={selected}
@@ -677,6 +712,7 @@ function GroupSection({
   boundary,
   spawn,
   drag,
+  handle,
   panes,
   shown,
   selected,
@@ -691,6 +727,7 @@ function GroupSection({
   boundary: number
   spawn?: string
   drag?: DragToGroup
+  handle: boolean
   panes?: ReadonlyMap<string, number>
   shown: ColumnKey[]
   selected: ReadonlySet<string>
@@ -786,6 +823,7 @@ function GroupSection({
                 s={s}
                 groupKey={g.key}
                 drag={drag}
+                handle={handle}
                 paneCount={panes?.get(keyOf(s))}
                 shown={shown}
                 selected={selected}

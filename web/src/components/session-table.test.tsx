@@ -559,6 +559,26 @@ describe('SessionTable', () => {
       expect(link.getAttribute('href')).toBe('/d/m1/s/a1')
     })
 
+    it('wears a grip only where a drop could actually land', async () => {
+      // The grip is an advertisement, not the handle it looks like — the
+      // gesture works from the whole row. It renders when some heading on
+      // screen would take the drop, and stays away both from lists that
+      // cannot drag and from groupings whose every heading refuses, where it
+      // would promise a move that only ever says no.
+      const bare = await renderTable()
+      expect(bare.queryByTitle('Drag to move to another group')).toBeNull()
+      bare.unmount()
+
+      const refused = await renderTable({
+        drag: { droppable: () => false, onDrop: vi.fn() },
+      })
+      expect(refused.queryByTitle('Drag to move to another group')).toBeNull()
+      refused.unmount()
+
+      await renderTable({ drag: { droppable: () => true, onDrop: vi.fn() } })
+      expect(screen.getByTitle('Drag to move to another group')).toBeTruthy()
+    })
+
     it('claims the long press only while dragging is on offer', async () => {
       // select-none and the callout suppression are what let a finger hold a
       // row without iOS answering with selection or the link preview — and
