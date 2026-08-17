@@ -123,6 +123,108 @@ describe('Emulator interface', () => {
     em.dispose()
   })
 
+  describe('touch selection', () => {
+    /** A mounted terminal with `text` on screen, ready to be selected from. */
+    async function screen(text: string, cols = 40) {
+      const el = document.createElement('div')
+      document.body.appendChild(el)
+      const em = createXtermEmulator({ cols, rows: 6 })
+      em.attachTo(el)
+      await settled(em, text)
+      return { em, done: () => (em.dispose(), el.remove()) }
+    }
+
+    it('lifts the word under the finger and nothing either side of it', async () => {
+      // The case the gesture exists for: a session id printed in a sentence,
+      // wanted on its own and without the words around it.
+      const { em, done } = await screen('resume c1ff4c66-5b72 now')
+
+      em.selectWordAt({ col: 10, row: 0 })
+
+      expect(em.selection()).toBe('c1ff4c66-5b72')
+      done()
+    })
+
+    it('takes whitespace as no word at all', async () => {
+      const { em, done } = await screen('one   two')
+      em.selectWordAt({ col: 0, row: 0 })
+
+      em.selectWordAt({ col: 4, row: 0 })
+
+      // The earlier selection survives: a press on blank space is not a way
+      // to lose what was already held.
+      expect(em.selection()).toBe('one')
+      done()
+    })
+
+    it('extends forward across a row boundary', async () => {
+      const { em, done } = await screen('alpha bravo\r\ncharlie delta', 12)
+
+      em.selectWordAt({ col: 6, row: 0 })
+      // The last cell of "charlie", not the space after it: the cell under
+      // the finger is inside the selection, so a drag onto the space would
+      // rightly carry the space along.
+      em.extendSelectionTo({ col: 6, row: 1 })
+
+      expect(em.selection()).toBe('bravo\ncharlie')
+      done()
+    })
+
+    it('extends backwards from the anchored word, keeping its far end', async () => {
+      const { em, done } = await screen('alpha bravo charlie')
+
+      em.selectWordAt({ col: 6, row: 0 })
+      em.extendSelectionTo({ col: 0, row: 0 })
+
+      expect(em.selection()).toBe('alpha bravo')
+      done()
+    })
+
+    it('falls back to the anchored word when the drag returns inside it', async () => {
+      const { em, done } = await screen('alpha bravo charlie')
+
+      em.selectWordAt({ col: 6, row: 0 })
+      em.extendSelectionTo({ col: 14, row: 0 })
+      em.extendSelectionTo({ col: 8, row: 0 })
+
+      expect(em.selection()).toBe('bravo')
+      done()
+    })
+
+    it('ignores a drag that no press anchored', async () => {
+      const { em, done } = await screen('alpha bravo')
+
+      em.extendSelectionTo({ col: 8, row: 0 })
+
+      expect(em.selection()).toBe('')
+      done()
+    })
+
+    it('drops the anchor along with the selection', async () => {
+      const { em, done } = await screen('alpha bravo charlie')
+      em.selectWordAt({ col: 0, row: 0 })
+
+      em.clearSelection()
+      em.extendSelectionTo({ col: 14, row: 0 })
+
+      expect(em.selection()).toBe('')
+      done()
+    })
+
+    it('counts rows from the top of the viewport, not the scrollback', async () => {
+      // Six rows of screen and ten lines written, so the buffer has scrolled
+      // and viewport row 0 is no longer buffer line 0. A caller holding a
+      // finger over the top line means the line it can see.
+      const lines = Array.from({ length: 10 }, (_, i) => `line${i}`).join('\r\n')
+      const { em, done } = await screen(lines)
+
+      em.selectWordAt({ col: 0, row: 0 })
+
+      expect(em.selection()).toBe('line4')
+      done()
+    })
+  })
+
   it('stops reporting the pointer a replayed program had asked for', async () => {
     // The bug this is the floor for: a snapshot's scrollback carries the
     // mouse-tracking sequence of a program that died with the daemon, so

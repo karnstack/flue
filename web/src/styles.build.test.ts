@@ -120,34 +120,20 @@ describe('compiled stylesheet', () => {
     expect(css).not.toContain('touch-action:none')
   })
 
-  it('gives a touch device a pressable box over the terminal', () => {
-    // What makes a long-press Paste possible at all: xterm ships its input
-    // as a zero-sized element parked off-page, and a finger cannot land on
-    // it. This is also the rule most likely to be lost silently — it beats
-    // inline style, and only `!important` does that, so a tidy-up that drops
-    // the annotations would leave a stylesheet that still builds and a
-    // gesture that no longer works.
-    // The last one, not the first: xterm.css names the same element, and the
-    // whole point of flue's rule is that it comes after and overrides it.
-    const at = css.lastIndexOf('.xterm-helper-textarea')
-    expect(at).toBeGreaterThan(-1)
-    const rule = css.slice(at, css.indexOf('}', at))
-    for (const decl of [
-      'inline-size:100%!important',
-      'block-size:100%!important',
-      // Without this the browser rings the focused element, and the element
-      // now has the terminal's box — so it reads as a blue line drawn around
-      // the whole terminal for as long as the session is being typed into.
-      'outline:none!important',
-    ]) {
-      expect(rule).toContain(decl)
-    }
-    // And only where there is no mouse to lose a text selection to.
-    expect(css.slice(0, at)).toContain('pointer:coarse')
-    // Unlayered, so it outranks xterm.css whatever the specificity — the
-    // import at the top of styles.css puts that sheet in `layer(base)`
-    // precisely so rules like this one can win.
-    expect(css.slice(at).indexOf('@layer')).not.toBe(0)
+  it('keeps the long press for flue and not for the platform', () => {
+    // The gesture selects a word and opens flue's own Copy and Paste menu.
+    // iOS answers the same press with a callout of its own, which lands on
+    // top of that menu offering different verbs for one gesture.
+    expect(css).toContain('-webkit-touch-callout:none')
+  })
+
+  it('no longer parks an input element over the terminal', () => {
+    // There was one, briefly, to give a long press some editable text to
+    // land on. flue owns the gesture now, and that element sized to the
+    // terminal is what put a focus ring around the whole session. One hit is
+    // xterm's own rule, which ships whatever flue does; a second would be
+    // flue putting the box back.
+    expect(css.split('xterm-helper-textarea').length - 1).toBe(1)
   })
 })
 

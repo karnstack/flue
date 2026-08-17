@@ -21,6 +21,8 @@
  * NaN that only shows up as a blank screen.
  */
 
+import type { Cell } from '@/emulator/types'
+
 export interface Box {
   width: number
   height: number
@@ -94,4 +96,39 @@ export function cellsThatFit(pane: Box, cell: Box): Dimensions {
 export function fitFactor(content: Box, pane: Box): number {
   if (!measurable(content) || !measurable(pane)) return 1
   return Math.min(pane.width / content.width, pane.height / content.height, 1)
+}
+
+/** A point on the glass, in the same coordinates a touch reports. */
+export interface Point {
+  x: number
+  y: number
+}
+
+/** Where a rendered screen sits on the glass, and how big it ended up. */
+export interface ScreenBox extends Point, Box {}
+
+/**
+ * Which cell a point on the glass is over.
+ *
+ * `screen` is the rendered surface's own box as the browser reports it, which
+ * on a scaled view is the *scaled* box. That is exactly why the arithmetic
+ * here divides by it rather than by a cell size measured anywhere else:
+ * dividing a scaled width by the column count gives the scaled width of one
+ * column, and the factor cancels out. A cell size taken from `cellBox` would
+ * not cancel, and every touch on a phone mirroring a laptop would land a
+ * column or two off, further out the further right the finger went.
+ *
+ * Clamped to the screen rather than refused outside it. A drag that runs off
+ * the edge means the row it ran off, which is what makes dragging to the end
+ * of a line possible at all; and the inset around the surface is blank space
+ * a press can legitimately begin in.
+ */
+export function cellAt(point: Point, screen: ScreenBox, dims: Dimensions): Cell | null {
+  if (!measurable(screen) || dims.cols < 1 || dims.rows < 1) return null
+  const col = Math.floor(((point.x - screen.x) / screen.width) * dims.cols)
+  const row = Math.floor(((point.y - screen.y) / screen.height) * dims.rows)
+  return {
+    col: Math.min(Math.max(col, 0), dims.cols - 1),
+    row: Math.min(Math.max(row, 0), dims.rows - 1),
+  }
 }

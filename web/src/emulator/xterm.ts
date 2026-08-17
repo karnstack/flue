@@ -1,6 +1,6 @@
 import { Terminal } from '@xterm/xterm'
 import { WebLinksAddon } from '@xterm/addon-web-links'
-import type { Emulator, Grid, PixelSize, TerminalTheme } from './types'
+import type { Cell, Emulator, Grid, PixelSize, TerminalTheme } from './types'
 
 export interface XtermOptions {
   cols?: number
@@ -122,6 +122,10 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
 
   const encoder = new TextEncoder()
   let disposed = false
+  // The word a long press anchored, in buffer rows: where a drag extends
+  // from, and what it falls back to when the finger comes back inside it.
+  // `to` is the column after the last cell, the way a range end usually is.
+  let anchor: { row: number; from: number; to: number } | null = null
 
   // Device-query suppression for mirrors. The session's byte stream is
   // broadcast to every attached client, each of which is a full emulator
@@ -182,6 +186,60 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
 
     onData(cb: (bytes: Uint8Array) => void) {
       term.onData((data) => cb(encoder.encode(data)))
+    },
+
+    screenBox() {
+      if (disposed) return null
+      const screen = term.element?.querySelector(SCREEN_SELECTOR)
+      if (!(screen instanceof HTMLElement)) return null
+      // getBoundingClientRect and not offsetWidth, and for exactly the reason
+      // contentSize gives for the opposite choice: a mirroring view is scaled
+      // by CSS on an ancestor, and the rect is the only one of the two that
+      // has the scale in it.
+      const rect = screen.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return null
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+    },
+
+    selectWordAt(cell: Cell) {
+      if (disposed) return
+      const row = bufferRow(term, cell.row)
+      const word = wordAt(term, row, cell.col)
+      if (!word) return
+      anchor = { row, from: word.from, to: word.to }
+      apply(term, row, word.from, row, word.to)
+    },
+
+    extendSelectionTo(cell: Cell) {
+      if (disposed || !anchor) return
+      const row = bufferRow(term, cell.row)
+      // The cell under the finger belongs to the selection, so the far edge
+      // is the column after it. Without this a drag can never reach the last
+      // character of a line, which is where the interesting half of a path
+      // or a hash lives.
+      if (after(row, cell.col + 1, anchor.row, anchor.to)) {
+        apply(term, anchor.row, anchor.from, row, cell.col + 1)
+      } else if (after(anchor.row, anchor.from, row, cell.col)) {
+        apply(term, row, cell.col, anchor.row, anchor.to)
+      } else {
+        apply(term, anchor.row, anchor.from, anchor.row, anchor.to)
+      }
+    },
+
+    selection() {
+      if (disposed) return ''
+      return term.getSelection()
+    },
+
+    clearSelection() {
+      anchor = null
+      if (disposed) return
+      term.clearSelection()
+    },
+
+    paste(text: string) {
+      if (disposed) return
+      term.paste(text)
     },
 
     stopReporting() {
@@ -258,6 +316,64 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       term.input(data, true)
     },
   }
+}
+
+/** The buffer line a viewport row is currently showing. */
+function bufferRow(term: Terminal, row: number): number {
+  return term.buffer.active.viewportY + row
+}
+
+/** Whether (rowA, colA) comes after (rowB, colB) in reading order. */
+function after(rowA: number, colA: number, rowB: number, colB: number): boolean {
+  return rowA > rowB || (rowA === rowB && colA > colB)
+}
+
+/**
+ * Hand a range to xterm's own selection.
+ *
+ * `select` takes a start and a *length*, and that length wraps: past the
+ * width of a row it carries into the next one, which is the only reason a
+ * multi-row range can be expressed through the public API at all.
+ */
+function apply(term: Terminal, row: number, from: number, endRow: number, to: number): void {
+  term.select(from, row, (endRow - row) * term.cols + (to - from))
+}
+
+/**
+ * Whether a cell is blank, asked by column rather than by string index.
+ *
+ * The distinction is not pedantic. A double-width character occupies two
+ * cells and one position in the row's translated text, so walking that text
+ * puts every column after the first CJK glyph out by one. Reading cells
+ * instead keeps the count honest, and the second cell of a wide character —
+ * width zero, no characters of its own — is part of the glyph before it
+ * rather than a gap in the middle of a word.
+ */
+function blankAt(term: Terminal, row: number, col: number): boolean {
+  const cell = term.buffer.active.getLine(row)?.getCell(col)
+  if (!cell) return true
+  if (cell.getWidth() === 0) return false
+  const chars = cell.getChars()
+  return chars === '' || chars === ' '
+}
+
+/**
+ * The run of non-blank cells around a column, or null over blank space.
+ *
+ * Whitespace is the only separator, which is deliberate and is not what a
+ * text editor would do. What gets lifted off a terminal is paths, URLs,
+ * hashes, flags and session ids, and every one of them is full of the
+ * punctuation an editor would break on — a rule that stopped at the hyphen
+ * would turn a UUID into six presses.
+ */
+function wordAt(term: Terminal, row: number, col: number): { from: number; to: number } | null {
+  const blank = (c: number) => blankAt(term, row, c)
+  if (col < 0 || col >= term.cols || blank(col)) return null
+  let from = col
+  while (from > 0 && !blank(from - 1)) from--
+  let to = col + 1
+  while (to < term.cols && !blank(to)) to++
+  return { from, to }
 }
 
 /**

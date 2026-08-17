@@ -1,4 +1,4 @@
-import type { Emulator, Grid, PixelSize, TerminalTheme } from '@/emulator/types'
+import type { Cell, Emulator, Grid, PixelSize, TerminalTheme } from '@/emulator/types'
 
 export interface FakeEmulatorOptions {
   cols?: number
@@ -23,6 +23,8 @@ export interface FakeEmulator extends Emulator {
   readonly scrolled: number
   /** What contentSize() reports. jsdom lays nothing out, so this is set by hand. */
   measured: PixelSize | null
+  /** What screenBox() reports; set by hand like measured. */
+  onGlass: (PixelSize & { x: number; y: number }) | null
   /** What applicationCursorKeys() reports; set by hand like measured. */
   appCursor: boolean
   /** Simulate the user typing. */
@@ -37,6 +39,21 @@ export interface FakeEmulator extends Emulator {
   readonly reportingStops: number[]
   /** What reportsPointer() answers; set by hand like measured. */
   pointerReports: boolean
+  /** Every selectWordAt() cell, in order. */
+  readonly wordPresses: Cell[]
+  /** Every extendSelectionTo() cell, in order. */
+  readonly extensions: Cell[]
+  /** How many times the selection has been cleared. */
+  readonly selectionClears: number
+  /** What selection() answers. Cleared and set by the calls below. */
+  selected: string
+  /**
+   * The word a selectWordAt() will find, which a fake cannot work out for
+   * itself. Empty stands for a press on blank space.
+   */
+  word: string
+  /** Text handed to paste(), in order. */
+  readonly pasted: string[]
 }
 
 /**
@@ -56,12 +73,21 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
   const themes: TerminalTheme[] = []
   const queryAnswers: boolean[] = []
   const reportingStops: number[] = []
+  const wordPresses: Cell[] = []
+  const extensions: Cell[] = []
+  const pasted: string[] = []
 
   const self: FakeEmulator = {
     written,
     themes,
     queryAnswers,
     reportingStops,
+    wordPresses,
+    extensions,
+    pasted,
+    selectionClears: 0,
+    selected: '',
+    word: '',
     cols: opts.cols ?? 80,
     rows: opts.rows ?? 24,
     mountedOn: null,
@@ -69,6 +95,7 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
     focusCalls: 0,
     scrolled: 0,
     measured: null,
+    onGlass: null,
     appCursor: false,
     pointerReports: false,
 
@@ -101,6 +128,29 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
 
     onData(cb: (bytes: Uint8Array) => void) {
       listeners.push(cb)
+    },
+
+    screenBox: () => self.onGlass,
+
+    selectWordAt(cell: Cell) {
+      wordPresses.push(cell)
+      mutable(self).selected = self.word
+    },
+
+    extendSelectionTo(cell: Cell) {
+      extensions.push(cell)
+    },
+
+    selection: () => self.selected,
+
+    clearSelection() {
+      mutable(self).selectionClears++
+      mutable(self).selected = ''
+    },
+
+    paste(text: string) {
+      pasted.push(text)
+      self.send(text)
     },
 
     stopReporting() {

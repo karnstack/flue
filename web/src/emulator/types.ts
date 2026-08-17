@@ -17,6 +17,19 @@ export interface PixelSize {
 }
 
 /**
+ * A cell on the screen in front of somebody: column, and row counted from
+ * the top of the viewport rather than from the top of the scrollback.
+ *
+ * Viewport-relative because that is what a finger knows. Where the viewport
+ * sits in the buffer is the emulator's business, and a caller that had to
+ * hold both would have to keep them in step through every scroll.
+ */
+export interface Cell {
+  col: number
+  row: number
+}
+
+/**
  * A terminal colour palette.
  *
  * Every field is optional: an emulator has defaults for all of them, and a
@@ -106,6 +119,58 @@ export interface Emulator {
    * destination rather than registering a second callback.
    */
   onData(cb: (bytes: Uint8Array) => void): void
+  /**
+   * Where the rendered screen sits on the glass, in client coordinates.
+   *
+   * The counterpart of contentSize, and the difference between them is the
+   * whole point of having both. contentSize reports the screen's own layout
+   * size and deliberately ignores any scaling, because that is the number the
+   * sizing policy divides by. This one reports the box as the browser sees
+   * it, scaling and all, because that is the number a touch has to be
+   * measured against: a finger lands in client coordinates, and a mirroring
+   * view draws its screen at a fraction of the size it was laid out at.
+   *
+   * Null before anything has been laid out, jsdom included.
+   */
+  screenBox(): (PixelSize & { x: number; y: number }) | null
+  /**
+   * Select the word under a cell, and remember it as the anchor.
+   *
+   * The opening move of a touch selection, and a word rather than a cell
+   * because a single cell is not something anybody wants: the gesture exists
+   * to lift a path, a hash or a session id off the screen, and every one of
+   * those is a word. Whitespace under the finger selects nothing and leaves
+   * any existing selection alone, so a press on the empty half of a line is
+   * not a way to lose what was already held.
+   *
+   * The anchor is the whole word, not a point in it. Extending backwards
+   * past the press therefore keeps the word's far end pinned, which is what
+   * every phone does and what makes a first press worth having.
+   */
+  selectWordAt(cell: Cell): void
+  /**
+   * Grow the selection out to a cell, from the anchor the press left.
+   *
+   * Either direction: a cell past the anchor extends the end, a cell before
+   * it extends the start, and anywhere inside falls back to the anchored
+   * word. Does nothing without an anchor — a drag that never began as a
+   * press is a scroll, and this is not the code that decides that.
+   */
+  extendSelectionTo(cell: Cell): void
+  /** The selected text, empty when there is no selection. */
+  selection(): string
+  /** Drop the selection and the anchor with it. */
+  clearSelection(): void
+  /**
+   * Paste text as terminal input.
+   *
+   * Distinct from writing bytes: a terminal normalises the newlines in
+   * pasted text and wraps the whole of it when the program has asked for
+   * bracketed-paste mode. A clipboard control that put the text on the wire
+   * itself would lose both, and a pasted command with a newline in it would
+   * run rather than land in the line editor.
+   */
+  paste(text: string): void
   /**
    * Forget the reporting modes a replayed backlog turned on.
    *

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cellBox, cellsThatFit, fitFactor, GUTTER_PX } from './geometry'
+import { cellAt, cellBox, cellsThatFit, fitFactor, GUTTER_PX } from './geometry'
 
 describe('cellBox', () => {
   it('divides rendered pixels by the cells they were rendered at', () => {
@@ -78,5 +78,40 @@ describe('fitFactor', () => {
   it('falls back to 1 when either box is unmeasurable', () => {
     expect(fitFactor({ width: 0, height: 0 }, { width: 400, height: 400 })).toBe(1)
     expect(fitFactor({ width: 400, height: 400 }, { width: 0, height: 0 })).toBe(1)
+  })
+})
+
+describe('cellAt', () => {
+  const screen = { x: 20, y: 40, width: 800, height: 480 }
+  const dims = { cols: 80, rows: 24 }
+
+  it('reads a point as the cell drawn under it', () => {
+    // 10px per column, 20px per row, and the screen's own origin subtracted
+    // first: the inset around it is not part of the grid.
+    expect(cellAt({ x: 20, y: 40 }, screen, dims)).toEqual({ col: 0, row: 0 })
+    expect(cellAt({ x: 125, y: 105 }, screen, dims)).toEqual({ col: 10, row: 3 })
+  })
+
+  it('cancels the scale a mirroring view is rendered at', () => {
+    // The same 80x24 screen, drawn at half size on a phone. The reported box
+    // is the scaled one, so dividing by it gives the scaled column width and
+    // the factor drops out — a touch two thirds along still reads column 53
+    // and not column 26.
+    const half = { x: 0, y: 0, width: 400, height: 240 }
+    expect(cellAt({ x: 265, y: 120 }, half, dims)).toEqual({ col: 53, row: 12 })
+  })
+
+  it('clamps a finger that has run off the edge', () => {
+    // What makes dragging to the end of a line possible: past the right edge
+    // means the last column, not "no cell".
+    expect(cellAt({ x: 9999, y: 9999 }, screen, dims)).toEqual({ col: 79, row: 23 })
+    expect(cellAt({ x: -9999, y: -9999 }, screen, dims)).toEqual({ col: 0, row: 0 })
+  })
+
+  it('has no answer before anything has been laid out', () => {
+    // jsdom, and the first frame in a browser. Dividing by this box would
+    // produce an Infinity that only shows up as a selection nobody can aim.
+    expect(cellAt({ x: 10, y: 10 }, { x: 0, y: 0, width: 0, height: 0 }, dims)).toBeNull()
+    expect(cellAt({ x: 10, y: 10 }, screen, { cols: 0, rows: 0 })).toBeNull()
   })
 })
