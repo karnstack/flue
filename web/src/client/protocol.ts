@@ -94,6 +94,19 @@ export interface SessionInfo {
   createdAt: string
   /** RFC 3339, as Go marshals a time.Time. */
   lastActive: string
+  /**
+   * The id of the anchor session this one is grouped under — a split pane on
+   * a desktop, a tab on a phone. Absent for every session that stands alone,
+   * which is every session from before the field. Metadata only: the daemon
+   * records it and nothing else, so folding a group is this side's decision.
+   */
+  group?: string
+  /**
+   * A scratch terminal: hidden by this client's lists, reaped fast once
+   * exited, and closed by the daemon when its `group` parent ends. Dismissing
+   * its UI detaches — the shell keeps running until then. Absent means false.
+   */
+  ephemeral?: boolean
 }
 
 /**
@@ -151,6 +164,14 @@ export interface SpawnMsg {
    * asked for. Mirrors `reqId,omitempty` on the Go side.
    */
   reqId?: number
+  /**
+   * Group the new session under an anchor session — a split, or a tab in the
+   * anchor's group. Only sent to a daemon whose welcome caps include
+   * `multiplex`; an older daemon would ignore it and spawn an orphan.
+   */
+  group?: string
+  /** Mark a scratch terminal. Same caps gate as `group`. */
+  ephemeral?: boolean
 }
 
 export interface AttachMsg {
@@ -234,6 +255,12 @@ export interface UpdateMsg {
   name?: string
   tags?: string[]
   pinned?: boolean
+  /**
+   * One edit only: `false` keeps a scratch terminal, promoting it to an
+   * ordinary member of its group. Absent leaves the flag alone, like every
+   * other field here.
+   */
+  ephemeral?: boolean
 }
 
 /**

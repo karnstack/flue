@@ -16,6 +16,7 @@ import { RemoteRoute } from '@/routes/remote'
 import { SessionsRoute } from '@/routes/sessions'
 import { SettingsRoute } from '@/routes/settings'
 import { TerminalRoute } from '@/routes/terminal'
+import { ScratchProvider } from '@/scratch/provider'
 import { NEW_SESSION_PATH, validateNewSessionSearch } from '@/sessions/new-session'
 import { SwitcherProvider } from '@/switcher/provider'
 
@@ -123,7 +124,15 @@ const rootRoute = createRootRouteWithContext<FlueRouterOptions>()({
           not chosen one.
         */}
         <SwitcherProvider>
-          <Outlet />
+          {/*
+            The scratch terminal rides beside the switcher for the same
+            reason the switcher is here: its chord has to answer on any
+            screen with a session, and its anchor is whatever session the
+            route says is on screen.
+          */}
+          <ScratchProvider>
+            <Outlet />
+          </ScratchProvider>
         </SwitcherProvider>
       </FleetProvider>
     )

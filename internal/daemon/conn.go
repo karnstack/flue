@@ -64,6 +64,13 @@ const (
 	peekMaxBytes = 128 << 10
 )
 
+// capMultiplex is the welcome capability that says this daemon understands
+// session groups and ephemeral sessions — the optional spawn and update
+// fields added for the in-session multiplexer. Feature detection, not
+// negotiation: the fields are additive either way, the cap only tells a
+// client whether the affordances are worth drawing.
+const capMultiplex = "multiplex"
+
 var (
 	errConnClosed     = errors.New("daemon: connection closed")
 	errConnBacklogged = errors.New("daemon: client is not draining its socket")
@@ -445,6 +452,12 @@ func (c *conn) serve() {
 		DaemonID: "local",
 		Host:     c.srv.hostname,
 		Ver:      c.srv.version,
+		// What this daemon can do beyond the base protocol, for a client to
+		// feature-detect on. "multiplex" says spawn accepts group and
+		// ephemeral, and update accepts ephemeral: a client talking to a
+		// daemon that does not say it hides the split and scratch affordances
+		// rather than spawning sessions whose extra fields silently dropped.
+		Caps: []string{capMultiplex},
 		// Read here, once, at the moment this connection opens. The status is
 		// not a stream — nothing pushes an update when the relay reconnects —
 		// so what a client holds is what was true when it arrived, which is
@@ -591,7 +604,7 @@ func (c *conn) handleControl(msg any) {
 		// spend that distinction on the way past. wire.Update and
 		// session.MetaPatch have the same shape for exactly this reason.
 		if _, err := c.srv.reg.UpdateMeta(m.ID, session.MetaPatch{
-			Name: m.Name, Tags: m.Tags, Pinned: m.Pinned,
+			Name: m.Name, Tags: m.Tags, Pinned: m.Pinned, Ephemeral: m.Ephemeral,
 		}); err != nil {
 			// The only thing UpdateMeta refuses is an id it does not hold, and a
 			// client editing a session that has just exited and been reaped is
@@ -682,6 +695,7 @@ func (c *conn) handleControl(msg any) {
 	case wire.Spawn:
 		s, err := c.srv.reg.Spawn(session.SpawnOpts{
 			Cwd: m.Cwd, Cmd: m.Cmd, Cols: m.Cols, Rows: m.Rows,
+			Group: m.Group, Ephemeral: m.Ephemeral,
 		})
 		if err != nil {
 			c.sendErrorFor(m.ReqID, "spawn_failed", err.Error())

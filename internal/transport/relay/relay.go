@@ -255,6 +255,15 @@ type Transport struct {
 	// count, taken by each and returned when it finishes. See maxPairings.
 	pairings chan struct{}
 
+	// serving counts the goroutines this transport has spun off to serve a
+	// channel or answer a pairing — the ones that write into the device
+	// registry (a last-seen stamp, a pairing's new entry). Run waits for it
+	// on the way out, and only there: within a reconnect a lame connection's
+	// unwinding must not delay the dial that brings every other browser back,
+	// but Run's return is the promise that nothing of the transport is still
+	// running — least of all a registry write racing the caller's teardown.
+	serving sync.WaitGroup
+
 	log *slog.Logger
 
 	// keepalive is the interval between flue-ping frames, a field rather than a
@@ -352,6 +361,10 @@ func (t *Transport) Run(ctx context.Context) error {
 	// context is done, and a status left reading "connecting" would have every
 	// welcome after it announce a relay nothing is trying to reach.
 	defer t.srv.SetRelayStatus(daemon.RelayOff, "")
+	// LIFO with the line above: the serve goroutines are joined first, then
+	// the status flips. See the field's comment for why the join is here and
+	// not in each reconnect iteration.
+	defer t.serving.Wait()
 
 	attempt := 0
 	for {

@@ -252,7 +252,18 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info
 			Tags:       normalizeTags(restore.Tags),
 			CreatedAt:  created,
 			LastActive: born,
+			// From the options, then from the restore record: a spawn names its
+			// group up front, and a revival hands back the one the dead session
+			// carried. Both empty is every session from before the field.
+			Group: opts.Group,
+			// Deliberately not restored: an ephemeral session is never
+			// snapshotted (see Session.Snapshot), so a restore record cannot
+			// carry the flag.
+			Ephemeral: opts.Ephemeral,
 		},
+	}
+	if s.info.Group == "" {
+		s.info.Group = restore.Group
 	}
 	s.info.ID = s.id
 	s.info.Title = restore.Title
@@ -381,25 +392,61 @@ func (r *Registry) List() []*Session {
 	return out
 }
 
-// Reap removes sessions that exited more than ExitedRetention ago.
+// Reap removes sessions that exited more than their retention ago —
+// ExitedRetention ordinarily, EphemeralRetention for a scratch terminal —
+// and closes the running ephemeral children of parents that have ended.
+//
+// The second half is the whole of an ephemeral session's lifecycle: a scratch
+// terminal is dismissed by detaching, never by closing, so the shell inside it
+// runs on — a dev server started there keeps serving — until the session it
+// was opened from exits or is reaped. This sweep is where that promise is
+// kept. A parent that is merely exited (still listable in its retention
+// window) already ends its scratch: the terminal the scratch belongs beside is
+// over, and nothing can reopen it from there.
 //
 // Victims are collected under r.mu and closed only after it has been
 // released. Close signals a process group, waits for the session's supervisor
 // to answer and closes a file descriptor; doing any of that while holding r.mu
 // would turn a stall in one session into a stall of Get, List, Spawn and every
-// other session too. The one session call made under r.mu, exitStatus, reads
-// two fields under s.mu and returns.
+// other session too. The session calls made under r.mu, exitStatus and
+// groupID, read fields under s.mu and return.
 func (r *Registry) Reap() {
 	now := r.clock()
 
 	var victims []*Session
+	var orphans []*Session
 	r.mu.Lock()
 	for id, s := range r.sessions {
-		exited, at := s.exitStatus()
-		if exited && now.Sub(at) >= ExitedRetention {
+		exited, at, ephemeral := s.exitStatus()
+		retention := ExitedRetention
+		if ephemeral {
+			// A scratch terminal's final output has one reader, who has already
+			// dismissed it. Keeping it listable for ten minutes would pile
+			// hidden exited rows behind every list that folds them away.
+			retention = EphemeralRetention
+		}
+		if exited && now.Sub(at) >= retention {
 			victims = append(victims, s)
 			delete(r.sessions, id)
+			continue
 		}
+		if !ephemeral || exited {
+			continue
+		}
+		// A running scratch terminal lives exactly as long as its parent. An
+		// ephemeral session with no group has no parent to follow and is left
+		// alone — its client owns its lifecycle.
+		group := s.groupID()
+		if group == "" {
+			continue
+		}
+		parent, held := r.sessions[group]
+		if held {
+			if parentExited, _, _ := parent.exitStatus(); !parentExited {
+				continue
+			}
+		}
+		orphans = append(orphans, s)
 	}
 	r.mu.Unlock()
 
@@ -411,5 +458,20 @@ func (r *Registry) Reap() {
 		// deliberate: an exited session stays listable for ExitedRetention, and
 		// a name is exactly what makes it findable in that window.
 		DeleteMeta(dir, s.ID())
+	}
+	for _, s := range orphans {
+		// Between collection under r.mu and this Close, a Keep may have
+		// landed: UpdateMeta clears Ephemeral without r.mu, and a session
+		// promoted in that window is an ordinary member now — killing it
+		// would be the sweep spending a decision the user just reversed.
+		// Re-read the flag at the last moment; the promotion path never sets
+		// it back, so a stale read here can only spare, never kill.
+		if _, _, ephemeral := s.exitStatus(); !ephemeral {
+			continue
+		}
+		// Close, not delete: the kill lands now, the exit is recorded by the
+		// session's own supervisor, and the next sweep reaps the row through
+		// the ordinary path above.
+		_ = s.Close()
 	}
 }

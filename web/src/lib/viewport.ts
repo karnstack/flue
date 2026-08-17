@@ -57,8 +57,16 @@ export function trackVisualViewport(opts: {
   surface: HTMLElement
   gestureArea?: HTMLElement
   viewport: ViewportLike | null
+  /**
+   * Chrome in normal flow above the pane — the group view's tab strip. The
+   * formula below assumes the pane's layout box starts at the top of the
+   * page; a pane that starts topInset pixels down must be that much shorter,
+   * or its bottom rows (and the prompt) land behind the keyboard by exactly
+   * the strip's height.
+   */
+  topInset?: number
 }): () => void {
-  const { pane, surface, gestureArea = surface, viewport } = opts
+  const { pane, surface, gestureArea = surface, viewport, topInset = 0 } = opts
   if (!viewport) return () => {}
 
   const apply = () => {
@@ -69,25 +77,83 @@ export function trackVisualViewport(opts: {
     }
     surface.style.touchAction = ''
     gestureArea.style.touchAction = ''
-    pane.style.height = `${viewport.height}px`
+    pane.style.height = `${Math.max(0, viewport.height - topInset)}px`
     pane.style.translate = `0px ${viewport.offsetTop}px`
   }
 
+  // The slots are single-occupancy by design (see ViewportLike on why they
+  // are properties), and trackers legitimately overlap now: the scratch
+  // modal's terminal mounts over the route's, and split panes stack several
+  // more. A dispose that nulled the slot would leave every survivor deaf to
+  // the keyboard — and a dispose that restored "whatever it found on
+  // install" resurrects a dead tracker's handler the moment they tear down
+  // out of install order. So the stack is explicit: one shared record per
+  // viewport, disposal removes exactly its own entry, and the slot always
+  // belongs to the newest entry still alive (or to whatever non-flue handler
+  // held it before the first tracker arrived).
+  const rec = stackFor(viewport)
+  const me = { apply }
+  rec.stack.push(me)
   viewport.onresize = apply
   viewport.onscroll = apply
   apply()
 
   return () => {
-    // Each slot is surrendered only if it is still this tracker's. Nulling
-    // unconditionally would be a disposer reaching past its own lifetime:
-    // a remount can install the replacement before tearing down the old
-    // tracker, and the old one would then strip the handlers the new one
-    // just wired, leaving the pane stuck at whatever the keyboard last did.
-    if (viewport.onresize === apply) viewport.onresize = null
-    if (viewport.onscroll === apply) viewport.onscroll = null
     surface.style.touchAction = ''
     gestureArea.style.touchAction = ''
     pane.style.height = ''
     pane.style.translate = ''
+    const i = rec.stack.indexOf(me)
+    if (i === -1) return // disposed twice
+    const wasTop = i === rec.stack.length - 1
+    rec.stack.splice(i, 1)
+    if (rec.stack.length === 0) stacks.delete(viewport)
+    // A tracker below the top never held the slot, so it has nothing to hand
+    // over; and each slot is surrendered only if it is still this tracker's —
+    // a remount can install the replacement before tearing down the old
+    // tracker, and the old one must not strip the handlers the new one just
+    // wired, leaving the pane stuck at whatever the keyboard last did.
+    if (!wasTop) return
+    const next = rec.stack[rec.stack.length - 1]
+    let handedOver = false
+    if (viewport.onresize === apply) {
+      viewport.onresize = next ? next.apply : rec.prevResize
+      handedOver = next !== undefined
+    }
+    if (viewport.onscroll === apply) {
+      viewport.onscroll = next ? next.apply : rec.prevScroll
+      handedOver = handedOver || next !== undefined
+    }
+    // The successor takes the state over now, not on the next keyboard move:
+    // its pane may have been styled for a viewport several trackers ago.
+    if (handedOver) next!.apply()
   }
+}
+
+/** One tracker on a viewport: what disposal needs to find and remove. */
+interface Tracker {
+  apply: () => void
+}
+
+/**
+ * The live trackers per viewport, newest last, plus the handlers the first
+ * of them displaced — restored when the last one leaves. A WeakMap because
+ * the real page has one visualViewport forever, but every test conjures its
+ * own; keying on the object keeps them from sharing a stack.
+ */
+interface TrackerStack {
+  stack: Tracker[]
+  prevResize: ViewportLike['onresize']
+  prevScroll: ViewportLike['onscroll']
+}
+
+const stacks = new WeakMap<ViewportLike, TrackerStack>()
+
+function stackFor(viewport: ViewportLike): TrackerStack {
+  let rec = stacks.get(viewport)
+  if (rec === undefined) {
+    rec = { stack: [], prevResize: viewport.onresize, prevScroll: viewport.onscroll }
+    stacks.set(viewport, rec)
+  }
+  return rec
 }

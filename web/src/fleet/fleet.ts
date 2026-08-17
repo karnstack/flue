@@ -986,6 +986,12 @@ export class FleetClient {
     for (const slot of this.slots) {
       if (slot.rows === null) continue
       for (const row of slot.rows) {
+        // Ephemeral sessions are hidden here, at the one seam every fleet
+        // consumer reads through — the sessions list, the switcher, the
+        // recents. A scratch terminal is reachable from exactly one place,
+        // the session it was opened over, and that surface talks to the
+        // FlueClient directly rather than to these rows.
+        if (row.ephemeral) continue
         out.push({ ...row, machineId: slot.id, machineName: slot.name })
       }
     }

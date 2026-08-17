@@ -8,6 +8,7 @@
  */
 import type { FleetSession } from '@/fleet/types'
 import { keyOf } from '@/fleet/types'
+import { anchorIdOf, groupMembers } from '@/sessions/groups'
 import { displayName, filterSessions, orderSessions } from '@/sessions/view'
 import { visitKey, type RecentVisit } from './recents'
 
@@ -54,7 +55,7 @@ export type SwitcherRow =
 
 /** A headed run of rows. Sections with nothing in them are never returned. */
 export interface SwitcherSection {
-  key: 'pinned' | 'recent' | 'all' | 'results'
+  key: 'group' | 'pinned' | 'recent' | 'all' | 'results'
   label: string
   rows: SwitcherRow[]
 }
@@ -125,8 +126,31 @@ function restingSections(
 ): SwitcherSection[] {
   // The dead do not rest here — see the ended-sessions note on buildPalette.
   const usable = sessions.filter((s) => s.state !== 'exited')
+
   const pinned = pinnedOrder(usable)
   const spoken = new Set(pinned.map(keyOf))
+
+  // The other terminals of the group this tab is inside — its panes and tabs
+  // — lead the palette: from within a split, "the shell next to this one" is
+  // the likeliest there of all, and the list folds members away, so this is
+  // the one place they are offered by name. The session the tab is *on* is
+  // deliberately not a row (a take-me-there control does not offer here),
+  // and a pinned sibling keeps its Pinned row instead — the ⌃⇧1..9 badges
+  // number that run, and a section that poached from it would renumber the
+  // chords.
+  const siblings: FleetSession[] = []
+  if (currentKey !== null) {
+    const here = live.get(currentKey)
+    if (here !== undefined) {
+      const machineRows = usable.filter((s) => s.machineId === here.machineId)
+      for (const s of groupMembers(machineRows, anchorIdOf(here))) {
+        const key = keyOf(s)
+        if (key === currentKey || spoken.has(key)) continue
+        spoken.add(key)
+        siblings.push(s)
+      }
+    }
+  }
 
   const recentRows: SwitcherRow[] = []
   for (const visit of recents) {
@@ -156,6 +180,11 @@ function restingSections(
   ).map((session) => liveRow(session, null, currentKey))
 
   return trim([
+    {
+      key: 'group',
+      label: 'This session',
+      rows: siblings.map((s) => liveRow(s, null, currentKey)),
+    },
     { key: 'pinned', label: 'Pinned', rows: pinned.map((s, at) => liveRow(s, badgeAt(at), currentKey)) },
     { key: 'recent', label: 'Recent', rows: recentRows },
     { key: 'all', label: 'All sessions', rows: rest },

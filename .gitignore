@@ -22,3 +22,5 @@ flued
 /site/src/routeTree.gen.ts
 # Wrangler's local cache from site deploys.
 /site/.wrangler/
+# tsc --noEmit with incremental drops this beside web/tsconfig.json.
+web/tsconfig.tsbuildinfo

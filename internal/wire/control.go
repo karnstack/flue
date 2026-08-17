@@ -24,6 +24,14 @@ type Spawn struct {
 	// ReqID correlates this request with the attached or error answering it.
 	// Client-chosen; zero means the client asked for no correlation.
 	ReqID uint64 `json:"reqId,omitempty"`
+	// Group links the new session under an anchor session — a split pane, or a
+	// tab in the anchor's group. Optional and additive: a daemon from before
+	// the field ignores it, and the session simply spawns ungrouped.
+	Group string `json:"group,omitempty"`
+	// Ephemeral marks a scratch terminal: hidden by clients, reaped fast once
+	// exited, and closed by the daemon when the Group parent ends. Optional
+	// and additive like Group.
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 type Attach struct {
@@ -97,6 +105,10 @@ type Update struct {
 	Name   *string   `json:"name,omitempty"`
 	Tags   *[]string `json:"tags,omitempty"`
 	Pinned *bool     `json:"pinned,omitempty"`
+	// Ephemeral exists for one edit: clearing it keeps a scratch terminal,
+	// promoting it to an ordinary member of its group. A pointer for the same
+	// reason the others are — absent means this edit is not about it.
+	Ephemeral *bool `json:"ephemeral,omitempty"`
 }
 
 // Peek asks for the tail of a session's scrollback without attaching to it.

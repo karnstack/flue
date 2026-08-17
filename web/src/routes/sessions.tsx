@@ -27,6 +27,7 @@ import { keyOf, LOCAL_MACHINE_ID, type FleetSession, type MachineState } from '@
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
 import { takeCwd } from '@/lib/url'
 import { cn } from '@/lib/utils'
+import { foldGroups } from '@/sessions/groups'
 import { useOpenNewSession, type NewSessionOrigin } from '@/sessions/open-new-session'
 import {
   applyView,
@@ -45,6 +46,12 @@ import {
   saveView,
   type SavedView,
 } from '@/sessions/views-store'
+
+/**
+ * One empty list, module-wide, so a fleet that has not reported yet does not
+ * hand every useMemo below a fresh `[]` identity per render.
+ */
+const EMPTY_SESSIONS: FleetSession[] = []
 
 /**
  * The terminal's path, written out rather than imported from src/router.tsx.
@@ -388,8 +395,15 @@ export function SessionsRoute() {
   // tab is looked at beats waiting out a stretched poll tick.
   useRefetchOnFocus(useCallback(() => fleet.list(), [fleet]))
 
-  const sessions = fleetState?.sessions ?? []
+  const merged = fleetState?.sessions ?? EMPTY_SESSIONS
   const machines = fleetState?.machines ?? null
+
+  // Group members fold under their anchor: one row per group, wearing a pane
+  // count, rather than N rows for what a reader thinks of as one terminal. A
+  // member whose anchor is gone keeps its row — see foldGroups.
+  const grouped = useMemo(() => foldGroups(merged), [merged])
+  const sessions = grouped.rows
+  const panes = grouped.panes
 
   const groups = useMemo(() => applyView(sessions, view), [sessions, view])
   /** How many rows the view folded away for having ended. See hiddenExited. */
@@ -752,6 +766,7 @@ export function SessionsRoute() {
       {showTable && (
         <SessionTable
           groups={groups}
+          panes={panes}
           columns={columns}
           selected={selected}
           onToggleSelect={toggleSelect}

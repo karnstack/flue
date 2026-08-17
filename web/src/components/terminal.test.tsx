@@ -1790,19 +1790,30 @@ function session(over: Partial<SessionInfo> = {}): SessionInfo {
   }
 }
 
-describe('the exit overlay', () => {
-  it('appears when the shell exits, naming the code', () => {
-    const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
+describe('an exited shell', () => {
+  it('hands the exit straight to onClosed — no overlay, no question', () => {
+    const onClosed = vi.fn()
+    const { sock } = mountTerminal((em) => (
+      <Terminal sessionId="s1" createEmulator={em.create} onClosed={onClosed} />
+    ))
 
     act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
-    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 130 }))
+    expect(onClosed).not.toHaveBeenCalled()
 
-    const card = screen.getByRole('alertdialog')
-    expect(card.getAttribute('aria-label')).toBe('shell exited (130)')
-    expect(card.textContent).toContain('(130)')
+    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 130 }))
+    // What closing means — fold a pane, dismiss the scratch modal, leave the
+    // route, or keep a corpse on screen to read — is the caller's decision,
+    // which is why the exit is reported rather than acted on.
+    expect(onClosed).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    // Nothing is sent for the dead session: the exit already retired its ref
+    // on both ends, and the daemon reaps it on its own schedule.
+    expect(sock.ofType('close')).toHaveLength(0)
   })
 
-  it('dims the terminal but leaves it in the tree, scrollback intact', () => {
+  it('dims the scrollback for a view that stays', () => {
+    // A caller that keeps the view — reading a session that was already over
+    // — gets the dimmed pane and the pill, with the scrollback intact.
     const { sock } = mountTerminal((em) => <Terminal sessionId="s1" createEmulator={em.create} />)
 
     act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
@@ -1810,52 +1821,6 @@ describe('the exit overlay', () => {
 
     act(() => sock.emitControl({ type: 'exit', ref: 1, code: 0 }))
     expect(inset().className).toContain('opacity-60')
-    // The wrapper must not eat events meant for the scrollback under it.
-    expect(screen.getByRole('alertdialog').parentElement!.className).toContain('pointer-events-none')
-  })
-
-  it('Restart spawns in the dead session’s directory, closes it, and hands over', () => {
-    const onRestarted = vi.fn()
-    const { sock } = mountTerminal((em) => (
-      <Terminal sessionId="s1" createEmulator={em.create} onRestarted={onRestarted} />
-    ))
-
-    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
-    act(() => sock.emitControl({ type: 'sessions', sessions: [session()] }))
-    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 0 }))
-
-    fireEvent.click(screen.getByRole('button', { name: 'Restart' }))
-    const spawns = sock.ofType('spawn')
-    expect(spawns).toHaveLength(1)
-    expect(spawns[0]).toMatchObject({ cwd: '/home/karn/code', cols: 80, rows: 24 })
-
-    // A second click while the first is unanswered must not start a second
-    // shell.
-    fireEvent.click(screen.getByRole('button', { name: 'Restart' }))
-    expect(sock.ofType('spawn')).toHaveLength(1)
-
-    const reqId = spawns[0]!.reqId as number
-    act(() => sock.emitControl(attached({ ref: 9, id: 's2', reqId })))
-
-    // The new ref goes straight back — the next route attaches for itself.
-    // Nothing is sent for the dead session: the exit already retired its ref
-    // on both ends, and the daemon reaps it after ExitedRetention.
-    expect(sock.ofType('detach')).toContainEqual({ type: 'detach', ref: 9 })
-    expect(onRestarted).toHaveBeenCalledWith('s2')
-  })
-
-  it('Close just leaves — the daemon reaps an exited session on its own', () => {
-    const onClosed = vi.fn()
-    const { sock } = mountTerminal((em) => (
-      <Terminal sessionId="s1" createEmulator={em.create} onClosed={onClosed} />
-    ))
-
-    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
-    act(() => sock.emitControl({ type: 'exit', ref: 1, code: 1 }))
-
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
-    expect(sock.ofType('close')).toHaveLength(0)
-    expect(onClosed).toHaveBeenCalled()
   })
 })
 

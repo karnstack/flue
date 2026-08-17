@@ -127,6 +127,58 @@ describe('trackVisualViewport', () => {
     expect(pane.style.height).toBe('')
   })
 
+  it('leaves the slots empty when every tracker is gone, in any dispose order', () => {
+    // The failure this pins down: A then B install, A disposes first (its
+    // slot check fails, so it restores nothing), then B disposes and puts
+    // back the handler it captured — A's, whose tracker is already dead. The
+    // resurrected closure would keep restyling A's detached pane on every
+    // keyboard move, and nothing live would own the slot.
+    const vv = fakeViewport({ height: 700 })
+    const paneB = document.createElement('div')
+    const surfaceB = document.createElement('div')
+    const disposeA = trackVisualViewport({ pane, surface, viewport: vv })
+    const disposeB = trackVisualViewport({ pane: paneB, surface: surfaceB, viewport: vv })
+
+    disposeA()
+    disposeB()
+    expect(vv.onresize).toBeNull()
+    expect(vv.onscroll).toBeNull()
+
+    vv.height = 400
+    vv.fire()
+    expect(pane.style.height).toBe('')
+    expect(paneB.style.height).toBe('')
+  })
+
+  it('hands the slot to the survivor when the top and a middle tracker dispose', () => {
+    // Three panes overlap, the middle then the top go away: the slot must
+    // fall to the one still alive — not to the middle one's dead handler,
+    // which is what a captured-previous chain restores.
+    const vv = fakeViewport({ height: 700 })
+    const paneB = document.createElement('div')
+    const paneC = document.createElement('div')
+    trackVisualViewport({ pane, surface, viewport: vv })
+    const disposeB = trackVisualViewport({
+      pane: paneB,
+      surface: document.createElement('div'),
+      viewport: vv,
+    })
+    const disposeC = trackVisualViewport({
+      pane: paneC,
+      surface: document.createElement('div'),
+      viewport: vv,
+    })
+
+    disposeB()
+    disposeC()
+
+    vv.height = 400
+    vv.fire()
+    expect(pane.style.height).toBe('400px')
+    expect(paneB.style.height).toBe('')
+    expect(paneC.style.height).toBe('')
+  })
+
   it('does not unwire a newer tracker when an older one disposes', () => {
     // A remount can install the replacement before tearing the old one down.
     // The stale disposer must clear only its own pane, never the live

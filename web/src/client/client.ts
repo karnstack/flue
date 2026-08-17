@@ -406,6 +406,19 @@ export class FlueClient {
   }
 
   /**
+   * Whether the daemon's welcome declared a capability — how a consumer
+   * feature-detects before drawing an affordance. `multiplex` is the one that
+   * exists today: it gates the split and scratch-terminal controls, which
+   * must not spawn sessions whose `group`/`ephemeral` fields an older daemon
+   * would silently drop. False before the first welcome, which errs on the
+   * side of hiding a control for one round trip rather than showing one that
+   * cannot work.
+   */
+  hasCap(cap: string): boolean {
+    return this.lastWelcome?.caps?.includes(cap) ?? false
+  }
+
+  /**
    * Why the daemon revoked this device, or null while it has not —
    * `onRevoked`'s counterpart for a consumer that mounts after the event, as
    * `status` is for `onStatus`. The event fires once, on a connection that is
@@ -505,7 +518,13 @@ export class FlueClient {
    * to protect. Losing it costs a retry and little else, since the sessions
    * screen re-lists on reconnect and the row visibly snaps back.
    */
-  update(patch: { id: string; name?: string; tags?: string[]; pinned?: boolean }) {
+  update(patch: {
+    id: string
+    name?: string
+    tags?: string[]
+    pinned?: boolean
+    ephemeral?: boolean
+  }) {
     this.send({ type: 'update', ...patch })
   }
 
@@ -624,7 +643,14 @@ export class FlueClient {
    * that appears minutes later at a screen nobody is looking at is worse
    * than none.
    */
-  spawn(opts: { cwd?: string; cmd?: string[]; cols: number; rows: number }): number | null {
+  spawn(opts: {
+    cwd?: string
+    cmd?: string[]
+    cols: number
+    rows: number
+    group?: string
+    ephemeral?: boolean
+  }): number | null {
     if (!this.ready || !this.sock) return null
     const { cols, rows, ...rest } = opts
     const reqId = this.nextReqId++

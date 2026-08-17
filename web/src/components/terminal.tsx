@@ -1,17 +1,26 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { ArrowLeftRightIcon, LayoutGridIcon, PlusIcon } from 'lucide-react'
+import { DropdownMenu } from 'radix-ui'
+import {
+  ArrowLeftRightIcon,
+  Columns2Icon,
+  LayoutGridIcon,
+  PanelTopIcon,
+  PlusIcon,
+  Rows2Icon,
+  SquareTerminalIcon,
+} from 'lucide-react'
 
 import { useFlueClient } from '@/client/provider'
-import { ExitOverlay } from '@/components/exit-overlay'
 import { KeyBar } from '@/components/key-bar'
 import { PasteBox } from '@/components/paste-box'
 import { SelectionMenu, type MenuEnd } from '@/components/selection-menu'
+import { ShortcutsHelp } from '@/components/shortcuts-help'
 import { ThemeMenu } from '@/components/theme-menu'
 import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
 import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
 import type { Emulator } from '@/emulator/types'
 import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
-import { loadThemePref, saveThemePref, THEME_PREF_KEY } from '@/lib/theme-pref'
+import { loadThemePref, onThemePref, saveThemePref, THEME_PREF_KEY } from '@/lib/theme-pref'
 import {
   cellAt,
   cellBox,
@@ -23,9 +32,11 @@ import {
 } from '@/lib/geometry'
 import { startGlide } from '@/lib/glide'
 import { createKeyboardModes, type KeyboardMode } from '@/lib/keyboard'
+import { newTabChordLabel, splitChordLabel, type GroupLayout } from '@/lib/split-keys'
 import { barKeyBytes, ctrlTransform, type BarKey } from '@/lib/keys'
 import { cn } from '@/lib/utils'
 import { trackVisualViewport, zoomedIn } from '@/lib/viewport'
+import { useScratch } from '@/scratch/context'
 import { isApplePlatform, openChordLabel } from '@/switcher/keys'
 import { useSwitcher } from '@/switcher/provider'
 
@@ -48,11 +59,13 @@ export interface TerminalProps {
    */
   createEmulator?: (opts: XtermOptions) => Emulator
   /**
-   * Called with the new session's id once a Restart's spawn has attached.
-   * The route supplies navigation; the component never touches the router.
+   * Called the moment the shell exits, and by nothing else. What "closed"
+   * means belongs to the view above: a split pane folds away, the scratch
+   * modal dismisses, a lone session leaves for the dashboard — and a session
+   * that was *already* exited when it was opened is the caller's to keep on
+   * screen, which is why the daemon's whole exited-retention window exists.
+   * The component never touches the router.
    */
-  onRestarted?: (sessionId: string) => void
-  /** Called after Close has closed the dead session; navigate away here. */
   onClosed?: () => void
   /**
    * Called by the `+` in the control strip, with this session's directory when
@@ -64,6 +77,46 @@ export interface TerminalProps {
    * would be a terminal that could not be mounted without one.
    */
   onNewSession?: (cwd: string | null) => void
+  /**
+   * Called by the split and new-tab rows in the `+` menu, with this
+   * session's directory and how the group should render from now on. The
+   * rows only exist when this is provided, which is how the route
+   * feature-detects: no handler on a daemon without the `multiplex` cap, no
+   * rows. What a split *is* — a member session, a pane, a tab — lives above
+   * this component with the group layout; the terminal only offers the
+   * verbs.
+   */
+  onSplit?: (cwd: string | null, layout: GroupLayout) => void
+  /**
+   * How much floating chrome to draw. `minimal` is for the scratch modal,
+   * which has its own frame and its own dismiss: the status pill stays — a
+   * scratch that cannot say "Reconnecting…" is a black box — and every
+   * navigation chip goes, because navigating away from inside a modal is not
+   * a place anyone means to go.
+   */
+  chrome?: 'full' | 'minimal'
+  /**
+   * Whether the pane pins itself to the visual viewport (lib/viewport.ts).
+   * True everywhere the terminal is the page — which is what the pinning
+   * formula assumes. The desktop scratch modal turns it off: a centered
+   * dialog is not at the top of the page, and a pane forced to viewport
+   * height would burst it.
+   */
+  fitViewport?: boolean
+  /**
+   * Height in px of in-flow chrome above the pane — the mobile tab strip.
+   * Read once at mount (it feeds the viewport tracker); the group view keys
+   * this component on it, so a strip appearing remounts rather than drifts.
+   */
+  viewportInset?: number
+  /**
+   * Whether this view writes the browser tab's title. True everywhere the
+   * terminal is the tab's subject; the route turns it off for every split
+   * pane that is not the URL session, and the scratch modal always — with
+   * several mounted at once, whoever registered last would otherwise name
+   * the tab.
+   */
+  ownsTitle?: boolean
 }
 
 /** Named so the test and the markup cannot drift apart. */
@@ -151,12 +204,17 @@ const PRESS_SLOP = 10
 export function Terminal({
   sessionId,
   createEmulator = createXtermEmulator,
-  onRestarted,
   onClosed,
   onNewSession,
+  onSplit,
+  chrome = 'full',
+  fitViewport = true,
+  viewportInset = 0,
+  ownsTitle = true,
 }: TerminalProps) {
   const client = useFlueClient()
   const switcher = useSwitcher()
+  const scratch = useScratch()
   // Which modifier this keyboard actually has, for the chip's tooltip. Once per
   // mount: nobody swaps a Mac for a ThinkPad mid-session.
   const chordLabel = useMemo(() => openChordLabel(isApplePlatform()), [])
@@ -187,7 +245,6 @@ export function Terminal({
   const [ctrlArmed, setCtrlArmed] = useState(false)
   const ctrlArmedRef = useRef(ctrlArmed)
   ctrlArmedRef.current = ctrlArmed
-  const [exitCode, setExitCode] = useState<number | null>(null)
   // The touch menu: which end of the terminal it is at, and whether the
   // press it came from found anything to copy. Null for not showing.
   //
@@ -222,7 +279,6 @@ export function Terminal({
   // ends, and an exited session reaps itself after ExitedRetention — Close
   // just leaves.
   const actionsRef = useRef<{
-    restart: (dir: string | null) => void
     applyTheme: (id: string) => void
     sendKey: (key: BarKey) => void
     copy: () => void
@@ -230,10 +286,14 @@ export function Terminal({
     pasteText: (text: string) => void
     dismiss: () => void
   } | null>(null)
-  // The latest onRestarted, readable from inside the effect without putting
-  // a prop identity in its dependency array.
-  const restartedRef = useRef(onRestarted)
-  restartedRef.current = onRestarted
+  // The latest onClosed, readable from inside the effect without putting a
+  // prop identity in its dependency array.
+  const closedRef = useRef(onClosed)
+  closedRef.current = onClosed
+  // Same treatment for tab-title ownership, which flips without a remount
+  // when the URL moves between two panes of one group.
+  const ownsTitleRef = useRef(ownsTitle)
+  ownsTitleRef.current = ownsTitle
 
   useEffect(() => {
     const pane = paneRef.current
@@ -337,9 +397,6 @@ export function Terminal({
     // reconnect must not walk the pill back to "Reconnecting…" and imply that
     // waiting will help.
     let over = false
-    // The reqId of a Restart's spawn, unanswered. Doubles as the click guard:
-    // one restart in flight at a time, per mount.
-    let restartReq: number | null = null
     let frame = 0
     // The pty-resize debounce. A browser sidebar sliding open resizes the
     // pane on every animation frame, and each new pty size is a SIGWINCH the
@@ -365,6 +422,7 @@ export function Terminal({
     let tabOsc = ''
     let tabCwd = ''
     const retitle = () => {
+      if (!ownsTitleRef.current) return
       const at = tabOsc || tabCwd
       const text = tabName && at ? `${tabName} — ${at}` : tabName || at
       if (text) document.title = text
@@ -738,13 +796,17 @@ export function Terminal({
 
     // The pane hugs the visual viewport: a phone keyboard shrinks it and the
     // ResizeObserver below refits the terminal above the keyboard. While
-    // pinch-zoomed it instead releases the surface so one finger pans.
-    const untrackViewport = trackVisualViewport({
-      pane,
-      surface,
-      gestureArea: inner,
-      viewport: window.visualViewport,
-    })
+    // pinch-zoomed it instead releases the surface so one finger pans. The
+    // desktop scratch modal opts out — see fitViewport on the props.
+    const untrackViewport = fitViewport
+      ? trackVisualViewport({
+          pane,
+          surface,
+          gestureArea: inner,
+          viewport: window.visualViewport,
+          topInset: viewportInset,
+        })
+      : () => {}
 
     // Every registration returns an unsubscribe, and all of them are released
     // on cleanup: the client outlives this view by design.
@@ -783,16 +845,6 @@ export function Terminal({
 
     offs.push(
       client.onAttached((a) => {
-        if (restartReq !== null && a.reqId === restartReq) {
-          // The Restart's own spawn. Hand the new ref straight back — the
-          // route this navigates to attaches for itself — and go. The dead
-          // session needs nothing: the exit already retired its ref on both
-          // ends, and the daemon reaps it after ExitedRetention.
-          restartReq = null
-          client.detach(a.ref)
-          restartedRef.current?.(a.id)
-          return
-        }
         // One client serves the whole tab, so every listener sees every reply.
         if (a.id !== sessionId) return
         ref = a.ref
@@ -858,8 +910,14 @@ export function Terminal({
         if (r !== ref) return
         over = true
         emulator.write(EXIT_NOTICE(code))
-        setExitCode(code)
         setPhase('exited')
+        // The view above decides what an exit closes — a pane, a modal, the
+        // whole route — or keeps: a session opened after it had already
+        // exited is being read, and reading is the point of the daemon's
+        // exited-retention window. There is no overlay in between; a shell
+        // that ends is over, and asking Restart-or-Close on every `exit 0`
+        // answered a question nobody was asking.
+        closedRef.current?.()
       }),
     )
 
@@ -905,6 +963,18 @@ export function Terminal({
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || !e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return
+      // With splits and the scratch modal, several Terminals listen on this
+      // window at once, and stopPropagation cannot silence siblings on the
+      // same target and phase — unguarded, every pane would race its own
+      // requestFullscreen. The pane holding the keyboard answers the chord;
+      // when no pane holds it, only a lone terminal may (a chord over an
+      // ambiguous split does nothing rather than something arbitrary).
+      const active = document.activeElement
+      if (!pane.contains(active)) {
+        const owner = active instanceof Element ? active.closest('[data-flue-inset]') : null
+        if (owner !== null) return
+        if (document.querySelectorAll('[data-flue-inset]').length > 1) return
+      }
       // Capture, and stopped here. Left to bubble, xterm's own handler on the
       // helper textarea would already have turned it into a carriage return
       // and sent it to the shell before this ran.
@@ -937,14 +1007,6 @@ export function Terminal({
     media?.addEventListener?.('change', onScheme)
 
     actionsRef.current = {
-      // Click-driven only, for the same StrictMode reason session creation
-      // lives on the sessions screen: a spawn fired from a mount effect runs
-      // twice and can only ever detach one of its shells.
-      restart: (dir) => {
-        if (restartReq !== null) return
-        const reqId = client.spawn({ cwd: dir ?? undefined, cols: dims.cols, rows: dims.rows })
-        if (reqId !== null) restartReq = reqId
-      },
       applyTheme: (id) => {
         const next = resolveTheme(id, prefersDark())
         emulator.setTheme(next)
@@ -1008,9 +1070,8 @@ export function Terminal({
 
     // Another tab choosing a theme lands here: the preference is global, and
     // a change should sweep every open terminal, not just the one clicked.
-    // The storage event only ever fires in *other* tabs; the clicking tab
-    // goes through handleTheme. A null key is storage.clear() — back to
-    // system either way.
+    // The storage event only ever fires in *other* tabs. A null key is
+    // storage.clear() — back to system either way.
     const onStorage = (e: StorageEvent) => {
       if (e.key !== null && e.key !== THEME_PREF_KEY) return
       const id = e.newValue ?? THEME_SYSTEM
@@ -1018,6 +1079,15 @@ export function Terminal({
       actionsRef.current?.applyTheme(id)
     }
     window.addEventListener('storage', onStorage)
+    // And a choice made in *this* document lands here — the half the storage
+    // event cannot deliver. With splits and the scratch modal, several
+    // terminals share one document, and the menu that took the click sits on
+    // exactly one of them; without this, that pane repainted and its
+    // siblings kept the old clothes until remount.
+    const offThemePref = onThemePref((id) => {
+      setThemeId(id)
+      actionsRef.current?.applyTheme(id)
+    })
 
     client.attach(sessionId, 0)
     // For the cwd: `attached` does not carry it, the session list does.
@@ -1036,6 +1106,7 @@ export function Terminal({
       glide?.()
       untrackViewport()
       window.removeEventListener('storage', onStorage)
+      offThemePref()
       window.removeEventListener('keydown', onKey, true)
       observer.disconnect()
       media?.removeEventListener?.('change', onScheme)
@@ -1048,7 +1119,9 @@ export function Terminal({
       // what React's double-invoked mount effect does on every mount.
       if (ref !== null) client.detach(ref)
       else client.forget(sessionId)
-      document.title = priorTitle
+      // Only the title's owner restores it: a split pane unmounting must not
+      // blank the name the URL pane is still entitled to.
+      if (ownsTitleRef.current) document.title = priorTitle
       if (canvas.style.backgroundColor === paintedCanvas) {
         canvas.style.backgroundColor = priorCanvas
       }
@@ -1057,14 +1130,16 @@ export function Terminal({
       }
       emulator.dispose()
     }
-  }, [client, sessionId, createEmulator])
+    // fitViewport and viewportInset rebuild the emulator on change by design:
+    // both describe the box the terminal lives in, and the group view keys
+    // this component on them anyway.
+  }, [client, sessionId, createEmulator, fitViewport, viewportInset])
 
-  const handleRestart = () => actionsRef.current?.restart(cwd)
-  const handleClose = () => onClosed?.()
   const handleTheme = (id: string) => {
     setThemeId(id)
+    // The save announces to every terminal in this document — this pane
+    // included — so the apply is not repeated here.
     saveThemePref(id)
-    actionsRef.current?.applyTheme(id)
   }
 
   // What the floating controls wear: the resolved theme's own surfaces,
@@ -1083,6 +1158,10 @@ export function Terminal({
     <div
       ref={paneRef}
       data-flue-mode={mode}
+      // Which session this pane shows, for the route's focus tracking: the
+      // split chord targets the pane last holding the keyboard, and a focus
+      // listener needs something in the DOM to resolve a focus event to.
+      data-flue-session={sessionId}
       style={chipStyle}
       // The background follows the terminal palette, which the effect sets in
       // JS the moment it runs. These two are what the very first paint uses,
@@ -1149,7 +1228,9 @@ export function Terminal({
           loses to them — the controls must win the stack or the scrollbar
           eats their clicks. */}
       <div className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
-        <ThemeMenu value={themeId} dark={dark} onChange={handleTheme} />
+        {chrome === 'full' && <ThemeMenu value={themeId} dark={dark} onChange={handleTheme} />}
+        {chrome === 'full' && (
+          <>
         {/*
           The way to another session without leaving this one.
 
@@ -1194,29 +1275,45 @@ export function Terminal({
           <span className="sr-only">Open the flue dashboard</span>
         </a>
         {/*
-          A button, and it used to be a link to `/?cwd=` — which is the
-          dashboard, so a session started from here came up behind the whole
-          list for as long as the daemon took to answer. It asks first now:
-          the dialog above this component collects a name and tags while there
-          is still a form to collect them on, and the page it opens starts the
-          session on its own ground.
-
-          The same box as the theme trigger — an icon in px-2.5 py-1.5 — so the
-          cluster reads as one control strip, not two heights.
+          One `+` for everything that creates a terminal, so the strip stays
+          four chips however many verbs a daemon offers. On a daemon without
+          the `multiplex` cap (no onSplit, no scratch) it is the plain
+          new-session button it always was; otherwise it opens a menu of the
+          four verbs with their chords beside them — which is also where the
+          chords are taught, the way the switcher chip's tooltip teaches ⌘K.
         */}
-        <button
-          type="button"
-          onClick={() => onNewSession?.(cwd)}
-          title="New session here"
-          className={cn(
-            'rounded-lg px-2.5 py-1.5',
-            'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
-            'transition-colors hover:text-(--chip-fg)',
-          )}
-        >
-          <PlusIcon aria-hidden="true" className="size-4" />
-          <span className="sr-only">New session in this directory</span>
-        </button>
+        {onSplit === undefined && !scratch.enabled ? (
+          <button
+            type="button"
+            onClick={() => onNewSession?.(cwd)}
+            title="New session here"
+            className={cn(
+              'rounded-lg px-2.5 py-1.5',
+              'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
+              'transition-colors hover:text-(--chip-fg)',
+            )}
+          >
+            <PlusIcon aria-hidden="true" className="size-4" />
+            <span className="sr-only">New session in this directory</span>
+          </button>
+        ) : (
+          <PlusMenu
+            chipStyle={chipStyle}
+            onNewSession={() => onNewSession?.(cwd)}
+            onSplit={onSplit === undefined ? undefined : (layout) => onSplit(cwd, layout)}
+            onScratch={scratch.enabled ? scratch.toggle : undefined}
+          />
+        )}
+        {/*
+          Every chord in one card, because the pills that used to teach them
+          are gone in a hundred milliseconds on a local daemon and the
+          tooltips teach one chord each. No chip for a finger — the card is
+          keyboard education — though the chord still answers a hardware
+          keyboard on a coarse-pointer device.
+        */}
+        <ShortcutsHelp chipStyle={chipStyle} chip={!coarse} />
+          </>
+        )}
         {phase !== 'live' && (
           // Dark in both themes, like the pane it floats over usually is; the
           // translucent ground and backdrop-blur keep it legible over whatever
@@ -1270,9 +1367,6 @@ export function Terminal({
           </div>
         )}
       </div>
-      {phase === 'exited' && exitCode !== null && (
-        <ExitOverlay code={exitCode} onRestart={handleRestart} onClose={handleClose} />
-      )}
     </div>
   )
 }
@@ -1283,4 +1377,94 @@ const NOTICE: Record<Exclude<Phase, 'live'>, string> = {
   exited: 'Process exited',
   gone: 'This session is gone',
   revoked: 'This device was revoked',
+}
+
+/**
+ * The `+` menu: every verb that creates a terminal from here, in one chip.
+ * Dressed in the terminal's control colours like the theme menu beside it,
+ * and for the same reason spelled the same way — the content portals outside
+ * the pane that carries the --chip-* variables, so they are set again on the
+ * content explicitly.
+ */
+function PlusMenu({
+  chipStyle,
+  onNewSession,
+  onSplit,
+  onScratch,
+}: {
+  chipStyle: CSSProperties
+  onNewSession: () => void
+  onSplit?: (layout: GroupLayout) => void
+  onScratch?: () => void
+}) {
+  // Once per mount, like the switcher chip's tooltip: nobody swaps keyboards
+  // mid-session.
+  const apple = useMemo(() => isApplePlatform(), [])
+  const itemClass = cn(
+    'flex cursor-default items-center gap-x-2.5 rounded-md px-2.5 py-1.5',
+    'text-base/6 text-(--chip-fg) outline-none select-none sm:text-sm/6',
+    'data-[highlighted]:bg-(--chip-wash)',
+  )
+  const chordClass = 'ml-6 font-mono text-xs text-(--chip-dim)'
+
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          title="New terminal here"
+          className={cn(
+            'rounded-lg px-2.5 py-1.5',
+            'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
+            'transition-colors hover:text-(--chip-fg) data-[state=open]:text-(--chip-fg)',
+          )}
+        >
+          <PlusIcon aria-hidden="true" className="size-4" />
+          <span className="sr-only">New terminal here</span>
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="end"
+          sideOffset={6}
+          style={chipStyle}
+          className={cn(
+            'z-20 min-w-52 rounded-lg p-1',
+            'bg-(--chip-bg) shadow-xl ring-1 ring-(--chip-ring) backdrop-blur-sm',
+          )}
+        >
+          <DropdownMenu.Item className={itemClass} onSelect={onNewSession}>
+            <PlusIcon aria-hidden="true" className="size-4 shrink-0 text-(--chip-dim)" />
+            <span className="flex-1">New session</span>
+          </DropdownMenu.Item>
+          {onSplit !== undefined && (
+            <>
+              <DropdownMenu.Item className={itemClass} onSelect={() => onSplit('row')}>
+                <Columns2Icon aria-hidden="true" className="size-4 shrink-0 text-(--chip-dim)" />
+                <span className="flex-1">Split right</span>
+                <kbd className={chordClass}>{splitChordLabel(apple, 'row')}</kbd>
+              </DropdownMenu.Item>
+              <DropdownMenu.Item className={itemClass} onSelect={() => onSplit('column')}>
+                <Rows2Icon aria-hidden="true" className="size-4 shrink-0 text-(--chip-dim)" />
+                <span className="flex-1">Split down</span>
+                <kbd className={chordClass}>{splitChordLabel(apple, 'column')}</kbd>
+              </DropdownMenu.Item>
+              <DropdownMenu.Item className={itemClass} onSelect={() => onSplit('tabs')}>
+                <PanelTopIcon aria-hidden="true" className="size-4 shrink-0 text-(--chip-dim)" />
+                <span className="flex-1">New tab</span>
+                <kbd className={chordClass}>{newTabChordLabel(apple)}</kbd>
+              </DropdownMenu.Item>
+            </>
+          )}
+          {onScratch !== undefined && (
+            <DropdownMenu.Item className={itemClass} onSelect={onScratch}>
+              <SquareTerminalIcon aria-hidden="true" className="size-4 shrink-0 text-(--chip-dim)" />
+              <span className="flex-1">Scratch terminal</span>
+              <kbd className={chordClass}>{apple ? '⌃ ⌃' : 'Ctrl Ctrl'}</kbd>
+            </DropdownMenu.Item>
+          )}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  )
 }
