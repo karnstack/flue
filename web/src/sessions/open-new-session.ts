@@ -27,10 +27,13 @@ export type NewSessionOrigin = Partial<NewSessionRequest>
  * Called straight out of a click or a form submission, never out of a reply,
  * which is the whole reason the page exists — see the note on NewSessionRoute.
  *
- * A blocked popup falls back to this tab rather than to nothing at all. It is
- * not what was asked for, but a button that visibly does nothing is worse than
- * a button that does the old thing, and the reader can still get back with the
- * browser's own back button.
+ * The tab is the only path: there is deliberately no popup-blocked fallback.
+ * With `noopener`, window.open returns null on every call — that is specified
+ * behaviour, the option severs the handle the caller would otherwise get — so
+ * the return value cannot distinguish a block from success. A fallback keyed
+ * on it fired unconditionally and spawned two sessions per click, one in the
+ * new tab and one here. A genuinely blocked popup is rare, and the browser's
+ * own blocked-popup UI is the recovery.
  */
 export function useOpenNewSession(): (want: NewSessionRequest) => void {
   const router = useRouter()
@@ -40,8 +43,7 @@ export function useOpenNewSession(): (want: NewSessionRequest) => void {
         to: NEW_SESSION_PATH,
         search: newSessionSearch(want),
       }).href
-      const tab = window.open(href, '_blank', 'noopener')
-      if (tab === null) void router.navigate({ to: href })
+      window.open(href, '_blank', 'noopener')
     },
     [router],
   )
