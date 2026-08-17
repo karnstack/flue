@@ -25,8 +25,9 @@ interface UADataLike {
 }
 
 /**
- * Whether this is a Mac keyboard, which decides one thing only: whether Cmd+K
- * opens the palette, and which glyphs the hints print.
+ * Whether this is a Mac keyboard: whether Cmd+K opens the palette, which
+ * glyphs the hints print, and whether the terminal keeps Ctrl+C as the
+ * interrupt over a selection (see XtermOptions.macKeyboard).
  *
  * `navigator.platform` is deprecated and every engine still answers it, which
  * for this question is the right trade: the modern replacement is Chromium-only

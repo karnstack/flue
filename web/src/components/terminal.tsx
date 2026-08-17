@@ -278,7 +278,12 @@ export function Terminal({
     }
 
     const palette = resolveTheme(themeIdRef.current, prefersDark())
-    const emulator = createEmulator({ cols: 80, rows: 24, theme: palette })
+    const emulator = createEmulator({
+      cols: 80,
+      rows: 24,
+      theme: palette,
+      macKeyboard: isApplePlatform(),
+    })
     // Read by the clipboard callbacks, which settle a promise later and
     // must not write state into a view that has gone away.
     let alive = true
