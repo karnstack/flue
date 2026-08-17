@@ -1307,9 +1307,11 @@ export function Terminal({
         {/*
           Every chord in one card, because the pills that used to teach them
           are gone in a hundred milliseconds on a local daemon and the
-          tooltips teach one chord each.
+          tooltips teach one chord each. No chip for a finger — the card is
+          keyboard education — though the chord still answers a hardware
+          keyboard on a coarse-pointer device.
         */}
-        <ShortcutsHelp chipStyle={chipStyle} />
+        <ShortcutsHelp chipStyle={chipStyle} chip={!coarse} />
           </>
         )}
         {phase !== 'live' && (

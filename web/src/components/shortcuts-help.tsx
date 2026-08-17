@@ -88,7 +88,19 @@ function sections(apple: boolean): Section[] {
  * route mounts the strip on one pane, so the chord listener here is single
  * too.
  */
-export function ShortcutsHelp({ chipStyle }: { chipStyle: CSSProperties }) {
+export function ShortcutsHelp({
+  chipStyle,
+  chip = true,
+}: {
+  chipStyle: CSSProperties
+  /**
+   * Whether to draw the chip at all. False on a coarse pointer: a card of
+   * keyboard chords is furniture on a phone. The chord listener stays either
+   * way — an iPad grows a hardware keyboard without changing its pointer,
+   * and ⌘/ should answer it.
+   */
+  chip?: boolean
+}) {
   const apple = useMemo(() => isApplePlatform(), [])
   const [open, setOpen] = useState(false)
 
@@ -107,21 +119,23 @@ export function ShortcutsHelp({ chipStyle }: { chipStyle: CSSProperties }) {
 
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
-      <Dialog.Trigger asChild>
-        <button
-          type="button"
-          title={`Keyboard shortcuts · ${helpChordLabel(apple)}`}
-          style={chipStyle}
-          className={cn(
-            'rounded-lg px-2.5 py-1.5',
-            'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
-            'transition-colors hover:text-(--chip-fg) data-[state=open]:text-(--chip-fg)',
-          )}
-        >
-          <KeyboardIcon aria-hidden="true" className="size-4" />
-          <span className="sr-only">Keyboard shortcuts</span>
-        </button>
-      </Dialog.Trigger>
+      {chip && (
+        <Dialog.Trigger asChild>
+          <button
+            type="button"
+            title={`Keyboard shortcuts · ${helpChordLabel(apple)}`}
+            style={chipStyle}
+            className={cn(
+              'rounded-lg px-2.5 py-1.5',
+              'bg-(--chip-bg) text-(--chip-dim) shadow-lg ring-1 ring-(--chip-ring) backdrop-blur-sm',
+              'transition-colors hover:text-(--chip-fg) data-[state=open]:text-(--chip-fg)',
+            )}
+          >
+            <KeyboardIcon aria-hidden="true" className="size-4" />
+            <span className="sr-only">Keyboard shortcuts</span>
+          </button>
+        </Dialog.Trigger>
+      )}
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/25" />
         <Dialog.Content

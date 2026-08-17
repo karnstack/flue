@@ -56,6 +56,17 @@ describe('ShortcutsHelp', () => {
     expect(screen.getByText('Scratch terminal')).toBeTruthy()
   })
 
+  it('hides the chip for a finger, keeping the chord for a hardware keyboard', () => {
+    render(<ShortcutsHelp chipStyle={{}} chip={false} />)
+    expect(screen.queryByRole('button', { name: 'Keyboard shortcuts' })).toBeNull()
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: '?', code: 'Slash', ctrlKey: true, shiftKey: true }),
+      )
+    })
+    expect(screen.getByRole('dialog')).toBeTruthy()
+  })
+
   it('toggles on its own chord', () => {
     render(<ShortcutsHelp chipStyle={{}} />)
     // jsdom's navigator is not a Mac, so the chord is Ctrl+Shift+/.
