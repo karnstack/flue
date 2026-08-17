@@ -7,7 +7,9 @@ import {
   COLUMN_LABELS,
   DEFAULT_VIEW,
   displayName,
+  dropOnGroup,
   filterSessions,
+  groupAcceptsDrop,
   GROUPING_LABELS,
   GROUPINGS,
   groupSessions,
@@ -567,5 +569,109 @@ describe('spawnFromGroup', () => {
     for (const grouping of GROUPINGS) {
       expect(spawnFromGroup(grouping, 'nonsense')).not.toBeUndefined()
     }
+  })
+})
+
+describe('groupAcceptsDrop', () => {
+  it('admits drops onto tag headings alone', () => {
+    // Tags are the one group-defining fact a person assigns; everything else
+    // is derived from the session or pinned to a daemon, and a heading that
+    // highlighted for a drop it must refuse would be an offer made in bad
+    // faith.
+    for (const grouping of GROUPINGS) {
+      expect(groupAcceptsDrop(grouping), grouping).toBe(grouping === 'tag')
+    }
+  })
+})
+
+describe('dropOnGroup', () => {
+  it('moves a session between tags: the source tag off, the target on', () => {
+    // "Put this there" — a session that kept the tag it was dragged out of
+    // would still sit under the heading the reader just removed it from,
+    // which reads as a drop that did not work.
+    const row = s({ tags: ['api'] })
+    expect(dropOnGroup('tag', row, 'tag:api', 'tag:ops')).toEqual({
+      kind: 'retag',
+      tags: ['ops'],
+    })
+  })
+
+  it('leaves the tags the gesture never named alone', () => {
+    const row = s({ tags: ['api', 'db', 'edge'] })
+    expect(dropOnGroup('tag', row, 'tag:api', 'tag:ops')).toEqual({
+      kind: 'retag',
+      tags: ['db', 'edge', 'ops'],
+    })
+  })
+
+  it('does not double a tag the session already carries', () => {
+    // Dragged out of `api` onto `ops` while already tagged both: the move is
+    // still a move — api comes off — and ops must appear once, not twice.
+    const row = s({ tags: ['api', 'ops'] })
+    expect(dropOnGroup('tag', row, 'tag:api', 'tag:ops')).toEqual({
+      kind: 'retag',
+      tags: ['ops'],
+    })
+  })
+
+  it('tags an untagged session dropped onto a tag', () => {
+    const row = s({ tags: [] })
+    expect(dropOnGroup('tag', row, 'untagged', 'tag:api')).toEqual({
+      kind: 'retag',
+      tags: ['api'],
+    })
+  })
+
+  it('clears every tag on a drop onto the untagged remainder', () => {
+    // "No tag" is not a tag to swap in but the absence being pointed at, and
+    // half-clearing would leave the row under headings the reader just
+    // dragged it away from.
+    const row = s({ tags: ['api', 'ops'] })
+    expect(dropOnGroup('tag', row, 'tag:api', 'untagged')).toEqual({ kind: 'retag', tags: [] })
+  })
+
+  it('keeps a colon that belongs to the tag rather than to the prefix', () => {
+    const row = s({ tags: ['a:b'] })
+    expect(dropOnGroup('tag', row, 'tag:a:b', 'tag:c:d')).toEqual({
+      kind: 'retag',
+      tags: ['c:d'],
+    })
+  })
+
+  it('has nothing to say about a drop back onto its own heading', () => {
+    const row = s({ tags: ['api'] })
+    expect(dropOnGroup('tag', row, 'tag:api', 'tag:api')).toEqual({ kind: 'none' })
+    expect(dropOnGroup('machine', row, 'machine:m1', 'machine:m1')).toEqual({ kind: 'none' })
+    expect(dropOnGroup('tag', s(), 'untagged', 'untagged')).toEqual({ kind: 'none' })
+  })
+
+  it('refuses a machine heading, with the reason said in words', () => {
+    // A live shell cannot cross daemons; the pointer was allowed to make the
+    // offer, so the refusal has to be answerable out loud.
+    const verdict = dropOnGroup('machine', s(), 'machine:m1', 'machine:m2')
+    expect(verdict.kind).toBe('reject')
+    if (verdict.kind === 'reject') expect(verdict.reason).toMatch(/machine/)
+  })
+
+  it('refuses the derived groupings, state and directory', () => {
+    for (const [grouping, from, to] of [
+      ['state', 'state:running', 'state:exited'],
+      ['directory', 'dir:/a', 'dir:/b'],
+    ] as const) {
+      const verdict = dropOnGroup(grouping, s(), from, to)
+      expect(verdict.kind, grouping).toBe('reject')
+    }
+  })
+
+  it('shrugs at the ungrouped view, where there is nothing to drop onto', () => {
+    expect(dropOnGroup('none', s(), 'all', 'all')).toEqual({ kind: 'none' })
+    expect(dropOnGroup('none', s(), 'all', 'other')).toEqual({ kind: 'none' })
+  })
+
+  it('leaves the session it was asked about untouched', () => {
+    const row = s({ tags: ['api', 'ops'] })
+    dropOnGroup('tag', row, 'tag:api', 'untagged')
+    dropOnGroup('tag', row, 'tag:api', 'tag:edge')
+    expect(row.tags).toEqual(['api', 'ops'])
   })
 })

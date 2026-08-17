@@ -9,7 +9,7 @@ import { NewSessionDialog } from '@/components/new-session-dialog'
 import { PageHeader } from '@/components/page-header'
 import { RenameDialog } from '@/components/rename-dialog'
 import { SessionSearch } from '@/components/session-search'
-import { SessionTable, type RowAction } from '@/components/session-table'
+import { SessionTable, type DragToGroup, type RowAction } from '@/components/session-table'
 import { TagEditor } from '@/components/tag-editor'
 import { ViewTabs } from '@/components/view-tabs'
 import { Button } from '@/components/ui/button'
@@ -33,6 +33,8 @@ import {
   applyView,
   DEFAULT_VIEW,
   displayName,
+  dropOnGroup,
+  groupAcceptsDrop,
   hiddenExited,
   spawnFromGroup,
   type Group,
@@ -484,6 +486,42 @@ export function SessionsRoute() {
   }
 
   /**
+   * Drag a row, drop it on a heading: give the session that heading's fact.
+   *
+   * The meaning of a drop is `dropOnGroup`'s, pure and unit-tested, exactly
+   * as the heading's `+` defers to `spawnFromGroup`; this is only the glue
+   * that carries a verdict out. A retag is the same `update` the tag editor
+   * sends — drag and drop is a shortcut for an existing edit, never a new
+   * power — followed by an immediate `list`, because the row only moves when
+   * the next delivery re-groups, and a poll's worth of nothing after a drop
+   * reads as the drop not working. The notice says what happened either way:
+   * a successful move in words, since the rows reshuffle under the pointer,
+   * and a refusal in the verdict's own reason. Ungrouped there is nowhere to
+   * drop, so the whole layer is switched off rather than offered and refused.
+   */
+  const dragToGroup = useMemo<DragToGroup | undefined>(() => {
+    if (view.grouping === 'none') return undefined
+    const grouping = view.grouping
+    return {
+      droppable: () => groupAcceptsDrop(grouping),
+      onDrop: (s, fromKey, group) => {
+        const verdict = dropOnGroup(grouping, s, fromKey, group.key)
+        if (verdict.kind === 'retag') {
+          fleet.update(s.machineId, { id: s.id, tags: verdict.tags })
+          fleet.list()
+          setNotice(
+            verdict.tags.length === 0
+              ? `Removed the tags from ${displayName(s)}.`
+              : `Moved ${displayName(s)} to ${group.label}.`,
+          )
+        } else if (verdict.kind === 'reject') {
+          setNotice(verdict.reason)
+        }
+      },
+    }
+  }, [view.grouping, fleet])
+
+  /**
    * How a row asks what it is doing, for the hover preview.
    *
    * Routed through the fleet by the row's own machine, so a preview of a
@@ -775,6 +813,7 @@ export function SessionsRoute() {
           onAction={onAction}
           onSpawnIn={spawnInGroup}
           spawnLabel={spawnLabel}
+          drag={dragToGroup}
           peek={peek}
         />
       )}

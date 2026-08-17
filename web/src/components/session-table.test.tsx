@@ -536,6 +536,65 @@ describe('SessionTable', () => {
     })
   })
 
+  describe('dragging', () => {
+    // What a drag *does* is dropOnGroup's, pinned in sessions/view.test.ts;
+    // jsdom draws no layout, so the gesture itself — sensors, collision,
+    // release — cannot be honestly simulated here. What this component owes
+    // and can prove is the wiring around the gesture.
+
+    it('leaves the native anchor drag alone until a drag contract arrives', async () => {
+      const bare = await renderTable()
+      expect(
+        bare.getByRole('link', { name: 'Open zsh in a new tab' }).getAttribute('draggable'),
+      ).toBeNull()
+      bare.unmount()
+
+      // With one: the browser's own href-drag would race the sensor for
+      // every gesture starting on the link's stretched overlay, which is
+      // most of the row — so it stands down.
+      await renderTable({ drag: { droppable: () => true, onDrop: vi.fn() } })
+      const link = screen.getByRole('link', { name: 'Open zsh in a new tab' })
+      expect(link.getAttribute('draggable')).toBe('false')
+      // And the row is still, above all, the link it always was.
+      expect(link.getAttribute('href')).toBe('/d/m1/s/a1')
+    })
+
+    it('wears a grip only where a drop could actually land', async () => {
+      // The grip is an advertisement, not the handle it looks like — the
+      // gesture works from the whole row. It renders when some heading on
+      // screen would take the drop, and stays away both from lists that
+      // cannot drag and from groupings whose every heading refuses, where it
+      // would promise a move that only ever says no.
+      const bare = await renderTable()
+      expect(bare.queryByTitle('Drag to move to another group')).toBeNull()
+      bare.unmount()
+
+      const refused = await renderTable({
+        drag: { droppable: () => false, onDrop: vi.fn() },
+      })
+      expect(refused.queryByTitle('Drag to move to another group')).toBeNull()
+      refused.unmount()
+
+      await renderTable({ drag: { droppable: () => true, onDrop: vi.fn() } })
+      expect(screen.getByTitle('Drag to move to another group')).toBeTruthy()
+    })
+
+    it('claims the long press only while dragging is on offer', async () => {
+      // select-none and the callout suppression are what let a finger hold a
+      // row without iOS answering with selection or the link preview — and
+      // they cost real behaviour (copying a path), so they must not leak
+      // into lists that cannot drag.
+      const bare = await renderTable()
+      expect(bare.container.querySelector('li')!.className).not.toMatch(/select-none/)
+      bare.unmount()
+
+      const { container } = await renderTable({
+        drag: { droppable: () => true, onDrop: vi.fn() },
+      })
+      expect(container.querySelector('li')!.className).toMatch(/select-none/)
+    })
+  })
+
   describe('empty state', () => {
     it('shows the terminal card when there are no groups at all', async () => {
       const { container } = await renderTable({ groups: [] })

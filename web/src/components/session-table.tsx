@@ -1,4 +1,17 @@
-import { Fragment } from 'react'
+import { Fragment, useState } from 'react'
+import {
+  DndContext,
+  DragOverlay,
+  MouseSensor,
+  TouchSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core'
 import { Link } from '@tanstack/react-router'
 import {
   ChevronDownIcon,
@@ -6,6 +19,7 @@ import {
   PlusIcon,
   StarIcon,
 } from '@heroicons/react/16/solid'
+import { GripVerticalIcon } from 'lucide-react'
 
 import { SessionPreview } from '@/components/session-preview'
 import { Badge } from '@/components/ui/badge'
@@ -25,6 +39,32 @@ import { COLUMN_KEYS, displayName, type ColumnKey, type Group } from '@/sessions
 
 /** What a row's ⋯ menu can ask of a session. */
 export type RowAction = 'rename' | 'tags' | 'pin' | 'unpin' | 'close'
+
+/**
+ * How a dragged row is let go, when the caller offers dragging at all.
+ *
+ * Both halves belong to the caller for the same reason `spawnLabel` does: this
+ * component is handed labelled runs of rows and cannot tell a tag's heading
+ * from a machine's, so what a drop *means* — a retag, a refusal said out loud
+ * — is decided above it (see `dropOnGroup`). `droppable` is what the drag
+ * layer draws while the row is in the air: a group it answers true for
+ * highlights under the pointer, any other answers with a no-drop cursor, and
+ * the drop itself is reported either way so the caller can say why it
+ * refused. Omitting the whole object turns dragging off, which is what the
+ * ungrouped view and every test that is not about dragging do.
+ */
+export interface DragToGroup {
+  /** Whether this group's heading can take a drop. */
+  droppable(group: Group): boolean
+  /** A row let go over a group — its band, or its run of rows. */
+  onDrop(s: FleetSession, fromKey: string, group: Group): void
+}
+
+/** What rides on a draggable row: the session, and the heading it left. */
+interface DragCargo {
+  s: FleetSession
+  fromKey: string
+}
 
 /**
  * How a row asks the daemon what it is doing, for the hover preview.
@@ -164,6 +204,9 @@ const TAG_CAP = 3
  */
 function SessionRow({
   s,
+  groupKey,
+  drag,
+  handle,
   paneCount,
   shown,
   selected,
@@ -172,6 +215,12 @@ function SessionRow({
   peek,
 }: {
   s: FleetSession
+  /** The heading this row renders under — what a drag is picked up from. */
+  groupKey: string
+  /** The drag layer's contract, when the caller offers one. See DragToGroup. */
+  drag?: DragToGroup
+  /** Whether to show the grip — only when a drop could land somewhere. */
+  handle: boolean
   /** Panes folded into this row, when its group has more than one. */
   paneCount?: number
   shown: ColumnKey[]
@@ -183,6 +232,20 @@ function SessionRow({
   const key = keyOf(s)
   const name = displayName(s)
   const ended = s.state === 'exited'
+  /*
+   * One draggable per rendered row rather than per session: a session tagged
+   * twice renders under two headings, and the id has to say which heading the
+   * drag left, or a retag could not know which tag to take off. The newline
+   * can appear in neither half, so the pair cannot collide with another
+   * row's. The listeners land on the whole `li` — the activation distance is
+   * what keeps a plain click a click, so the checkbox, the ⋯ trigger and the
+   * link all still answer their own presses.
+   */
+  const { setNodeRef, listeners, isDragging } = useDraggable({
+    id: `${groupKey}\n${key}`,
+    data: { s, fromKey: groupKey } satisfies DragCargo,
+    disabled: drag === undefined,
+  })
   const link = (
     <Link
       to={TERMINAL_PATH}
@@ -198,6 +261,10 @@ function SessionRow({
       // Said out loud rather than left to the target attribute, which screen
       // readers announce inconsistently and some not at all.
       aria-label={`Open ${name} in a new tab`}
+      // An anchor is natively draggable, and that drag — the browser's own,
+      // carrying the href — would race the sensor for every gesture that
+      // starts on the link's stretched overlay, which is most of the row.
+      draggable={drag === undefined ? undefined : false}
       className="flex min-w-0 flex-1 items-baseline gap-x-2 outline-none after:absolute after:inset-0 after:rounded-md focus-visible:after:outline-2 focus-visible:after:-outline-offset-1 focus-visible:after:outline-ring"
     >
       <span className="truncate text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
@@ -218,7 +285,45 @@ function SessionRow({
     </Link>
   )
   return (
-    <li className="group/row relative flex items-center gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-row-hover">
+    <li
+      ref={setNodeRef}
+      {...listeners}
+      className={cn(
+        'group/row relative flex items-center gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-row-hover',
+        // The ghost in the overlay is the row now; the one left behind stands
+        // back rather than vanishing, so the reader keeps sight of where it
+        // came from.
+        isDragging && 'opacity-40',
+        // A drag surface must own its long press: iOS answers one on a link
+        // with the preview sheet and on text with selection, and either would
+        // take the gesture before the touch sensor's hold delay elapses.
+        drag !== undefined && 'select-none [-webkit-touch-callout:none]',
+      )}
+    >
+      {/*
+        The grip is how the drag says it exists before anyone has tried it —
+        the gesture works from anywhere on the row, so this is an
+        advertisement rather than the handle it looks like. Quiet until the
+        row is hovered, exactly as the checkbox and the ⋯ trigger are, and at
+        full strength for a coarse pointer, which has no hover and no grab
+        cursor to learn from. Rendered only when a drop could land somewhere
+        (see SessionTable): a grip on a row whose every target refuses would
+        advertise a gesture that only ever says no. z-10 so it takes its own
+        pointer — the grab cursor is half the signal, and under the link's
+        overlay it would read as one more place to click. aria-hidden because
+        it is not operable on its own: the keyboard path is the tag editor,
+        and a focusable handle no key can lift would be a lie told to exactly
+        the people who rely on it.
+      */}
+      {handle && (
+        <span
+          aria-hidden="true"
+          title="Drag to move to another group"
+          className="relative z-10 -mr-1 flex size-4 shrink-0 cursor-grab items-center justify-center text-zinc-400 opacity-0 transition-opacity group-hover/row:opacity-100 active:cursor-grabbing pointer-coarse:opacity-100 dark:text-zinc-500"
+        >
+          <GripVerticalIcon className="size-3.5" />
+        </span>
+      )}
       <Checkbox
         checked={selected.has(key)}
         onCheckedChange={() => onToggleSelect(key)}
@@ -408,6 +513,7 @@ export function SessionTable({
   onAction,
   onSpawnIn,
   spawnLabel,
+  drag,
   peek,
 }: {
   groups: Group[]
@@ -432,9 +538,29 @@ export function SessionTable({
    * of rows and could not tell a machine's heading from a tag's.
    */
   spawnLabel?(group: Group): string | undefined
+  /** Drag a row onto a group's heading, when that means anything. */
+  drag?: DragToGroup
   /** How a row asks what it is doing, for the hover preview. See PeekFn. */
   peek?: PeekFn
 }) {
+  /**
+   * The ghost's subject, held here because only the drag layer's own events
+   * know it. Ahead of the empty-state return, as every hook must be.
+   *
+   * The sensors are two rather than one pointer sensor, because a mouse and
+   * a finger disagree about what starting a drag should cost. A mouse pays
+   * five pixels of travel, which is what keeps a plain click a click on a row
+   * that is mostly one big link. A finger pays a hold — scrolling is also a
+   * touch sliding up a row, and a distance rule would grab every scroll —
+   * and the tolerance is what lets a hold that drifts slightly still lift
+   * rather than demanding a surgeon's stillness.
+   */
+  const [dragging, setDragging] = useState<FleetSession | null>(null)
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 300, tolerance: 8 } }),
+  )
+
   if (groups.length === 0) {
     /*
      * The empty state quotes the landing page's terminal figure: a dark card
@@ -471,101 +597,244 @@ export function SessionTable({
   // The pinned rule only makes sense where there are no headings to do the
   // separating: the single 'all' group of the ungrouped view.
   const ungrouped = groups.length === 1 && groups[0]!.key === 'all'
+  // Whether the rows wear a grip: only while some heading on screen would
+  // actually take the drop. The gesture itself stays live either way — the
+  // refusals are part of what it says — but an advertisement is a promise,
+  // and a grip down a list with nowhere to go promises a move that every
+  // release would refuse.
+  const liftable = drag !== undefined && groups.some((g) => drag.droppable(g))
+
+  /*
+   * The drag layer's own bookkeeping, all of it about saying things: who the
+   * ghost shows, what the cursor promises, and the one report a drop makes.
+   * The cursor rides document.body because during a drag the pointer is
+   * captured — no element under it is hovered, so no element's cursor rule
+   * can speak. `no-drop` over a heading the caller refuses is the drop
+   * rejected *before* it happens; the caller then says why in words when the
+   * reader insists (see DragToGroup).
+   */
+  const settle = () => {
+    setDragging(null)
+    document.body.style.cursor = ''
+  }
+  const dragStart = (e: DragStartEvent) => {
+    setDragging((e.active.data.current as DragCargo).s)
+    document.body.style.cursor = 'grabbing'
+  }
+  const dragOver = (e: DragOverEvent) => {
+    if (drag === undefined) return
+    const group = (e.over?.data.current as { group: Group } | undefined)?.group
+    document.body.style.cursor =
+      group !== undefined && !drag.droppable(group) ? 'no-drop' : 'grabbing'
+  }
+  const dragEnd = (e: DragEndEvent) => {
+    settle()
+    const group = (e.over?.data.current as { group: Group } | undefined)?.group
+    if (drag === undefined || group === undefined) return
+    const cargo = e.active.data.current as DragCargo
+    drag.onDrop(cargo.s, cargo.fromKey, group)
+  }
 
   return (
-    <div className="flex flex-col gap-y-4">
-      {groups.map((g) => {
-        const open = !collapsed.has(g.key)
-        // Where the pinned prefix ends; 0 and -1 both mean "no rule".
-        const boundary = ungrouped ? g.sessions.findIndex((s) => !s.pinned) : 0
-        /*
-         * What this heading's `+` would be called, and therefore whether it
-         * exists at all.
-         *
-         * Resolved once, per group, and checked — not merely passed to
-         * aria-label. A group that refuses one answers undefined (see
-         * `spawnFromGroup`, and "Exited" for the case that motivates it), and
-         * an unchecked answer rendered a button with no accessible name: a
-         * `+` a pointer can press, a click the caller then refuses, and
-         * nothing for a screen reader to announce it as.
-         */
-        const spawn = onSpawnIn === undefined ? undefined : spawnLabel?.(g)
-        return (
-          <section key={g.key} className="flex flex-col">
-            {/*
-              Two real controls in the band, and they are kept apart on
-              purpose: folding a group and starting a session in it must never
-              be the same click. The toggle owns the chevron and the label so
-              its accessible name is the group's; the tally is read-along
-              text; and the `+` is ranged right, where a new-thing control
-              belongs and where a pointer aimed at the fold cannot reach it.
-              It appears only when the caller can honour it — see
-              `spawnFromGroup`, which is what decides that a heading like
-              "Exited" has nothing to offer.
-            */}
-            <div className="group/band flex items-center gap-x-1.5 rounded-md px-2 py-1 transition-colors hover:bg-row-hover">
-              <button
-                type="button"
-                aria-expanded={open}
-                onClick={() => onToggleGroup(g.key)}
-                className="-ml-1 flex min-w-0 items-center gap-x-1 rounded-sm px-1 py-0.5 text-control font-medium text-zinc-950 transition-colors outline-none focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring dark:text-white"
-              >
-                <ChevronDownIcon
-                  aria-hidden="true"
-                  className={cn(
-                    'size-3.5 shrink-0 text-zinc-400 transition-transform dark:text-zinc-500',
-                    !open && '-rotate-90',
-                  )}
-                />
-                <span className="truncate">{g.label}</span>
-              </button>
-              <span className="shrink-0 text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
-                {tally(g.sessions)}
-              </span>
-              {spawn !== undefined && onSpawnIn !== undefined && (
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  // Named after its own group, as every repeated control in a
-                  // list is: without it a screen reader announces "New
-                  // session" once per heading with nothing to tell them apart.
-                  aria-label={spawn}
-                  // Quiet until the band is under the pointer or the button
-                  // itself has focus — a column of `+` signs down the left of
-                  // every heading would read as the loudest thing on a screen
-                  // whose ordinary use is reading it. Full strength for a
-                  // coarse pointer, which has no hover to reveal it with.
-                  className="ml-auto text-zinc-500 opacity-0 transition-opacity group-hover/band:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100 dark:text-zinc-400"
-                  onClick={() => onSpawnIn(g)}
-                >
-                  <PlusIcon aria-hidden="true" />
-                </Button>
-              )}
-            </div>
-            {open && (
-              <ul className="mt-1 flex flex-col">
-                {g.sessions.map((s, at) => (
-                  // Keyed by the same composite the selection uses: unique
-                  // within a group, even when the session itself repeats
-                  // across tag groups in their own lists.
-                  <Fragment key={keyOf(s)}>
-                    {at === boundary && at > 0 && <PinnedRule />}
-                    <SessionRow
-                      s={s}
-                      paneCount={panes?.get(keyOf(s))}
-                      shown={shown}
-                      selected={selected}
-                      onToggleSelect={onToggleSelect}
-                      onAction={onAction}
-                      peek={peek}
-                    />
-                  </Fragment>
-                ))}
-              </ul>
+    <DndContext
+      sensors={sensors}
+      onDragStart={dragStart}
+      onDragOver={dragOver}
+      onDragEnd={dragEnd}
+      onDragCancel={settle}
+    >
+      <div className="flex flex-col gap-y-4">
+        {groups.map((g) => (
+          <GroupSection
+            key={g.key}
+            g={g}
+            open={!collapsed.has(g.key)}
+            // Where the pinned prefix ends; 0 and -1 both mean "no rule".
+            boundary={ungrouped ? g.sessions.findIndex((s) => !s.pinned) : 0}
+            /*
+             * What this heading's `+` would be called, and therefore whether
+             * it exists at all.
+             *
+             * Resolved once, per group, and checked — not merely passed to
+             * aria-label. A group that refuses one answers undefined (see
+             * `spawnFromGroup`, and "Exited" for the case that motivates it),
+             * and an unchecked answer rendered a button with no accessible
+             * name: a `+` a pointer can press, a click the caller then
+             * refuses, and nothing for a screen reader to announce it as.
+             */
+            spawn={onSpawnIn === undefined ? undefined : spawnLabel?.(g)}
+            drag={drag}
+            handle={liftable}
+            panes={panes}
+            shown={shown}
+            selected={selected}
+            onToggleSelect={onToggleSelect}
+            onToggleGroup={onToggleGroup}
+            onAction={onAction}
+            onSpawnIn={onSpawnIn}
+            peek={peek}
+          />
+        ))}
+      </div>
+      {/*
+        The dragged row as a ghost: not the row itself — a full-width row
+        under a fingertip would hide the headings it is aimed at — but the
+        one thing that identifies it, in a card the elevation tokens already
+        know how to draw. No drop animation: the row's real move is the next
+        list re-grouping, and a ghost gliding back to a place the row is
+        about to leave would animate a lie.
+      */}
+      <DragOverlay dropAnimation={null}>
+        {dragging === null ? null : (
+          <div className="w-fit max-w-60 rounded-md bg-white px-3 py-1.5 shadow-medium ring-1 ring-zinc-950/10 dark:bg-zinc-900 dark:ring-white/10">
+            <p className="truncate text-control font-medium text-zinc-950 dark:text-white">
+              {displayName(dragging)}
+            </p>
+          </div>
+        )}
+      </DragOverlay>
+    </DndContext>
+  )
+}
+
+/**
+ * One group: its heading band, and its run of rows while unfolded.
+ *
+ * A component rather than a map body so the droppable hook has somewhere
+ * legal to live — one droppable per group, covering the section whole,
+ * because the issue a drop answers is "put this session *there*", and there
+ * is the group as a place: heading and rows alike. The highlight lands on
+ * the band alone, where the reader is aiming.
+ */
+function GroupSection({
+  g,
+  open,
+  boundary,
+  spawn,
+  drag,
+  handle,
+  panes,
+  shown,
+  selected,
+  onToggleSelect,
+  onToggleGroup,
+  onAction,
+  onSpawnIn,
+  peek,
+}: {
+  g: Group
+  open: boolean
+  boundary: number
+  spawn?: string
+  drag?: DragToGroup
+  handle: boolean
+  panes?: ReadonlyMap<string, number>
+  shown: ColumnKey[]
+  selected: ReadonlySet<string>
+  onToggleSelect(key: string): void
+  onToggleGroup(groupKey: string): void
+  onAction(action: RowAction, s: FleetSession): void
+  onSpawnIn?(group: Group): void
+  peek?: PeekFn
+}) {
+  /*
+   * Registered even for a heading that refuses drops, and deliberately: the
+   * refusal has an affordance — the no-drop cursor, the notice on release —
+   * and both need the drag layer to know the pointer is over this group at
+   * all. Only `droppable` decides whether anything lights up.
+   */
+  const { setNodeRef, isOver } = useDroppable({
+    id: g.key,
+    data: { group: g },
+    disabled: drag === undefined,
+  })
+  const droppable = drag !== undefined && drag.droppable(g)
+  return (
+    <section ref={setNodeRef} className="flex flex-col">
+      {/*
+        Two real controls in the band, and they are kept apart on
+        purpose: folding a group and starting a session in it must never
+        be the same click. The toggle owns the chevron and the label so
+        its accessible name is the group's; the tally is read-along
+        text; and the `+` is ranged right, where a new-thing control
+        belongs and where a pointer aimed at the fold cannot reach it.
+        It appears only when the caller can honour it — see
+        `spawnFromGroup`, which is what decides that a heading like
+        "Exited" has nothing to offer.
+      */}
+      <div
+        className={cn(
+          'group/band flex items-center gap-x-1.5 rounded-md px-2 py-1 transition-colors hover:bg-row-hover',
+          // The drop target saying it is one: the same wash a hover gives,
+          // held while a row hangs over any part of the group, plus an
+          // outline in the ring token — the wash alone is what every band
+          // under the pointer already does, and a target must read as more
+          // than hovered.
+          isOver && droppable && 'bg-row-hover outline-2 -outline-offset-2 outline-ring',
+        )}
+      >
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => onToggleGroup(g.key)}
+          className="-ml-1 flex min-w-0 items-center gap-x-1 rounded-sm px-1 py-0.5 text-control font-medium text-zinc-950 transition-colors outline-none focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring dark:text-white"
+        >
+          <ChevronDownIcon
+            aria-hidden="true"
+            className={cn(
+              'size-3.5 shrink-0 text-zinc-400 transition-transform dark:text-zinc-500',
+              !open && '-rotate-90',
             )}
-          </section>
-        )
-      })}
-    </div>
+          />
+          <span className="truncate">{g.label}</span>
+        </button>
+        <span className="shrink-0 text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
+          {tally(g.sessions)}
+        </span>
+        {spawn !== undefined && onSpawnIn !== undefined && (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            // Named after its own group, as every repeated control in a
+            // list is: without it a screen reader announces "New
+            // session" once per heading with nothing to tell them apart.
+            aria-label={spawn}
+            // Quiet until the band is under the pointer or the button
+            // itself has focus — a column of `+` signs down the left of
+            // every heading would read as the loudest thing on a screen
+            // whose ordinary use is reading it. Full strength for a
+            // coarse pointer, which has no hover to reveal it with.
+            className="ml-auto text-zinc-500 opacity-0 transition-opacity group-hover/band:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100 dark:text-zinc-400"
+            onClick={() => onSpawnIn(g)}
+          >
+            <PlusIcon aria-hidden="true" />
+          </Button>
+        )}
+      </div>
+      {open && (
+        <ul className="mt-1 flex flex-col">
+          {g.sessions.map((s, at) => (
+            // Keyed by the same composite the selection uses: unique
+            // within a group, even when the session itself repeats
+            // across tag groups in their own lists.
+            <Fragment key={keyOf(s)}>
+              {at === boundary && at > 0 && <PinnedRule />}
+              <SessionRow
+                s={s}
+                groupKey={g.key}
+                drag={drag}
+                handle={handle}
+                paneCount={panes?.get(keyOf(s))}
+                shown={shown}
+                selected={selected}
+                onToggleSelect={onToggleSelect}
+                onAction={onAction}
+                peek={peek}
+              />
+            </Fragment>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }

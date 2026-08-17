@@ -410,6 +410,86 @@ function after(key: string, prefix: string): string {
   return key.startsWith(prefix) ? key.slice(prefix.length) : key
 }
 
+/**
+ * What letting a dragged row go over a group's heading should do.
+ *
+ * `retag` is the one thing a drop can actually change: a session's tags are
+ * the only group-defining fact a person assigns, so a drag between tag
+ * headings is a plain metadata edit — the same one the tag editor performs,
+ * which is why drag and drop can never become the only path to it. `reject`
+ * is a drop the screen must answer out loud, in the reason given, because the
+ * pointer was allowed to make an offer the data cannot honour. `none` is a
+ * drop with nothing to say — the row let go where it already was.
+ */
+export type DropVerdict =
+  | { kind: 'retag'; tags: string[] }
+  | { kind: 'reject'; reason: string }
+  | { kind: 'none' }
+
+/**
+ * Whether this grouping's headings can take a drop at all.
+ *
+ * Only tags: a machine heading names a daemon a live shell cannot cross to,
+ * and state and directory are read off the session rather than assigned to
+ * it. The distinction is what the drag layer draws — valid targets highlight,
+ * the rest answer the pointer with a no-drop cursor — so it is decided here,
+ * beside the verdicts it must always agree with.
+ */
+export function groupAcceptsDrop(grouping: Grouping): boolean {
+  return grouping === 'tag'
+}
+
+/**
+ * The verdict on one drop: this session, picked up under `fromKey`, let go
+ * over `toKey`.
+ *
+ * A tag drop *moves* rather than merely adds — the tag it was picked up
+ * under comes off and the tag it landed on goes on — because the gesture is
+ * "put this there", and a session that stayed under the heading it was
+ * dragged out of would read as a drop that did not work. The rest of the
+ * session's tags are none of the gesture's business and survive untouched.
+ * Landing on the untagged remainder clears every tag, since "no tag" is not
+ * a tag to swap in but the absence being pointed at.
+ *
+ * The refusals name their reason in a full sentence, because the reason is
+ * the answer to the question the reader just asked with their pointer.
+ */
+export function dropOnGroup(
+  grouping: Grouping,
+  s: FleetSession,
+  fromKey: string,
+  toKey: string,
+): DropVerdict {
+  if (fromKey === toKey) return { kind: 'none' }
+  switch (grouping) {
+    case 'tag': {
+      if (toKey === UNTAGGED_KEY) return { kind: 'retag', tags: [] }
+      const fromTag = fromKey === UNTAGGED_KEY ? null : after(fromKey, 'tag:')
+      const toTag = after(toKey, 'tag:')
+      const tags = s.tags.filter((t) => t !== fromTag)
+      if (!tags.includes(toTag)) tags.push(toTag)
+      return { kind: 'retag', tags }
+    }
+    case 'machine':
+      return {
+        kind: 'reject',
+        reason: 'A session cannot move to another machine. Its shell runs where it started.',
+      }
+    case 'state':
+      return {
+        kind: 'reject',
+        reason: 'State cannot be assigned. It reports what the session is doing.',
+      }
+    case 'directory':
+      return {
+        kind: 'reject',
+        reason: 'Directory cannot be assigned. It is where the session runs.',
+      }
+    case 'none':
+      return { kind: 'none' }
+  }
+}
+
 /** Gather the rows into their buckets, then put the buckets in reading order. */
 function collect(list: FleetSession[], bucketsOf: (s: FleetSession) => Bucket[]): Group[] {
   const found = new Map<string, Bucket & { sessions: FleetSession[] }>()
