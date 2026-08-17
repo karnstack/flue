@@ -107,11 +107,14 @@ export interface ViewConfig {
  *
  * Grouped by machine because the fleet is the reason this screen was rebuilt —
  * "what is running where" is the first question, and a heading per machine
- * answers it before a single row is read. Ended sessions stay in, because a
- * session that exited three minutes ago with a non-zero code is exactly what
- * someone comes here to find; hiding it by default would make the screen
- * quietly lie about what happened. Every column but the creation time, which
- * is the one people ask for rarely and can turn on.
+ * answers it before a single row is read. Ended sessions start hidden: an
+ * exited session is history rather than somewhere to go, and a list that
+ * opens on last week's dead shells buries the rows someone came to act on.
+ * They are folded away rather than gone — `hiddenExited` counts them, the
+ * screen says the count out loud, and one press brings them back — so the
+ * session that exited three minutes ago with a non-zero code is still one
+ * click from being found. Every column but the creation time, which is the
+ * one people ask for rarely and can turn on.
  *
  * Frozen, and its column list with it, because this is one object shared by
  * every browser tab that has never saved an arrangement. `ViewConfig` is a
@@ -126,7 +129,7 @@ export const DEFAULT_VIEW: ViewConfig = Object.freeze<ViewConfig>({
   ordering: 'lastActive',
   search: '',
   columns: frozen(['name', 'directory', 'machine', 'tags', 'state', 'lastActive']),
-  showExited: true,
+  showExited: false,
 })
 
 /**
@@ -438,4 +441,21 @@ export function applyView(list: FleetSession[], v: ViewConfig): Group[] {
   const matched = filterSessions(list, v.search)
   const wanted = v.showExited ? matched : matched.filter((s) => s.state !== 'exited')
   return groupSessions(orderSessions(wanted, v.ordering), v.grouping)
+}
+
+/**
+ * How many sessions the view folded away for having ended.
+ *
+ * The number the screen says out loud under the list: a default that hides
+ * ended sessions silently would make an emptied list read as an empty fleet,
+ * and the way back — the display options' checkbox — is set somewhere the
+ * reader has no reason to look. Counted after the search for the same reason
+ * `applyView` filters after it: the sentence sits under a searched list, and
+ * "3 ended" must mean three the reader would see, not three somewhere in the
+ * fleet. Zero whenever the view shows them, because a fold that is open hides
+ * nothing.
+ */
+export function hiddenExited(list: FleetSession[], v: ViewConfig): number {
+  if (v.showExited) return 0
+  return filterSessions(list, v.search).filter((s) => s.state === 'exited').length
 }

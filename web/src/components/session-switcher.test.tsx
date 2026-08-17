@@ -191,6 +191,25 @@ describe('SessionSwitcher', () => {
     expect(props.onPick).toHaveBeenCalledWith({ machineId: 'local', sessionId: 'p2' })
   })
 
+  it('leaves exited sessions out until a search names one, then says it ended', async () => {
+    const user = userEvent.setup()
+    mount({
+      sessions: [
+        s({ id: 'a', name: 'pnpm build' }),
+        s({ id: 'over', name: 'old deploy', state: 'exited' }),
+      ],
+    })
+    // At rest the palette is a "take me there" control, and a dead session is
+    // not a there.
+    expect(rowNames().join(' ')).not.toContain('old deploy')
+
+    await user.type(field(), 'deploy')
+
+    const row = screen.getAllByRole('option')[0]!
+    expect(row.textContent).toContain('old deploy')
+    expect(row.textContent).toContain('exited')
+  })
+
   it('shows a remembered session whose machine has gone, and still opens it', async () => {
     const user = userEvent.setup()
     const { props } = mount({
