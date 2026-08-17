@@ -14,6 +14,7 @@ import { useFlueClient } from '@/client/provider'
 import { KeyBar } from '@/components/key-bar'
 import { PasteBox } from '@/components/paste-box'
 import { SelectionMenu, type MenuEnd } from '@/components/selection-menu'
+import { ShortcutsHelp } from '@/components/shortcuts-help'
 import { ThemeMenu } from '@/components/theme-menu'
 import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
 import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
@@ -1303,6 +1304,12 @@ export function Terminal({
             onScratch={scratch.enabled ? scratch.toggle : undefined}
           />
         )}
+        {/*
+          Every chord in one card, because the pills that used to teach them
+          are gone in a hundred milliseconds on a local daemon and the
+          tooltips teach one chord each.
+        */}
+        <ShortcutsHelp chipStyle={chipStyle} />
           </>
         )}
         {phase !== 'live' && (
