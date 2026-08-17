@@ -29,6 +29,17 @@ type Device struct {
 	// fleet directory will publish it — and empty for devices paired
 	// before the fleet key existed.
 	Cert []byte `json:"cert,omitempty"`
+
+	// Origin is where this device first reached this machine from — the
+	// Origin header on its enrolment POST, e.g. "http://localhost:7719".
+	// A hint for telling otherwise-identical rows apart, never an identity:
+	// it is whatever the browser sent, it is only known for devices that
+	// enrolled over loopback, and empty is the ordinary state of every
+	// other row — one paired by ceremony, one admitted on a fleet cert, or
+	// one from before origins were recorded. First seen wins (SetOrigin),
+	// and it stays out of the certificate: it is a fact about how this
+	// machine was reached, not about the device.
+	Origin string `json:"origin,omitempty"`
 }
 
 // DeviceID derives the identity from the key itself, so an entry cannot
@@ -257,6 +268,45 @@ func (s *DeviceStore) SetCert(publicKey, cert []byte) (bool, error) {
 			return false, nil
 		}
 		devices[i].Cert = slices.Clone(cert)
+		if err := s.save(devices); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// SetOrigin records where a device enrolled from, once, reporting whether it
+// wrote. A row that already has an origin keeps it — first seen wins, so a
+// key that reaches this daemon from more than one place is labelled by where
+// it turned up rather than by wherever its tab last loaded — and an empty
+// origin, an unregistered key or a repeat are quiet no-ops, because the
+// enrolment endpoint calls this on every page load.
+//
+// No revocation check, unlike SetCert and Relabel, and the asymmetry is the
+// point: those write a credential, this writes a display hint. Revoking
+// removes the row itself, so a revoked key has nothing here to stamp.
+func (s *DeviceStore) SetOrigin(publicKey []byte, origin string) (bool, error) {
+	if len(publicKey) != 32 {
+		return false, fmt.Errorf("crypto: device key must be 32 bytes, got %d", len(publicKey))
+	}
+	if origin == "" {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	devices, err := s.load()
+	if err != nil {
+		return false, err
+	}
+	for i := range devices {
+		if !bytes.Equal(devices[i].PublicKey, publicKey) {
+			continue
+		}
+		if devices[i].Origin != "" {
+			return false, nil
+		}
+		devices[i].Origin = origin
 		if err := s.save(devices); err != nil {
 			return false, err
 		}

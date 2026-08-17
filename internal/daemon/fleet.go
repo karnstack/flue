@@ -203,6 +203,29 @@ const EnrolPath = "/api/fleet/enrol"
 // allows for a strictly larger body.
 const maxEnrolBytes = 4 << 10
 
+// maxOriginBytes bounds what enrolOrigin will record. A real Origin is a
+// scheme, a host and a port; 256 covers any of this daemon's own with room
+// to spare.
+const maxOriginBytes = 256
+
+// enrolOrigin is what enrolment records about where the browser is: the
+// request's Origin header, or nothing worth keeping.
+//
+// It is trusted exactly as far as a hint on a Devices row needs to be, and no
+// further — recorded on the local registry row, shown beside the label, never
+// minted into the certificate. By the time this runs, provenance
+// (checkProvenance) has already refused any Origin that is not one of this
+// daemon's own, so the value names which of the daemon's spellings the tab is
+// on: 127.0.0.1 or localhost. "null" is the opaque origin — a browser
+// declining to say — which is the same fact as no header at all.
+func enrolOrigin(r *http.Request) string {
+	o := r.Header.Get("Origin")
+	if o == "null" || len(o) > maxOriginBytes {
+		return ""
+	}
+	return o
+}
+
 // enrolRequest is what the loopback UI posts: its own device public key, and
 // nothing else.
 //
@@ -464,6 +487,19 @@ func (s *Server) handleEnrol(w http.ResponseWriter, r *http.Request) {
 		if fresh, ok := s.relabelEnrolled(dev, key, fi); ok {
 			cert = fresh
 		}
+		// And the row's origin, back-filled when it never had one. This is
+		// the path every pre-origin row takes on its next page load — the
+		// browser calls this endpoint on every load — so older rows come
+		// right on their own rather than being singled out, and a row that
+		// has an origin keeps it (SetOrigin, first seen wins). Best effort
+		// like the relabel above; the broadcast is because nothing else
+		// pushes a list for this, and the screens already looking should not
+		// hold a row the registry has just outgrown.
+		if wrote, err := s.identity.Devices.SetOrigin(key, enrolOrigin(r)); err != nil {
+			s.logger().Warn("could not record this browser's origin", "device", dev.ID, "err", err)
+		} else if wrote {
+			s.broadcastDeviceList()
+		}
 	} else {
 		label := enrolLabel(s.hostname)
 		cert, err = fi.Key.Sign(fleet.DeviceCert{
@@ -485,6 +521,12 @@ func (s *Server) handleEnrol(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger().Info("enrolled this machine's own browser as a fleet device",
 			"device", dev.ID, "label", dev.Label, "pairedOn", fi.MachineID)
+		// Where the browser came from, stamped before the broadcast below
+		// announces the row. Best effort: an enrolment holding a usable
+		// certificate must not fail over a display hint.
+		if _, err := s.identity.Devices.SetOrigin(key, enrolOrigin(r)); err != nil {
+			s.logger().Warn("could not record this browser's origin", "device", dev.ID, "err", err)
+		}
 		// Nothing is published to the fleet directory, exactly as the pairing
 		// ceremony publishes nothing: device certificates go to the device they
 		// are about and nowhere else (spec/fleet-trust.md, "Device certificates

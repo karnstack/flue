@@ -483,3 +483,61 @@ func TestRemoveByKeyComparesTheWholeKey(t *testing.T) {
 		t.Fatalf("RemoveByKey of an absent key = %v, %v; want false and no error", ok, err)
 	}
 }
+
+// TestSetOriginKeepsTheFirstOrigin: the origin is a first-seen hint, written
+// once and never replaced. One device key can legitimately reach this daemon
+// from more than one place — the vite dev server today, loopback tomorrow —
+// and a field that tracked the latest would make every row read "wherever the
+// tab last loaded from", which answers nothing at the moment of revoking.
+func TestSetOriginKeepsTheFirstOrigin(t *testing.T) {
+	dir := t.TempDir()
+	s := NewDeviceStore(dir)
+
+	key := testKey(t)
+	if _, err := s.Add("phone", key, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	wrote, err := s.SetOrigin(key, "http://127.0.0.1:7719")
+	if err != nil || !wrote {
+		t.Fatalf("SetOrigin on a device with none = %v, %v; want it written", wrote, err)
+	}
+	dev, ok, err := s.FindByKey(key)
+	if err != nil || !ok {
+		t.Fatalf("FindByKey = %v, %v", ok, err)
+	}
+	if dev.Origin != "http://127.0.0.1:7719" {
+		t.Fatalf("stored origin = %q, want the one just written", dev.Origin)
+	}
+
+	// A different origin later changes nothing: first seen wins.
+	wrote, err = s.SetOrigin(key, "http://localhost:7719")
+	if err != nil || wrote {
+		t.Fatalf("SetOrigin over an existing origin = %v, %v; want it refused", wrote, err)
+	}
+	dev, _, _ = s.FindByKey(key)
+	if dev.Origin != "http://127.0.0.1:7719" {
+		t.Fatalf("stored origin = %q; an existing origin was replaced", dev.Origin)
+	}
+
+	// An empty origin records nothing — it is the ordinary state of a device
+	// that never enrolled over loopback, not a value.
+	fresh := testKey(t)
+	if _, err := s.Add("laptop", fresh, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if wrote, err := s.SetOrigin(fresh, ""); err != nil || wrote {
+		t.Fatalf("SetOrigin with an empty origin = %v, %v; want a no-op", wrote, err)
+	}
+
+	// A key nobody paired gets nothing, and no error: the caller's question is
+	// "did this stamp a row", and for a row that is not there the answer is no.
+	if wrote, err := s.SetOrigin(testKey(t), "http://127.0.0.1:7719"); err != nil || wrote {
+		t.Fatalf("SetOrigin for an unregistered key = %v, %v; want a no-op", wrote, err)
+	}
+
+	// A malformed key is an error, as it is on every other mutation here.
+	if _, err := s.SetOrigin(key[:16], "http://127.0.0.1:7719"); err == nil {
+		t.Fatal("SetOrigin with a short key = nil, want an error")
+	}
+}

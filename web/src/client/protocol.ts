@@ -138,6 +138,19 @@ export interface DeviceInfo {
    * revoke on the strength of a blob that proved nothing.
    */
   pairedOn?: string
+  /**
+   * Where the device first reached the daemon from — the Origin header on its
+   * enrolment POST, e.g. "http://localhost:7719" — recorded on the daemon's
+   * local row and never minted into the certificate.
+   *
+   * It exists because several loopback tabs enrol as several devices, one per
+   * browser origin (IndexedDB scopes the device key to the origin), and their
+   * rows are otherwise identical. A hint, not an identity: absent is the
+   * ordinary state of a device paired by ceremony, admitted on a fleet cert,
+   * or enrolled before origins were recorded, and a screen must render absent
+   * as unremarkable rather than suspicious.
+   */
+  origin?: string
 }
 
 // Client -> server.

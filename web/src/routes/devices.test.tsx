@@ -187,6 +187,48 @@ describe('DevicesRoute', () => {
     expect(screen.getByText('2h ago')).toBeTruthy()
   })
 
+  /**
+   * The indistinguishable-rows fix (issue #71): several loopback tabs enrol as
+   * several devices — one per browser origin — and their rows read identically:
+   * same label, same machine, nothing but dates. The daemon now records the
+   * origin the enrolment came from and every row carries a short fingerprint of
+   * its key, so four rows saying "Browser on mb.local" can finally be told
+   * apart.
+   */
+  it('tells identically-labelled rows apart by origin and fingerprint', async () => {
+    const { sock } = await mountDevices()
+
+    listed(sock, [
+      device({ id: 'aa11bb22cc33', label: 'Browser on mb.local', origin: 'http://127.0.0.1:7719' }),
+      device({ id: 'dd44ee55ff66', label: 'Browser on mb.local', origin: 'http://localhost:7719' }),
+    ])
+
+    // The origin reads as a place, not a URL: the scheme says nothing a reader
+    // of this list acts on, and the host and port are the whole distinction.
+    expect(screen.getByText('127.0.0.1:7719')).toBeTruthy()
+    expect(screen.getByText('localhost:7719')).toBeTruthy()
+    expect(screen.queryByText('http://127.0.0.1:7719')).toBeNull()
+
+    // The fingerprint is the id's first six characters — the id is already a
+    // digest of the device key, so nothing new is derived here.
+    expect(screen.getByText('aa11bb')).toBeTruthy()
+    expect(screen.getByText('dd44ee')).toBeTruthy()
+  })
+
+  it('renders a row with no origin as ordinary, not as suspect', async () => {
+    const { sock } = await mountDevices()
+
+    // A phone paired by QR has no meaningful origin, and every row from
+    // before origins were recorded has none either. Both are the ordinary
+    // state: the row shows its dates and its fingerprint and says nothing
+    // about what it does not know.
+    listed(sock, [device({ id: 'aa11bb22cc33', label: 'iPhone' })])
+
+    expect(screen.getByText('iPhone')).toBeTruthy()
+    expect(screen.getByText('aa11bb')).toBeTruthy()
+    expect(screen.queryByText(/unknown/i)).toBeNull()
+  })
+
   it('asks before it revokes', async () => {
     const { sock } = await mountDevices()
     listed(sock, [device({ id: 'aa11bb22cc33', label: 'iPhone' })])

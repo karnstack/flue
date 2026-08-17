@@ -225,6 +225,14 @@ func newEnrolServer(t *testing.T, machineID string) (*httptest.Server, *Server, 
 // own origin, authenticated by the session cookie, carrying one key.
 func postEnrol(t *testing.T, ts *httptest.Server, publicKey []byte) *http.Response {
 	t.Helper()
+	return postEnrolFrom(t, ts, publicKey, ts.URL)
+}
+
+// postEnrolFrom is postEnrol from a chosen origin. The daemon owns two
+// (127.0.0.1 and localhost, same port), and which of them the tab is on is
+// exactly the fact enrolment records.
+func postEnrolFrom(t *testing.T, ts *httptest.Server, publicKey []byte, origin string) *http.Response {
+	t.Helper()
 	body, err := json.Marshal(map[string]string{
 		"publicKey": base64.StdEncoding.EncodeToString(publicKey),
 	})
@@ -237,7 +245,7 @@ func postEnrol(t *testing.T, ts *httptest.Server, publicKey []byte) *http.Respon
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{Name: tsCookie(ts), Value: tok})
-	req.Header.Set("Origin", ts.URL)
+	req.Header.Set("Origin", origin)
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -632,6 +640,63 @@ func TestEnrolBackfillsACertificateADeviceHasNone(t *testing.T) {
 	list := devices(t, srv)
 	if len(list) != 1 || list[0].Label != "an older pairing" {
 		t.Errorf("registry = %+v, want the existing row untouched", list)
+	}
+}
+
+// TestEnrolRecordsWhereTheBrowserCameFrom.
+//
+// Several loopback tabs enrol as several devices — IndexedDB is scoped to the
+// origin, so http://127.0.0.1:7719 and http://localhost:7719 hold different
+// keys — and their rows used to be identical: same label, same machine,
+// nothing but dates. The Origin header on the enrolment POST is the one fact
+// that differs, the daemon already has it, and nothing new is asked for or
+// trusted: it is recorded as a hint on the local row, never minted into the
+// certificate.
+func TestEnrolRecordsWhereTheBrowserCameFrom(t *testing.T) {
+	ts, srv, _ := newEnrolServer(t, "karns-mbp-a1b2-0f9a12cd")
+	key := deviceKey(0x5c)
+
+	enrolOK(t, ts, key)
+	list := devices(t, srv)
+	if len(list) != 1 || list[0].Origin != ts.URL {
+		t.Fatalf("registry = %+v, want one row with origin %q", list, ts.URL)
+	}
+
+	// The wire carries it, so a Devices screen can put it on the row.
+	wl, err := srv.deviceList()
+	if err != nil {
+		t.Fatalf("deviceList: %v", err)
+	}
+	if len(wl.Devices) != 1 || wl.Devices[0].Origin != ts.URL {
+		t.Fatalf("deviceList = %+v, want the enrolment origin on the row", wl.Devices)
+	}
+
+	// A later load does not rewrite history: the row keeps the origin it
+	// enrolled from, whichever of the daemon's origins the tab is on today.
+	other := strings.Replace(ts.URL, "127.0.0.1", "localhost", 1)
+	if resp := postEnrolFrom(t, ts, key, other); resp.StatusCode != http.StatusOK {
+		t.Fatalf("re-enrolment from %q = %d, want 200", other, resp.StatusCode)
+	}
+	if list := devices(t, srv); list[0].Origin != ts.URL {
+		t.Errorf("origin after a re-enrolment = %q, want the first one %q", list[0].Origin, ts.URL)
+	}
+
+	// A row from before origins were recorded picks one up on its next load —
+	// the browser calls this endpoint on every load, so the backfill is free
+	// and older rows are never singled out.
+	older := deviceKey(0x5d)
+	if _, err := srv.identity.Devices.Add("an older enrolment", older, nil); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if resp := postEnrolFrom(t, ts, older, other); resp.StatusCode != http.StatusOK {
+		t.Fatalf("enrolling the older row = %d, want 200", resp.StatusCode)
+	}
+	dev, ok, err := srv.identity.Devices.FindByKey(older)
+	if err != nil || !ok {
+		t.Fatalf("FindByKey = %v, %v", ok, err)
+	}
+	if dev.Origin != other {
+		t.Errorf("older row's origin = %q, want it back-filled to %q", dev.Origin, other)
 	}
 }
 
