@@ -139,6 +139,19 @@ function listed(sock: FakeSocket, sessions: SessionInfo[]) {
 
 const newSession = () => screen.getByRole('button', { name: 'New session' })
 
+/**
+ * The route's own status line. By role alone it stopped being unique: the
+ * drag layer (dnd-kit's DndContext) portals a live region onto document.body
+ * that is also role=status. The route's is the one and only `p` — the drag
+ * layer's is a div — and pinning the tag keeps every assertion about notices
+ * reading the element the reader actually sees.
+ */
+function notice(): HTMLElement {
+  const line = screen.getAllByRole('status').find((el) => el.tagName === 'P')
+  if (line === undefined) throw new Error('the notice line is not on screen')
+  return line
+}
+
 /** Open one of the display-options selects and take the option reading `label`. */
 async function pick(user: ReturnType<typeof userEvent.setup>, of: string, label: string) {
   const trigger = screen.getByRole('combobox', { name: of })
@@ -388,7 +401,7 @@ describe('SessionsRoute', () => {
       await user.click(screen.getByRole('menuitem', { name: 'Close' }))
 
       expect(sock.ofType('close')).toEqual([{ type: 'close', id: 's1' }])
-      expect(screen.getByRole('status').textContent).toContain('Closing alpha')
+      expect(notice().textContent).toContain('Closing alpha')
     })
 
     it('announces a refusal that answers an act nobody can correlate', async () => {
@@ -404,7 +417,7 @@ describe('SessionsRoute', () => {
       await user.click(screen.getByRole('menuitem', { name: 'Close' }))
       act(() => sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }))
 
-      expect(screen.getByRole('status').textContent).toBe('That session is gone.')
+      expect(notice().textContent).toBe('That session is gone.')
     })
 
     it('announces one from a remote machine too, not only the ridden one', async () => {
@@ -415,7 +428,7 @@ describe('SessionsRoute', () => {
         attic.sockets[0]!.emitControl({ type: 'error', code: 'not_found', msg: 'no such session' }),
       )
 
-      expect(screen.getByRole('status').textContent).toBe('That session is gone.')
+      expect(notice().textContent).toBe('That session is gone.')
     })
 
     it('leaves a correlated refusal to whoever holds its request', async () => {
@@ -429,7 +442,7 @@ describe('SessionsRoute', () => {
         sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: 9 }),
       )
 
-      expect(screen.getByRole('status').textContent).toBe('')
+      expect(notice().textContent).toBe('')
     })
 
     it('says nothing about an error that is not a missing session', async () => {
@@ -437,7 +450,7 @@ describe('SessionsRoute', () => {
 
       act(() => sock.emitControl({ type: 'error', code: 'lagged', msg: 'too far behind' }))
 
-      expect(screen.getByRole('status').textContent).toBe('')
+      expect(notice().textContent).toBe('')
     })
   })
 
@@ -466,7 +479,7 @@ describe('SessionsRoute', () => {
       expect(attic.sockets[0]!.ofType('close')).toEqual([{ type: 'close', id: 's2' }])
       // The act consumes the selection: the bar leaves with it.
       expect(screen.queryByRole('toolbar', { name: 'Bulk actions' })).toBeNull()
-      expect(screen.getByRole('status').textContent).toContain('Closing 2 sessions')
+      expect(notice().textContent).toContain('Closing 2 sessions')
     })
 
     it('pins the whole selection', async () => {
@@ -672,7 +685,7 @@ describe('SessionsRoute', () => {
 
       act(() => sock.close())
 
-      expect(screen.getByRole('status').textContent).toMatch(/reconnecting/i)
+      expect(notice().textContent).toMatch(/reconnecting/i)
     })
 
     it('shows a revoked machine as a final band, with no retry to press', async () => {
@@ -717,8 +730,8 @@ describe('SessionsRoute', () => {
 
       // The live region announces the fact; the reconnect line would be a
       // promise nothing is keeping.
-      expect(screen.getByRole('status').textContent).toMatch(/access was revoked/i)
-      expect(screen.getByRole('status').textContent).not.toMatch(/reconnecting/i)
+      expect(notice().textContent).toMatch(/access was revoked/i)
+      expect(notice().textContent).not.toMatch(/reconnecting/i)
       // And the band names the ridden machine as its welcome named it.
       expect(screen.getByText('mesa.local')).toBeTruthy()
       expect(screen.getByText(/revoked by another device/)).toBeTruthy()
@@ -729,11 +742,11 @@ describe('SessionsRoute', () => {
       // already in the accessibility tree, so one that arrives together with
       // its first message is a message nobody hears.
       const { sock } = await mountSessions()
-      expect(screen.getByRole('status').textContent).toBe('')
+      expect(notice().textContent).toBe('')
 
       act(() => sock.close())
 
-      expect(screen.getByRole('status').textContent).toMatch(/reconnecting/i)
+      expect(notice().textContent).toMatch(/reconnecting/i)
     })
   })
 
@@ -1071,7 +1084,7 @@ describe('SessionsRoute', () => {
       })
       await saveAs(user, 'Ops')
 
-      expect(screen.getByRole('status').textContent).toContain('Could not save the view')
+      expect(notice().textContent).toContain('Could not save the view')
       expect(screen.queryByRole('button', { name: 'Ops' })).toBeNull()
     })
   })
