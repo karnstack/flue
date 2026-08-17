@@ -524,6 +524,15 @@ type DeviceInfo struct {
 	// own — the conservative direction, since it is the one that does not offer
 	// a fleet-wide revoke on the strength of a blob that proved nothing.
 	PairedOn string `json:"pairedOn,omitempty"`
+	// Origin is where the device first reached this machine from — the Origin
+	// header on its enrolment POST, recorded on the local row and never minted
+	// into the certificate (crypto.Device). It exists because several loopback
+	// tabs enrol as several devices, one per browser origin, and their rows
+	// are otherwise identical. A hint, not an identity: absent is the ordinary
+	// state of a device paired by ceremony, admitted on a fleet cert, or
+	// enrolled before origins were recorded, and a screen must render absent
+	// as unremarkable rather than suspicious.
+	Origin string `json:"origin,omitempty"`
 }
 
 // DeviceList answers devices, and follows a revoke that succeeded.

@@ -1487,6 +1487,7 @@ func (s *Server) deviceList() (wire.DeviceList, error) {
 			PairedAt: d.PairedAt.Unix(),
 			LastSeen: d.LastSeen.Unix(),
 			PairedOn: pairedOn(fleetPub, d.Cert),
+			Origin:   d.Origin,
 		})
 	}
 	return wire.DeviceList{Devices: infos}, nil

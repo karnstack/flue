@@ -166,6 +166,35 @@ const META_TEXT = 'text-xs/6 whitespace-nowrap tabular-nums text-zinc-500 dark:t
 const ROW_BUTTON = 'text-zinc-500 dark:text-zinc-400'
 
 /**
+ * How much of a device id a row shows as its fingerprint.
+ *
+ * The id is already a digest of the device key, so the row derives nothing
+ * new — it prints the first six characters, which is enough to tell apart the
+ * handful of rows one machine holds while staying narrow enough to sit beside
+ * a label on a phone. It exists because rows can otherwise be identical to
+ * the word (see the origin note below), and it is on every row, because a row
+ * on a sibling machine has no origin to be told apart by.
+ */
+const FINGERPRINT_CHARS = 6
+
+/**
+ * The origin a device enrolled from, said as a place rather than a URL.
+ *
+ * The daemon records the Origin header of the enrolment POST, so several
+ * loopback tabs — each a device of its own, because the device key lives in
+ * storage the browser scopes per origin — stop reading identically. The
+ * scheme is dropped because it distinguishes nothing a reader of this list
+ * acts on; the host and port are the whole difference. Null for a row with no
+ * origin, which is ordinary rather than suspect — a phone paired by QR, a
+ * device admitted on the fleet's word, or a row from before origins were
+ * recorded — and the row simply says nothing about what it does not know.
+ */
+function enrolledFrom(origin?: string): string | null {
+  if (origin === undefined || origin === '') return null
+  return origin.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+}
+
+/**
  * The paired devices, one row each, with the revoke each row carries.
  *
  * A revoke cannot be taken back — the device's live connections are cut and
@@ -382,8 +411,20 @@ function DeviceRow({
 }) {
   return (
     <li className="group/row flex items-center gap-x-3 rounded-md px-2 py-1.5 transition-colors hover:bg-row-hover">
-      <span className="min-w-0 flex-1 truncate text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
-        {d.label}
+      {/*
+        The label and its fingerprint share the flexible slot, so the
+        fingerprint sits beside the words it disambiguates rather than drifting
+        into the dates on the right. The label is what truncates; six characters
+        of digest are the one part of the row that must never be the part that
+        goes.
+      */}
+      <span className="flex min-w-0 flex-1 items-center gap-x-2">
+        <span className="min-w-0 truncate text-base/6 font-medium text-zinc-950 sm:text-control dark:text-white">
+          {d.label}
+        </span>
+        <span className="shrink-0 font-mono text-xs text-zinc-400 dark:text-zinc-500">
+          {d.id.slice(0, FINGERPRINT_CHARS)}
+        </span>
       </span>
       {/*
         Said in the row rather than left to the label, because the label is
@@ -397,11 +438,16 @@ function DeviceRow({
         </span>
       )}
       {/*
-        Paired first, last seen second, reading right — and the first of
-        the two is what goes at narrow widths. Which was seen when is the
-        live fact, the one somebody checks before revoking; when it was
-        paired is history, and history is what a phone can do without.
+        Where it enrolled from, then paired, then last seen, reading right —
+        and the first two are what go at narrow widths. Which was seen when is
+        the live fact, the one somebody checks before revoking; where a tab
+        enrolled and when it paired are history, and history is what a phone
+        can do without — the rows a phone most needs to tell apart are its
+        siblings with no origin at all, which the fingerprint covers.
       */}
+      {enrolledFrom(d.origin) !== null && (
+        <span className={cn(META_TEXT, 'font-mono max-sm:hidden')}>{enrolledFrom(d.origin)}</span>
+      )}
       <span className={cn(META_TEXT, 'max-sm:hidden')}>paired {ago(d.pairedAt)}</span>
       <span className={META_TEXT}>{ago(d.lastSeen)}</span>
       {!revocable ? null : armed ? (
