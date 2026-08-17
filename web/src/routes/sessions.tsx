@@ -32,6 +32,7 @@ import {
   applyView,
   DEFAULT_VIEW,
   displayName,
+  hiddenExited,
   spawnFromGroup,
   type Group,
   type ViewConfig,
@@ -391,6 +392,8 @@ export function SessionsRoute() {
   const machines = fleetState?.machines ?? null
 
   const groups = useMemo(() => applyView(sessions, view), [sessions, view])
+  /** How many rows the view folded away for having ended. See hiddenExited. */
+  const hiddenEnded = useMemo(() => hiddenExited(sessions, view), [sessions, view])
   const byKey = useMemo(() => new Map(sessions.map((s) => [keyOf(s), s])), [sessions])
   const knownTags = useMemo(
     () => [...new Set(sessions.flatMap((s) => s.tags))].sort(),
@@ -624,10 +627,13 @@ export function SessionsRoute() {
    * machine still dialling, and at least one machine actually online — "No
    * sessions yet" from a screen whose machines are all down would be a lie
    * the placeholders and the unreachable bands are there to avoid telling.
+   * A list that is only empty because it folded its ended sessions away is
+   * not empty either; the fold line below stands in for the rows it hides.
    */
   const showTable =
     fleetState !== null &&
-    (groups.length > 0 || (settled && connecting.length === 0 && online.length > 0))
+    (groups.length > 0 ||
+      (settled && connecting.length === 0 && online.length > 0 && hiddenEnded === 0))
 
   /** Placeholder rows, for machines that have not had the chance to answer. */
   const showSkeleton =
@@ -755,6 +761,13 @@ export function SessionsRoute() {
           onSpawnIn={spawnInGroup}
           spawnLabel={spawnLabel}
           peek={peek}
+        />
+      )}
+
+      {hiddenEnded > 0 && (
+        <ExitedFold
+          count={hiddenEnded}
+          onShow={() => setView((v) => ({ ...v, showExited: true }))}
         />
       )}
 
@@ -946,6 +959,38 @@ function FleetGapBand({ gaps }: { gaps: FleetGaps }) {
         anywhere else, pair this browser again from a machine on the fleet.
       </p>
     </div>
+  )
+}
+
+/**
+ * The ended sessions the view folded away, counted where their rows would
+ * have ended up — under the list, since every ordering reads the living
+ * before the dead.
+ *
+ * A line and not a band: the bands above it report problems, and a fold is
+ * an arrangement working as designed. It exists because the default hides
+ * ended sessions, and a default that hid them without saying so would make
+ * an emptied list read as an empty fleet — the count keeps them discoverable
+ * from the screen itself rather than from a checkbox in the display options.
+ * Show sets the same `showExited` the checkbox owns, so the reveal is a view
+ * edit like any other: the dirty flag lights, the choice persists, and the
+ * checkbox is already ticked for whoever goes looking for the way back.
+ *
+ * "Exited", not a softer word, because it is the word this screen already
+ * uses everywhere it counts these sessions — the state heading, the group
+ * headcounts, the checkbox — and the fold naming them anything else would
+ * read as a third kind of session.
+ */
+function ExitedFold({ count, onShow }: { count: number; onShow(): void }) {
+  return (
+    <p className="flex items-center gap-x-1.5 text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
+      <span className="font-medium text-zinc-950 dark:text-white">{count}</span>
+      {count === 1 ? 'exited session' : 'exited sessions'}
+      <span aria-hidden="true">·</span>
+      <Button variant="ghost" size="sm" aria-label="Show exited sessions" onClick={onShow}>
+        Show
+      </Button>
+    </p>
   )
 }
 

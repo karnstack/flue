@@ -257,11 +257,56 @@ describe('SessionsRoute', () => {
     const { sock } = await mountSessions()
     listed(sock, [info({ id: 's1' }), info({ id: 's2', state: 'exited' })])
 
+    // The ended session has to be on show before State can have two headings:
+    // the default folds it away.
+    await user.click(screen.getByRole('button', { name: 'Show exited sessions' }))
     await user.click(screen.getByRole('button', { name: 'Display options' }))
     await pick(user, 'Grouping', 'State')
 
     expect(screen.getByRole('button', { name: 'Running' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Exited' })).toBeTruthy()
+  })
+
+  describe('the ended fold', () => {
+    it('folds ended sessions away by default and says how many', async () => {
+      const { sock } = await mountSessions()
+      listed(sock, [
+        info({ id: 's1', cwd: '/live' }),
+        info({ id: 's2', cwd: '/dead', state: 'exited' }),
+        info({ id: 's3', cwd: '/dead-too', state: 'exited' }),
+      ])
+
+      expect(screen.getByText('/live')).toBeTruthy()
+      expect(screen.queryByText('/dead')).toBeNull()
+      expect(screen.getByText('exited sessions')).toBeTruthy()
+      expect(screen.getByText('2')).toBeTruthy()
+
+      await userEvent.click(screen.getByRole('button', { name: 'Show exited sessions' }))
+
+      expect(screen.getByText('/dead')).toBeTruthy()
+      expect(screen.getByText('/dead-too')).toBeTruthy()
+      // An open fold hides nothing, so the count would be a claim about
+      // nothing; the display options own the way back.
+      expect(screen.queryByRole('button', { name: 'Show exited sessions' })).toBeNull()
+    })
+
+    it('does not claim an empty fleet when everything on it has ended', async () => {
+      // "No sessions yet" is a claim about the fleet, and a fleet whose every
+      // session has ended is not one that has none — the fold line stands in
+      // for the rows it hides.
+      const { sock, welcomeLocal, attic } = await mountSessions()
+      welcomeLocal()
+      act(() => attic.sockets[0]!.open())
+      listed(sock, [info({ id: 's1', cwd: '/dead', state: 'exited' })])
+      listed(attic.sockets[0]!, [])
+
+      expect(screen.queryByText(/No sessions yet/i)).toBeNull()
+      expect(screen.getByText('exited session')).toBeTruthy()
+
+      await userEvent.click(screen.getByRole('button', { name: 'Show exited sessions' }))
+
+      expect(screen.getByText('/dead')).toBeTruthy()
+    })
   })
 
   it('opens a session on the machine that owns it, from the row itself', async () => {
@@ -886,6 +931,9 @@ describe('SessionsRoute', () => {
         info({ id: 's2', state: 'exited', exitCode: 1 }),
       ])
       await user.click(screen.getByRole('button', { name: 'Display options' }))
+      // The default folds the ended session away, and a heading that is not
+      // there can prove nothing about its controls.
+      await user.click(screen.getByRole('checkbox', { name: 'Show exited sessions' }))
       await pick(user, 'Grouping', 'State')
       await user.keyboard('{Escape}')
 
@@ -952,29 +1000,30 @@ describe('SessionsRoute', () => {
       const { sock } = await mountSessions()
       listed(sock, [info({ id: 's1', cwd: '/live' }), info({ id: 's2', cwd: '/dead', state: 'exited' })])
 
-      // Arrange: ended sessions out, then keep that under a name.
+      // Arrange: ended sessions in — the default folds them away — then keep
+      // that under a name.
       await user.click(screen.getByRole('button', { name: 'Display options' }))
       await user.click(screen.getByRole('checkbox', { name: 'Show exited sessions' }))
       await user.keyboard('{Escape}')
-      expect(screen.queryByText('/dead')).toBeNull()
+      expect(screen.getByText('/dead')).toBeTruthy()
 
       await saveAs(user, 'Ops')
       expect(screen.getByRole('button', { name: 'Ops' }).getAttribute('aria-pressed')).toBe('true')
 
-      // All is the built-in default: everything comes back.
+      // All is the built-in default: the ended session folds away again.
       await user.click(screen.getByRole('button', { name: 'All' }))
-      expect(screen.getByText('/dead')).toBeTruthy()
+      expect(screen.queryByText('/dead')).toBeNull()
 
       // And the tab re-applies what it kept.
       await user.click(screen.getByRole('button', { name: 'Ops' }))
-      expect(screen.queryByText('/dead')).toBeNull()
+      expect(screen.getByText('/dead')).toBeTruthy()
 
       const kept = JSON.parse(localStorage.getItem('flue.views')!) as Array<{
         name: string
         showExited: boolean
       }>
       expect(kept).toHaveLength(1)
-      expect(kept[0]).toMatchObject({ name: 'Ops', showExited: false })
+      expect(kept[0]).toMatchObject({ name: 'Ops', showExited: true })
     })
 
     it('marks dirty by value, so an edit undone is no edit at all', async () => {
@@ -1036,6 +1085,7 @@ describe('SessionsRoute', () => {
       const first = await mountSessions()
       listed(first.sock, [info({ id: 's1' }), info({ id: 's2', state: 'exited' })])
       await user.click(screen.getByRole('button', { name: 'Display options' }))
+      await user.click(screen.getByRole('checkbox', { name: 'Show exited sessions' }))
       await pick(user, 'Grouping', 'State')
       await user.keyboard('{Escape}')
       first.unmount()

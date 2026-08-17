@@ -11,6 +11,7 @@ import {
   GROUPING_LABELS,
   GROUPINGS,
   groupSessions,
+  hiddenExited,
   ORDERING_LABELS,
   ORDERINGS,
   orderSessions,
@@ -395,7 +396,12 @@ describe('DEFAULT_VIEW', () => {
     expect(DEFAULT_VIEW.grouping).toBe('machine')
     expect(DEFAULT_VIEW.ordering).toBe('lastActive')
     expect(DEFAULT_VIEW.search).toBe('')
-    expect(DEFAULT_VIEW.showExited).toBe(true)
+  })
+
+  it('folds the ended sessions away', () => {
+    // An exited session is history, not somewhere to go; the list opens on
+    // what is running, and `hiddenExited` is what keeps the fold honest.
+    expect(DEFAULT_VIEW.showExited).toBe(false)
   })
 
   it('shows every column but the creation time', () => {
@@ -491,6 +497,27 @@ describe('applyView', () => {
     const input = [...rows]
     applyView(input, DEFAULT_VIEW)
     expect(input).toEqual(rows)
+  })
+})
+
+describe('hiddenExited', () => {
+  const rows = [
+    s({ id: 'live', cwd: '/code/flue' }),
+    s({ id: 'gone', cwd: '/srv/db', state: 'exited' }),
+    s({ id: 'gone-too', cwd: '/srv/cache', state: 'exited' }),
+  ]
+
+  it('counts what the fold is hiding', () => {
+    expect(hiddenExited(rows, { ...DEFAULT_VIEW, showExited: false })).toBe(2)
+  })
+
+  it('is zero when the view shows them, since an open fold hides nothing', () => {
+    expect(hiddenExited(rows, { ...DEFAULT_VIEW, showExited: true })).toBe(0)
+  })
+
+  it('counts inside the search, so the sentence matches the list it sits under', () => {
+    expect(hiddenExited(rows, { ...DEFAULT_VIEW, showExited: false, search: 'srv/db' })).toBe(1)
+    expect(hiddenExited(rows, { ...DEFAULT_VIEW, showExited: false, search: 'flue' })).toBe(0)
   })
 })
 

@@ -171,6 +171,46 @@ describe('buildPalette, resting', () => {
       ['local/b', false],
     ])
   })
+
+  it('offers no exited session, pinned or not', () => {
+    // A dead session is not a there, and every ended row is one more press
+    // between somebody and the session they meant.
+    const palette = buildPalette({
+      sessions: [
+        s({ id: 'dead-pin', pinned: true, state: 'exited' }),
+        s({ id: 'live-pin', pinned: true, createdAt: '2026-02-01T00:00:00Z' }),
+        s({ id: 'dead', state: 'exited' }),
+        s({ id: 'live' }),
+      ],
+      recents: [],
+      search: '',
+    })
+    expect(keys(palette)).toEqual(['local/live-pin', 'local/live'])
+  })
+
+  it('gives an exited pinned session no badge, and its number to the next', () => {
+    // The chord picks from the palette's own pinned run, so a dead row that
+    // kept a number would make ⌃⇧1 mean a session nobody can switch to.
+    const sessions = [
+      s({ id: 'dead', pinned: true, state: 'exited', createdAt: '2026-01-01T00:00:00Z' }),
+      s({ id: 'live', pinned: true, createdAt: '2026-02-01T00:00:00Z' }),
+    ]
+    const rows = flatten(buildPalette({ sessions, recents: [], search: '' }))
+    expect(rows.map((r) => [r.key, r.kind === 'live' ? r.badge : null])).toEqual([
+      ['local/live', 1],
+    ])
+  })
+
+  it('skips a visited session that has since exited, and does not ghost it', () => {
+    // Its machine is answering, so unlike a ghost there is no sleeping
+    // laptop this row could wake.
+    const palette = buildPalette({
+      sessions: [s({ id: 'a' }), s({ id: 'over', state: 'exited' })],
+      recents: [v({ sessionId: 'over' })],
+      search: '',
+    })
+    expect(keys(palette)).toEqual(['local/a'])
+  })
 })
 
 describe('buildPalette, searching', () => {
@@ -216,6 +256,30 @@ describe('buildPalette, searching', () => {
   it('has no sections at all when nothing matches', () => {
     const palette = buildPalette({ sessions: [s({ id: 'a' })], recents: [], search: 'nothing' })
     expect(palette.sections).toEqual([])
+  })
+
+  it('brings an exited session back once it is named', () => {
+    // Typing the exact name of a session you know ended and getting nothing
+    // would be its own kind of wrong.
+    const palette = buildPalette({
+      sessions: [s({ id: 'over', name: 'build', state: 'exited' })],
+      recents: [],
+      search: 'build',
+    })
+    expect(keys(palette)).toEqual(['local/over'])
+  })
+
+  it('ranks the ended matches after the running ones, and both before the ghosts', () => {
+    const palette = buildPalette({
+      sessions: [
+        // The ended row is the more recently active, and loses anyway.
+        s({ id: 'over', name: 'build old', state: 'exited', lastActive: '2026-06-01T00:00:00Z' }),
+        s({ id: 'live', name: 'build now' }),
+      ],
+      recents: [v({ machineId: 'studio', sessionId: 'asleep', label: 'build there' })],
+      search: 'build',
+    })
+    expect(keys(palette)).toEqual(['local/live', 'local/over', 'studio/asleep'])
   })
 })
 
@@ -309,5 +373,19 @@ describe('the cycle', () => {
 
   it('has nowhere to step in an empty fleet', () => {
     expect(stepCycle([], 'local/a', 1)).toBeNull()
+  })
+
+  it('walks past the exited, so a blind hop cannot land on a dead session', () => {
+    const sessions = [
+      s({ id: 'a' }),
+      s({ id: 'over', state: 'exited', createdAt: '2026-02-01T00:00:00Z' }),
+      s({ id: 'b', createdAt: '2026-03-01T00:00:00Z' }),
+    ]
+    const order = cycleOrder(sessions)
+    expect(order.map((x) => x.id)).toEqual(['a', 'b'])
+    expect(stepCycle(order, 'local/a', 1)?.id).toBe('b')
+    // Pressed from inside a session that has just ended, the chord still
+    // leaves: the walk starts from the top rather than refusing.
+    expect(stepCycle(order, 'local/over', 1)?.id).toBe('a')
   })
 })
