@@ -6,6 +6,7 @@ import { useFlueClient } from '@/client/provider'
 import type { FileMsg } from '@/client/protocol'
 import type { ReadHandle } from '@/client/client'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 import { cachedFile, rememberFile, CACHE_ENTRY_MAX } from './cache'
 import { highlight } from './highlight'
 import { languageFor } from './lang'
@@ -382,8 +383,16 @@ function TokenRow({ row }: { row: PeekToken[] }) {
       {row.map((t, i) => (
         <span
           key={i}
-          className={t.dark !== undefined ? 'dark:text-(--peek-dark)' : undefined}
-          style={{ color: t.light, '--peek-dark': t.dark } as CSSProperties}
+          // Both colours ride in as custom properties and come out through
+          // classes, never as a `color` on the style attribute: a style
+          // attribute outranks every stylesheet rule, so it would pin the
+          // light colour under a dark scheme no matter what the dark:
+          // variant asked for.
+          className={cn(
+            t.light !== undefined && 'text-(--peek-light)',
+            t.dark !== undefined && 'dark:text-(--peek-dark)',
+          )}
+          style={{ '--peek-light': t.light, '--peek-dark': t.dark } as CSSProperties}
         >
           {t.text}
         </span>

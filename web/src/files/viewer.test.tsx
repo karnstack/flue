@@ -165,6 +165,14 @@ describe('FileViewer', () => {
     await waitFor(() => {
       expect(document.querySelector('[data-file-row] span')).not.toBeNull()
     })
+    // The colour must arrive through the scheme-aware classes, never as an
+    // inline color — inline would pin the light palette under a dark scheme.
+    const span = document.querySelector<HTMLElement>('[data-file-row] span[style]')!
+    expect(span.style.color).toBe('')
+    expect(span.style.getPropertyValue('--peek-light')).not.toBe('')
+    expect(span.style.getPropertyValue('--peek-dark')).not.toBe('')
+    expect(span.className).toContain('text-(--peek-light)')
+    expect(span.className).toContain('dark:text-(--peek-dark)')
   })
 
   it('keeps plain rows for a shortened file', async () => {
