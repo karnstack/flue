@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -29,16 +30,23 @@ func ReattachHolders(r *Registry, root string) (reattached, swept int) {
 			continue
 		}
 		dir := filepath.Join(root, e.Name())
-		rec, err := LoadIdentity(dir)
-		if err != nil {
-			_ = os.RemoveAll(dir)
-			swept++
-			continue
-		}
+		// The identity record is auxiliary here, not a gate: the hello
+		// carries every fact the holder knew at spawn, so a record that
+		// failed to write (or to survive) costs the reattach nothing but
+		// the one edit only the record remembers, an ephemeral promotion.
+		// A zero record lets the holder's own account stand.
+		rec, _ := LoadIdentity(dir)
 		rem, err := DialRemote(dir, rec, r.clock)
 		if err != nil {
-			_ = os.RemoveAll(dir)
-			swept++
+			if errors.Is(err, ErrHolderGone) {
+				_ = os.RemoveAll(dir)
+				swept++
+			}
+			// A holder that answered the dial and then failed the
+			// handshake is alive, and behind it plausibly a running
+			// session — a newer holder under an older daemon, say. Not
+			// this daemon's to destroy; leave the directory for a daemon
+			// that can speak to it.
 			continue
 		}
 		r.mu.Lock()
