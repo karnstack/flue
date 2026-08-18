@@ -12,7 +12,9 @@
  *
  * The scanner is imported only once the panel is open: it is a wasm-sized
  * dependency the shell never needs, and a tab that pairs once should not
- * carry it on every boot.
+ * carry it on every boot. Its decode engine is a Worker over a blob: URL,
+ * which is why the served policy carries `worker-src 'self' blob:` —
+ * internal/daemon/server.go (cspHead) tells that story.
  */
 import { useEffect, useRef, useState } from 'react'
 import type QrScanner from 'qr-scanner'
@@ -32,10 +34,25 @@ const FAILURE_PROSE: Record<PairLinkFailure, string> = {
 /** The door pages' shared prose classes — machines.tsx spells out why. */
 const PROSE = 'text-base/7 text-pretty text-zinc-600 sm:text-sm/6 dark:text-zinc-400'
 
+/**
+ * Whether a decode report means the engine itself is broken.
+ *
+ * The scanner reports on every frame, and a frame with no code in it is the
+ * ordinary report — qr-scanner's NO_QR_CODE_FOUND, sometimes as a bare
+ * string, sometimes wrapped in an Error. Anything else is the engine failing
+ * to run at all (a worker the policy refused, a crash), and a preview backed
+ * by a dead engine is worse than none: it looks like scanning and reads
+ * nothing. Unrecognisable reports count as trouble for the same reason.
+ */
+export function scanTrouble(error: unknown): boolean {
+  const words = error instanceof Error ? error.message : error
+  return typeof words !== 'string' || !words.includes('No QR code found')
+}
+
 export function PairPanel({ onClose }: { onClose: () => void }) {
   const video = useRef<HTMLVideoElement>(null)
-  /** Whether the camera preview is live, still warming up, or not to be had. */
-  const [camera, setCamera] = useState<'starting' | 'live' | 'gone'>('starting')
+  /** True once scanning is out of reach and the paste box is the way. */
+  const [fallback, setFallback] = useState(false)
   const [failure, setFailure] = useState<PairLinkFailure | null>(null)
   const [link, setLink] = useState('')
 
@@ -56,12 +73,21 @@ export function PairPanel({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     let scanner: QrScanner | null = null
     let open = true
+    // Every road to the paste box runs through here, because most of them
+    // arrive with a camera already streaming: the video element leaves the
+    // tree when `fallback` flips, and a scanner left running against a
+    // detached element keeps the camera light on.
+    function bail() {
+      scanner?.destroy()
+      scanner = null
+      if (open) setFallback(true)
+    }
     void (async () => {
       // Answered before the import: a device with no media stack at all has
       // no use for the scanner engine, and the engine's worker would only
       // throw somewhere no catch is waiting.
       if (navigator.mediaDevices === undefined) {
-        setCamera('gone')
+        bail()
         return
       }
       let Scanner: typeof QrScanner
@@ -71,21 +97,27 @@ export function PairPanel({ onClose }: { onClose: () => void }) {
         // paste box needs neither.
         Scanner = (await import('qr-scanner')).default
       } catch {
-        if (open) setCamera('gone')
+        bail()
         return
       }
       if (!open || video.current === null) return
       scanner = new Scanner(video.current, (result) => follow(result.data), {
         returnDetailedScanResult: true,
         preferredCamera: 'environment',
+        // A started camera is not the same fact as a working engine. The
+        // engine's own failures surface here, per frame, and the honest
+        // answer to one is the paste box rather than a preview that looks
+        // like it is scanning.
+        onDecodeError: (error) => {
+          if (scanTrouble(error)) bail()
+        },
       })
       try {
         await scanner.start()
-        if (open) setCamera('live')
       } catch {
         // No camera on the device, or the user said no. Either way the
         // answer is the paste box, which is already on screen.
-        if (open) setCamera('gone')
+        bail()
       }
     })()
     return () => {
@@ -98,8 +130,8 @@ export function PairPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="flex flex-col gap-y-5">
-      {camera === 'gone' ? (
-        <p className={PROSE}>No camera to scan with here, so paste the pairing link instead.</p>
+      {fallback ? (
+        <p className={PROSE}>No way to scan here, so paste the pairing link instead.</p>
       ) : (
         <video
           ref={video}
@@ -125,7 +157,7 @@ export function PairPanel({ onClose }: { onClose: () => void }) {
             setFailure(null)
           }}
         />
-        <Button type="submit" size="sm" aria-label="Open link">
+        <Button type="submit" size="sm">
           Open link
         </Button>
       </form>

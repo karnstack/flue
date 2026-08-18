@@ -1391,6 +1391,7 @@ func TestSecurityHeaders(t *testing.T) {
 	for _, want := range []string{
 		"default-src 'self'",
 		"script-src 'self'",
+		"worker-src 'self' blob:",
 		"object-src 'none'",
 		"base-uri 'none'",
 		"frame-ancestors 'none'",

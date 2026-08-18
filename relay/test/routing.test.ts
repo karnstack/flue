@@ -323,10 +323,15 @@ describe('the relay Worker routes by machine id', () => {
  * the one that needs more). Never `https:` or a wildcard: this directive is
  * the outer bound on where an injected script could send what it read, and a
  * bound that names everywhere is not one.
+ *
+ * `worker-src 'self' blob:` carries the pairing panel's QR engine, which
+ * qr-scanner builds as a Worker over a blob: URL — internal/daemon/server.go
+ * (cspHead) says why the blob: grant does not widen what script-src guards.
  */
 describe('the security headers on served assets', () => {
   const CSP =
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+    "default-src 'self'; script-src 'self'; worker-src 'self' blob:; " +
+    "style-src 'self' 'unsafe-inline'; " +
     "img-src 'self' data:; connect-src 'self'; " +
     "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 

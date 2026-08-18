@@ -43,6 +43,36 @@ describe('parsePairLink', () => {
     expect(parsePairLink(link, ORIGIN)).toEqual({ ok: false, reason: 'foreign' })
   })
 
+  it('refuses the protocol-relative shape that resolves to another host', () => {
+    // //evil.example/pair is not a path: URL resolution reads it as a host,
+    // and the origin check is the one judgement keeping a scanned code from
+    // walking this tab off its relay.
+    expect(parsePairLink('//evil.example/pair?t=tok&k=key', ORIGIN)).toEqual({
+      ok: false,
+      reason: 'foreign',
+    })
+  })
+
+  it('refuses the backslash spelling of the same trick', () => {
+    // WHATWG URL parsing treats \ as / in special schemes, so /\evil.example
+    // is protocol-relative too, just dressed down.
+    const parsed = parsePairLink('/\\evil.example/pair?t=tok&k=key', ORIGIN)
+    expect(parsed.ok).toBe(false)
+  })
+
+  it('refuses a scheme that is not a place at all', () => {
+    const parsed = parsePairLink('javascript:alert(1)', ORIGIN)
+    expect(parsed.ok).toBe(false)
+  })
+
+  it('refuses the pairing path spelled in percent-encoding', () => {
+    // /%70air decodes to /pair in the eye of a server, but the pathname
+    // comparison is exact on purpose: what does not read as /pair does not
+    // get followed.
+    const parsed = parsePairLink('https://relay.test/%70air?t=tok&k=key', ORIGIN)
+    expect(parsed.ok).toBe(false)
+  })
+
   it('refuses a same-origin link that is not the pairing page', () => {
     expect(parsePairLink('https://relay.test/sessions', ORIGIN)).toEqual({
       ok: false,

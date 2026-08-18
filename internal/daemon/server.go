@@ -581,7 +581,17 @@ func methodPolicy(next http.Handler) http.Handler {
 //
 // Composed rather than written twice, so the shared half cannot drift.
 const (
-	cspHead = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	// `worker-src 'self' blob:` exists for one consumer: the pairing panel's
+	// QR engine (web/src/components/pair-panel.tsx), which qr-scanner builds
+	// as a Worker over a blob: URL. Without the directive the browser falls
+	// back through child-src to script-src, where 'self' never matches blob:
+	// — and the failure is a live camera preview that decodes nothing, only
+	// under the shipped policy, never on the dev server. The grant does not
+	// widen the injection surface script-src is guarding: a blob: worker can
+	// only be minted by script that is already executing under
+	// `script-src 'self'`.
+	cspHead = "default-src 'self'; script-src 'self'; worker-src 'self' blob:; " +
+		"style-src 'self' 'unsafe-inline'; " +
 		"img-src 'self' data:; connect-src 'self'"
 	cspTail = "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
