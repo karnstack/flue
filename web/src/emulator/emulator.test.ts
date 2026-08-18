@@ -11,6 +11,7 @@ import {
   openTerminalLink,
   TERMINAL_FONT_FAMILY,
 } from './xterm'
+import { findPaths } from '@/lib/paths'
 import type { Emulator } from './types'
 
 /**
@@ -121,6 +122,21 @@ describe('Emulator interface', () => {
     expect(Array.from(seen[0]!)).toEqual([0xc3, 0xa9])
 
     em.dispose()
+  })
+
+  it('carries a link detector across detectLinks, and survives disposal', async () => {
+    const em = createXtermEmulator({ cols: 40, rows: 6 })
+    await settled(em, 'holds internal/a.go steady')
+    const detector = {
+      find: findPaths,
+      verify: (p: string[]) => Promise.resolve(p.map(() => true)),
+      open: () => {},
+    }
+    em.detectLinks(detector)
+    em.detectLinks(detector) // replacing an installed one disposes the old
+    em.detectLinks(null)
+    em.dispose()
+    em.detectLinks(null) // after dispose: a no-op, not a throw
   })
 
   describe('touch selection', () => {
