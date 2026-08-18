@@ -5,7 +5,10 @@ import {
   applyView,
   COLUMN_KEYS,
   COLUMN_LABELS,
+  DEFAULT_DIRECTIONS,
   DEFAULT_VIEW,
+  DIRECTION_LABELS,
+  DIRECTIONS,
   displayName,
   dropOnGroup,
   filterSessions,
@@ -179,14 +182,18 @@ describe('orderSessions', () => {
     })
 
     for (const ordering of ORDERINGS) {
-      expect(ids(orderSessions([loud, pinned], ordering)), ordering).toEqual(['pinned', 'loud'])
+      for (const direction of DIRECTIONS) {
+        expect(ids(orderSessions([loud, pinned], ordering, direction)), `${ordering} ${direction}`).toEqual(
+          ['pinned', 'loud'],
+        )
+      }
     }
   })
 
   it('orders the pinned among themselves by the same key', () => {
     const later = s({ id: 'later', pinned: true, cwd: '/b', lastActive: '2026-01-01T00:05:00Z' })
     const earlier = s({ id: 'earlier', pinned: true, cwd: '/a', lastActive: '2026-01-01T00:00:00Z' })
-    expect(ids(orderSessions([earlier, later], 'lastActive'))).toEqual(['later', 'earlier'])
+    expect(ids(orderSessions([earlier, later], 'lastActive', 'desc'))).toEqual(['later', 'earlier'])
   })
 
   describe('by last active', () => {
@@ -196,26 +203,26 @@ describe('orderSessions', () => {
       // the two rows under the reader's pointer.
       const zulu = s({ id: 'zulu', cwd: '/z', lastActive: '2026-01-01T00:00:10Z' })
       const alpha = s({ id: 'alpha', cwd: '/a', lastActive: '2026-01-01T00:00:05Z' })
-      expect(ids(orderSessions([zulu, alpha], 'lastActive'))).toEqual(['alpha', 'zulu'])
+      expect(ids(orderSessions([zulu, alpha], 'lastActive', 'desc'))).toEqual(['alpha', 'zulu'])
     })
 
     it('puts the genuinely more recent first once the buckets differ', () => {
       // Forty seconds apart: :10 lands in the first bucket, :50 in the second.
       const zulu = s({ id: 'zulu', cwd: '/z', lastActive: '2026-01-01T00:00:50Z' })
       const alpha = s({ id: 'alpha', cwd: '/a', lastActive: '2026-01-01T00:00:10Z' })
-      expect(ids(orderSessions([alpha, zulu], 'lastActive'))).toEqual(['zulu', 'alpha'])
+      expect(ids(orderSessions([alpha, zulu], 'lastActive', 'desc'))).toEqual(['zulu', 'alpha'])
     })
 
     it('breaks a tie in one directory by id', () => {
       const second = s({ id: 'b2', cwd: '/code', lastActive: '2026-01-01T00:00:10Z' })
       const first = s({ id: 'a1', cwd: '/code', lastActive: '2026-01-01T00:00:20Z' })
-      expect(ids(orderSessions([second, first], 'lastActive'))).toEqual(['a1', 'b2'])
+      expect(ids(orderSessions([second, first], 'lastActive', 'desc'))).toEqual(['a1', 'b2'])
     })
 
     it('sorts a stamp no Date can read by directory rather than throwing', () => {
       const broken = s({ id: 'broken', cwd: '/z', lastActive: 'not a time' })
       const fine = s({ id: 'fine', cwd: '/a', lastActive: '2026-01-01T00:00:00Z' })
-      expect(ids(orderSessions([broken, fine], 'lastActive'))).toEqual(['fine', 'broken'])
+      expect(ids(orderSessions([broken, fine], 'lastActive', 'desc'))).toEqual(['fine', 'broken'])
     })
   })
 
@@ -225,14 +232,18 @@ describe('orderSessions', () => {
       // there is no churn to absorb.
       const old = s({ id: 'old', cwd: '/a', createdAt: '2026-01-01T00:00:00Z' })
       const fresh = s({ id: 'fresh', cwd: '/z', createdAt: '2026-01-01T00:00:01Z' })
-      expect(ids(orderSessions([old, fresh], 'created'))).toEqual(['fresh', 'old'])
+      expect(ids(orderSessions([old, fresh], 'created', 'desc'))).toEqual(['fresh', 'old'])
     })
 
     it('breaks a tie by directory, then id', () => {
       const zulu = s({ id: 'z', cwd: '/z' })
       const alphaTwo = s({ id: 'a2', cwd: '/a' })
       const alphaOne = s({ id: 'a1', cwd: '/a' })
-      expect(ids(orderSessions([zulu, alphaTwo, alphaOne], 'created'))).toEqual(['a1', 'a2', 'z'])
+      expect(ids(orderSessions([zulu, alphaTwo, alphaOne], 'created', 'desc'))).toEqual([
+        'a1',
+        'a2',
+        'z',
+      ])
     })
   })
 
@@ -241,14 +252,18 @@ describe('orderSessions', () => {
       const titled = s({ id: 'titled', title: 'build', cwd: '/z' })
       const named = s({ id: 'named', name: 'api', cwd: '/y' })
       const bare = s({ id: 'bare', cwd: '/code/zzz' })
-      expect(ids(orderSessions([bare, titled, named], 'name'))).toEqual(['named', 'titled', 'bare'])
+      expect(ids(orderSessions([bare, titled, named], 'name', 'asc'))).toEqual([
+        'named',
+        'titled',
+        'bare',
+      ])
     })
 
     it('breaks a tie by directory, then id', () => {
       const one = s({ id: 'a1', name: 'same', cwd: '/a' })
       const two = s({ id: 'a2', name: 'same', cwd: '/a' })
       const other = s({ id: 'b', name: 'same', cwd: '/b' })
-      expect(ids(orderSessions([other, two, one], 'name'))).toEqual(['a1', 'a2', 'b'])
+      expect(ids(orderSessions([other, two, one], 'name', 'asc'))).toEqual(['a1', 'a2', 'b'])
     })
   })
 
@@ -257,7 +272,7 @@ describe('orderSessions', () => {
       const deep = s({ id: 'deep', cwd: '/code/flue/web' })
       const shallowTwo = s({ id: 'b', cwd: '/code/flue' })
       const shallowOne = s({ id: 'a', cwd: '/code/flue' })
-      expect(ids(orderSessions([deep, shallowTwo, shallowOne], 'directory'))).toEqual([
+      expect(ids(orderSessions([deep, shallowTwo, shallowOne], 'directory', 'asc'))).toEqual([
         'a',
         'b',
         'deep',
@@ -265,11 +280,70 @@ describe('orderSessions', () => {
     })
   })
 
+  describe('turned around', () => {
+    it('reads oldest activity first, buckets and all', () => {
+      // Same two buckets as the descending case above, in the other order —
+      // and the stamps inside one bucket still cannot reshuffle anything.
+      const zulu = s({ id: 'zulu', cwd: '/a', lastActive: '2026-01-01T00:00:50Z' })
+      const alpha = s({ id: 'alpha', cwd: '/z', lastActive: '2026-01-01T00:00:10Z' })
+      expect(ids(orderSessions([zulu, alpha], 'lastActive', 'asc'))).toEqual(['alpha', 'zulu'])
+    })
+
+    it('reads oldest created first', () => {
+      const old = s({ id: 'old', cwd: '/z', createdAt: '2026-01-01T00:00:00Z' })
+      const fresh = s({ id: 'fresh', cwd: '/a', createdAt: '2026-01-01T00:00:01Z' })
+      expect(ids(orderSessions([old, fresh], 'created', 'asc'))).toEqual(['old', 'fresh'])
+    })
+
+    it('reads names from z to a', () => {
+      const alpha = s({ id: 'alpha', name: 'api', cwd: '/a' })
+      const zulu = s({ id: 'zulu', name: 'web', cwd: '/z' })
+      expect(ids(orderSessions([alpha, zulu], 'name', 'desc'))).toEqual(['zulu', 'alpha'])
+    })
+
+    it('reads directories from z to a', () => {
+      const first = s({ id: 'first', cwd: '/code/a' })
+      const last = s({ id: 'last', cwd: '/srv/z' })
+      expect(ids(orderSessions([first, last], 'directory', 'desc'))).toEqual(['last', 'first'])
+    })
+
+    it('turns the chosen key only — ties still read by directory then id, a to z', () => {
+      // The tiebreak is what keeps the screen still, and a direction that
+      // flipped it would reorder rows the chosen key has nothing to say about.
+      const one = s({ id: 'a1', name: 'same', cwd: '/a' })
+      const two = s({ id: 'a2', name: 'same', cwd: '/a' })
+      const other = s({ id: 'b', name: 'same', cwd: '/b' })
+      expect(ids(orderSessions([other, two, one], 'name', 'desc'))).toEqual(['a1', 'a2', 'b'])
+    })
+
+    it('still sorts an unreadable stamp by directory rather than throwing', () => {
+      // NaN negated is NaN, still falsy — the tiebreak must catch it in both
+      // directions.
+      const broken = s({ id: 'broken', cwd: '/z', lastActive: 'not a time' })
+      const fine = s({ id: 'fine', cwd: '/a', lastActive: '2026-01-01T00:00:00Z' })
+      expect(ids(orderSessions([broken, fine], 'lastActive', 'asc'))).toEqual(['fine', 'broken'])
+    })
+  })
+
   it('answers with a new list and leaves the caller’s alone', () => {
     const input = [s({ id: 'z', cwd: '/z' }), s({ id: 'a', cwd: '/a' })]
-    const out = orderSessions(input, 'directory')
+    const out = orderSessions(input, 'directory', 'asc')
     expect(ids(input)).toEqual(['z', 'a'])
     expect(out).not.toBe(input)
+  })
+})
+
+describe('DEFAULT_DIRECTIONS', () => {
+  it('reads time newest first and text a to z', () => {
+    // What each key most naturally means: "last active" is a question about
+    // now, "created" about what is newest, and the two alphabetical keys read
+    // the way an index does.
+    expect(DEFAULT_DIRECTIONS).toEqual({
+      lastActive: 'desc',
+      created: 'desc',
+      name: 'asc',
+      directory: 'asc',
+    })
   })
 })
 
@@ -400,6 +474,10 @@ describe('DEFAULT_VIEW', () => {
     expect(DEFAULT_VIEW.search).toBe('')
   })
 
+  it('reads its ordering in that ordering’s own natural direction', () => {
+    expect(DEFAULT_VIEW.direction).toBe(DEFAULT_DIRECTIONS[DEFAULT_VIEW.ordering])
+  })
+
   it('folds the ended sessions away', () => {
     // An exited session is history, not somewhere to go; the list opens on
     // what is running, and `hiddenExited` is what keeps the fold honest.
@@ -436,6 +514,7 @@ describe('the words for the keys', () => {
     for (const [key, label] of [
       ...GROUPINGS.map((g) => [g, GROUPING_LABELS[g]] as const),
       ...ORDERINGS.map((o) => [o, ORDERING_LABELS[o]] as const),
+      ...DIRECTIONS.map((d) => [d, DIRECTION_LABELS[d]] as const),
       ...COLUMN_KEYS.map((c) => [c, COLUMN_LABELS[c]] as const),
     ]) {
       expect(label, key).toMatch(/^[A-Z][^A-Z]*$/)
@@ -493,6 +572,20 @@ describe('applyView', () => {
 
   it('is no groups at all when the search matches nothing', () => {
     expect(applyView(rows, { ...DEFAULT_VIEW, search: 'nothing here' })).toEqual([])
+  })
+
+  it('orders in the direction the view asks for', () => {
+    const pair = [
+      s({ id: 'alpha', name: 'api', cwd: '/a' }),
+      s({ id: 'zulu', name: 'web', cwd: '/z' }),
+    ]
+    const groups = applyView(pair, {
+      ...DEFAULT_VIEW,
+      grouping: 'none',
+      ordering: 'name',
+      direction: 'desc',
+    })
+    expect(ids(groups[0]!.sessions)).toEqual(['zulu', 'alpha'])
   })
 
   it('leaves the fleet’s own list untouched', () => {

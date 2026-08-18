@@ -26,7 +26,9 @@
  */
 import {
   COLUMN_KEYS,
+  DEFAULT_DIRECTIONS,
   DEFAULT_VIEW,
+  DIRECTIONS,
   GROUPINGS,
   ORDERINGS,
   type ColumnKey,
@@ -64,17 +66,31 @@ function isSavedView(value: unknown): value is SavedView {
   )
 }
 
-/** Whether a parsed value carries every field of a ViewConfig, believably. */
+/**
+ * Whether a parsed value carries every field of a ViewConfig, believably.
+ *
+ * The direction is the one field allowed to be missing, because views were
+ * being saved before it existed and reading those as corrupt would cost their
+ * owners every tab on the day directions shipped. What the writing build
+ * meant by a directionless view is exactly what direction() answers: the
+ * ordering's natural way, which is how that build showed it.
+ */
 function isViewConfig(value: unknown): value is ViewConfig {
   const v = value as ViewConfig | null
   return (
     isMember(GROUPINGS, v?.grouping) &&
     isMember(ORDERINGS, v.ordering) &&
+    (v.direction === undefined || isMember(DIRECTIONS, v.direction)) &&
     typeof v.search === 'string' &&
     Array.isArray(v.columns) &&
     v.columns.every((c: unknown) => isMember(COLUMN_KEYS, c)) &&
     typeof v.showExited === 'boolean'
   )
+}
+
+/** The direction a stored view meant, written down or not. See isViewConfig. */
+function direction(v: ViewConfig): ViewConfig['direction'] {
+  return v.direction ?? DEFAULT_DIRECTIONS[v.ordering]
 }
 
 /** Whether a stored word is still one of the words this build knows. */
@@ -114,6 +130,7 @@ export function listViews(): SavedView[] {
     name: v.name,
     grouping: v.grouping,
     ordering: v.ordering,
+    direction: direction(v),
     search: v.search,
     columns: [...v.columns] as ColumnKey[],
     showExited: v.showExited,
@@ -202,6 +219,7 @@ export function loadCurrent(): { view: ViewConfig; active: string | null } {
   const view: ViewConfig = {
     grouping: record.view.grouping,
     ordering: record.view.ordering,
+    direction: direction(record.view),
     search: record.view.search,
     columns: [...record.view.columns],
     showExited: record.view.showExited,

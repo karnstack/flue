@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   COLUMN_LABELS,
   DEFAULT_VIEW,
+  DIRECTION_LABELS,
+  DIRECTIONS,
   GROUPING_LABELS,
   GROUPINGS,
   ORDERING_LABELS,
@@ -55,14 +57,16 @@ describe('DisplayOptions', () => {
     expect(screen.getByRole('dialog', { name: 'Display options' })).toBeTruthy()
     expect(screen.getByRole('combobox', { name: 'Grouping' })).toBeTruthy()
     expect(screen.getByRole('combobox', { name: 'Ordering' })).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: 'Direction' })).toBeTruthy()
     expect(screen.getByRole('checkbox', { name: 'Show exited sessions' })).toBeTruthy()
   })
 
   it('reads back the arrangement it was handed', async () => {
-    await open({ grouping: 'tag', ordering: 'name', showExited: false })
+    await open({ grouping: 'tag', ordering: 'name', direction: 'desc', showExited: false })
 
     expect(screen.getByRole('combobox', { name: 'Grouping' }).textContent).toContain('Tag')
     expect(screen.getByRole('combobox', { name: 'Ordering' }).textContent).toContain('Name')
+    expect(screen.getByRole('combobox', { name: 'Direction' }).textContent).toContain('Descending')
     expect(
       screen.getByRole('checkbox', { name: 'Show exited sessions' }).getAttribute('aria-checked'),
     ).toBe('false')
@@ -94,6 +98,19 @@ describe('DisplayOptions', () => {
     }
   })
 
+  it('offers both directions', async () => {
+    const { user } = await open()
+    screen.getByRole('combobox', { name: 'Direction' }).focus()
+    await user.keyboard('{Enter}')
+
+    for (const direction of DIRECTIONS) {
+      expect(
+        screen.getByRole('option', { name: DIRECTION_LABELS[direction] }),
+        direction,
+      ).toBeTruthy()
+    }
+  })
+
   it('edits the grouping and nothing else', async () => {
     const { user, onChange, view } = await open()
 
@@ -103,13 +120,25 @@ describe('DisplayOptions', () => {
     expect(onChange).toHaveBeenCalledWith({ ...view, grouping: 'tag' })
   })
 
-  it('edits the ordering and nothing else', async () => {
+  it('edits the ordering, and turns the direction back to that key’s own', async () => {
+    // The default view reads by last active, newest first. Directory is a
+    // textual key that naturally reads a to z — a direction remembered from
+    // the previous key would make every switch open backwards.
     const { user, onChange, view } = await open()
 
     await pick(user, 'Ordering', 'Directory')
 
     expect(onChange).toHaveBeenCalledTimes(1)
-    expect(onChange).toHaveBeenCalledWith({ ...view, ordering: 'directory' })
+    expect(onChange).toHaveBeenCalledWith({ ...view, ordering: 'directory', direction: 'asc' })
+  })
+
+  it('edits the direction and nothing else', async () => {
+    const { user, onChange, view } = await open()
+
+    await pick(user, 'Direction', 'Ascending')
+
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenCalledWith({ ...view, direction: 'asc' })
   })
 
   it('takes the ended sessions away and nothing else', async () => {

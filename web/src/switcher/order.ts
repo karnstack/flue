@@ -9,7 +9,7 @@
 import type { FleetSession } from '@/fleet/types'
 import { keyOf } from '@/fleet/types'
 import { anchorIdOf, groupMembers } from '@/sessions/groups'
-import { displayName, filterSessions, orderSessions } from '@/sessions/view'
+import { DEFAULT_DIRECTIONS, displayName, filterSessions, orderSessions } from '@/sessions/view'
 import { visitKey, type RecentVisit } from './recents'
 
 /**
@@ -177,6 +177,7 @@ function restingSections(
   const rest = orderSessions(
     usable.filter((s) => !spoken.has(keyOf(s))),
     'lastActive',
+    DEFAULT_DIRECTIONS.lastActive,
   ).map((session) => liveRow(session, null, currentKey))
 
   return trim([
@@ -202,7 +203,11 @@ function searchSections(
   // Ended sessions rejoin the list once they are named, ranked after
   // everything running: a match that can be switched to beats one that can
   // only be read about.
-  const matched = orderSessions(filterSessions(sessions, needle), 'lastActive')
+  const matched = orderSessions(
+    filterSessions(sessions, needle),
+    'lastActive',
+    DEFAULT_DIRECTIONS.lastActive,
+  )
   const hits = [
     ...matched.filter((s) => s.state !== 'exited'),
     ...matched.filter((s) => s.state === 'exited'),

@@ -124,6 +124,7 @@ describe('listViews on a store it cannot believe', () => {
     { what: 'a row named with nothing but blanks', row: { ...DEFAULT_VIEW, name: '   ' } },
     { what: 'a grouping nothing groups by', row: { ...WORK, grouping: 'folder' } },
     { what: 'an ordering nothing orders by', row: { ...WORK, ordering: 'size' } },
+    { what: 'a direction nothing reads in', row: { ...WORK, direction: 'sideways' } },
     { what: 'a search that is not text', row: { ...WORK, search: 3 } },
     { what: 'columns that are not a list', row: { ...WORK, columns: 'name' } },
     { what: 'a column no row has', row: { ...WORK, columns: ['name', 'colour'] } },
@@ -142,6 +143,19 @@ describe('listViews on a store it cannot believe', () => {
     stored([{ ...WORK, injected: 'not mine' }])
     expect(listViews()).toEqual([WORK])
     expect(Object.keys(listViews()[0]!).sort()).toEqual(Object.keys(WORK).sort())
+  })
+
+  it('reads a view saved before directions existed in its ordering’s own', () => {
+    // Views written by older builds carry no direction at all, and a browser
+    // that loses its tabs to an upgrade reads that as data loss. They come
+    // back reading the way that build showed them: the key's natural way.
+    const { direction: _work, ...oldWork } = WORK
+    const { direction: _ops, ...oldOps } = OPS
+    stored([oldWork, oldOps])
+    expect(listViews()).toEqual([
+      { ...WORK, direction: 'desc' },
+      { ...OPS, direction: 'asc' },
+    ])
   })
 })
 
@@ -199,6 +213,7 @@ describe('the current arrangement', () => {
       'null',
       JSON.stringify({ active: 'Ops' }),
       JSON.stringify({ view: { ...DEFAULT_VIEW, grouping: 'folder' }, active: null }),
+      JSON.stringify({ view: { ...DEFAULT_VIEW, direction: 'sideways' }, active: null }),
       JSON.stringify({ view: { ...DEFAULT_VIEW, columns: ['name', 'colour'] }, active: null }),
       JSON.stringify({ view: { ...DEFAULT_VIEW, showExited: 'yes' }, active: null }),
     ]
@@ -213,6 +228,12 @@ describe('the current arrangement', () => {
       throw new Error('denied')
     })
     expect(loadCurrent()).toEqual({ view: DEFAULT_VIEW, active: null })
+  })
+
+  it('reads an arrangement saved before directions existed in its ordering’s own', () => {
+    const { direction: _, ...old } = { ...DEFAULT_VIEW, ordering: 'name' as const }
+    localStorage.setItem(CURRENT_KEY, JSON.stringify({ view: old, active: null }))
+    expect(loadCurrent().view).toEqual({ ...DEFAULT_VIEW, ordering: 'name', direction: 'asc' })
   })
 
   it('drops a pressed tab whose view is gone, and keeps the arrangement', () => {
