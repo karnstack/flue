@@ -6,7 +6,7 @@ import type { HighlightAnswer } from './highlight.worker'
  *
  * Where module workers exist the tokenizing runs in one, off the thread the
  * terminal is painting on; where they do not (jsdom, and any browser without
- * them) the same code runs inline via dynamic import. Either way the shiki
+ * them) the same code runs on the calling thread instead. Either way the shiki
  * chunks load on the first file of a given language and never ride the main
  * bundle. Every failure — a worker that dies, a grammar that will not load —
  * answers null, because plain text is what the viewer was showing anyway.

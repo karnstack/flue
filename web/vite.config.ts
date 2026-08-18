@@ -33,6 +33,12 @@ const DAEMON_ORIGIN = `http://127.0.0.1:${DAEMON_PORT}`
 
 /** Emitted files worth holding for an offline load: the shell and its code. */
 function isPrecacheable(fileName: string): boolean {
+  // assets/peek/ holds the highlighter: its worker, its engine, and one
+  // chunk per grammar. Grammars load on the first file of their language and
+  // the runtime cache keeps them after that; precaching would push a few
+  // megabytes of languages onto every device against the chance a file of
+  // each kind is ever opened.
+  if (fileName.startsWith('assets/peek/')) return false
   return fileName.startsWith('assets/') && /\.(js|css)$/.test(fileName)
 }
 
@@ -165,6 +171,22 @@ export default defineConfig({
       },
     },
   },
+  // The highlight worker imports shiki dynamically, which makes its build a
+  // code-splitting one, and Rollup refuses to split an iife worker. Module
+  // workers are fine everywhere the app runs, and the CSP already covers
+  // them: with no worker-src declared, script-src 'self' governs, and the
+  // worker chunk is served from this origin like every other asset. Its
+  // output lands under assets/peek/ with the rest of the highlighter, which
+  // isPrecacheable reads as "on demand, never pushed".
+  worker: {
+    format: 'es',
+    rollupOptions: {
+      output: {
+        entryFileNames: 'assets/peek/[name]-[hash].js',
+        chunkFileNames: 'assets/peek/[name]-[hash].js',
+      },
+    },
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
@@ -183,6 +205,15 @@ export default defineConfig({
         // file really does contain no import statement.
         entryFileNames: (chunk) =>
           chunk.name === SW_ENTRY ? SW_FILE : 'assets/[name]-[hash].js',
+        // The highlighter's chunks — shiki and the tokenizing module that
+        // fronts it — go under assets/peek/, the directory isPrecacheable
+        // leaves out. They are reachable from the main-thread fallback path
+        // too, which is why the main build needs the same routing the worker
+        // build has.
+        chunkFileNames: (chunk) =>
+          chunk.moduleIds.some((id) => id.includes('/shiki/') || id.includes('files/tokenize'))
+            ? 'assets/peek/[name]-[hash].js'
+            : 'assets/[name]-[hash].js',
       },
     },
   },

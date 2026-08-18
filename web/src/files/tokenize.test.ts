@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { HIGHLIGHT_MAX_BYTES, HIGHLIGHT_MAX_LINES, tokenizePeek } from './tokenize'
+import { knownLanguages } from './lang'
+import { HIGHLIGHT_MAX_BYTES, HIGHLIGHT_MAX_LINES, hasGrammar, tokenizePeek } from './tokenize'
 
 describe('tokenizePeek', () => {
   it('colours a keyword differently from a string, in both schemes', async () => {
@@ -40,5 +41,9 @@ describe('tokenizePeek', () => {
 
   it('declines a language it does not know', async () => {
     expect(await tokenizePeek('hello', 'made-up-lang')).toBeNull()
+  })
+
+  it('carries a grammar for every language the name map can answer', () => {
+    expect(knownLanguages().filter((lang) => !hasGrammar(lang))).toEqual([])
   })
 })

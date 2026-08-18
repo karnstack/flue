@@ -41,6 +41,10 @@ beforeAll(async () => {
     for (const item of bundle.output ?? []) {
       const name = item.fileName ?? ''
       if (name === 'sw.js') sw = typeof item.code === 'string' ? item.code : ''
+      // assets/peek/ is the highlighter — grammars and worker loaded on the
+      // first file of a language, runtime-cached, and deliberately never
+      // precached; the assertion for that is its own case below.
+      if (name.startsWith('assets/peek/')) continue
       if (name.startsWith('assets/') && /\.(js|css)$/.test(name)) emittedAssets.push(name)
     }
   }
@@ -76,6 +80,13 @@ describe('emitted service worker', () => {
       // own URL rather than the origin root.
       expect(flueBuild.precache).toContain(`/${asset}`)
     }
+  })
+
+  it('pushes no highlighter chunk onto a device that never opened a file', () => {
+    // One chunk per grammar lives under assets/peek/. They load on the first
+    // file of their language and the runtime cache keeps them; precaching
+    // would download every language against the chance any is ever wanted.
+    expect(flueBuild.precache.filter((p) => p.startsWith('/assets/peek/'))).toEqual([])
   })
 
   it('precaches the stylesheet, not only the script', () => {

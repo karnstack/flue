@@ -1,10 +1,15 @@
 import { Check, Copy, FileText, X } from 'lucide-react'
 import { Dialog } from 'radix-ui'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 
 import { useFlueClient } from '@/client/provider'
 import type { FileMsg } from '@/client/protocol'
+import type { ReadHandle } from '@/client/client'
 import { Button } from '@/components/ui/button'
+import { cachedFile, rememberFile, CACHE_ENTRY_MAX } from './cache'
+import { highlight } from './highlight'
+import { languageFor } from './lang'
+import type { PeekToken } from './tokenize'
 
 export interface FileTarget {
   path: string
@@ -60,21 +65,31 @@ type Phase =
  * Content paints as it arrives — the head of a large file is on screen before
  * the tail has left the daemon, which over a relay is the difference between
  * reading now and watching a spinner. Painting is paced to one state change
- * per animation frame so a fast stream cannot outrun the renderer.
+ * per animation frame so a fast stream cannot outrun the renderer. A complete
+ * file colours afterwards, off the main thread, and is remembered in memory
+ * so reopening it costs one stat and no read.
  */
 export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
   const client = useFlueClient()
   const [phase, setPhase] = useState<Phase>({ at: 'opening' })
+  const [tokens, setTokens] = useState<PeekToken[][] | null>(null)
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
   const [, setPainted] = useState(0)
   const linesRef = useRef<string[]>([])
   const frame = useRef(0)
 
   useEffect(() => {
+    let gone = false
     linesRef.current = []
     setPhase({ at: 'opening' })
+    setTokens(null)
+    setImageUrl(null)
     const decoder = new TextDecoder()
+    const parts: Uint8Array[] = []
     let tail = ''
-    let kind: 'text' | 'image' = 'text'
+    let meta: FileMsg | null = null
+    let handle: ReadHandle | null = null
+
     const repaint = () => {
       if (frame.current !== 0) return
       frame.current = requestAnimationFrame(() => {
@@ -94,9 +109,9 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
     }
     const push = (piece: string) => {
       if (piece === '') return
-      const parts = (tail + piece).split('\n')
-      tail = parts.pop() ?? ''
-      for (const p of parts) emit(p)
+      const rows = (tail + piece).split('\n')
+      tail = rows.pop() ?? ''
+      for (const r of rows) emit(r)
       // A newline may never come. Overflow leaves the tail as finished rows,
       // which both bounds the tail and lets a newline-less stream paint.
       while (tail.length >= ROW_CAP) {
@@ -104,34 +119,102 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
         tail = tail.slice(ROW_CAP)
       }
     }
-    const handle = client.read(sessionId, target.path, {
-      file: (meta) => {
-        kind = meta.kind
-        if (meta.kind === 'image') {
-          setPhase({ at: 'image', meta })
-          // The stream is already coming; nothing here can show it yet.
-          queueMicrotask(() => handle.cancel())
-          return
-        }
-        setPhase({ at: 'text', meta })
-      },
-      chunk: (bytes) => {
-        if (kind === 'image') return
+
+    const deliverMeta = (m: FileMsg) => {
+      meta = m
+      if (gone) return
+      setPhase(m.kind === 'image' ? { at: 'image', meta: m } : { at: 'text', meta: m })
+    }
+    const deliverChunk = (bytes: Uint8Array) => {
+      parts.push(bytes)
+      if (meta?.kind !== 'image') {
         push(decoder.decode(bytes, { stream: true }))
         repaint()
-      },
-      eof: () => {
+      }
+    }
+    const colour = () => {
+      if (meta === null || meta.kind !== 'text' || meta.truncated === true) return
+      const lang = languageFor(meta.path)
+      if (lang === null) return
+      void highlight(linesRef.current.join('\n'), lang).then((rows) => {
+        if (!gone && rows !== null) setTokens(rows)
+      })
+    }
+    const deliverEof = (fromWire: boolean) => {
+      if (meta?.kind === 'image') {
+        if (!gone) setImageUrl(assembleDataUrl(meta.mime, parts))
+      } else {
         push(decoder.decode())
         if (tail !== '') {
           linesRef.current.push(tail)
           tail = ''
         }
         repaint()
-      },
-      fail: (f) => setPhase({ at: 'refused', code: f.code }),
-    })
+      }
+      colour()
+      if (!fromWire || meta === null || meta.truncated === true) return
+      const total = parts.reduce((n, p) => n + p.length, 0)
+      if (total > CACHE_ENTRY_MAX) return
+      // Confirm what is about to be remembered with the daemon's own stat,
+      // which is also what a reopen validates against. A file that changed
+      // while it streamed simply is not remembered.
+      const settled = meta
+      void client
+        .stat(sessionId, [target.path])
+        .then(([entry]) => {
+          if (entry?.exists !== true || entry.kind !== 'file') return
+          if ((entry.size ?? 0) !== settled.size) return
+          rememberFile(client, target.path, {
+            meta: settled,
+            mtime: entry.mtime ?? 0,
+            bytes: joinBytes(parts, total),
+          })
+        })
+        .catch(() => {})
+    }
+
+    const readFromWire = () => {
+      if (gone) return
+      handle = client.read(sessionId, target.path, {
+        file: deliverMeta,
+        chunk: deliverChunk,
+        eof: () => deliverEof(true),
+        fail: (f) => {
+          if (!gone) setPhase({ at: 'refused', code: f.code })
+        },
+      })
+    }
+
+    const start = async () => {
+      const held = cachedFile(client, target.path)
+      if (held === null) {
+        readFromWire()
+        return
+      }
+      try {
+        const [entry] = await client.stat(sessionId, [target.path])
+        if (gone) return
+        if (
+          entry?.exists === true &&
+          entry.kind === 'file' &&
+          (entry.size ?? 0) === held.meta.size &&
+          (entry.mtime ?? 0) === held.mtime
+        ) {
+          deliverMeta(held.meta)
+          deliverChunk(held.bytes)
+          deliverEof(false)
+          return
+        }
+      } catch {
+        // The stat could not confirm the memory; the wire is the truth.
+      }
+      readFromWire()
+    }
+    void start()
+
     return () => {
-      handle.cancel()
+      gone = true
+      handle?.cancel()
       if (frame.current !== 0) cancelAnimationFrame(frame.current)
       frame.current = 0
     }
@@ -199,17 +282,26 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
               {REFUSALS[phase.code] ?? 'The machine refused this read.'}
             </p>
           )}
-          {phase.at === 'image' && (
-            <p role="alert" className="flex-1 px-4 py-3 text-control text-muted-foreground">
-              An image ({phase.meta.mime}, {fmtBytes(phase.meta.size)}). The viewer cannot show one
-              yet.
-            </p>
-          )}
+          {phase.at === 'image' &&
+            (imageUrl !== null ? (
+              <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
+                <img alt={base} src={imageUrl} className="max-h-full max-w-full object-contain" />
+              </div>
+            ) : (
+              <p role="status" className="flex-1 px-4 py-3 text-control text-muted-foreground">
+                Receiving the image…
+              </p>
+            ))}
           {phase.at === 'text' && (
             // Keyed by path, so a viewer whose target changes under it — a
             // later phase reuses the mounted dialog — starts its scroll and
             // its one-shot jump over rather than inheriting the old file's.
-            <TextWindow key={target.path} lines={linesRef.current} mark={target.line} />
+            <TextWindow
+              key={target.path}
+              lines={linesRef.current}
+              tokens={tokens}
+              mark={target.line}
+            />
           )}
         </Dialog.Content>
       </Dialog.Portal>
@@ -217,7 +309,15 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
   )
 }
 
-function TextWindow({ lines, mark }: { lines: string[]; mark?: number }) {
+function TextWindow({
+  lines,
+  tokens,
+  mark,
+}: {
+  lines: string[]
+  tokens: PeekToken[][] | null
+  mark?: number
+}) {
   const boxRef = useRef<HTMLDivElement | null>(null)
   const jumped = useRef(false)
   const [top, setTop] = useState(0)
@@ -267,12 +367,28 @@ function TextWindow({ lines, mark }: { lines: string[]; mark?: number }) {
               data-marked={n === mark ? 'true' : undefined}
               className="h-5 pr-6 pl-4 whitespace-pre data-marked:bg-teal-500/15"
             >
-              {text}
+              {tokens?.[n - 1] !== undefined ? <TokenRow row={tokens[n - 1]!} /> : text}
             </div>
           )
         })}
       </div>
     </div>
+  )
+}
+
+function TokenRow({ row }: { row: PeekToken[] }) {
+  return (
+    <>
+      {row.map((t, i) => (
+        <span
+          key={i}
+          className={t.dark !== undefined ? 'dark:text-(--peek-dark)' : undefined}
+          style={{ color: t.light, '--peek-dark': t.dark } as CSSProperties}
+        >
+          {t.text}
+        </span>
+      ))}
+    </>
   )
 }
 
@@ -293,6 +409,26 @@ function CopyPath({ path }: { path: string }) {
       {held ? <Check /> : <Copy />}
     </Button>
   )
+}
+
+function joinBytes(parts: Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total)
+  let at = 0
+  for (const p of parts) {
+    out.set(p, at)
+    at += p.length
+  }
+  return out
+}
+
+function assembleDataUrl(mime: string, parts: Uint8Array[]): string {
+  let bin = ''
+  for (const part of parts) {
+    for (let at = 0; at < part.length; at += 0x8000) {
+      bin += String.fromCharCode(...part.subarray(at, at + 0x8000))
+    }
+  }
+  return `data:${mime};base64,${btoa(bin)}`
 }
 
 function fmtBytes(n: number): string {

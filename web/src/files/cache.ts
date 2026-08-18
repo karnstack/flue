@@ -4,7 +4,7 @@ import type { FileMsg } from '@/client/protocol'
  * Reopening a file the viewer just closed should cost nothing, and closing
  * the tab should cost the memory back.
  *
- * In memory only, on purpose: file contents sitting on a paired phone's disk
+ * In memory only, on purpose: file bytes sitting on a paired phone's disk
  * is a durability question this feature has no reason to open, which is why
  * this is not IndexedDB. Keyed by the client object — the machine identity a
  * viewer already holds — inside a WeakMap, so a closed connection's entries

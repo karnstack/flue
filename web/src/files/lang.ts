@@ -59,6 +59,11 @@ const BY_EXTENSION: Record<string, string> = {
   graphql: 'graphql',
 }
 
+/** Every language id this map can answer with, for the grammar cross-check. */
+export function knownLanguages(): string[] {
+  return [...new Set([...Object.values(SPECIAL_NAMES), ...Object.values(BY_EXTENSION)])]
+}
+
 export function languageFor(path: string): string | null {
   const base = path.slice(path.lastIndexOf('/') + 1).toLowerCase()
   const special = SPECIAL_NAMES[base]
