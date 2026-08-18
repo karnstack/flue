@@ -12,6 +12,7 @@ import {
   dayLabel,
   dayStartMs,
   DEFAULT_AGENT_VIEW,
+  dirChoices,
   displayTitle,
   filterHistory,
   filterRows,
@@ -187,6 +188,70 @@ describe('filterRows', () => {
     expect(
       filterRows(rows, { tools: new Set(['pi']), machines: new Set(['local']) }),
     ).toHaveLength(0)
+  })
+
+  it('narrows by directory, on the whole path rather than its basename', () => {
+    const homes = [
+      row({ id: 'a', cwd: '/Users/karn/code/flue' }),
+      row({ id: 'b', cwd: '/srv/checkouts/flue' }),
+      row({ id: 'c', cwd: '/Users/karn/code/reins' }),
+    ]
+    expect(
+      filterRows(homes, { dirs: new Set(['/Users/karn/code/flue']) }).map((r) => r.id),
+    ).toEqual(['a'])
+    expect(filterRows(homes, { dirs: new Set() })).toHaveLength(3)
+  })
+
+  it('composes the directory cut with the other filters', () => {
+    const homes = [
+      row({ id: 'a', cwd: '/Users/karn/code/flue', tool: 'claude' }),
+      row({ id: 'b', cwd: '/Users/karn/code/flue', tool: 'codex' }),
+      row({ id: 'c', cwd: '/Users/karn/code/reins', tool: 'claude' }),
+    ]
+    expect(
+      filterRows(homes, {
+        dirs: new Set(['/Users/karn/code/flue']),
+        tools: new Set(['claude']),
+      }).map((r) => r.id),
+    ).toEqual(['a'])
+  })
+})
+
+describe('dirChoices', () => {
+  it('lists distinct directories, busiest first, labelled by basename', () => {
+    const rows = [
+      row({ id: 'a', cwd: '/Users/karn/code/flue' }),
+      row({ id: 'b', cwd: '/Users/karn/code/flue' }),
+      row({ id: 'c', cwd: '/Users/karn/code/reins' }),
+    ]
+    expect(dirChoices(rows)).toEqual([
+      { cwd: '/Users/karn/code/flue', label: 'flue', count: 2 },
+      { cwd: '/Users/karn/code/reins', label: 'reins', count: 1 },
+    ])
+  })
+
+  it('breaks count ties by label so the menu reads alphabetically', () => {
+    const rows = [
+      row({ id: 'a', cwd: '/srv/zeta' }),
+      row({ id: 'b', cwd: '/srv/alpha' }),
+    ]
+    expect(dirChoices(rows).map((c) => c.label)).toEqual(['alpha', 'zeta'])
+  })
+
+  it('leaves pruned transcripts out, as the list itself does', () => {
+    const rows = [
+      row({ id: 'a', cwd: '/srv/alive' }),
+      row({ id: 'b', cwd: '/srv/gone', missing: true }),
+    ]
+    expect(dirChoices(rows).map((c) => c.cwd)).toEqual(['/srv/alive'])
+  })
+
+  it('keeps a selected directory listed after its rows vanish, at count zero', () => {
+    const rows = [row({ id: 'a', cwd: '/srv/alive' })]
+    expect(dirChoices(rows, new Set(['/srv/vanished']))).toEqual([
+      { cwd: '/srv/alive', label: 'alive', count: 1 },
+      { cwd: '/srv/vanished', label: 'vanished', count: 0 },
+    ])
   })
 })
 

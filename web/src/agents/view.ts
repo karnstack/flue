@@ -202,14 +202,52 @@ export function compactCost(usd: number): string {
  */
 export function filterRows(
   rows: AgentRow[],
-  opts: { tools?: ReadonlySet<AgentTool>; machines?: ReadonlySet<string> } = {},
+  opts: {
+    tools?: ReadonlySet<AgentTool>
+    machines?: ReadonlySet<string>
+    /** Whole cwd paths, not basenames — two repos may share a name. */
+    dirs?: ReadonlySet<string>
+  } = {},
 ): AgentRow[] {
-  const { tools, machines } = opts
+  const { tools, machines, dirs } = opts
   return rows.filter(
     (r) =>
       (tools === undefined || tools.size === 0 || tools.has(r.tool)) &&
-      (machines === undefined || machines.size === 0 || machines.has(r.machineId)),
+      (machines === undefined || machines.size === 0 || machines.has(r.machineId)) &&
+      (dirs === undefined || dirs.size === 0 || dirs.has(r.cwd)),
   )
+}
+
+/** One directory the filter menu offers, counted over the openable rows. */
+export interface DirChoice {
+  cwd: string
+  label: string
+  count: number
+}
+
+/**
+ * The directories the filter menu lists: every distinct cwd among the rows
+ * the list can show, busiest first so the menu leads with the projects worth
+ * narrowing to. Keyed and filtered on the whole path — two repos may share a
+ * basename — while the label is the basename a reader recognises. Pruned
+ * transcripts stay out for applyAgentView's reason: the list never shows
+ * them, and a menu entry that filters to nothing is a broken promise.
+ *
+ * A selected directory stays listed even after its last row vanishes — at
+ * count zero, which sinks it to the menu's foot — because the check beside
+ * it is the only way to take that narrowing off. Silently unselecting
+ * instead would misread a transient empty delivery as the reader's choice.
+ */
+export function dirChoices(rows: AgentRow[], selected?: ReadonlySet<string>): DirChoice[] {
+  const counts = new Map<string, number>()
+  for (const cwd of selected ?? []) counts.set(cwd, 0)
+  for (const r of rows) {
+    if (r.missing) continue
+    counts.set(r.cwd, (counts.get(r.cwd) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .map(([cwd, count]) => ({ cwd, label: basename(cwd) || cwd, count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label) || a.cwd.localeCompare(b.cwd))
 }
 
 /** How coarsely `endedAt` is read, for orderSessions' reason: transcripts a
@@ -356,7 +394,11 @@ export function groupRows(rows: AgentRow[], grouping: AgentGrouping, now: number
 export function applyAgentView(
   rows: AgentRow[],
   view: AgentViewConfig,
-  filters: { tools?: ReadonlySet<AgentTool>; machines?: ReadonlySet<string> },
+  filters: {
+    tools?: ReadonlySet<AgentTool>
+    machines?: ReadonlySet<string>
+    dirs?: ReadonlySet<string>
+  },
   now: number,
 ): AgentGroup[] {
   const openable = rows.filter((r) => !r.missing)
