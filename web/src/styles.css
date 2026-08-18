@@ -273,6 +273,14 @@
     --flue-hover: --alpha(var(--color-zinc-950) / 4%);
     --flue-press: --alpha(var(--color-zinc-950) / 7%);
 
+    /* The scrollbar thumb, at rest and under the pointer. A scrollbar is
+     * chrome, not content: it should read at a glance when sought and
+     * disappear into the canvas when not, which is the same job the hover
+     * tints do — hence the same neutral-alpha vocabulary rather than a
+     * solid grey that would sit on every screen like a drawn border. */
+    --flue-scrollbar-thumb: --alpha(var(--color-zinc-950) / 20%);
+    --flue-scrollbar-thumb-hover: --alpha(var(--color-zinc-950) / 35%);
+
     /*
      * Elevation, in three steps, spelled as shadows rather than as borders.
      *
@@ -383,6 +391,9 @@
       --flue-hover: --alpha(var(--color-white) / 5%);
       --flue-press: --alpha(var(--color-white) / 8%);
 
+      --flue-scrollbar-thumb: --alpha(var(--color-white) / 20%);
+      --flue-scrollbar-thumb-hover: --alpha(var(--color-white) / 35%);
+
       /*
        * Darker and wider than the light theme's, which is not a stylistic
        * preference: a shadow is the absence of light, and on a near-black
@@ -436,6 +447,53 @@
   body {
     background-color: var(--flue-canvas);
     color: var(--foreground);
+  }
+
+  /* Without this the browser keeps painting *light-theme* native chrome —
+   * scrollbars above all — inside an app whose own colours follow the media
+   * query, which is how a white scrollbar track ends up glowing down the
+   * middle of a near-black screen. `light dark` (not a hardcoded value)
+   * keeps the choice with prefers-color-scheme, exactly like every token
+   * above. */
+  :root {
+    color-scheme: light dark;
+  }
+
+  /* The scrollbars themselves, restyled to sit inside the design instead of
+   * beside it: no track — the canvas is the track — and a slim thumb in the
+   * neutral-alpha ramp that steps up under the pointer. The WebKit rules and
+   * the two standard properties say the same thing twice because each engine
+   * listens to only one of them. The 3px transparent ring with content-box
+   * clipping is what makes the thumb float clear of the window edge. xterm's
+   * own overlay scrollbar is unaffected: it draws its own elements, and this
+   * file already removes them below. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--flue-scrollbar-thumb) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--flue-scrollbar-thumb);
+    background-clip: content-box;
+    border: 3px solid transparent;
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--flue-scrollbar-thumb-hover);
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
   }
 }
 
