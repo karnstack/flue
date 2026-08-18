@@ -91,6 +91,7 @@ function configOf(v: SavedView): ViewConfig {
   return {
     grouping: v.grouping,
     ordering: v.ordering,
+    direction: v.direction,
     search: v.search,
     columns: [...v.columns],
     showExited: v.showExited,
@@ -109,6 +110,7 @@ function sameArrangement(a: ViewConfig, b: ViewConfig): boolean {
   return (
     a.grouping === b.grouping &&
     a.ordering === b.ordering &&
+    a.direction === b.direction &&
     a.search === b.search &&
     a.showExited === b.showExited &&
     a.columns.length === b.columns.length &&

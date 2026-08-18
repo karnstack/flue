@@ -39,6 +39,26 @@ export type Grouping = (typeof GROUPINGS)[number]
 export const ORDERINGS = ['lastActive', 'created', 'name', 'directory'] as const
 export type Ordering = (typeof ORDERINGS)[number]
 
+/** The two ways an ordering can read: with its key, or against it. */
+export const DIRECTIONS = ['asc', 'desc'] as const
+export type Direction = (typeof DIRECTIONS)[number]
+
+/**
+ * The direction each ordering means when nobody has said otherwise.
+ *
+ * Time reads newest first — "last active" is a question about now, and the
+ * newest session should be visibly the newest — while the two textual keys
+ * read the way an index does, a to z. Picking an ordering lands here first;
+ * the direction control is for turning that around, not for remembering how
+ * "Name" was flipped three orderings ago.
+ */
+export const DEFAULT_DIRECTIONS: Record<Ordering, Direction> = {
+  lastActive: 'desc',
+  created: 'desc',
+  name: 'asc',
+  directory: 'asc',
+}
+
 /** Every column the sessions list can show, in the order they read across. */
 export const COLUMN_KEYS = [
   'name',
@@ -83,6 +103,12 @@ export const ORDERING_LABELS: Record<Ordering, string> = {
 }
 
 /** @see GROUPING_LABELS */
+export const DIRECTION_LABELS: Record<Direction, string> = {
+  asc: 'Ascending',
+  desc: 'Descending',
+}
+
+/** @see GROUPING_LABELS */
 export const COLUMN_LABELS: Record<ColumnKey, string> = {
   name: 'Name',
   directory: 'Directory',
@@ -97,6 +123,7 @@ export const COLUMN_LABELS: Record<ColumnKey, string> = {
 export interface ViewConfig {
   grouping: Grouping
   ordering: Ordering
+  direction: Direction
   search: string
   columns: ColumnKey[]
   showExited: boolean
@@ -127,6 +154,7 @@ export interface ViewConfig {
 export const DEFAULT_VIEW: ViewConfig = Object.freeze<ViewConfig>({
   grouping: 'machine',
   ordering: 'lastActive',
+  direction: DEFAULT_DIRECTIONS.lastActive,
   search: '',
   columns: frozen(['name', 'directory', 'machine', 'tags', 'state', 'lastActive']),
   showExited: false,
@@ -256,32 +284,46 @@ function haystack(s: FleetSession): string[] {
  * the top and pinned sessions read among themselves by the same key the rest
  * do. A stamp no `Date` can parse compares as a tie rather than as an error,
  * and lands wherever the directory puts it.
+ *
+ * The direction turns the chosen key around and touches nothing else. Pinned
+ * stays first — "pinned" means kept in reach, not kept at whichever end the
+ * sort happens to point — and the tiebreak keeps reading a to z, because it
+ * exists to hold the screen still and a flipped tiebreak would reorder rows
+ * the chosen key said nothing about.
  */
-export function orderSessions(list: FleetSession[], ordering: Ordering): FleetSession[] {
+export function orderSessions(
+  list: FleetSession[],
+  ordering: Ordering,
+  direction: Direction,
+): FleetSession[] {
   const by = COMPARE[ordering]
+  const sign = direction === 'desc' ? -1 : 1
   return [...list].sort(
     (a, b) =>
       Number(b.pinned) - Number(a.pinned) ||
-      // A comparison of two unreadable stamps is NaN, which is falsy — so the
-      // tiebreak below catches it, and no row can vanish into a sort that
-      // threw.
-      by(a, b) ||
+      // A comparison of two unreadable stamps is NaN, which no sign changes
+      // and which is falsy — so the tiebreak below catches it, and no row can
+      // vanish into a sort that threw.
+      sign * by(a, b) ||
       a.cwd.localeCompare(b.cwd) ||
       a.id.localeCompare(b.id),
   )
 }
 
 /**
- * The chosen key, and only it — pinning and the tiebreak are applied around
- * these by orderSessions, so `directory` has nothing left of its own to say.
+ * The chosen key, and only it, reading ascending — pinning, the direction and
+ * the tiebreak are applied around these by orderSessions. `directory` compares
+ * the same field the tiebreak does, and still has to say so itself: the
+ * tiebreak never turns around, and a directory key that stayed silent would
+ * leave descending-by-directory meaning nothing.
  */
 const COMPARE: Record<Ordering, (a: FleetSession, b: FleetSession) => number> = {
-  lastActive: (a, b) => activeBucket(b) - activeBucket(a),
+  lastActive: (a, b) => activeBucket(a) - activeBucket(b),
   // No bucket here: `createdAt` is stamped once and never moves, so there is
-  // no churn to absorb and the newest session should be visibly the newest.
-  created: (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
+  // no churn to absorb.
+  created: (a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt),
   name: (a, b) => displayName(a).localeCompare(displayName(b)),
-  directory: () => 0,
+  directory: (a, b) => a.cwd.localeCompare(b.cwd),
 }
 
 /** Which half-minute a session was last touched in. */
@@ -520,7 +562,7 @@ function collect(list: FleetSession[], bucketsOf: (s: FleetSession) => Bucket[])
 export function applyView(list: FleetSession[], v: ViewConfig): Group[] {
   const matched = filterSessions(list, v.search)
   const wanted = v.showExited ? matched : matched.filter((s) => s.state !== 'exited')
-  return groupSessions(orderSessions(wanted, v.ordering), v.grouping)
+  return groupSessions(orderSessions(wanted, v.ordering, v.direction), v.grouping)
 }
 
 /**

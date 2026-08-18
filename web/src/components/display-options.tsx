@@ -15,6 +15,9 @@ import {
 import {
   COLUMN_KEYS,
   COLUMN_LABELS,
+  DEFAULT_DIRECTIONS,
+  DIRECTION_LABELS,
+  DIRECTIONS,
   GROUPING_LABELS,
   GROUPINGS,
   ORDERING_LABELS,
@@ -36,7 +39,7 @@ export interface DisplayOptionsProps {
  *
  * Everything a person can say about the shape of the list lives behind this
  * one trigger, and that is the argument for it existing at all. The controls
- * are four, they are each used rarely, and left out in the header they would
+ * are five, they are each used rarely, and left out in the header they would
  * turn a page title into a form — while the two things done constantly, search
  * and starting a session, stay one click away beside it.
  *
@@ -84,7 +87,20 @@ export function DisplayOptions({ view, onChange }: DisplayOptionsProps) {
           value={view.ordering}
           options={ORDERINGS}
           labels={ORDERING_LABELS}
-          onPick={(ordering) => onChange({ ...view, ordering })}
+          // A new key brings its own natural direction along rather than
+          // inheriting the old key's: whoever flipped Name to z–a and then
+          // switched to Created wants the newest first, not a reversal they
+          // asked of a different column.
+          onPick={(ordering) =>
+            onChange({ ...view, ordering, direction: DEFAULT_DIRECTIONS[ordering] })
+          }
+        />
+        <Choice
+          label="Direction"
+          value={view.direction}
+          options={DIRECTIONS}
+          labels={DIRECTION_LABELS}
+          onPick={(direction) => onChange({ ...view, direction })}
         />
 
         <div className="flex items-center justify-between gap-2">
