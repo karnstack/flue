@@ -606,11 +606,15 @@ describe('usageStats', () => {
     expect(s.currentStreak).toBe(0)
   })
 
-  it('caps spanDays at 366 for a lone year-1 stamp, without a calendar walk', () => {
+  it('keeps a lone year-1 stamp out of the calendar facts, without a walk', () => {
+    // A day outside the DAY_SPAN_CAP window contributes nothing to the
+    // active-day facts — the same clamp that keeps "N of M" coherent under
+    // years of backfill also retires the old "1 of 366" reading a bogus
+    // ancient stamp used to get.
     const s = usageStats([row({ id: 'ancient', startedAt: '0001-01-01T00:00:00Z' })], NOW)
-    expect(s.spanDays).toBe(366)
-    expect(s.activeDays).toBe(1)
-    expect(s.longestStreak).toBe(1)
+    expect(s.spanDays).toBe(0)
+    expect(s.activeDays).toBe(0)
+    expect(s.longestStreak).toBe(0)
     expect(s.currentStreak).toBe(0)
     // The default endedAt is fine but the start claims year 1: a two-thousand-
     // year session is a broken clock, not a record.
@@ -909,6 +913,25 @@ describe('tokensByDay with backfill', () => {
 })
 
 describe('usageStats with backfill', () => {
+  it('never claims more active days than the span they are read against', () => {
+    // Backfill reaching years past the DAY_SPAN_CAP window: without the
+    // clamp the strip would print "700 of 366".
+    const days: HistoryDayRow[] = []
+    for (let i = 0; i < 700; i++) {
+      const d = new Date(2026, 7, 18 - i)
+      const pad = (n: number) => String(n).padStart(2, '0')
+      days.push(
+        hist({
+          date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+          sessions: 1,
+        }),
+      )
+    }
+    const usage = usageStats([], NOW, days)
+    expect(usage.activeDays).toBeLessThanOrEqual(usage.spanDays)
+    expect(usage.spanDays).toBe(366)
+    expect(usage.activeDays).toBe(366)
+  })
   it('counts remembered days as active and lets them carry a streak', () => {
     const rows = [row({ id: 'a', startedAt: at(2026, 7, 18, 9) })]
     const days = [

@@ -469,14 +469,20 @@ func (x *Index) Snapshot(tools []string, cwd string) ([]Summary, bool) {
 	// Subagent files first: their tokens land on the conversation that
 	// spawned them, keyed by the parent's path. Tombstoned subagents fold
 	// too — the accounting outlives the file, which is the tombstone's whole
-	// point.
-	folded := map[string]TokenUsage{}
+	// point. Everything else the aggregate carries exists for the orphan
+	// case below, where the fold's target is gone and the aggregate is all
+	// that remains of the session.
+	folded := map[string]*subagentAgg{}
 	for _, e := range x.entries {
-		if e.ParentPath != "" {
-			u := folded[e.ParentPath]
-			u.add(e.Summary.Tokens)
-			folded[e.ParentPath] = u
+		if e.ParentPath == "" {
+			continue
 		}
+		agg := folded[e.ParentPath]
+		if agg == nil {
+			agg = &subagentAgg{}
+			folded[e.ParentPath] = agg
+		}
+		agg.fold(e.Summary)
 	}
 	out := []Summary{}
 	for path, e := range x.entries {
@@ -489,6 +495,9 @@ func (x *Index) Snapshot(tools []string, cwd string) ([]Summary, bool) {
 		// session. It stays in the index (so the sweep does not re-parse it
 		// forever) but never reaches a list: it has nothing to show, and its
 		// zero StartedAt would poison any date arithmetic a client does.
+		// Tokens folded onto a stub are dropped with it — a session that
+		// spawned subagents always has a conversation, so a stub with a
+		// subagents directory is not a shape the stores produce.
 		if e.Summary.MessageCount == 0 {
 			continue
 		}
@@ -499,8 +508,8 @@ func (x *Index) Snapshot(tools []string, cwd string) ([]Summary, bool) {
 			continue
 		}
 		sum := e.Summary
-		if u, ok := folded[path]; ok {
-			sum.Tokens.add(u)
+		if agg, ok := folded[path]; ok {
+			sum.Tokens.add(agg.tokens)
 		}
 		if e.Missing {
 			// A tombstone still counts, but it cannot be opened or resumed,
@@ -511,8 +520,64 @@ func (x *Index) Snapshot(tools []string, cwd string) ([]Summary, bool) {
 		}
 		out = append(out, sum)
 	}
+	// Orphaned subagents: the conversation file was pruned before this index
+	// ever saw it — Claude Code's cleanup deletes the .jsonl and leaves the
+	// session directory behind — so there is no entry to fold into and no
+	// tombstone to keep counting. The subagent files still name the session
+	// (their directory does), still carry its working directory, and still
+	// hold the bulk of its tokens, so what remains is served as a synthesized
+	// tombstone: countable, never openable, exactly the history the fold
+	// exists to keep.
+	for parent, agg := range folded {
+		if _, ok := x.entries[parent]; ok {
+			continue
+		}
+		if agg.msgs == 0 || !toolAllowed(agg.tool, tools) || (cwd != "" && agg.cwd != cwd) {
+			continue
+		}
+		ad, ok := adapterFor(agg.tool)
+		if !ok {
+			continue
+		}
+		sum := newSummary(agg.tool, ad.idFromPath(parent))
+		sum.Cwd = agg.cwd
+		sum.StartedAt, sum.EndedAt = agg.started, agg.ended
+		sum.Tokens = agg.tokens
+		// The subagents' own counts, honestly short: the conversation's are
+		// unrecoverable, and "at least this much" beats zero.
+		sum.MessageCount, sum.ToolCallCount = agg.msgs, agg.calls
+		sum.Missing = true
+		out = append(out, sum)
+	}
 	sortNewestFirst(out)
 	return out, x.building
+}
+
+// subagentAgg is what a session's subagent files add up to, and — when the
+// session's own file was pruned before it was ever indexed — everything the
+// store still knows about the session at all.
+type subagentAgg struct {
+	tool           Tool
+	cwd            string
+	started, ended time.Time
+	tokens         TokenUsage
+	msgs, calls    int
+}
+
+func (a *subagentAgg) fold(s Summary) {
+	a.tool = s.Tool
+	if a.cwd == "" {
+		a.cwd = s.Cwd
+	}
+	if !s.StartedAt.IsZero() && (a.started.IsZero() || s.StartedAt.Before(a.started)) {
+		a.started = s.StartedAt
+	}
+	if s.EndedAt.After(a.ended) {
+		a.ended = s.EndedAt
+	}
+	a.tokens.add(s.Tokens)
+	a.msgs += s.MessageCount
+	a.calls += s.ToolCallCount
 }
 
 // Resolve is the only way a (tool, id) becomes a path: reads and searches go
@@ -539,6 +604,10 @@ func toolAllowed(tool Tool, filter []string) bool {
 	}
 	return false
 }
+
+// ToolAllowed is toolAllowed for the daemon, which applies the agents verb's
+// tool filter to History the way Snapshot applies it to sessions.
+func ToolAllowed(tool Tool, filter []string) bool { return toolAllowed(tool, filter) }
 
 // sortNewestFirst orders summaries by when they last spoke, ties broken by
 // id so the order is stable across sweeps.

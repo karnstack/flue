@@ -391,7 +391,13 @@ export function rangeFilter(rows: AgentRow[], range: InsightRange, now: number):
  * The local start of the day a backfill date names. The date is a bare
  * YYYY-MM-DD in the serving machine's calendar; read in the viewer's, the
  * honest simplification every cross-machine day bucket here already makes.
- * NaN for a date that will not parse, which every consumer skips.
+ * The one sharp edge: a viewer in a different timezone can land a backfill
+ * day beside the indexed day it describes, and the max-merge then counts
+ * both — a same-sessions double count across midnight, bounded to the two
+ * days either side of the offset. Accepted for the same reason the bucketing
+ * is: a per-machine timezone negotiation would cost far more than one
+ * boundary day's drift. NaN for a date that will not parse, which every
+ * consumer skips.
  */
 export function historyDayMs(date: string): number {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date)
@@ -440,16 +446,30 @@ function mergedSessionCounts(rows: AgentRow[], history: HistoryDayRow[]): Map<st
   for (const r of rows) {
     const at = Date.parse(r.startedAt)
     const day = Number.isNaN(at) ? 'undated' : String(dayStartMs(at))
-    const key = `${r.machineId}|${r.tool}|${day}`
+    const key = mergeKey(r.machineId, r.tool, day)
     counts.set(key, (counts.get(key) ?? 0) + 1)
   }
   for (const h of history) {
     const day = historyDayMs(h.date)
     if (Number.isNaN(day)) continue
-    const key = `${h.machineId}|${h.tool}|${day}`
+    const key = mergeKey(h.machineId, h.tool, String(day))
     counts.set(key, Math.max(counts.get(key) ?? 0, h.sessions))
   }
   return counts
+}
+
+/** A merge key whose tool and day always read back out — the machine id is
+ *  user-adjacent text and may hold the separator, so it goes last-resistant:
+ *  splitMergeKey parses from the right. */
+function mergeKey(machineId: string, tool: AgentTool, day: string): string {
+  return `${machineId}|${tool}|${day}`
+}
+
+function splitMergeKey(key: string): { tool: AgentTool; day: string } {
+  const parts = key.split('|')
+  const day = parts.pop()!
+  const tool = parts.pop() as AgentTool
+  return { tool, day }
 }
 
 /** The merged session total — mergedSessionCounts, summed. */
@@ -578,7 +598,7 @@ export function sessionsByDay(
   const merged = mergedSessionCounts(rows, history)
   const counts = new Map<number, Record<AgentTool, number>>()
   for (const [key, n] of merged) {
-    const [, tool, day] = key.split('|') as [string, AgentTool, string]
+    const { tool, day } = splitMergeKey(key)
     const dayMs = Number(day)
     if (!Number.isFinite(dayMs)) continue
     const point = counts.get(dayMs) ?? { claude: 0, codex: 0, pi: 0 }
@@ -757,7 +777,9 @@ export function heatmapWeeks(
 export interface UsageStats {
   sessions: number
   totalTokens: number
-  /** Days on which at least one session began. */
+  /** Days on which at least one session began — by either witness, the
+   *  transcripts or the backfill — within the same DAY_SPAN_CAP window
+   *  spanDays is capped to, so the two always read against each other. */
   activeDays: number
   /** Days from the first session start to today inclusive, capped at
    *  DAY_SPAN_CAP exactly as daySpan caps — the year-1 guard again, so one
@@ -774,7 +796,7 @@ export interface UsageStats {
    *  epoch-zero start beside a real end claims a two-thousand-year session,
    *  which is a broken clock, not a record. Zero when nothing qualifies. */
   longestSessionMs: number
-  /** The longest run of consecutive active days anywhere in the history. */
+  /** The longest run of consecutive active days within the window. */
   longestStreak: number
   /** The run of consecutive active days ending today — or ending yesterday,
    *  which still counts: a streak is not broken by a today that has not had
@@ -815,11 +837,18 @@ export function usageStats(
   // A day either witness saw is an active day: the calendar facts — active
   // days, span, streaks — take the transcripts and the backfill together,
   // while the token facts (most active day, total) stay the transcripts'
-  // own, historyDayMs's reason.
-  const activeDaySet = new Set(byStartDay.keys())
+  // own, historyDayMs's reason. Bounded to the same window spanDays is
+  // capped to, so "N of M" can never claim more active days than the span
+  // it is read against — backfill reaches years back, and unclamped it
+  // would print "700 of 366".
+  const windowStart = shiftDay(today, -(DAY_SPAN_CAP - 1))
+  const activeDaySet = new Set<number>()
+  for (const day of byStartDay.keys()) {
+    if (day >= windowStart && day <= today) activeDaySet.add(day)
+  }
   for (const h of history) {
     const day = historyDayMs(h.date)
-    if (!Number.isNaN(day) && day <= today) activeDaySet.add(day)
+    if (!Number.isNaN(day) && day >= windowStart && day <= today) activeDaySet.add(day)
   }
 
   let first = Number.POSITIVE_INFINITY

@@ -50,6 +50,60 @@ func TestSweepFoldsSubagentTokens(t *testing.T) {
 	}
 }
 
+// TestTombstonedSubagentsKeepFolding pins the fold's other half: pruning a
+// subagent file must not shrink the parent's totals — the tombstoned entry
+// keeps folding, which is what lets a session's accounting survive the
+// cleanup deleting its pieces one by one.
+func TestTombstonedSubagentsKeepFolding(t *testing.T) {
+	home, _ := fakeHome(t)
+	write(t, subagentPath(home, "agent-aaa111.jsonl"), fixture(t, "claude-subagent.jsonl"))
+	x := New(t.TempDir(), home)
+	x.sweep()
+	before := claudeSummary(t, x).Tokens
+
+	if err := os.Remove(subagentPath(home, "agent-aaa111.jsonl")); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	x.sweep()
+	if after := claudeSummary(t, x).Tokens; after != before {
+		t.Errorf("parent tokens shrank when the subagent file was pruned: %+v, want %+v", after, before)
+	}
+}
+
+// TestOrphanedSubagentsServeAsTombstone pins the orphan case seen on a real
+// store: Claude Code's cleanup deletes the conversation .jsonl but leaves
+// <uuid>/subagents/ behind, and if that happened before the index ever ran
+// there is nothing to fold into. The remains are served as a synthesized
+// tombstone — counted, never listed as openable, carrying the subagents' own
+// working directory, span and tokens.
+func TestOrphanedSubagentsServeAsTombstone(t *testing.T) {
+	home, paths := fakeHome(t)
+	write(t, subagentPath(home, "agent-aaa111.jsonl"), fixture(t, "claude-subagent.jsonl"))
+	// The conversation file is gone before the first sweep.
+	if err := os.Remove(paths[ToolClaude]); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	x := New(t.TempDir(), home)
+	x.sweep()
+
+	sum := claudeSummary(t, x)
+	if !sum.Missing {
+		t.Error("orphan tombstone not marked missing")
+	}
+	if sum.ID != claudeFixtureID {
+		t.Errorf("orphan id = %q, want the session uuid %q", sum.ID, claudeFixtureID)
+	}
+	if sum.Cwd != "/home/dev/proj" {
+		t.Errorf("orphan cwd = %q, want the subagents' own", sum.Cwd)
+	}
+	if want := (TokenUsage{Input: 11, Output: 22, CacheRead: 103, CacheWrite: 9}); sum.Tokens != want {
+		t.Errorf("orphan tokens = %+v, want %+v", sum.Tokens, want)
+	}
+	if sum.StartedAt.IsZero() || sum.EndedAt.IsZero() {
+		t.Error("orphan span is zero; clients drop rows with unreadable stamps")
+	}
+}
+
 // TestSweepTombstonesVanishedTranscripts pins the retention story: a file the
 // tool pruned keeps its summary — marked missing, unresumable, unsearchable,
 // unreadable — and comes back whole if the file does.
