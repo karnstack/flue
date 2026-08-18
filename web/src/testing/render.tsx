@@ -34,6 +34,8 @@ export async function renderWithRouter(ui: ReactNode, initialPath = '/sessions')
   const paths = [
     '/',
     '/sessions',
+    '/agents',
+    '/agents/$machineId/$tool/$sessionId',
     '/devices',
     '/remote',
     '/settings',

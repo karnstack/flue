@@ -5,6 +5,10 @@ import {
   FRAME_INPUT,
   FRAME_OUTPUT,
   PROTOCOL_VERSION,
+  type AgentHitsMsg,
+  type AgentIndexMsg,
+  type AgentPageMsg,
+  type AgentTool,
   type Attached,
   type ClientMessage,
   type DeviceInfo,
@@ -57,6 +61,22 @@ const BACKOFF_MAX_MS = 10_000
 const PEEK_TIMEOUT_MS = 5_000
 
 /**
+ * How long each agent-transcript request waits before giving up.
+ *
+ * They need a deadline for `peek`'s exact reason: the agent verbs are newer
+ * than the protocol's others, so a daemon older than this page answers each
+ * with an *uncorrelated* `error{bad_message}` that reaches no asker, and the
+ * same timer covers a daemon that simply dropped the request. Three constants
+ * rather than one because the work behind them is not the same work: `agents`
+ * answers from an in-memory index, `agentRead` parses one file's window, and
+ * `agentSearch` walks many files under a byte budget — a search allowed
+ * twenty seconds says nothing about how long a list should spin.
+ */
+const AGENTS_TIMEOUT_MS = 10_000
+const AGENT_READ_TIMEOUT_MS = 15_000
+const AGENT_SEARCH_TIMEOUT_MS = 20_000
+
+/**
  * How long a connection has to last before the backoff forgets it ever failed.
  *
  * "Reset on open" is not enough, because opening is not the same as being kept.
@@ -90,6 +110,14 @@ function dimension(n: number): number {
 }
 
 type Listener<T extends unknown[]> = (...args: T) => void
+
+/**
+ * Whoever is waiting on one request-with-a-promise — the shape every entry of
+ * `peeks` and the three agent maps shares. Both settlers clear the request's
+ * deadline on the way through, which is why teardown can reject an entry
+ * without leaving its timer armed.
+ */
+type Settlers<T> = { resolve: (v: T) => void; reject: (e: Error) => void }
 
 /**
  * A set of listeners. Registration appends and returns an unsubscribe — never
@@ -223,7 +251,22 @@ export class FlueClient {
    * is never coming, and a hover card waiting forever on it would sit at a
    * spinner until the pointer moved.
    */
-  private peeks = new Map<number, { resolve: (p: Preview) => void; reject: (e: Error) => void }>()
+  private peeks = new Map<number, Settlers<Preview>>()
+
+  /**
+   * The agent-transcript requests on the wire, reqId -> whoever is waiting —
+   * `peeks` again, once per response type. A map per type rather than one
+   * tagged map, because each promise is typed to its own answer and the maps
+   * are what keep that honest: an `agentPage` naming an `agents` request's
+   * reqId finds nothing to settle, rather than handing a list a page.
+   *
+   * Every entry is settled, one way or another, exactly as `peeks` promises:
+   * the answer or the error that echoes the reqId, the per-verb deadline, or
+   * the sweep in `teardown`.
+   */
+  private agentIndexAsks = new Map<number, Settlers<AgentIndexMsg>>()
+  private agentPageAsks = new Map<number, Settlers<AgentPageMsg>>()
+  private agentHitsAsks = new Map<number, Settlers<AgentHitsMsg>>()
 
   /** A `list` asked for while the socket was down. See `list`. */
   private listOwed = false
@@ -575,6 +618,99 @@ export class FlueClient {
       if (!this.send({ type: 'peek', id, bytes, reqId })) {
         clearTimeout(deadline)
         this.peeks.delete(reqId)
+        reject(new Error('flue: not connected'))
+      }
+    })
+  }
+
+  /**
+   * Ask for the index of agent transcripts, optionally narrowed by tool or
+   * working directory.
+   *
+   * Promises, as `peek` is and for its reason: each of these three requests
+   * has exactly one asker waiting on exactly one answer, and each is dropped
+   * rather than held while the socket is down — a transcript list surfacing
+   * from behind a ten-second backoff answers a screen that already moved on.
+   * The answer may say `building: true`, in which case asking again is the
+   * caller's move; this client adds no polling of its own.
+   */
+  agents(opts: { tools?: AgentTool[]; cwd?: string } = {}): Promise<AgentIndexMsg> {
+    return this.askAgent(this.agentIndexAsks, AGENTS_TIMEOUT_MS, (reqId) => ({
+      type: 'agents',
+      tools: opts.tools,
+      cwd: opts.cwd,
+      reqId,
+    }))
+  }
+
+  /**
+   * Read one window of a transcript. `offset` is a byte offset — what the
+   * previous page's `next` or `start` handed back, `0` for the top, or the
+   * summary's `fileSize` with `dir: 'backward'` for the end. Rejected with
+   * the daemon's words for a transcript it no longer has.
+   */
+  agentRead(
+    tool: AgentTool,
+    id: string,
+    offset: number,
+    opts: { dir?: 'forward' | 'backward'; limit?: number } = {},
+  ): Promise<AgentPageMsg> {
+    return this.askAgent(this.agentPageAsks, AGENT_READ_TIMEOUT_MS, (reqId) => ({
+      type: 'agentRead',
+      tool,
+      id,
+      offset,
+      dir: opts.dir,
+      limit: opts.limit,
+      reqId,
+    }))
+  }
+
+  /** Search the indexed transcripts, narrowed and capped as the caller asks. */
+  agentSearch(
+    query: string,
+    opts: { tools?: AgentTool[]; cwd?: string; limit?: number } = {},
+  ): Promise<AgentHitsMsg> {
+    return this.askAgent(this.agentHitsAsks, AGENT_SEARCH_TIMEOUT_MS, (reqId) => ({
+      type: 'agentSearch',
+      query,
+      tools: opts.tools,
+      cwd: opts.cwd,
+      limit: opts.limit,
+      reqId,
+    }))
+  }
+
+  /**
+   * The promise-per-request pattern `peek` established, shared by the three
+   * agent verbs. Same order for the same reasons: the entry is set before the
+   * send, so a send that throws synchronously cannot leave a promise nothing
+   * will ever settle; the deadline is load-bearing, because an older daemon's
+   * refusal names no reqId and reaches no asker; and both settlers clear the
+   * deadline, so `teardown`'s sweep leaves no timer armed.
+   */
+  private askAgent<T>(
+    waiting: Map<number, Settlers<T>>,
+    timeoutMs: number,
+    build: (reqId: number) => ClientMessage,
+  ): Promise<T> {
+    if (!this.ready || !this.sock) {
+      return Promise.reject(new Error('flue: not connected'))
+    }
+    const reqId = this.nextReqId++
+    return new Promise<T>((resolve, reject) => {
+      const deadline = setTimeout(() => {
+        if (!waiting.delete(reqId)) return
+        reject(new Error('flue: the daemon did not answer'))
+      }, timeoutMs)
+      const settle = <V,>(cb: (v: V) => void) => (v: V) => {
+        clearTimeout(deadline)
+        cb(v)
+      }
+      waiting.set(reqId, { resolve: settle(resolve), reject: settle(reject) })
+      if (!this.send(build(reqId))) {
+        clearTimeout(deadline)
+        waiting.delete(reqId)
         reject(new Error('flue: not connected'))
       }
     })
@@ -933,6 +1069,21 @@ export class FlueClient {
         break
       }
 
+      // The agent answers settle exactly as `preview` does: by reqId, to the
+      // one asker, and an answer nobody is waiting for — the asker timed out,
+      // or a daemon volunteered one — is dropped rather than raised.
+      case 'agentIndex':
+        this.settleAgentAsk(this.agentIndexAsks, msg)
+        break
+
+      case 'agentPage':
+        this.settleAgentAsk(this.agentPageAsks, msg)
+        break
+
+      case 'agentHits':
+        this.settleAgentAsk(this.agentHitsAsks, msg)
+        break
+
       case 'error': {
         if (msg.reqId !== undefined) {
           // A peek's own refusal, before the attach bookkeeping below looks at
@@ -944,6 +1095,13 @@ export class FlueClient {
           if (waiting !== undefined) {
             this.peeks.delete(msg.reqId)
             waiting.reject(new Error(msg.msg || msg.code))
+            this.errorListeners.emit(msg)
+            break
+          }
+          // An agent request's refusal, ahead of the same bookkeeping for the
+          // same reason: `not_found` answers these too, and an agent ask made
+          // no reattach plan for the sweep below to retire.
+          if (this.rejectAgentAsk(msg.reqId, new Error(msg.msg || msg.code))) {
             this.errorListeners.emit(msg)
             break
           }
@@ -1010,6 +1168,30 @@ export class FlueClient {
     }
   }
 
+  /** Resolve the agent ask `msg` answers, if its asker is still waiting. */
+  private settleAgentAsk<T extends { reqId: number }>(waiting: Map<number, Settlers<T>>, msg: T) {
+    const asked = waiting.get(msg.reqId)
+    if (asked === undefined) return
+    waiting.delete(msg.reqId)
+    asked.resolve(msg)
+  }
+
+  /**
+   * Reject whichever agent ask `reqId` names, and say whether one was found.
+   * All three maps are consulted because an error does not say which verb it
+   * answers; reqIds come off one counter, so at most one map holds it.
+   */
+  private rejectAgentAsk(reqId: number, err: Error): boolean {
+    for (const waiting of [this.agentIndexAsks, this.agentPageAsks, this.agentHitsAsks] as const) {
+      const asked = waiting.get(reqId)
+      if (asked === undefined) continue
+      waiting.delete(reqId)
+      asked.reject(err)
+      return true
+    }
+    return false
+  }
+
   private send(msg: ClientMessage): boolean {
     if (!this.ready || !this.sock) return false
     this.sock.send(JSON.stringify(msg))
@@ -1050,14 +1232,20 @@ export class FlueClient {
     // refOwner is deliberately left alone: it is what lets a view that unmounts
     // during the outage still name the session its ref stood for.
     this.attachments.clear()
-    // All three name replies that were on the wire, and this socket was the
-    // wire. The peeks are rejected rather than merely dropped: a promise
-    // nothing settles is a hover card spinning until the pointer moves.
+    // All of these name replies that were on the wire, and this socket was
+    // the wire. The peeks and the agent asks are rejected rather than merely
+    // dropped: a promise nothing settles is a hover card — or a transcript
+    // screen — spinning until something else moves.
     this.pending.clear()
     this.abandoned.clear()
     const orphaned = [...this.peeks.values()]
     this.peeks.clear()
     for (const p of orphaned) p.reject(new Error('flue: connection lost'))
+    for (const waiting of [this.agentIndexAsks, this.agentPageAsks, this.agentHitsAsks] as const) {
+      const asks = [...waiting.values()]
+      waiting.clear()
+      for (const a of asks) a.reject(new Error('flue: connection lost'))
+    }
     sock?.close()
   }
 

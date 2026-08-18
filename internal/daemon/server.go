@@ -87,6 +87,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/flynn/noise"
+	"github.com/karnstack/flue/internal/agentstore"
 	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/fleet"
 	"github.com/karnstack/flue/internal/session"
@@ -213,6 +214,14 @@ type Server struct {
 	// as auth's, because it too is set after construction.
 	relayUIMu sync.Mutex
 	relayUI   RelayUI
+
+	// agentIdx is the transcript index behind the agent verbs, injected by
+	// cmd/flue (SetAgentIndex); nil means the feature is absent — the verbs
+	// answer bad_message and the welcome never advertises the capability.
+	// Its own lock, same shape as relayUI's, because it too is set after
+	// construction.
+	agentIdxMu sync.Mutex
+	agentIdx   *agentstore.Index
 
 	// fleetPub is where a freshly minted certificate or revocation goes to be
 	// published to the fleet directory, injected by whoever starts the relay

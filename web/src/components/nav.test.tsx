@@ -17,6 +17,13 @@ describe('NAV_ITEMS', () => {
       expect(item.icon).toBeTruthy()
     }
   })
+
+  it('puts Agents between Sessions and Devices', () => {
+    const labels = NAV_ITEMS.map((item) => item.label)
+    expect(labels.indexOf('Agents')).toBe(labels.indexOf('Sessions') + 1)
+    expect(labels.indexOf('Devices')).toBe(labels.indexOf('Agents') + 1)
+    expect(NAV_ITEMS.find((item) => item.label === 'Agents')?.to).toBe('/agents')
+  })
 })
 
 describe('isNavItemActive', () => {

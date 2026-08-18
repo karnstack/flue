@@ -98,7 +98,7 @@ const PATH_MAX = 40
 const PATH_HEAD = 15
 const PATH_TAIL = 22
 
-function midCut(path: string): string {
+export function midCut(path: string): string {
   if (path.length <= PATH_MAX) return path
   return `${path.slice(0, PATH_HEAD)}…${path.slice(-PATH_TAIL)}`
 }
@@ -108,7 +108,7 @@ function midCut(path: string): string {
  * reads unix seconds, so the parse and the division live here, once. A stamp
  * no Date can read renders as nothing rather than as arithmetic on NaN.
  */
-function since(stamp: string): string {
+export function since(stamp: string): string {
   const at = Date.parse(stamp)
   return Number.isNaN(at) ? '' : ago(at / 1000)
 }

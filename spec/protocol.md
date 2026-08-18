@@ -40,6 +40,9 @@ Every control message is a JSON object with a `type` discriminator.
 | `stat` | `id`, `paths[]`, `reqId?` | ask whether paths exist, relative to a session |
 | `read` | `id`, `path`, `reqId?` | start reading one |
 | `cancel` | `ref` | abandon a read in flight |
+| `agents` | `tools[]?`, `cwd?`, `reqId?` | list the machine's agent transcripts |
+| `agentRead` | `tool`, `id`, `offset`, `dir?`, `limit?`, `reqId?` | read one page of a transcript |
+| `agentSearch` | `query`, `tools[]?`, `cwd?`, `limit?`, `reqId?` | search transcripts for a phrase |
 | `devices` | — | list the paired devices |
 | `revoke` | `deviceId` | unpair a device and cut its connections |
 | `pairStart` | — | enter pairing mode |
@@ -59,6 +62,9 @@ Every control message is a JSON object with a `type` discriminator.
 | `stats` | `entries[]`, `reqId?` | answers `stat` |
 | `file` | `ref`, `path`, `size`, `mime`, `kind`, `truncated?`, `reqId?` | answers `read`; content follows as `0x02` frames |
 | `eof` | `ref` | that read's stream has ended |
+| `agentIndex` | `building`, `sessions[]`, `reqId?` | answers `agents` |
+| `agentPage` | `tool`, `id`, `messages[]`, `start`, `next`, `eof`, `fileSize`, `reqId?` | answers `agentRead` |
+| `agentHits` | `building`, `truncated`, `hits[]`, `reqId?` | answers `agentSearch` |
 | `deviceList` | `devices[]` | answers `devices`, and is broadcast after a pairing or a `revoke` |
 | `pairing` | `token`, `url`, `daemonPub`, `expiresAt` | answers `pairStart` |
 | `revoked` | `reason` | this device was unpaired; the connection is about to close |
@@ -335,6 +341,83 @@ losing the row it was aimed at.
 
 Refusals are `not_found`, `is_dir`, `too_large`, `denied`, `bad_path`, `busy`
 and `unsupported`, each correlated by `reqId`.
+
+### Agent transcripts
+
+`agents`, `agentRead` and `agentSearch` open the conversations coding agents
+keep on disk — Claude Code, Codex and Pi each write a transcript per session
+under the user's home — to any client of this daemon. They are wire verbs
+rather than HTTP endpoints because the wire is the only leg every client has:
+a relayed tab reaches this machine over the Noise channel and nothing else,
+and a transcript browser served over loopback only would be a local-only
+feature for no reason anyone could name.
+
+A session is addressed as `(tool, id)`, and **a client never sends a path**.
+The daemon's index is the only thing that turns an identity into a file, so
+the verbs cannot be used to name one: `read` resolves paths because its job is
+the file a session mentioned; these verbs' job is a store whose layout is the
+daemon's business alone. The daemon does volunteer paths it chose itself in
+what it sends back — a summary names the session's working directory, and Pi's
+resume command names the transcript file, because `pi` resumes from a path
+rather than an id — which tells a client where things are without ever letting
+it choose. The formats are other programs' and unversioned, so the daemon
+parses defensively — an unknown line type or a malformed line is skipped,
+never an error — and reports what it could read.
+
+`agents` answers with `agentIndex`: one summary per session — identity,
+working directory, title, first prompt, message and tool-call counts, token
+usage, dollar cost when the transcript itself records one, and a resume
+command when the working directory is known. The daemon keeps these summaries
+in an index it sweeps on demand and caches in its config directory; summaries
+name working directories and first prompts, which is the same order of
+sensitivity as a snapshot's scrollback, so the cache inherits the config
+directory's discipline — 0600 in a 0700 directory, written to a fresh inode
+and renamed into place, rebuilt from the transcripts when corrupt or missing.
+`building` says a sweep is still running: the list is what the daemon knows
+*so far*, and a client that wants the stragglers asks again rather than
+concluding the machine has none. `tools[]` and `cwd` filter; `sessions[]`
+marshals `[]`, never null.
+
+`agentRead` answers with one `agentPage`: a bounded window of normalized
+messages, never the file, because transcripts run to tens of megabytes and
+the answer shares a socket with the terminal. `offset` is a byte offset;
+`dir: "forward"` (the default) parses from it, `dir: "backward"` parses the
+window ending at it and keeps the last messages — which is how "load earlier"
+pages up and how `offset = fileSize` jumps to the end. Each message carries
+the byte offset of its source line, and `start` and `next` are line offsets
+the client hands straight back, so paging needs no cursor state on the
+daemon. A message longer than the daemon's per-block cap arrives cut, with
+`truncated` saying so.
+
+`agentPage.eof` follows the doctrine `eof` set under "Reading files": it says
+the parse reached the end of the file *as it was at read time*, and nothing
+more. These transcripts are appended to by live sessions, so a page that was
+the end a second ago has a successor now — a client re-asks from `next` — and
+a line the writer has not finished (no newline yet) is left for the page that
+finds it whole rather than parsed as garbage.
+
+`agentSearch` answers with `agentHits`: case-insensitive substring over the
+normalized message text, newest sessions first, under one total scan budget —
+spent newest-first so what falls off is the oldest. `truncated` says the
+answer is a prefix (the hit cap or the budget was reached); `building` means
+what it means on `agentIndex`. Each hit carries the session's identity and
+the matched message's line offset, which pages straight to it.
+
+Failures are `bad_message` for what the client got wrong — a tool name
+outside the protocol, a direction that is neither spelling, an empty query —
+and `not_found` for a session that is not there, which over stores other
+programs prune is the ordinary answer, not the exceptional one. `busy`
+answers an `agentRead` or `agentSearch` past the connection's cap on
+concurrent agent requests, the same code and the same meaning as one file
+read too many: retry when an outstanding answer lands. Every reply and
+refusal is correlated by `reqId`.
+
+All of it is additive. A daemon with the feature advertises `"agents"` in
+`welcome.caps` — and only when it actually has an index, since a daemon that
+could not resolve a home directory has no stores to read — and a client gates
+the whole screen on the cap. An old daemon advertises nothing, the client
+draws nothing, and the verbs are never sent; a client that races its own
+welcome gets `bad_message` and treats it as the cap's absence.
 
 ## Pairing
 

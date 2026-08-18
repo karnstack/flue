@@ -8,6 +8,8 @@ import {
 import type { FlueClient } from '@/client/client'
 import { FleetProvider } from '@/fleet/provider'
 import { AppShell } from '@/components/app-shell'
+import { AgentViewerRoute } from '@/routes/agent-viewer'
+import { AgentsRoute } from '@/routes/agents'
 import { DevicesRoute } from '@/routes/devices'
 import { MachinesRoute } from '@/routes/machines'
 import { NewSessionRoute } from '@/routes/new-session'
@@ -171,6 +173,50 @@ const sessionsRoute = createRoute({
   component: SessionsRoute,
 })
 
+/**
+ * The agents browser. One route, three presentations — the sessions list, the
+ * insights, and the search results. `q` rides the URL as history (a search is
+ * what the back button should undo); `view=insights` rides it as state, written
+ * with replace so a reload lands back on the insights and the back button
+ * never wades through toggle flips. The chip filters stay out: they are
+ * glances, not places.
+ */
+const agentsRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/agents',
+  validateSearch: (search: Record<string, unknown>): { q?: string; view?: 'insights' } => {
+    const out: { q?: string; view?: 'insights' } = {}
+    if (typeof search.q === 'string' && search.q !== '') out.q = search.q
+    if (search.view === 'insights') out.view = 'insights'
+    return out
+  },
+  component: AgentsRoute,
+})
+
+/**
+ * The transcript viewer, inside the shell unlike the terminal: a transcript
+ * is a document being read, not a session being ridden, and the way back to
+ * the list should stay one click away. `at` is a byte offset from a search
+ * hit — the wire's own anchor — narrowed to a non-negative number or dropped,
+ * so a mangled link opens the transcript from the top rather than nowhere.
+ */
+const agentViewerRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/agents/$machineId/$tool/$sessionId',
+  validateSearch: (search: Record<string, unknown>): { at?: number } => {
+    const out: { at?: number } = {}
+    const at =
+      typeof search.at === 'number'
+        ? search.at
+        : typeof search.at === 'string'
+          ? Number(search.at)
+          : Number.NaN
+    if (Number.isInteger(at) && at >= 0) out.at = at
+    return out
+  },
+  component: AgentViewerRoute,
+})
+
 const devicesRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/devices',
@@ -287,7 +333,15 @@ const pairRoute = createRoute({
 })
 
 const routeTree = rootRoute.addChildren([
-  shellRoute.addChildren([indexRoute, sessionsRoute, devicesRoute, remoteRoute, settingsRoute]),
+  shellRoute.addChildren([
+    indexRoute,
+    sessionsRoute,
+    agentsRoute,
+    agentViewerRoute,
+    devicesRoute,
+    remoteRoute,
+    settingsRoute,
+  ]),
   terminalRoute,
   newSessionRoute,
   machinesRoute,
