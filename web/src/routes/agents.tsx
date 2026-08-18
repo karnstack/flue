@@ -12,7 +12,6 @@ import {
   applyAgentView,
   byModel,
   byProject,
-  compactCost,
   compactTokens,
   DEFAULT_AGENT_VIEW,
   filterHistory,
@@ -819,6 +818,11 @@ function Insights({
       }
     }, [rows, history, lifetime, filters, range])
 
+  // No cost card, deliberately, even though Pi transcripts record dollars
+  // and insightTotals still sums them: only one tool's sessions carry a
+  // figure, so the card read as the whole screen's bill while covering a
+  // sliver of it. If it returns it needs a provenance story, not a wider
+  // sum — compactCost in agents/view.ts is waiting for it.
   const stats: Array<{ label: string; value: string }> = [
     { label: 'Sessions', value: String(totals.sessions) },
     // The headline the tools' own usage screens lead with: every bucket
@@ -828,9 +832,6 @@ function Insights({
     { label: 'Output tokens', value: compactTokens(totals.output) },
     { label: 'Cache read', value: compactTokens(totals.cacheRead) },
   ]
-  if (totals.costUsd !== null) {
-    stats.push({ label: 'Recorded cost', value: compactCost(totals.costUsd) })
-  }
 
   // The quiet label/value rows beside the heatmap; a row whose value would
   // read as null or zero is left out rather than printed empty.
@@ -881,16 +882,7 @@ function Insights({
               claim, and on the dark canvas the panel-plus-inset-ring is what
               gives the row a shape the hairlines never quite did. */}
           <dl
-            className={cn(
-              'grid grid-cols-2 gap-3',
-              // Five across is the widest a row of these stays legible;
-              // six splits into two balanced rows of three instead.
-              stats.length === 6
-                ? '@2xl:grid-cols-3'
-                : stats.length === 5
-                  ? '@2xl:grid-cols-5'
-                  : '@2xl:grid-cols-4',
-            )}
+            className={cn('grid grid-cols-2 gap-3', '@2xl:grid-cols-5')}
           >
             {stats.map((stat) => (
               // Reversed visually: the value reads above its label, while
