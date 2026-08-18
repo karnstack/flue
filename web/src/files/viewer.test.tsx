@@ -293,6 +293,69 @@ describe('FileViewer', () => {
     expect(sock.control().filter((m) => m.type === 'read')).toHaveLength(2)
   })
 
+  it('opens a complete markdown file rendered, raw one press away', async () => {
+    const { sock, sent } = openViewer({ path: 'README.md' })
+    served(sock, sent!.reqId, { path: '/home/k/README.md' })
+    await flowed(sock, '# Hello\n\nplain words')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 1, name: 'Hello' })).toBeTruthy()
+    })
+    expect(document.querySelector('[data-file-row]')).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Raw' }))
+    expect(screen.queryByRole('heading', { level: 1, name: 'Hello' })).toBeNull()
+    expect(document.querySelector('[data-file-row]')).not.toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Rendered' }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 1, name: 'Hello' })).toBeTruthy()
+    })
+  })
+
+  it('offers no rendered view for a file that is not markdown', async () => {
+    const { sock, sent } = openViewer({ path: 'notes.txt' })
+    served(sock, sent!.reqId, { path: '/home/k/notes.txt' })
+    await flowed(sock, 'plain')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    expect(screen.queryByRole('button', { name: 'Rendered' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Raw' })).toBeNull()
+  })
+
+  it('keeps a shortened markdown file raw, with no rendered option', async () => {
+    const { sock, sent } = openViewer({ path: 'big.md' })
+    served(sock, sent!.reqId, { path: '/home/k/big.md', size: 41943040, truncated: true })
+    await flowed(sock, '# Half a heading')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    expect(screen.queryByRole('button', { name: 'Rendered' })).toBeNull()
+    expect(document.querySelector('[data-file-row]')).not.toBeNull()
+  })
+
+  it('opens raw when the click named a line, rendering still offered', async () => {
+    const { sock, sent } = openViewer({ path: 'README.md', line: 2 })
+    served(sock, sent!.reqId, { path: '/home/k/README.md' })
+    await flowed(sock, '# Hello\nsecond line\nthird')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    expect(document.querySelector('[data-file-row]')).not.toBeNull()
+    expect(screen.getByText('second line').closest('[data-file-row]')!.getAttribute('data-marked')).toBe('true')
+    await userEvent.click(screen.getByRole('button', { name: 'Rendered' }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 1, name: 'Hello' })).toBeTruthy()
+    })
+  })
+
   it('wraps long lines by default, and unwraps on the toggle', async () => {
     const { sock, sent } = openViewer({ path: 'notes.txt' })
     served(sock, sent!.reqId, { path: '/home/k/notes.txt' })

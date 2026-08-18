@@ -1,7 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Check, Copy, FileText, WrapText, X } from 'lucide-react'
 import { Dialog } from 'radix-ui'
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from 'react'
 
 import { useFlueClient } from '@/client/provider'
 import type { FileMsg, PathEntry } from '@/client/protocol'
@@ -56,9 +56,17 @@ const REFUSALS: Record<string, string> = {
 
 type Phase =
   | { at: 'opening' }
-  | { at: 'text'; meta: FileMsg }
+  | { at: 'text'; meta: FileMsg; done: boolean }
   | { at: 'image'; meta: FileMsg }
   | { at: 'refused'; code: string }
+
+/** How the body of a markdown file shows: as a page, or as its lines. */
+type BodyMode = 'rendered' | 'raw'
+
+/** Loaded on the first markdown file, beside shiki, never in the bundle. */
+const MarkdownLazy = lazy(() =>
+  import('./markdown').then((m) => ({ default: m.MarkdownView })),
+)
 
 /**
  * A file over the session: the answer to clicking a path the session named.
@@ -76,6 +84,7 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
   const [tokens, setTokens] = useState<PeekToken[][] | null>(null)
   const [imageUrl, setImageUrl] = useState<string | null>(null)
   const [wrap, setWrap] = useState(true)
+  const [mode, setMode] = useState<BodyMode>('raw')
   const [, setPainted] = useState(0)
   const linesRef = useRef<string[]>([])
   const frame = useRef(0)
@@ -125,7 +134,17 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
     const deliverMeta = (m: FileMsg) => {
       meta = m
       if (gone) return
-      setPhase(m.kind === 'image' ? { at: 'image', meta: m } : { at: 'text', meta: m })
+      setPhase(m.kind === 'image' ? { at: 'image', meta: m } : { at: 'text', meta: m, done: false })
+      // A whole markdown file opens as a page; a click that named a line
+      // opens on the lines the number means, with the page one press away.
+      setMode(
+        m.kind === 'text' &&
+          m.truncated !== true &&
+          target.line === undefined &&
+          languageFor(m.path) === 'markdown'
+          ? 'rendered'
+          : 'raw',
+      )
     }
     const deliverChunk = (bytes: Uint8Array) => {
       parts.push(bytes)
@@ -159,6 +178,7 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
           linesRef.current.push(tail)
           tail = ''
         }
+        setPhase((p) => (p.at === 'text' ? { ...p, done: true } : p))
         repaint()
       }
       colour()
@@ -244,6 +264,12 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
   const slash = shownPath.lastIndexOf('/')
   const base = slash >= 0 ? shownPath.slice(slash + 1) : shownPath
   const dir = slash > 0 ? shownPath.slice(0, slash) : slash === 0 ? '/' : ''
+  const renderable =
+    phase.at === 'text' &&
+    phase.meta.truncated !== true &&
+    languageFor(phase.meta.path) === 'markdown'
+  const showsPage = renderable && mode === 'rendered'
+  const showsLines = phase.at === 'text' && !showsPage
 
   return (
     <Dialog.Root
@@ -275,7 +301,29 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
                 {fmtBytes(meta.size)}
               </span>
             )}
-            {phase.at === 'text' && (
+            {renderable && (
+              <div className="flex shrink-0 items-center gap-0.5">
+                <Button
+                  aria-pressed={mode === 'rendered'}
+                  size="xs"
+                  variant="ghost"
+                  className={mode === 'rendered' ? 'bg-muted/60' : 'text-muted-foreground'}
+                  onClick={() => setMode('rendered')}
+                >
+                  Rendered
+                </Button>
+                <Button
+                  aria-pressed={mode === 'raw'}
+                  size="xs"
+                  variant="ghost"
+                  className={mode === 'raw' ? 'bg-muted/60' : 'text-muted-foreground'}
+                  onClick={() => setMode('raw')}
+                >
+                  Raw
+                </Button>
+              </div>
+            )}
+            {showsLines && (
               <Button
                 aria-label="Wrap lines"
                 aria-pressed={wrap}
@@ -323,7 +371,28 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
                 Receiving the image…
               </p>
             ))}
-          {phase.at === 'text' && (
+          {showsPage && phase.at === 'text' && (
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+              <div className="mx-auto w-full max-w-[72ch] px-6 py-4 text-sm">
+                {phase.done ? (
+                  <Suspense
+                    fallback={
+                      <p role="status" className="text-control text-muted-foreground">
+                        Rendering…
+                      </p>
+                    }
+                  >
+                    <MarkdownLazy text={linesRef.current.join('\n')} />
+                  </Suspense>
+                ) : (
+                  <p role="status" className="text-control text-muted-foreground">
+                    Receiving…
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+          {showsLines && (
             // Keyed by path, so a viewer whose target changes under it — a
             // later phase reuses the mounted dialog — starts its scroll and
             // its one-shot jump over rather than inheriting the old file's.
