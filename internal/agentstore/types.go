@@ -65,6 +65,15 @@ type TokenUsage struct {
 	CacheWrite int64 `json:"cacheWrite"`
 }
 
+// add folds another accounting into this one, bucket by bucket — how a
+// subagent file's tokens land on the conversation that spawned it.
+func (t *TokenUsage) add(u TokenUsage) {
+	t.Input += u.Input
+	t.Output += u.Output
+	t.CacheRead += u.CacheRead
+	t.CacheWrite += u.CacheWrite
+}
+
 // Resume is the command that picks a session back up, with the directory to
 // run it in. It is a hint printed for a human, never something this package
 // executes; a session whose working directory is unknown carries no Resume at
@@ -102,6 +111,12 @@ type Summary struct {
 	CostUsd  float64 `json:"costUsd,omitempty"`
 	FileSize int64   `json:"fileSize"`
 	Resume   *Resume `json:"resume,omitempty"`
+	// Missing says the transcript file has been pruned by its own tool —
+	// Claude Code deletes transcripts past its cleanup period — and this
+	// summary is a tombstone: it still counts in every aggregate, but there
+	// is no file left to page or resume, so a client keeps it out of the
+	// list of openable transcripts.
+	Missing bool `json:"missing,omitempty"`
 }
 
 // Message is one normalized entry of a transcript page.

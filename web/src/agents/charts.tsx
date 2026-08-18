@@ -309,7 +309,15 @@ export function Heatmap({
                       <TooltipContent sideOffset={6}>
                         <span className="font-medium">{heatDayLabel(cell.dayMs)}</span>
                         <span className="text-background/70">
-                          {cell.tokens > 0 ? `${compactTokens(cell.tokens)} tok` : 'quiet'}
+                          {/* A painted day with no token figure is backfill:
+                              the tool's own counters remember activity whose
+                              transcripts are gone, so it is active, not
+                              quiet — just unmeasured. */}
+                          {cell.tokens > 0
+                            ? `${compactTokens(cell.tokens)} tok`
+                            : cell.level > 0
+                              ? 'active'
+                              : 'quiet'}
                         </span>
                       </TooltipContent>
                     </Tooltip>

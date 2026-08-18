@@ -72,7 +72,7 @@ func (c *conn) handleAgents(m wire.Agents) {
 		return
 	}
 	sessions, building := idx.Snapshot(m.Tools, m.Cwd)
-	_ = c.sendControl(wire.AgentIndex{Building: building, Sessions: sessions, ReqID: m.ReqID})
+	_ = c.sendControl(wire.AgentIndex{Building: building, Sessions: sessions, History: idx.History(), ReqID: m.ReqID})
 }
 
 // beginAgentWork claims one of the connection's agent-work slots, answering

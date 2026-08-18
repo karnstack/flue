@@ -39,6 +39,16 @@ type adapter interface {
 	resume(sum Summary, path string) *Resume
 }
 
+// subagentFiler is the optional face of an adapter whose store keeps some
+// files as accounting for another: parentPath names the transcript a file
+// augments, or "" for a file that is a session itself. Claude's subagents/
+// files are today's only case. A file with a parent is indexed like any
+// other — incremental parse, persisted entry — but never listed as a
+// session: its tokens are folded into the parent's summary by Snapshot.
+type subagentFiler interface {
+	parentPath(path string) string
+}
+
 // lineParser consumes newline-terminated transcript lines, in file order,
 // accumulating a summary and yielding the normalized messages each line holds.
 type lineParser interface {
@@ -175,6 +185,14 @@ type entry struct {
 	MtimeNs int64      `json:"mtimeNs"`
 	Offset  int64      `json:"offset"`
 	State   parseState `json:"state"`
+	// ParentPath marks a subagent file: the transcript whose summary absorbs
+	// this file's tokens (subagentFiler). Empty for a session of its own.
+	ParentPath string `json:"parentPath,omitempty"`
+	// Missing says the file has vanished from disk — Claude Code prunes
+	// transcripts after its cleanup period — and the entry is a tombstone:
+	// the summary still counts, the transcript can no longer be opened. Set
+	// by the sweep, cleared by refresh the moment the file is back.
+	Missing bool `json:"missing,omitempty"`
 }
 
 // Index is the in-memory map of every transcript the sweep has met, keyed by
@@ -191,6 +209,13 @@ type Index struct {
 	building bool
 	sweeping bool
 	lastAt   time.Time
+
+	// The backfill cache, its own lock because History and Snapshot share no
+	// state and a stats-cache parse must not queue a list behind it.
+	histMu      sync.Mutex
+	histSize    int64
+	histMtimeNs int64
+	hist        []HistoryDay
 }
 
 // indexFileName is the one file this package writes.
@@ -308,7 +333,12 @@ func (x *Index) poke() {
 
 // sweep walks every adapter's roots and brings the index into line with the
 // files: new files parsed, grown files parsed from their stored offset,
-// shrunk or replaced files re-parsed whole, vanished files dropped.
+// shrunk or replaced files re-parsed whole, vanished files tombstoned. A
+// tombstone rather than a drop, because the stores prune themselves — Claude
+// Code deletes transcripts past its cleanup period — and a session's
+// accounting should outlive the file the way the tool's own /usage counters
+// do. The summary stays, marked Missing; only the transcript behind it is
+// gone.
 func (x *Index) sweep() {
 	dirty := false
 	seen := map[string]bool{}
@@ -324,9 +354,9 @@ func (x *Index) sweep() {
 	}
 
 	x.mu.Lock()
-	for path := range x.entries {
-		if !seen[path] {
-			delete(x.entries, path)
+	for path, e := range x.entries {
+		if !seen[path] && !e.Missing {
+			e.Missing = true
 			dirty = true
 		}
 	}
@@ -358,6 +388,13 @@ func (x *Index) refresh(ad adapter, path string) bool {
 	case prev == nil:
 		// New file: parse whole.
 	case size == prev.Size && mtime == prev.MtimeNs:
+		// Unchanged — but a tombstoned file that is back on disk unchanged
+		// (restored from a backup, say) is a change worth recording.
+		if prev.Missing {
+			prev.Missing = false
+			x.mu.Unlock()
+			return true
+		}
 		x.mu.Unlock()
 		return false
 	case size > prev.Size:
@@ -380,8 +417,13 @@ func (x *Index) refresh(ad adapter, path string) bool {
 	sum.FileSize = size
 	sum.Resume = ad.resume(sum, path)
 
+	var parent string
+	if sf, ok := ad.(subagentFiler); ok {
+		parent = sf.parentPath(path)
+	}
+
 	x.mu.Lock()
-	x.entries[path] = &entry{Summary: sum, Size: size, MtimeNs: mtime, Offset: off, State: st}
+	x.entries[path] = &entry{Summary: sum, Size: size, MtimeNs: mtime, Offset: off, State: st, ParentPath: parent}
 	x.mu.Unlock()
 	return true
 }
@@ -424,8 +466,24 @@ func (x *Index) Snapshot(tools []string, cwd string) ([]Summary, bool) {
 	x.poke()
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	out := []Summary{}
+	// Subagent files first: their tokens land on the conversation that
+	// spawned them, keyed by the parent's path. Tombstoned subagents fold
+	// too — the accounting outlives the file, which is the tombstone's whole
+	// point.
+	folded := map[string]TokenUsage{}
 	for _, e := range x.entries {
+		if e.ParentPath != "" {
+			u := folded[e.ParentPath]
+			u.add(e.Summary.Tokens)
+			folded[e.ParentPath] = u
+		}
+	}
+	out := []Summary{}
+	for path, e := range x.entries {
+		// A subagent file is accounting, not a session; it was folded above.
+		if e.ParentPath != "" {
+			continue
+		}
 		// A file with no conversation — hook echoes, a bare last-prompt
 		// stub, a session someone opened and closed — is bookkeeping, not a
 		// session. It stays in the index (so the sweep does not re-parse it
@@ -440,7 +498,18 @@ func (x *Index) Snapshot(tools []string, cwd string) ([]Summary, bool) {
 		if cwd != "" && e.Summary.Cwd != cwd {
 			continue
 		}
-		out = append(out, e.Summary)
+		sum := e.Summary
+		if u, ok := folded[path]; ok {
+			sum.Tokens.add(u)
+		}
+		if e.Missing {
+			// A tombstone still counts, but it cannot be opened or resumed,
+			// and the flag is how a client knows to keep it out of the list
+			// of openable transcripts while still charting it.
+			sum.Missing = true
+			sum.Resume = nil
+		}
+		out = append(out, sum)
 	}
 	sortNewestFirst(out)
 	return out, x.building

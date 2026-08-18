@@ -243,18 +243,24 @@ func TestPartialTrailingLineIsNotConsumed(t *testing.T) {
 	}
 }
 
-func TestVanishedFilesDropTheirEntries(t *testing.T) {
+func TestVanishedFilesBecomeTombstones(t *testing.T) {
 	x, _, paths := newSweptIndex(t)
 	if err := os.Remove(paths[ToolCodex]); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	x.sweep()
-	if _, _, ok := x.Resolve(ToolCodex, codexFixtureID); ok {
-		t.Error("Resolve still finds a session whose file is gone")
-	}
+	// The session still counts — the stores prune themselves, and history
+	// must not vanish with the file — but it is flagged, so a client can
+	// keep it out of the openable list. The full contract is pinned in
+	// TestSweepTombstonesVanishedTranscripts.
 	sums, _ := x.Snapshot(nil, "")
-	if len(sums) != 2 {
-		t.Fatalf("Snapshot = %d sessions, want 2", len(sums))
+	if len(sums) != 3 {
+		t.Fatalf("Snapshot = %d sessions, want 3 (a prune tombstones, never drops)", len(sums))
+	}
+	for _, s := range sums {
+		if s.Tool == ToolCodex && !s.Missing {
+			t.Error("pruned session served without its missing flag")
+		}
 	}
 }
 

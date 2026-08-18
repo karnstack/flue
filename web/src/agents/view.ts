@@ -14,7 +14,13 @@
  * single arrangement rule, and an arrangement rule should be arguable without
  * reading any markup at all.
  */
-import type { AgentHit, AgentMessage, AgentSummary, AgentTool } from '@/client/protocol'
+import type {
+  AgentHistoryDay,
+  AgentHit,
+  AgentMessage,
+  AgentSummary,
+  AgentTool,
+} from '@/client/protocol'
 
 /**
  * One transcript stamped with the machine whose disk it lives on. The stamp is
@@ -31,6 +37,15 @@ export interface AgentRow extends AgentSummary {
 export interface AgentHitRow extends AgentHit {
   machineId: string
   machineName: string
+}
+
+/**
+ * One backfill day stamped with its machine, exactly as AgentRow is. The
+ * merge with the transcript rows is per (machine, tool, day) — see
+ * mergedSessionCounts — so the stamp is load-bearing, not a label.
+ */
+export interface HistoryDayRow extends AgentHistoryDay {
+  machineId: string
 }
 
 /**
@@ -323,7 +338,10 @@ export function groupRows(rows: AgentRow[], grouping: AgentGrouping, now: number
 /**
  * The whole pipeline, in the one direction it runs: chip filters, then the
  * order, then the cut into headed runs. One function so no caller re-derives
- * the sequence.
+ * the sequence. Tombstones — summaries whose transcript the tool has pruned
+ * — are dropped here and only here: the list is the openable transcripts,
+ * and a row that cannot open is a broken promise; the insights, which they
+ * still count toward, take the unfiltered rows.
  */
 export function applyAgentView(
   rows: AgentRow[],
@@ -331,7 +349,8 @@ export function applyAgentView(
   filters: { tools?: ReadonlySet<AgentTool>; machines?: ReadonlySet<string> },
   now: number,
 ): AgentGroup[] {
-  return groupRows(orderRows(filterRows(rows, filters), view.ordering), view.grouping, now)
+  const openable = rows.filter((r) => !r.missing)
+  return groupRows(orderRows(filterRows(openable, filters), view.ordering), view.grouping, now)
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +387,78 @@ export function rangeFilter(rows: AgentRow[], range: InsightRange, now: number):
   })
 }
 
+/**
+ * The local start of the day a backfill date names. The date is a bare
+ * YYYY-MM-DD in the serving machine's calendar; read in the viewer's, the
+ * honest simplification every cross-machine day bucket here already makes.
+ * NaN for a date that will not parse, which every consumer skips.
+ */
+export function historyDayMs(date: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date)
+  if (m === null) return Number.NaN
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()
+}
+
+/** The backfill days the chip filters admit — filterRows for HistoryDayRow. */
+export function filterHistory(
+  history: HistoryDayRow[],
+  opts: { tools?: ReadonlySet<AgentTool>; machines?: ReadonlySet<string> } = {},
+): HistoryDayRow[] {
+  const { tools, machines } = opts
+  return history.filter(
+    (h) =>
+      (tools === undefined || tools.size === 0 || tools.has(h.tool)) &&
+      (machines === undefined || machines.size === 0 || machines.has(h.machineId)),
+  )
+}
+
+/** The backfill days a range admits — rangeFilter for HistoryDayRow. */
+export function rangeFilterHistory(
+  history: HistoryDayRow[],
+  range: InsightRange,
+  now: number,
+): HistoryDayRow[] {
+  const today = dayStartMs(now)
+  const from = range === 'all' ? Number.NEGATIVE_INFINITY : shiftDay(today, -(RANGE_DAYS[range] - 1))
+  return history.filter((h) => {
+    const day = historyDayMs(h.date)
+    return !Number.isNaN(day) && day >= from && day <= today
+  })
+}
+
+/**
+ * Sessions per (machine, tool, day), transcripts and backfill merged by
+ * taking the larger of the two claims for each key. Larger, not summed: on a
+ * day both witness, the backfill's count and the indexed count are the same
+ * sessions told twice — the backfill even counts stubs the index hides, so
+ * it may honestly say more — while summing would bill every session double.
+ * Rows with no readable start stamp merge with nothing and are counted as
+ * themselves under one NaN key per machine and tool.
+ */
+function mergedSessionCounts(rows: AgentRow[], history: HistoryDayRow[]): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const r of rows) {
+    const at = Date.parse(r.startedAt)
+    const day = Number.isNaN(at) ? 'undated' : String(dayStartMs(at))
+    const key = `${r.machineId}|${r.tool}|${day}`
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  for (const h of history) {
+    const day = historyDayMs(h.date)
+    if (Number.isNaN(day)) continue
+    const key = `${h.machineId}|${h.tool}|${day}`
+    counts.set(key, Math.max(counts.get(key) ?? 0, h.sessions))
+  }
+  return counts
+}
+
+/** The merged session total — mergedSessionCounts, summed. */
+export function mergedSessions(rows: AgentRow[], history: HistoryDayRow[]): number {
+  let total = 0
+  for (const n of mergedSessionCounts(rows, history).values()) total += n
+  return total
+}
+
 /** The day `days` calendar days away from `dayMs`, DST-proof. */
 function shiftDay(dayMs: number, days: number): number {
   const d = new Date(dayMs)
@@ -384,7 +475,7 @@ export interface InsightTotals {
   costUsd: number | null
 }
 
-export function insightTotals(rows: AgentRow[]): InsightTotals {
+export function insightTotals(rows: AgentRow[], history: HistoryDayRow[] = []): InsightTotals {
   let input = 0
   let output = 0
   let cacheRead = 0
@@ -395,7 +486,11 @@ export function insightTotals(rows: AgentRow[]): InsightTotals {
     cacheRead += r.tokens.cacheRead
     if (r.costUsd !== undefined) costUsd = (costUsd ?? 0) + r.costUsd
   }
-  return { sessions: rows.length, input, output, cacheRead, costUsd }
+  // Sessions merge with the backfill; the token figures cannot — the
+  // aggregates behind the backfill fold cache reads into one number, a
+  // different measurement — so they stay the transcripts' own and read as
+  // "at least" for any span the backfill extends.
+  return { sessions: mergedSessions(rows, history), input, output, cacheRead, costUsd }
 }
 
 /** One day of the stacked chart: tokens per tool, on the session's start day. */
@@ -421,15 +516,20 @@ export interface SessionsDayPoint {
  *  most a per-day chart can say before the bars are hairlines. */
 const DAY_SPAN_CAP = 366
 
-/** The continuous run of days from the earliest row to `now`, zero-filled —
- *  a chart with the quiet days missing would lie about the pace — and capped
- *  at DAY_SPAN_CAP days ending today. Rows before the window still count in
- *  the stat strip; they just fall off the left edge of the chart. */
-function daySpan(rows: AgentRow[], now: number): number[] {
+/** The continuous run of days from the earliest row or backfill day to
+ *  `now`, zero-filled — a chart with the quiet days missing would lie about
+ *  the pace — and capped at DAY_SPAN_CAP days ending today. Days before the
+ *  window still count in the stat strip; they just fall off the left edge of
+ *  the chart. */
+function daySpan(rows: AgentRow[], history: HistoryDayRow[], now: number): number[] {
   let first = Number.POSITIVE_INFINITY
   for (const r of rows) {
     const at = Date.parse(r.startedAt)
     if (!Number.isNaN(at)) first = Math.min(first, dayStartMs(at))
+  }
+  for (const h of history) {
+    const day = historyDayMs(h.date)
+    if (!Number.isNaN(day)) first = Math.min(first, day)
   }
   if (!Number.isFinite(first)) return []
   const last = dayStartMs(now)
@@ -439,7 +539,11 @@ function daySpan(rows: AgentRow[], now: number): number[] {
   return days
 }
 
-export function tokensByDay(rows: AgentRow[], now: number): TokensDayPoint[] {
+export function tokensByDay(
+  rows: AgentRow[],
+  now: number,
+  history: HistoryDayRow[] = [],
+): TokensDayPoint[] {
   const points = new Map<number, Record<AgentTool, number>>()
   for (const r of rows) {
     const at = Date.parse(r.startedAt)
@@ -449,7 +553,10 @@ export function tokensByDay(rows: AgentRow[], now: number): TokensDayPoint[] {
     point[r.tool] += rowTokens(r)
     points.set(day, point)
   }
-  return daySpan(rows, now).map((day) => {
+  // The backfill widens the span but never the bars: it has no token figure
+  // in the transcripts' measurement, so its days chart as quiet — visible,
+  // zero, honest.
+  return daySpan(rows, history, now).map((day) => {
     const byTool = points.get(day) ?? { claude: 0, codex: 0, pi: 0 }
     return {
       dayMs: day,
@@ -460,17 +567,25 @@ export function tokensByDay(rows: AgentRow[], now: number): TokensDayPoint[] {
   })
 }
 
-export function sessionsByDay(rows: AgentRow[], now: number): SessionsDayPoint[] {
+export function sessionsByDay(
+  rows: AgentRow[],
+  now: number,
+  history: HistoryDayRow[] = [],
+): SessionsDayPoint[] {
+  // Per machine and tool first, so the merge with the backfill is the
+  // per-key larger-of-two that mergedSessionCounts defines, then summed
+  // across machines per day for the chart.
+  const merged = mergedSessionCounts(rows, history)
   const counts = new Map<number, Record<AgentTool, number>>()
-  for (const r of rows) {
-    const at = Date.parse(r.startedAt)
-    if (Number.isNaN(at)) continue
-    const day = dayStartMs(at)
-    const point = counts.get(day) ?? { claude: 0, codex: 0, pi: 0 }
-    point[r.tool] += 1
-    counts.set(day, point)
+  for (const [key, n] of merged) {
+    const [, tool, day] = key.split('|') as [string, AgentTool, string]
+    const dayMs = Number(day)
+    if (!Number.isFinite(dayMs)) continue
+    const point = counts.get(dayMs) ?? { claude: 0, codex: 0, pi: 0 }
+    point[tool] += n
+    counts.set(dayMs, point)
   }
-  return daySpan(rows, now).map((day) => {
+  return daySpan(rows, history, now).map((day) => {
     const byTool = counts.get(day) ?? { claude: 0, codex: 0, pi: 0 }
     return {
       dayMs: day,
@@ -566,6 +681,7 @@ function mondayIndex(ms: number): number {
 export function heatmapWeeks(
   rows: AgentRow[],
   now: number,
+  history: HistoryDayRow[] = [],
 ): { weeks: HeatCell[][]; months: HeatMonth[] } {
   const today = dayStartMs(now)
   const thisMonday = shiftDay(today, -mondayIndex(today))
@@ -578,6 +694,18 @@ export function heatmapWeeks(
     const day = dayStartMs(at)
     if (day < firstMonday || day > today) continue
     tokens.set(day, (tokens.get(day) ?? 0) + rowTokens(r))
+  }
+
+  // Days only the backfill witnesses: active, magnitude unknown. They paint
+  // at the faintest level rather than blank — a day the tool's own counters
+  // remember must not read as a day off — and they stay out of the quartile
+  // ranking, which is a ranking of measured token totals.
+  const backfilled = new Set<number>()
+  for (const h of history) {
+    const day = historyDayMs(h.date)
+    if (Number.isNaN(day) || day < firstMonday || day > today) continue
+    if ((tokens.get(day) ?? 0) > 0) continue
+    backfilled.add(day)
   }
 
   const active = [...tokens.values()].filter((v) => v > 0).sort((a, b) => a - b)
@@ -601,7 +729,8 @@ export function heatmapWeeks(
         continue
       }
       const t = tokens.get(day) ?? 0
-      week.push({ dayMs: day, tokens: t, level: levelOf(t) })
+      const level = backfilled.has(day) ? 1 : levelOf(t)
+      week.push({ dayMs: day, tokens: t, level })
     }
     weeks.push(week)
   }
@@ -659,7 +788,11 @@ export interface UsageStats {
  * per active day, so the ancient-stamp guard costs a set entry rather than a
  * march from year 1 to now.
  */
-export function usageStats(rows: AgentRow[], now: number): UsageStats {
+export function usageStats(
+  rows: AgentRow[],
+  now: number,
+  history: HistoryDayRow[] = [],
+): UsageStats {
   const today = dayStartMs(now)
 
   let totalTokens = 0
@@ -679,8 +812,18 @@ export function usageStats(rows: AgentRow[], now: number): UsageStats {
     }
   }
 
+  // A day either witness saw is an active day: the calendar facts — active
+  // days, span, streaks — take the transcripts and the backfill together,
+  // while the token facts (most active day, total) stay the transcripts'
+  // own, historyDayMs's reason.
+  const activeDaySet = new Set(byStartDay.keys())
+  for (const h of history) {
+    const day = historyDayMs(h.date)
+    if (!Number.isNaN(day) && day <= today) activeDaySet.add(day)
+  }
+
   let first = Number.POSITIVE_INFINITY
-  for (const day of byStartDay.keys()) first = Math.min(first, day)
+  for (const day of activeDaySet) first = Math.min(first, day)
   let spanDays = 0
   if (Number.isFinite(first)) {
     first = Math.max(first, shiftDay(today, -(DAY_SPAN_CAP - 1)))
@@ -698,7 +841,7 @@ export function usageStats(rows: AgentRow[], now: number): UsageStats {
     }
   }
 
-  const active = [...byStartDay.keys()].sort((a, b) => a - b)
+  const active = [...activeDaySet].sort((a, b) => a - b)
   let longestStreak = 0
   let run = 0
   let prev: number | null = null
@@ -718,9 +861,9 @@ export function usageStats(rows: AgentRow[], now: number): UsageStats {
 
   const models = byModel(rows)
   return {
-    sessions: rows.length,
+    sessions: mergedSessions(rows, history),
     totalTokens,
-    activeDays: byStartDay.size,
+    activeDays: activeDaySet.size,
     spanDays,
     mostActiveDay: mostDay === null ? null : monthDay(mostDay, now),
     favoriteModel: models.length === 0 ? null : shortModel(models[0]!.model),
