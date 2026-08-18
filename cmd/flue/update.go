@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/karnstack/flue/internal/daemon"
+	"github.com/karnstack/flue/internal/service"
 	"github.com/karnstack/flue/internal/transport/local"
 )
 
@@ -350,6 +351,12 @@ func extractFlue(archive []byte) ([]byte, error) {
 func restartForUpdate(w io.Writer, latest string) error {
 	if mgr, err := newServiceManager(); err == nil {
 		if st, err := mgr.Status(); err == nil && st.Installed {
+			// Same convergence runRestart does: the restart should boot the
+			// new build under the current unit template, not whatever an
+			// older flue wrote at enable time.
+			if ur, ok := mgr.(service.UnitRefresher); ok {
+				_ = ur.RefreshUnit()
+			}
 			if err := mgr.Restart(); err != nil {
 				return fmt.Errorf("restart the login service: %w", err)
 			}

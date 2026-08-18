@@ -212,31 +212,38 @@ func (s *Session) Snapshot() (Snapshot, bool) {
 	}, true
 }
 
-// Snapshots returns one Snapshot per running session — the set a shutdown
-// should carry over.
-//
-// The agent-store lookup happens here rather than inside Session.Snapshot for
-// one reason: it reads directories, and s.mu is never held across a syscall.
-// Snapshot returns with the lock released and the cwd already in hand, so the
-// scan costs a few readdirs per running session on a shutdown path that is
-// already writing a file per session.
+// SnapshotForShutdown is Snapshot plus the agent-conversation hint — the
+// record a process on its way down writes so the next boot can revive the
+// session with a resume command. The agent-store lookup happens out here
+// rather than inside Snapshot for one reason: it reads directories, and
+// s.mu is never held across a syscall. Shared by the daemon's shutdown pass
+// over in-process sessions and by a holder answering its own SIGTERM.
+func (s *Session) SnapshotForShutdown() (Snapshot, bool) {
+	snap, ok := s.Snapshot()
+	if !ok {
+		return Snapshot{}, false
+	}
+	snap.Agent, snap.AgentSession = agentSessionFor(snap.Cwd, snap.CreatedAt)
+	if snap.Agent == agentClaude {
+		snap.ClaudeSession = snap.AgentSession
+	}
+	return snap, true
+}
+
+// Snapshots returns one Snapshot per running in-process session — the set a
+// shutdown should carry over. Holder-backed sessions are not the daemon's
+// to snapshot: their rings live with their holders, and each holder writes
+// its own snapshot on its own SIGTERM.
 func (r *Registry) Snapshots() []Snapshot {
 	var out []Snapshot
 	for _, h := range r.List() {
 		s, local := h.(*Session)
 		if !local {
-			// A holder-backed session's ring lives with its holder, and so
-			// does its revival: the holder writes the snapshot on its own
-			// SIGTERM. The daemon has nothing of it worth saving.
 			continue
 		}
-		snap, ok := s.Snapshot()
+		snap, ok := s.SnapshotForShutdown()
 		if !ok {
 			continue
-		}
-		snap.Agent, snap.AgentSession = agentSessionFor(snap.Cwd, snap.CreatedAt)
-		if snap.Agent == agentClaude {
-			snap.ClaudeSession = snap.AgentSession
 		}
 		out = append(out, snap)
 	}

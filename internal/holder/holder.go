@@ -13,11 +13,13 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/holdwire"
 	"github.com/karnstack/flue/internal/session"
 )
@@ -80,6 +82,23 @@ func Serve(dir, version string, ready io.WriteCloser) error {
 
 	h := &holder{dir: dir, version: version, born: time.Now(), done: make(chan struct{})}
 	go h.watch()
+
+	// SIGTERM is the machine going down or the user's login ending — the
+	// events a holder cannot outlive. That is exactly when the old
+	// daemon-side snapshot used to be written, so the holder writes it now:
+	// scrollback, identity, and the agent resume hint land in the snapshots
+	// directory for the next boot's revive pass. The daemon's close verb is
+	// the opposite case — a deliberate retirement — and snapshots nothing.
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		defer signal.Stop(sigc)
+		select {
+		case <-sigc:
+			h.shutdownOnSignal()
+		case <-h.done:
+		}
+	}()
 
 	go func() {
 		<-h.done
@@ -366,6 +385,31 @@ func (h *holder) pushEvents(s *session.Session) {
 			}
 		}
 	}
+}
+
+// shutdownOnSignal is the holder's half of a graceful machine or login
+// shutdown: snapshot for revival, close the session, exit. The holder dir
+// is left in place on purpose — the next boot's reattach pass finds its
+// socket dead, sweeps the dir, and the revive pass brings the session back
+// from the snapshot written here.
+func (h *holder) shutdownOnSignal() {
+	h.mu.Lock()
+	s := h.sess
+	closing := h.closing
+	h.closing = true
+	h.mu.Unlock()
+	if closing {
+		return
+	}
+	if s != nil {
+		if snap, ok := s.SnapshotForShutdown(); ok {
+			if dir, err := config.Dir(); err == nil {
+				_ = session.SaveSnapshots(filepath.Join(dir, session.SnapshotsDirName), []session.Snapshot{snap})
+			}
+		}
+		_ = s.Close()
+	}
+	close(h.done)
 }
 
 // watch is the self-reap guard: a holder whose child has exited and whose
