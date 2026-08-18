@@ -164,6 +164,38 @@ describe('the machine picker', () => {
     expect(screen.queryByRole('button', { name: /^Connect/ })).toBeNull()
   })
 
+  it('offers to pair from the empty state, for the tab no outside link can reach', async () => {
+    // An app saved to a home screen holds its own storage partition, and the
+    // camera app opens scanned links in the browser proper — so the way in
+    // has to be on this screen itself.
+    render(<MachinesRoute />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pair a machine' }))
+
+    expect(screen.getByRole('textbox', { name: 'Pairing link' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Pair a machine' })).toBeTruthy()
+  })
+
+  it('offers to pair another machine beside a full list', async () => {
+    saveMachine(MESA)
+
+    render(<MachinesRoute />)
+    await userEvent.click(screen.getByRole('button', { name: 'Pair another machine' }))
+
+    expect(screen.getByRole('textbox', { name: 'Pairing link' })).toBeTruthy()
+  })
+
+  it('comes back from the pairing panel with Cancel', async () => {
+    saveMachine(MESA)
+
+    render(<MachinesRoute />)
+    await userEvent.click(screen.getByRole('button', { name: 'Pair another machine' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(screen.getByRole('button', { name: 'Connect to Blue Mesa' })).toBeTruthy()
+    expect(screen.queryByRole('textbox', { name: 'Pairing link' })).toBeNull()
+  })
+
   it('carries no chrome, because it is the door rather than a screen', () => {
     saveMachine(MESA)
     render(<MachinesRoute />)

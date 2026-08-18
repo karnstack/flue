@@ -75,9 +75,11 @@ sw.addEventListener('install', (event) => {
       await cache.addAll(BUILD.precache)
       // Take over immediately. flue ships as a single binary, so a new worker
       // only ever appears because the user upgraded flue and reloaded; making
-      // them reload twice to pick it up buys nothing. The bundle has no
-      // dynamic imports, so there are no old chunks for a claimed page to
-      // ask for.
+      // them reload twice to pick it up buys nothing. The lazy chunks the
+      // bundle does have (xterm's webgl addon, the QR engine) are precached
+      // beside the shell and purged with it on activate, so a claimed page
+      // from the old build that asks for one gets a soft failure — the
+      // canvas renderer, the paste box — rather than a broken screen.
       await sw.skipWaiting()
     })(),
   )
