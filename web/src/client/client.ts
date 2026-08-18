@@ -14,6 +14,7 @@ import {
   type DeviceInfo,
   type ErrorMsg,
   type Pairing,
+  type PathEntry,
   type Preview,
   type RelayInfo,
   type ServerMessage,
@@ -59,6 +60,16 @@ const BACKOFF_MAX_MS = 10_000
  * none of the others do.
  */
 const PEEK_TIMEOUT_MS = 5_000
+
+/**
+ * How long a `stat` waits before giving up on the daemon.
+ *
+ * It needs a deadline for `peek`'s exact reason — a daemon older than this
+ * page answers with an *uncorrelated* `error{bad_message}` that reaches no
+ * asker — and it borrows peek's number: both answer a hover, and a hover that
+ * outlives five seconds has already lost the line it was about.
+ */
+const STAT_TIMEOUT_MS = 5_000
 
 /**
  * How long each agent-transcript request waits before giving up.
@@ -252,6 +263,14 @@ export class FlueClient {
    * spinner until the pointer moved.
    */
   private peeks = new Map<number, Settlers<Preview>>()
+
+  /**
+   * The stats on the wire, reqId -> whoever is waiting. `peeks` again, for
+   * `stat`: one hovered line asks one question and exactly one answer or
+   * refusal settles it. Settled by `stats`, the error echoing the reqId, the
+   * deadline, or the sweep in `teardown`.
+   */
+  private statAsks = new Map<number, Settlers<PathEntry[]>>()
 
   /**
    * The agent-transcript requests on the wire, reqId -> whoever is waiting —
@@ -618,6 +637,46 @@ export class FlueClient {
       if (!this.send({ type: 'peek', id, bytes, reqId })) {
         clearTimeout(deadline)
         this.peeks.delete(reqId)
+        reject(new Error('flue: not connected'))
+      }
+    })
+  }
+
+  /**
+   * Ask whether up to 32 paths exist, resolved against one session's live
+   * working directory. Entries answer in the order asked; a path the daemon
+   * cannot resolve is `exists: false` rather than a refusal — "no" is the
+   * ordinary answer here, and only a malformed batch earns an error.
+   *
+   * A promise, as `peek` is and for its reason: every hovered line has
+   * exactly one asker waiting on exactly one answer, and one dropped rather
+   * than held while the socket is down — a verification surfacing from behind
+   * a ten-second backoff decorates a line the pointer left long ago.
+   */
+  stat(id: string, paths: string[]): Promise<PathEntry[]> {
+    if (!this.ready || !this.sock) {
+      return Promise.reject(new Error('flue: not connected'))
+    }
+    const reqId = this.nextReqId++
+    return new Promise<PathEntry[]>((resolve, reject) => {
+      // The deadline is peek's, for peek's reason: a daemon older than this
+      // page refuses with an uncorrelated error that reaches no asker.
+      const deadline = setTimeout(() => {
+        if (!this.statAsks.delete(reqId)) return
+        reject(new Error('flue: the daemon did not answer'))
+      }, STAT_TIMEOUT_MS)
+      const settle =
+        <T,>(cb: (v: T) => void) =>
+        (v: T) => {
+          clearTimeout(deadline)
+          cb(v)
+        }
+      this.statAsks.set(reqId, { resolve: settle(resolve), reject: settle(reject) })
+      // After the entry exists, so a send that throws synchronously cannot
+      // leave a promise nothing will ever settle.
+      if (!this.send({ type: 'stat', id, paths, reqId })) {
+        clearTimeout(deadline)
+        this.statAsks.delete(reqId)
         reject(new Error('flue: not connected'))
       }
     })
@@ -1069,6 +1128,15 @@ export class FlueClient {
         break
       }
 
+      case 'stats': {
+        if (msg.reqId === undefined) break
+        const waiting = this.statAsks.get(msg.reqId)
+        if (waiting === undefined) break
+        this.statAsks.delete(msg.reqId)
+        waiting.resolve(msg.entries)
+        break
+      }
+
       // The agent answers settle exactly as `preview` does: by reqId, to the
       // one asker, and an answer nobody is waiting for — the asker timed out,
       // or a daemon volunteered one — is dropped rather than raised.
@@ -1095,6 +1163,16 @@ export class FlueClient {
           if (waiting !== undefined) {
             this.peeks.delete(msg.reqId)
             waiting.reject(new Error(msg.msg || msg.code))
+            this.errorListeners.emit(msg)
+            break
+          }
+          // A stat's refusal, apart from `pending` for the reason peek is:
+          // its `not_found` names a session only this ask cared about, and a
+          // stat made no reattach plan for the sweep below to retire.
+          const asked = this.statAsks.get(msg.reqId)
+          if (asked !== undefined) {
+            this.statAsks.delete(msg.reqId)
+            asked.reject(new Error(msg.msg || msg.code))
             this.errorListeners.emit(msg)
             break
           }
@@ -1241,6 +1319,9 @@ export class FlueClient {
     const orphaned = [...this.peeks.values()]
     this.peeks.clear()
     for (const p of orphaned) p.reject(new Error('flue: connection lost'))
+    const unanswered = [...this.statAsks.values()]
+    this.statAsks.clear()
+    for (const s of unanswered) s.reject(new Error('flue: connection lost'))
     for (const waiting of [this.agentIndexAsks, this.agentPageAsks, this.agentHitsAsks] as const) {
       const asks = [...waiting.values()]
       waiting.clear()

@@ -40,6 +40,7 @@ import {
   type SignalMsg,
   type SizeChanged,
   type SpawnMsg,
+  type PathEntry,
   type StatMsg,
   type StatsMsg,
   type PeekMsg,
@@ -3000,6 +3001,106 @@ describe('FlueClient peek', () => {
     expect(() =>
       sock.emitControl({ type: 'preview', id: 's1', data: '', cols: 80, rows: 24, reqId: 999 }),
     ).not.toThrow()
+    expect(c.status).toBe('open')
+  })
+})
+
+describe('FlueClient stat', () => {
+  it('resolves with the entries, in the order asked', async () => {
+    const { c, sock } = connected()
+    const answer = c.stat('s1', ['a/b.go', '~/notes.md'])
+    const sent = sock.sentControl().find((m) => m.type === 'stat')!
+    expect(sent).toMatchObject({ type: 'stat', id: 's1', paths: ['a/b.go', '~/notes.md'] })
+    sock.emitControl({
+      type: 'stats',
+      entries: [
+        { path: 'a/b.go', exists: true, kind: 'file', size: 12, mtime: 1754870400 },
+        { path: '~/notes.md', exists: false },
+      ],
+      reqId: sent.reqId as number,
+    })
+    await expect(answer).resolves.toEqual([
+      { path: 'a/b.go', exists: true, kind: 'file', size: 12, mtime: 1754870400 },
+      { path: '~/notes.md', exists: false },
+    ])
+  })
+
+  it('correlates two stats in flight by reqId', async () => {
+    const { c, sock } = connected()
+    const first = c.stat('s1', ['one'])
+    const second = c.stat('s1', ['two'])
+    const sent = sock.sentControl().filter((m) => m.type === 'stat')
+    sock.emitControl({
+      type: 'stats',
+      entries: [{ path: 'two', exists: true, kind: 'file' }],
+      reqId: sent[1]!.reqId as number,
+    })
+    sock.emitControl({
+      type: 'stats',
+      entries: [{ path: 'one', exists: false }],
+      reqId: sent[0]!.reqId as number,
+    })
+    await expect(first).resolves.toEqual([{ path: 'one', exists: false }])
+    await expect(second).resolves.toEqual([{ path: 'two', exists: true, kind: 'file' }])
+  })
+
+  it('rejects on a refusal, and still surfaces it through onError', async () => {
+    const { c, sock } = connected()
+    const heard: string[] = []
+    c.onError((e) => heard.push(e.code))
+    const answer = c.stat(
+      's1',
+      Array.from({ length: 33 }, (_, i) => `p${i}`),
+    )
+    const sent = sock.sentControl().find((m) => m.type === 'stat')!
+    sock.emitControl({
+      type: 'error',
+      code: 'bad_path',
+      msg: 'too many paths in one stat',
+      reqId: sent.reqId as number,
+    })
+    await expect(answer).rejects.toThrow('too many paths in one stat')
+    expect(heard).toEqual(['bad_path'])
+  })
+
+  it('does not retire a reattach plan when the refusal is not_found', async () => {
+    // A stat's not_found names a session the *stat* could not find; the
+    // reattach plan made by attach must survive it, exactly as peek promises.
+    const { c, sock } = connected()
+    c.attach('s1', 0)
+    const answer = c.stat('s1', ['a'])
+    const sent = sock.sentControl().find((m) => m.type === 'stat')!
+    const gone: string[] = []
+    c.onSessionGone((id) => gone.push(id))
+    sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: sent.reqId as number })
+    await expect(answer).rejects.toThrow('no such session')
+    expect(gone).toEqual([])
+  })
+
+  it('rejects while the connection is down', async () => {
+    const { c } = harness()
+    await expect(c.stat('s1', ['a'])).rejects.toThrow('not connected')
+  })
+
+  it('rejects when the connection drops with the ask in flight', async () => {
+    const { c, sock } = connected()
+    const answer = c.stat('s1', ['a'])
+    sock.close()
+    await expect(answer).rejects.toThrow('connection lost')
+  })
+
+  it('gives up when nothing answers', async () => {
+    vi.useFakeTimers()
+    const { c } = connected()
+    const answer = c.stat('s1', ['a'])
+    const settled = expect(answer).rejects.toThrow('did not answer')
+    await vi.advanceTimersByTimeAsync(5_000)
+    await settled
+  })
+
+  it('ignores a stats answer nobody is waiting for', () => {
+    const { c, sock } = connected()
+    expect(() => sock.emitControl({ type: 'stats', entries: [], reqId: 999 })).not.toThrow()
     expect(c.status).toBe('open')
   })
 })
