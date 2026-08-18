@@ -1,5 +1,7 @@
 import { createElement, type ReactNode } from 'react'
 import Markdown, { type Components } from 'react-markdown'
+import rehypeRaw from 'rehype-raw'
+import rehypeSanitize from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
 
 import { cn } from '@/lib/utils'
@@ -7,12 +9,14 @@ import { cn } from '@/lib/utils'
 /*
  * Rendered markdown for the file viewer.
  *
- * react-markdown builds React elements and nothing else: raw HTML in the
- * file is dropped by construction, so there is no sanitizer here to get
- * wrong and no innerHTML anywhere. Links follow the openTerminalLink rule —
- * http(s) or nothing — and an image renders as its alt text, because a
- * relative source has no origin to load from and the CSP would refuse a
- * remote one anyway.
+ * react-markdown builds React elements and nothing else — no innerHTML
+ * anywhere. HTML written into the file (README badge preambles, centred
+ * heroes) is parsed by rehype-raw and then cut to rehype-sanitize's GitHub
+ * schema, so scripts, event handlers, and javascript: URLs never survive to
+ * the element tree. On top of that sit this file's own guards: links follow
+ * the openTerminalLink rule — http(s) or nothing — and an image renders as
+ * its alt text, because a relative source has no origin to load from and
+ * the CSP would refuse a remote one anyway.
  */
 
 /**
@@ -86,7 +90,13 @@ const parts: Components = {
 
 export function MarkdownView({ text }: { text: string }) {
   return (
-    <Markdown remarkPlugins={[remarkGfm]} components={parts}>
+    <Markdown
+      remarkPlugins={[remarkGfm]}
+      // Order is the contract: raw turns HTML text into nodes, sanitize
+      // prunes those nodes, and only then does the component map render.
+      rehypePlugins={[rehypeRaw, rehypeSanitize]}
+      components={parts}
+    >
       {text}
     </Markdown>
   )

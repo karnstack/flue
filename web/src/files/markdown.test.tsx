@@ -18,12 +18,29 @@ describe('MarkdownView', () => {
     expect(screen.getByRole('cell', { name: '2' })).toBeTruthy()
   })
 
-  it('drops raw HTML instead of injecting it', () => {
+  it('renders HTML in the file, as elements rather than as source text', () => {
+    render(
+      <MarkdownView
+        text={'<h1 align="center">flue</h1>\n<p align="center"><strong>the tagline</strong></p>'}
+      />,
+    )
+    expect(screen.getByRole('heading', { level: 1, name: 'flue' })).toBeTruthy()
+    expect(screen.getByText('the tagline').tagName).toBe('STRONG')
+    expect(screen.queryByText(/<h1/)).toBeNull()
+  })
+
+  it('sanitizes what it renders instead of injecting it', () => {
     const { container } = render(
-      <MarkdownView text={'before\n\n<script>window.pwned = true</script>\n\n<img src=x onerror="window.pwned = true">\n\nafter'} />,
+      <MarkdownView
+        text={
+          'before\n\n<script>window.pwned = true</script>\n\n<img src=x onerror="window.pwned = true">\n\n<a href="javascript:window.pwned = true">press</a>\n\nafter'
+        }
+      />,
     )
     expect(container.querySelector('script')).toBeNull()
     expect(container.querySelector('img')).toBeNull()
+    expect(container.querySelector('[onerror]')).toBeNull()
+    expect(screen.queryByRole('link', { name: 'press' })).toBeNull()
     expect((window as { pwned?: boolean }).pwned).toBeUndefined()
     expect(screen.getByText('after')).toBeTruthy()
   })
