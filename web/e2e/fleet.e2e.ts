@@ -420,6 +420,115 @@ describe('a fleet, end to end', () => {
     }
   })
 
+  it('reads a file from machine B over the relay, chunked and complete', async () => {
+    // The 1 MiB relay frame cap and the 32 KiB chunk pacing only exist for
+    // real on this path — every unit suite fakes the socket — so this is the
+    // one place they are genuinely proven. A ~260 KB file is written on B
+    // through the marker session's own shell, then read from A across the
+    // Worker, and the bytes must arrive complete and paced.
+    const stamp = `flue-peek-${NONCE}`
+    const filePath = `/tmp/${stamp}.txt`
+
+    // Write the file through B's own loopback socket and learn its exact
+    // size from the daemon's own stat, which is also the verb a hover uses.
+    let size = 0
+    open(fleet.b.origin, { token: fleet.b.token })
+    try {
+      const onB = new FlueClient(daemonSocketUrl())
+      await connected(onB)
+      let seen = ''
+      onB.onOutput((_ref, bytes) => {
+        seen += new TextDecoder().decode(bytes)
+      })
+      const ref = await new Promise<number>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('no attach')), 30_000)
+        const off = onB.onAttached((a) => {
+          if (a.id !== markerSession) return
+          clearTimeout(timer)
+          off()
+          resolve(a.ref)
+        })
+        onB.attach(markerSession)
+      })
+      // The completion marker is split in the typed command so the terminal's
+      // echo of the keystrokes cannot satisfy the wait; only the echo run
+      // after the redirect finished prints it whole.
+      onB.sendInput(
+        ref,
+        new TextEncoder().encode(
+          `head -c 196608 /dev/urandom | base64 > ${filePath} && echo ${stamp}-wr''itten\n`,
+        ),
+      )
+      await until('the file to be written on machine B', () => seen.includes(`${stamp}-written`), 30_000)
+      const entries = await onB.stat(markerSession, [filePath])
+      expect(entries[0]?.exists).toBe(true)
+      expect(entries[0]?.kind).toBe('file')
+      size = entries[0]?.size ?? 0
+      expect(size).toBeGreaterThan(150_000)
+      onB.close()
+    } finally {
+      shut()
+    }
+
+    // Now from machine A's tab, across the Worker, the way the viewer reads.
+    const t = open(fleet.a.origin, { token: fleet.a.token })
+    const f = new FleetClient(
+      [{ id: LOCAL_MACHINE_ID, name: '', client: new FlueClient(daemonSocketUrl()), pinned: false }],
+      undefined,
+      { enrol: enrolThisBrowser, directoryFetch: readDirectoryViaDaemon },
+    )
+    const view = watch(f)
+    try {
+      f.connect()
+      await until(
+        "machine B to be online in machine A's tab",
+        () => {
+          t.focus()
+          return view.latest().machines.some((m) => m.id === fleet.b.machineId && m.status === 'online')
+        },
+        90_000,
+      )
+      const remote = f.clientFor(fleet.b.machineId as string)
+      expect(remote).not.toBeNull()
+      const client = remote as FlueClient
+
+      const chunkSizes: number[] = []
+      let got = 0
+      let meta: { kind: string; size: number } | null = null
+      const outcome = await new Promise<string>((resolve) => {
+        const timer = setTimeout(() => resolve('deadline with no eof'), 60_000)
+        client.read(markerSession, filePath, {
+          file: (m) => {
+            meta = { kind: m.kind, size: m.size }
+          },
+          chunk: (bytes) => {
+            chunkSizes.push(bytes.length)
+            got += bytes.length
+          },
+          eof: () => {
+            clearTimeout(timer)
+            resolve('eof')
+          },
+          fail: (fl) => {
+            clearTimeout(timer)
+            resolve(`${fl.code}: ${fl.msg}`)
+          },
+        })
+      })
+
+      expect(outcome).toBe('eof')
+      expect(meta).toMatchObject({ kind: 'text', size })
+      expect(got).toBe(size)
+      // ~260 KB in 32 KiB chunks: several frames, none past the daemon's own
+      // chunk size, which keeps every one far under the relay's 1 MiB cap.
+      expect(chunkSizes.length).toBeGreaterThanOrEqual(4)
+      expect(Math.max(...chunkSizes)).toBeLessThanOrEqual(32 << 10)
+    } finally {
+      f.close()
+      shut()
+    }
+  })
+
   it('keeps device certificates out of the fleet directory', async () => {
     // Two machines have joined and a browser has been enrolled, so if device
     // certificates were published there would be one here. `GET /directory`

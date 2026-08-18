@@ -20,6 +20,8 @@ import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
 import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
 import type { Emulator } from '@/emulator/types'
 import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
+import { createPathDetector } from '@/files/detector'
+import { FileViewer, type FileTarget } from '@/files/viewer'
 import { loadThemePref, onThemePref, saveThemePref, THEME_PREF_KEY } from '@/lib/theme-pref'
 import {
   cellAt,
@@ -257,6 +259,8 @@ export function Terminal({
   // Whether the fallback paste field is up, because the browser refused to
   // read the clipboard for us. See PasteBox.
   const [pasteBox, setPasteBox] = useState(false)
+  // The file a clicked path opened, up over the session until dismissed.
+  const [peeked, setPeeked] = useState<FileTarget | null>(null)
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
   const [cwd, setCwd] = useState<string | null>(null)
@@ -285,6 +289,7 @@ export function Terminal({
     paste: () => void
     pasteText: (text: string) => void
     dismiss: () => void
+    focusSurface: () => void
   } | null>(null)
   // The latest onClosed, readable from inside the effect without putting a
   // prop identity in its dependency array.
@@ -350,6 +355,19 @@ export function Terminal({
     emulator.attachTo(surface)
     emulator.focus()
     paintGround(palette.background)
+
+    // Paths in the output: found by the shared matcher, vouched for by the
+    // daemon one hovered line at a time, opened over the session. The
+    // detector is effect-local like the emulator holding it, and its
+    // verification cache dies with the mount — the daemon is the truth and
+    // thirty seconds is the longest this view will repeat an answer.
+    emulator.detectLinks(
+      createPathDetector({
+        stat: (paths) => client.stat(sessionId, paths),
+        open: (candidate) =>
+          setPeeked({ path: candidate.path, line: candidate.line, col: candidate.col }),
+      }),
+    )
 
     // Everything below is effect-local rather than a ref, because all of it
     // belongs to one emulator and one attachment: a second mount gets its own.
@@ -1066,6 +1084,7 @@ export function Terminal({
       },
       pasteText: sendPaste,
       dismiss: dismissSelection,
+      focusSurface: () => emulator.focus(),
     }
 
     // Another tab choosing a theme lands here: the preference is global, and
@@ -1223,6 +1242,18 @@ export function Terminal({
         >
           {clipProblem}
         </p>
+      )}
+      {peeked !== null && (
+        <FileViewer
+          sessionId={sessionId}
+          target={peeked}
+          onClose={() => {
+            setPeeked(null)
+            // The click that opened the viewer stole the terminal's focus;
+            // closing hands it back so typing resumes without a second tap.
+            actionsRef.current?.focusSurface()
+          }}
+        />
       )}
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar

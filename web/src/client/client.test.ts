@@ -40,6 +40,7 @@ import {
   type SignalMsg,
   type SizeChanged,
   type SpawnMsg,
+  type PathEntry,
   type StatMsg,
   type StatsMsg,
   type PeekMsg,
@@ -47,7 +48,14 @@ import {
   type UpdateMsg,
   type Welcome,
 } from './protocol'
-import { daemonSocketUrl, FlueClient, type ConnStatus, type SocketLike } from './client'
+import {
+  daemonSocketUrl,
+  FlueClient,
+  type ConnStatus,
+  type ReadFailure,
+  type ReadSink,
+  type SocketLike,
+} from './client'
 
 const URL_ = 'ws://127.0.0.1:7717/ws'
 
@@ -3001,6 +3009,326 @@ describe('FlueClient peek', () => {
       sock.emitControl({ type: 'preview', id: 's1', data: '', cols: 80, rows: 24, reqId: 999 }),
     ).not.toThrow()
     expect(c.status).toBe('open')
+  })
+})
+
+describe('FlueClient stat', () => {
+  it('resolves with the entries, in the order asked', async () => {
+    const { c, sock } = connected()
+    const answer = c.stat('s1', ['a/b.go', '~/notes.md'])
+    const sent = sock.sentControl().find((m) => m.type === 'stat')!
+    expect(sent).toMatchObject({ type: 'stat', id: 's1', paths: ['a/b.go', '~/notes.md'] })
+    sock.emitControl({
+      type: 'stats',
+      entries: [
+        { path: 'a/b.go', exists: true, kind: 'file', size: 12, mtime: 1754870400 },
+        { path: '~/notes.md', exists: false },
+      ],
+      reqId: sent.reqId as number,
+    })
+    await expect(answer).resolves.toEqual([
+      { path: 'a/b.go', exists: true, kind: 'file', size: 12, mtime: 1754870400 },
+      { path: '~/notes.md', exists: false },
+    ])
+  })
+
+  it('correlates two stats in flight by reqId', async () => {
+    const { c, sock } = connected()
+    const first = c.stat('s1', ['one'])
+    const second = c.stat('s1', ['two'])
+    const sent = sock.sentControl().filter((m) => m.type === 'stat')
+    sock.emitControl({
+      type: 'stats',
+      entries: [{ path: 'two', exists: true, kind: 'file' }],
+      reqId: sent[1]!.reqId as number,
+    })
+    sock.emitControl({
+      type: 'stats',
+      entries: [{ path: 'one', exists: false }],
+      reqId: sent[0]!.reqId as number,
+    })
+    await expect(first).resolves.toEqual([{ path: 'one', exists: false }])
+    await expect(second).resolves.toEqual([{ path: 'two', exists: true, kind: 'file' }])
+  })
+
+  it('rejects on a refusal, and still surfaces it through onError', async () => {
+    const { c, sock } = connected()
+    const heard: string[] = []
+    c.onError((e) => heard.push(e.code))
+    const answer = c.stat(
+      's1',
+      Array.from({ length: 33 }, (_, i) => `p${i}`),
+    )
+    const sent = sock.sentControl().find((m) => m.type === 'stat')!
+    sock.emitControl({
+      type: 'error',
+      code: 'bad_path',
+      msg: 'too many paths in one stat',
+      reqId: sent.reqId as number,
+    })
+    await expect(answer).rejects.toThrow('too many paths in one stat')
+    expect(heard).toEqual(['bad_path'])
+  })
+
+  it('does not retire a reattach plan when the refusal is not_found', async () => {
+    // A stat's not_found names a session the *stat* could not find; the
+    // reattach plan made by attach must survive it, exactly as peek promises.
+    const { c, sock } = connected()
+    c.attach('s1', 0)
+    const answer = c.stat('s1', ['a'])
+    const sent = sock.sentControl().find((m) => m.type === 'stat')!
+    const gone: string[] = []
+    c.onSessionGone((id) => gone.push(id))
+    sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such session', reqId: sent.reqId as number })
+    await expect(answer).rejects.toThrow('no such session')
+    expect(gone).toEqual([])
+  })
+
+  it('rejects while the connection is down', async () => {
+    const { c } = harness()
+    await expect(c.stat('s1', ['a'])).rejects.toThrow('not connected')
+  })
+
+  it('rejects when the connection drops with the ask in flight', async () => {
+    const { c, sock } = connected()
+    const answer = c.stat('s1', ['a'])
+    sock.close()
+    await expect(answer).rejects.toThrow('connection lost')
+  })
+
+  it('gives up when nothing answers', async () => {
+    vi.useFakeTimers()
+    const { c } = connected()
+    const answer = c.stat('s1', ['a'])
+    const settled = expect(answer).rejects.toThrow('did not answer')
+    await vi.advanceTimersByTimeAsync(5_000)
+    await settled
+  })
+
+  it('ignores a stats answer nobody is waiting for', () => {
+    const { c, sock } = connected()
+    expect(() => sock.emitControl({ type: 'stats', entries: [], reqId: 999 })).not.toThrow()
+    expect(c.status).toBe('open')
+  })
+})
+
+describe('FlueClient read', () => {
+  /** A sink that records everything, so each case asserts on plain data. */
+  const collect = () => {
+    const seen = {
+      meta: null as FileMsg | null,
+      chunks: [] as string[],
+      eof: 0,
+      failed: null as ReadFailure | null,
+    }
+    const sink: ReadSink = {
+      file: (m) => {
+        seen.meta = m
+      },
+      chunk: (b) => seen.chunks.push(text(b)),
+      eof: () => seen.eof++,
+      fail: (f) => {
+        seen.failed = f
+      },
+    }
+    return { seen, sink }
+  }
+
+  const opened = (sock: FakeSocket, reqId: unknown, ref = 7) => {
+    sock.emitControl({
+      type: 'file',
+      ref,
+      path: '/home/k/a.go',
+      size: 11,
+      mime: 'text/plain; charset=utf-8',
+      kind: 'text',
+      reqId: reqId as number,
+    })
+  }
+
+  it('streams file, chunks, then eof to the sink', () => {
+    const { c, sock } = connected()
+    const { seen, sink } = collect()
+    c.read('s1', 'a.go', sink)
+    const sent = sock.sentControl().find((m) => m.type === 'read')!
+    expect(sent).toMatchObject({ type: 'read', id: 's1', path: 'a.go' })
+    opened(sock, sent.reqId)
+    sock.emitBinary(FRAME_FILE, 7, 'package ')
+    sock.emitBinary(FRAME_FILE, 7, 'main\n')
+    sock.emitControl({ type: 'eof', ref: 7 })
+    expect(seen.meta).toMatchObject({ path: '/home/k/a.go', size: 11, kind: 'text' })
+    expect(seen.chunks).toEqual(['package ', 'main\n'])
+    expect(seen.eof).toBe(1)
+    expect(seen.failed).toBeNull()
+  })
+
+  it('routes chunks by ref when two reads interleave', () => {
+    const { c, sock } = connected()
+    const a = collect()
+    const b = collect()
+    c.read('s1', 'a.go', a.sink)
+    c.read('s1', 'b.go', b.sink)
+    const sent = sock.sentControl().filter((m) => m.type === 'read')
+    opened(sock, sent[0]!.reqId, 7)
+    opened(sock, sent[1]!.reqId, 8)
+    sock.emitBinary(FRAME_FILE, 8, 'bee')
+    sock.emitBinary(FRAME_FILE, 7, 'aye')
+    expect(a.seen.chunks).toEqual(['aye'])
+    expect(b.seen.chunks).toEqual(['bee'])
+  })
+
+  it('keeps 0x02 frames away from terminal output', () => {
+    const { c, sock } = connected()
+    sock.emitControl({
+      type: 'attached',
+      ref: 3,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      head: 0,
+      truncated: false,
+      primary: true,
+    })
+    const before = c.lastSeqFor(3)
+    sock.emitBinary(FRAME_FILE, 3, 'not output')
+    expect(c.lastSeqFor(3)).toBe(before)
+  })
+
+  it('discards frames and eof for a ref it does not hold', () => {
+    // A cancel and a finishing read cross on the wire routinely; the spec
+    // says discard, not protest. The harness fails this test on flue: logs.
+    const { c, sock } = connected()
+    sock.emitBinary(FRAME_FILE, 42, 'late')
+    expect(() => sock.emitControl({ type: 'eof', ref: 42 })).not.toThrow()
+    expect(c.status).toBe('open')
+  })
+
+  it('cancel after file sends cancel and goes deaf to the stream', () => {
+    const { c, sock } = connected()
+    const { seen, sink } = collect()
+    const handle = c.read('s1', 'a.go', sink)
+    opened(sock, sock.sentControl().find((m) => m.type === 'read')!.reqId)
+    handle.cancel()
+    expect(sock.sentControl().find((m) => m.type === 'cancel')).toMatchObject({
+      type: 'cancel',
+      ref: 7,
+    })
+    sock.emitBinary(FRAME_FILE, 7, 'late')
+    sock.emitControl({ type: 'eof', ref: 7 })
+    expect(seen.chunks).toEqual([])
+    expect(seen.eof).toBe(0)
+  })
+
+  it('cancel before file marks the ask abandoned, then cancels the ref when it lands', () => {
+    const { c, sock } = connected()
+    const { seen, sink } = collect()
+    const handle = c.read('s1', 'a.go', sink)
+    handle.cancel()
+    expect(sock.sentControl().find((m) => m.type === 'cancel')).toBeUndefined()
+    opened(sock, sock.sentControl().find((m) => m.type === 'read')!.reqId)
+    expect(sock.sentControl().find((m) => m.type === 'cancel')).toMatchObject({
+      type: 'cancel',
+      ref: 7,
+    })
+    expect(seen.meta).toBeNull()
+  })
+
+  it('retires an abandoned read whose answer was a refusal, not a file', () => {
+    const { c, sock } = connected()
+    const { seen, sink } = collect()
+    const handle = c.read('s1', 'gone.txt', sink)
+    handle.cancel()
+    const sent = sock.sentControl().find((m) => m.type === 'read')!
+    sock.emitControl({
+      type: 'error',
+      code: 'not_found',
+      msg: 'cannot read that path',
+      reqId: sent.reqId as number,
+    })
+    // Nobody is behind it: no fail on the sink, and — the leak this pins —
+    // a later file answer for the same reqId is impossible, so nothing may
+    // treat the id as still abandoned. A second read must behave normally.
+    expect(seen.failed).toBeNull()
+    const again = collect()
+    c.read('s1', 'gone.txt', again.sink)
+    const sent2 = sock.sentControl().filter((m) => m.type === 'read')[1]!
+    sock.emitControl({
+      type: 'file',
+      ref: 9,
+      path: '/x/gone.txt',
+      size: 1,
+      mime: 'text/plain; charset=utf-8',
+      kind: 'text',
+      reqId: sent2.reqId as number,
+    })
+    expect(again.seen.meta).not.toBeNull()
+  })
+
+  it('cancel twice sends one cancel', () => {
+    const { c, sock } = connected()
+    const { sink } = collect()
+    const handle = c.read('s1', 'a.go', sink)
+    opened(sock, sock.sentControl().find((m) => m.type === 'read')!.reqId)
+    handle.cancel()
+    handle.cancel()
+    expect(sock.sentControl().filter((m) => m.type === 'cancel')).toHaveLength(1)
+  })
+
+  it('fails the sink on a refusal, with the code intact', () => {
+    const { c, sock } = connected()
+    const { seen, sink } = collect()
+    c.read('s1', 'somewhere/', sink)
+    const sent = sock.sentControl().find((m) => m.type === 'read')!
+    sock.emitControl({
+      type: 'error',
+      code: 'is_dir',
+      msg: 'that is a directory',
+      reqId: sent.reqId as number,
+    })
+    expect(seen.failed).toEqual({ code: 'is_dir', msg: 'that is a directory' })
+  })
+
+  it('fails the sink when the connection drops mid-stream', () => {
+    const { c, sock } = connected()
+    const { seen, sink } = collect()
+    c.read('s1', 'a.go', sink)
+    opened(sock, sock.sentControl().find((m) => m.type === 'read')!.reqId)
+    sock.close()
+    expect(seen.failed).toEqual({ code: 'lost', msg: 'flue: connection lost' })
+  })
+
+  it('fails the sink when the connection drops before the file answers', () => {
+    const { c, sock } = connected()
+    const { seen, sink } = collect()
+    c.read('s1', 'a.go', sink)
+    sock.close()
+    expect(seen.failed).toEqual({ code: 'lost', msg: 'flue: connection lost' })
+  })
+
+  it('fails the sink when nothing answers the ask', async () => {
+    vi.useFakeTimers()
+    const { c, sock } = connected()
+    const { seen, sink } = collect()
+    c.read('s1', 'a.go', sink)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(seen.failed).toEqual({ code: 'timeout', msg: 'flue: the daemon did not answer' })
+    // A file that limps in later is cancelled, not delivered.
+    opened(sock, sock.sentControl().find((m) => m.type === 'read')!.reqId)
+    expect(sock.sentControl().find((m) => m.type === 'cancel')).toMatchObject({
+      type: 'cancel',
+      ref: 7,
+    })
+    expect(seen.meta).toBeNull()
+  })
+
+  it('fails immediately while the connection is down', async () => {
+    const { c } = harness()
+    const { seen, sink } = collect()
+    c.read('s1', 'a.go', sink)
+    await Promise.resolve()
+    expect(seen.failed).toEqual({ code: 'lost', msg: 'flue: not connected' })
   })
 })
 

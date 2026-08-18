@@ -1,4 +1,4 @@
-import type { Cell, Emulator, Grid, PixelSize, TerminalTheme } from '@/emulator/types'
+import type { Cell, Emulator, Grid, LinkDetector, PixelSize, TerminalTheme } from '@/emulator/types'
 
 export interface FakeEmulatorOptions {
   cols?: number
@@ -54,6 +54,8 @@ export interface FakeEmulator extends Emulator {
   word: string
   /** Text handed to paste(), in order. */
   readonly pasted: string[]
+  /** The last detector handed to detectLinks(); null after detectLinks(null). */
+  readonly detector: LinkDetector | null
 }
 
 /**
@@ -98,6 +100,7 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
     onGlass: null,
     appCursor: false,
     pointerReports: false,
+    detector: null,
 
     text: () => written.join(''),
 
@@ -183,6 +186,10 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
     contentSize: () => self.measured,
 
     applicationCursorKeys: () => self.appCursor,
+
+    detectLinks(detector: LinkDetector | null) {
+      mutable(self).detector = detector
+    },
 
     injectForTest(data: string) {
       self.send(data)

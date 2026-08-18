@@ -67,6 +67,42 @@ export interface TerminalTheme {
 }
 
 /**
+ * A path-shaped span found in one logical line of terminal text.
+ *
+ * Produced by `lib/paths.ts` and consumed by whichever emulator decorates the
+ * span; defined here because both sides of the seam speak it. `start`/`end`
+ * are indices into the logical line, `end` one past the last character with
+ * any `:line[:col]` suffix included — the decorated stretch. `path` is the
+ * text to hand the daemon: suffix and wrapping punctuation removed.
+ */
+export interface LinkCandidate {
+  path: string
+  start: number
+  end: number
+  line?: number
+  col?: number
+}
+
+/**
+ * Finds, verifies, and opens file paths named in terminal output.
+ *
+ * The emulator's half of the bargain is mechanical: assemble the text of a
+ * hovered line, hand it to `find`, decorate the spans `verify` vouches for,
+ * and report a click to `open`. Everything that requires judgement — what
+ * counts as a candidate, asking the daemon, caching the answers, what opening
+ * means — lives behind this interface, so nothing xterm-shaped leaks up and
+ * nothing session-shaped leaks down.
+ */
+export interface LinkDetector {
+  /** Path-shaped candidates in one logical line of text. */
+  find(text: string): LinkCandidate[]
+  /** Which of these paths are real files, answered in order. */
+  verify(paths: string[]): Promise<boolean[]>
+  /** A verified candidate was clicked. */
+  open(candidate: LinkCandidate): void
+}
+
+/**
  * The narrow seam between flue and whatever emulates the terminal.
  *
  * xterm.js implements this today. Keeping it small and free of xterm-specific
@@ -251,6 +287,13 @@ export interface Emulator {
    * xterm would be.
    */
   applicationCursorKeys(): boolean
+  /**
+   * Decorate real file paths in the output so a click can open them, or pass
+   * null to stop. Emulator-agnostic for the reason every method here is:
+   * any terminal emulator can mark a span of text and report a press on it,
+   * and everything judgement-shaped stays on the detector's side of the seam.
+   */
+  detectLinks(detector: LinkDetector | null): void
   /** Test-only: simulate user input. */
   injectForTest(data: string): void
 }

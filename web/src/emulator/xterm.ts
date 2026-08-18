@@ -1,5 +1,6 @@
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type IDisposable } from '@xterm/xterm'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { pathLinksAt } from './links'
 import type { Cell, Emulator, Grid, PixelSize, TerminalTheme } from './types'
 
 export interface XtermOptions {
@@ -103,6 +104,7 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
 
   const encoder = new TextEncoder()
   let disposed = false
+  let linkProvider: IDisposable | null = null
 
   /*
    * The keys xterm has no notion of: Shift+Enter, and copy and paste chords.
@@ -343,9 +345,22 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
       void loadWebglRenderer(term, () => disposed)
     },
 
+    detectLinks(detector) {
+      linkProvider?.dispose()
+      linkProvider = null
+      if (disposed || detector === null) return
+      linkProvider = term.registerLinkProvider({
+        provideLinks: (bufferLine, provide) => {
+          pathLinksAt(term, bufferLine, detector).then(provide, () => provide(undefined))
+        },
+      })
+    },
+
     dispose() {
       if (disposed) return
       disposed = true
+      linkProvider?.dispose()
+      linkProvider = null
       term.dispose()
     },
 
