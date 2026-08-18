@@ -9,10 +9,15 @@ import (
 
 // Claude Code keeps one directory per project under ~/.claude/projects, named
 // by a byte-mapped slug of the project's path, holding one .jsonl per
-// conversation named by the conversation's uuid. Sibling directories hold
-// tool results and subagent state, and are ignored: the conversation file is
-// the transcript, and everything a viewer shows is in it — subagent traffic
-// included, flagged isSidechain on its lines.
+// conversation named by the conversation's uuid. Beside each conversation
+// file sits a directory of the same uuid, holding tool results and — since
+// the format moved subagents out of the main file — a subagents/ directory
+// with one agent-<id>.jsonl per subagent run. Those subagent files carry the
+// bulk of a busy store's tokens (they outnumber conversations ten to one on
+// a real machine), so they are indexed too: not as sessions of their own,
+// but as token accounting folded into the conversation that spawned them —
+// see parentPath and the fold in Snapshot. Older transcripts that still hold
+// subagent traffic inline (flagged isSidechain) keep working unchanged.
 //
 // Every line is a JSON object with a `type`. The types this parser interprets
 // are user, assistant, ai-title and custom-title; everything else — mode,
@@ -31,10 +36,12 @@ func (claudeAdapter) roots(home string) []string {
 	return []string{filepath.Join(home, ".claude", "projects")}
 }
 
-// transcripts is every conversation file under root: one directory level of
-// project slugs, then the .jsonl files directly inside each. Deliberately not
-// a recursive walk — the sibling directories beside a transcript hold tool
-// results, and a walk into them would list files that are not sessions.
+// transcripts is every conversation file under root — one directory level of
+// project slugs, then the .jsonl files directly inside each — plus every
+// subagent file at the one deeper spot the layout keeps them:
+// <slug>/<uuid>/subagents/*.jsonl. Deliberately a bounded walk and not a
+// recursive one — the session directories hold tool results too, and a walk
+// into everything would list files that are neither sessions nor accounting.
 func (claudeAdapter) transcripts(root string) []string {
 	projects, err := os.ReadDir(root)
 	if err != nil {
@@ -45,18 +52,43 @@ func (claudeAdapter) transcripts(root string) []string {
 		if !p.IsDir() {
 			continue
 		}
-		files, err := os.ReadDir(filepath.Join(root, p.Name()))
+		dir := filepath.Join(root, p.Name())
+		files, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
 		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+			if f.IsDir() {
+				subs, err := os.ReadDir(filepath.Join(dir, f.Name(), "subagents"))
+				if err != nil {
+					continue
+				}
+				for _, s := range subs {
+					if s.IsDir() || !strings.HasSuffix(s.Name(), ".jsonl") {
+						continue
+					}
+					out = append(out, filepath.Join(dir, f.Name(), "subagents", s.Name()))
+				}
 				continue
 			}
-			out = append(out, filepath.Join(root, p.Name(), f.Name()))
+			if !strings.HasSuffix(f.Name(), ".jsonl") {
+				continue
+			}
+			out = append(out, filepath.Join(dir, f.Name()))
 		}
 	}
 	return out
+}
+
+// parentPath implements subagentFiler: a file under a session's subagents/
+// directory augments the conversation file named after that session, a
+// sibling of the session directory. Anything else is a session itself.
+func (claudeAdapter) parentPath(path string) string {
+	sub := filepath.Dir(path)
+	if filepath.Base(sub) != "subagents" {
+		return ""
+	}
+	return filepath.Dir(sub) + ".jsonl"
 }
 
 // idFromPath is the session's identity: Claude names the file after the

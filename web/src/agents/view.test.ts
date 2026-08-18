@@ -13,16 +13,20 @@ import {
   dayStartMs,
   DEFAULT_AGENT_VIEW,
   displayTitle,
+  filterHistory,
   filterRows,
   fmtDuration,
   groupHits,
   groupRows,
   heatmapWeeks,
+  historyDayMs,
   insightTotals,
   keyMessages,
   latestModel,
+  mergedSessions,
   orderRows,
   rangeFilter,
+  rangeFilterHistory,
   retryMissingTranscript,
   rowKey,
   rowTokens,
@@ -34,6 +38,7 @@ import {
   type AgentHitRow,
   type AgentRow,
   type HeatCell,
+  type HistoryDayRow,
 } from './view'
 
 /** A local-time stamp, so day bucketing tests hold in any timezone. */
@@ -601,11 +606,15 @@ describe('usageStats', () => {
     expect(s.currentStreak).toBe(0)
   })
 
-  it('caps spanDays at 366 for a lone year-1 stamp, without a calendar walk', () => {
+  it('keeps a lone year-1 stamp out of the calendar facts, without a walk', () => {
+    // A day outside the DAY_SPAN_CAP window contributes nothing to the
+    // active-day facts — the same clamp that keeps "N of M" coherent under
+    // years of backfill also retires the old "1 of 366" reading a bogus
+    // ancient stamp used to get.
     const s = usageStats([row({ id: 'ancient', startedAt: '0001-01-01T00:00:00Z' })], NOW)
-    expect(s.spanDays).toBe(366)
-    expect(s.activeDays).toBe(1)
-    expect(s.longestStreak).toBe(1)
+    expect(s.spanDays).toBe(0)
+    expect(s.activeDays).toBe(0)
+    expect(s.longestStreak).toBe(0)
     expect(s.currentStreak).toBe(0)
     // The default endedAt is fine but the start claims year 1: a two-thousand-
     // year session is a broken clock, not a record.
@@ -794,5 +803,182 @@ describe('splitSnippet', () => {
       match: 'zebra',
       after: ' crossing',
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Backfill history and tombstones.
+
+function hist(over: Partial<HistoryDayRow> & { date: string; sessions: number }): HistoryDayRow {
+  return { tool: 'claude', machineId: 'local', ...over }
+}
+
+describe('historyDayMs', () => {
+  it('reads a date in the local calendar', () => {
+    expect(historyDayMs('2026-08-18')).toBe(new Date(2026, 7, 18).getTime())
+  })
+  it('is NaN for anything that is not YYYY-MM-DD', () => {
+    expect(Number.isNaN(historyDayMs('yesterday'))).toBe(true)
+    expect(Number.isNaN(historyDayMs('2026-8-18'))).toBe(true)
+  })
+})
+
+describe('filterHistory', () => {
+  const days = [
+    hist({ date: '2026-08-01', sessions: 3 }),
+    hist({ date: '2026-08-02', sessions: 1, tool: 'codex', machineId: 'remote' }),
+  ]
+  it('admits everything when no chips narrow', () => {
+    expect(filterHistory(days)).toHaveLength(2)
+    expect(filterHistory(days, { tools: new Set(), machines: new Set() })).toHaveLength(2)
+  })
+  it('narrows by tool and machine the way filterRows does', () => {
+    expect(filterHistory(days, { tools: new Set(['claude'] as const) })).toHaveLength(1)
+    expect(filterHistory(days, { machines: new Set(['remote']) })).toHaveLength(1)
+  })
+})
+
+describe('rangeFilterHistory', () => {
+  it('keeps the calendar window and drops the rest', () => {
+    const days = [
+      hist({ date: '2026-08-18', sessions: 1 }),
+      hist({ date: '2026-08-12', sessions: 2 }),
+      hist({ date: '2026-08-11', sessions: 3 }),
+      hist({ date: '2026-08-19', sessions: 4 }), // tomorrow: not yet a day
+    ]
+    const kept = rangeFilterHistory(days, '7d', NOW)
+    expect(kept.map((h) => h.date)).toEqual(['2026-08-18', '2026-08-12'])
+    expect(rangeFilterHistory(days, 'all', NOW)).toHaveLength(3)
+  })
+})
+
+describe('mergedSessions', () => {
+  it('takes the larger claim per machine, tool and day, never the sum', () => {
+    const rows = [
+      row({ id: 'a', startedAt: at(2026, 7, 18, 9) }),
+      row({ id: 'b', startedAt: at(2026, 7, 18, 11) }),
+    ]
+    // The backfill remembers 5 sessions that day — stubs included — so 5
+    // stands; 2 + 5 would bill the two indexed ones twice.
+    expect(mergedSessions(rows, [hist({ date: '2026-08-18', sessions: 5 })])).toBe(5)
+    // The index winning the same comparison also stands.
+    expect(mergedSessions(rows, [hist({ date: '2026-08-18', sessions: 1 })])).toBe(2)
+  })
+  it('keeps machines, tools and days apart', () => {
+    const rows = [row({ id: 'a', startedAt: at(2026, 7, 18, 9) })]
+    const days = [
+      hist({ date: '2026-08-18', sessions: 2, machineId: 'remote' }),
+      hist({ date: '2026-08-17', sessions: 3 }),
+    ]
+    expect(mergedSessions(rows, days)).toBe(1 + 2 + 3)
+  })
+})
+
+describe('insightTotals with backfill', () => {
+  it('merges the session count and leaves every token figure alone', () => {
+    const rows = [row({ id: 'a', startedAt: at(2026, 7, 18, 9) })]
+    const totals = insightTotals(rows, [hist({ date: '2026-08-10', sessions: 4 })])
+    expect(totals.sessions).toBe(5)
+    expect(totals.input).toBe(100)
+    expect(totals.output).toBe(50)
+  })
+})
+
+describe('sessionsByDay with backfill', () => {
+  it('charts remembered days and stretches the span back to them', () => {
+    const rows = [row({ id: 'a', startedAt: at(2026, 7, 18, 9) })]
+    const days = sessionsByDay(rows, NOW, [hist({ date: '2026-08-10', sessions: 6 })])
+    expect(days[0]!.dayMs).toBe(new Date(2026, 7, 10).getTime())
+    expect(days[0]!.byTool.claude).toBe(6)
+    expect(days.at(-1)!.byTool.claude).toBe(1)
+  })
+  it('takes the larger claim on a day both witness', () => {
+    const rows = [
+      row({ id: 'a', startedAt: at(2026, 7, 18, 9) }),
+      row({ id: 'b', startedAt: at(2026, 7, 18, 11) }),
+    ]
+    const days = sessionsByDay(rows, NOW, [hist({ date: '2026-08-18', sessions: 5 })])
+    expect(days.at(-1)!.byTool.claude).toBe(5)
+  })
+})
+
+describe('tokensByDay with backfill', () => {
+  it('stretches the span but keeps remembered days at zero tokens', () => {
+    const rows = [row({ id: 'a', startedAt: at(2026, 7, 18, 9) })]
+    const days = tokensByDay(rows, NOW, [hist({ date: '2026-08-10', sessions: 6 })])
+    expect(days[0]!.dayMs).toBe(new Date(2026, 7, 10).getTime())
+    expect(days[0]!.total).toBe(0)
+    expect(days.at(-1)!.total).toBe(150)
+  })
+})
+
+describe('usageStats with backfill', () => {
+  it('never claims more active days than the span they are read against', () => {
+    // Backfill reaching years past the DAY_SPAN_CAP window: without the
+    // clamp the strip would print "700 of 366".
+    const days: HistoryDayRow[] = []
+    for (let i = 0; i < 700; i++) {
+      const d = new Date(2026, 7, 18 - i)
+      const pad = (n: number) => String(n).padStart(2, '0')
+      days.push(
+        hist({
+          date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+          sessions: 1,
+        }),
+      )
+    }
+    const usage = usageStats([], NOW, days)
+    expect(usage.activeDays).toBeLessThanOrEqual(usage.spanDays)
+    expect(usage.spanDays).toBe(366)
+    expect(usage.activeDays).toBe(366)
+  })
+  it('counts remembered days as active and lets them carry a streak', () => {
+    const rows = [row({ id: 'a', startedAt: at(2026, 7, 18, 9) })]
+    const days = [
+      hist({ date: '2026-08-16', sessions: 2 }),
+      hist({ date: '2026-08-17', sessions: 1 }),
+    ]
+    const usage = usageStats(rows, NOW, days)
+    expect(usage.activeDays).toBe(3)
+    expect(usage.longestStreak).toBe(3)
+    expect(usage.currentStreak).toBe(3)
+    expect(usage.sessions).toBe(4)
+    // The token facts stay the transcripts' own.
+    expect(usage.totalTokens).toBe(150)
+    expect(usage.mostActiveDay).toBe('Aug 18')
+  })
+})
+
+describe('heatmapWeeks with backfill', () => {
+  it('paints a remembered day at the faintest level and leaves ranked days ranked', () => {
+    const rows = [row({ id: 'a', startedAt: at(2026, 7, 18, 9) })]
+    const { weeks } = heatmapWeeks(rows, NOW, [hist({ date: '2026-08-10', sessions: 3 })])
+    const cells = weeks.flat()
+    const remembered = cells.find((c) => c.dayMs === new Date(2026, 7, 10).getTime())!
+    const measured = cells.find((c) => c.dayMs === new Date(2026, 7, 18).getTime())!
+    expect(remembered.level).toBe(1)
+    expect(remembered.tokens).toBe(0)
+    expect(measured.level).toBe(4)
+  })
+  it('never dims a day the transcripts already measured', () => {
+    const rows = [row({ id: 'a', startedAt: at(2026, 7, 18, 9) })]
+    const { weeks } = heatmapWeeks(rows, NOW, [hist({ date: '2026-08-18', sessions: 9 })])
+    const cell = weeks.flat().find((c) => c.dayMs === new Date(2026, 7, 18).getTime())!
+    expect(cell.level).toBe(4)
+    expect(cell.tokens).toBe(150)
+  })
+})
+
+describe('applyAgentView with tombstones', () => {
+  it('keeps a pruned transcript out of the list', () => {
+    const rows = [row({ id: 'kept' }), row({ id: 'pruned', missing: true })]
+    const groups = applyAgentView(rows, DEFAULT_AGENT_VIEW, {}, NOW)
+    const listed = groups.flatMap((g) => g.rows.map((r) => r.id))
+    expect(listed).toEqual(['kept'])
+  })
+  it('still counts it in the insights', () => {
+    const rows = [row({ id: 'pruned', missing: true })]
+    expect(insightTotals(rows).sessions).toBe(1)
+    expect(usageStats(rows, NOW).activeDays).toBe(1)
   })
 })

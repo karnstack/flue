@@ -757,6 +757,27 @@ export interface AgentSummary {
    * resume launched from the wrong directory is worse than none.
    */
   resume?: { cmd: string[]; cwd: string }
+  /**
+   * The transcript file has been pruned by its own tool — Claude Code
+   * deletes transcripts past its cleanup period — and this summary is a
+   * tombstone: it counts in every insight, but there is nothing left to
+   * open or resume, so the sessions list leaves it out. Absent is false.
+   */
+  missing?: boolean
+}
+
+/**
+ * One day of one tool's own aggregate accounting, served as backfill for
+ * days the transcripts no longer witness — Claude Code prunes transcripts
+ * but keeps its per-day session counts forever. `date` is YYYY-MM-DD in the
+ * serving machine's own calendar. Session counts only: the aggregates fold
+ * cache reads into their token figures, a different measurement than the
+ * summaries', so tokens stay transcript-derived.
+ */
+export interface AgentHistoryDay {
+  tool: AgentTool
+  date: string
+  sessions: number
 }
 
 /**
@@ -816,6 +837,9 @@ export interface AgentIndexMsg {
   building: boolean
   /** Empty rather than absent when nothing is indexed. */
   sessions: AgentSummary[]
+  /** Per-day backfill from the tools' own aggregates. Absent on daemons
+   *  from before the field existed, which merges as no backfill at all. */
+  history?: AgentHistoryDay[]
   reqId: number
 }
 

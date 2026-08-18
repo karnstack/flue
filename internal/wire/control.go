@@ -625,6 +625,15 @@ type Revoked struct {
 type AgentIndex struct {
 	Building bool                 `json:"building"`
 	Sessions []agentstore.Summary `json:"sessions"`
+	// History is per-day backfill from the tools' own aggregates — days the
+	// transcripts no longer witness because the tool pruned them (see
+	// agentstore.HistoryDay). It honours the request's Tools filter, and a
+	// request scoped by Cwd gets none at all: the aggregates carry no
+	// working directory, and global history merged into a per-project
+	// answer would inflate it. Optional and additive: a daemon without it
+	// simply sends sessions alone, which is what every daemon did before
+	// the field existed.
+	History []agentstore.HistoryDay `json:"history,omitempty"`
 	// ReqID echoes the reqId of the agents this answers.
 	ReqID uint64 `json:"reqId,omitempty"`
 }

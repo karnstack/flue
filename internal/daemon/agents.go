@@ -72,7 +72,19 @@ func (c *conn) handleAgents(m wire.Agents) {
 		return
 	}
 	sessions, building := idx.Snapshot(m.Tools, m.Cwd)
-	_ = c.sendControl(wire.AgentIndex{Building: building, Sessions: sessions, ReqID: m.ReqID})
+	// The backfill honours the same filters the snapshot does. A cwd scope
+	// gets none at all — the aggregates behind it carry no working
+	// directory, and global history merged into a per-project answer would
+	// inflate it.
+	var history []agentstore.HistoryDay
+	if m.Cwd == "" {
+		for _, h := range idx.History() {
+			if agentstore.ToolAllowed(h.Tool, m.Tools) {
+				history = append(history, h)
+			}
+		}
+	}
+	_ = c.sendControl(wire.AgentIndex{Building: building, Sessions: sessions, History: history, ReqID: m.ReqID})
 }
 
 // beginAgentWork claims one of the connection's agent-work slots, answering

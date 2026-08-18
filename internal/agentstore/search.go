@@ -55,6 +55,10 @@ func (x *Index) Search(ctx context.Context, query string, tools []string, cwd st
 			truncated = true
 			break
 		}
+		if sum.Missing {
+			// A tombstone has no file to scan; skipping it costs no budget.
+			continue
+		}
 		path, _, ok := x.Resolve(sum.Tool, sum.ID)
 		if !ok {
 			continue

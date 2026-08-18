@@ -15,6 +15,7 @@ import {
   compactCost,
   compactTokens,
   DEFAULT_AGENT_VIEW,
+  filterHistory,
   filterRows,
   fmtDuration,
   groupHits,
@@ -23,6 +24,7 @@ import {
   INSIGHT_RANGE_LABELS,
   INSIGHT_RANGES,
   rangeFilter,
+  rangeFilterHistory,
   sessionsByDay,
   shortModel,
   splitSnippet,
@@ -32,6 +34,7 @@ import {
   type AgentHitRow,
   type AgentRow,
   type AgentViewConfig,
+  type HistoryDayRow,
   type InsightRange,
 } from '@/agents/view'
 import { AgentEmptyState, AgentList, AgentSkeleton, ToolDot } from '@/components/agent-rows'
@@ -48,7 +51,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import type { AgentSummary, AgentTool } from '@/client/protocol'
+import type { AgentHistoryDay, AgentSummary, AgentTool } from '@/client/protocol'
 import { useFleet } from '@/fleet/provider'
 import type { MachineState } from '@/fleet/types'
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
@@ -68,7 +71,7 @@ const BUILD_POLL_BUDGET_MS = 60_000
 /** What one machine has said about its transcripts, or not yet. */
 type MachineAgents =
   | { at: 'loading' }
-  | { at: 'ready'; rows: AgentSummary[]; building: boolean }
+  | { at: 'ready'; rows: AgentSummary[]; history: AgentHistoryDay[]; building: boolean }
   | { at: 'failed' }
 
 /** Everything a finished fan-out search has to say. */
@@ -178,7 +181,13 @@ export function AgentsRoute() {
         (msg) => {
           if (generation.current !== mine) return
           setByMachine((prev) =>
-            new Map(prev).set(id, { at: 'ready', rows: msg.sessions, building: msg.building }),
+            new Map(prev).set(id, {
+              at: 'ready',
+              rows: msg.sessions,
+              // Absent on daemons from before the field: no backfill.
+              history: msg.history ?? [],
+              building: msg.building,
+            }),
           )
           const armed = timers.current.get(id)
           if (armed !== undefined) {
@@ -292,6 +301,16 @@ export function AgentsRoute() {
     }
     return out
   }, [byMachine, names])
+
+  /** Every machine's backfill days, machine-stamped the way rows are. */
+  const historyRows: HistoryDayRow[] = useMemo(() => {
+    const out: HistoryDayRow[] = []
+    for (const [id, state] of byMachine) {
+      if (state.at !== 'ready') continue
+      for (const h of state.history) out.push({ ...h, machineId: id })
+    }
+    return out
+  }, [byMachine])
 
   const filters = useMemo(
     () => ({ tools: toolFilter, machines: machineFilter }),
@@ -442,7 +461,13 @@ export function AgentsRoute() {
           </div>
 
           {mode === 'insights' ? (
-            <Insights rows={rows} filters={filters} range={range} onRange={setRange} />
+            <Insights
+              rows={rows}
+              history={historyRows}
+              filters={filters}
+              range={range}
+              onRange={setRange}
+            />
           ) : (
             <>
               {groups.length > 0 && <AgentList groups={groups} showMachine={online.length > 1} />}
@@ -719,11 +744,13 @@ function basenameOf(path: string): string {
  */
 function Insights({
   rows,
+  history,
   filters,
   range,
   onRange,
 }: {
   rows: AgentRow[]
+  history: HistoryDayRow[]
   filters: { tools: ReadonlySet<AgentTool>; machines: ReadonlySet<string> }
   range: InsightRange
   onRange(range: InsightRange): void
@@ -734,27 +761,32 @@ function Insights({
   // which Recharts read as new data and re-animated, so the rank labels
   // blinked every poll. The clock is sampled when the inputs change, not
   // when React happens to run.
-  const { everything, ranged, totals, tokens, sessions, projects, models, heat, usage } =
+  const { everything, ranged, rangedHistory, totals, tokens, sessions, projects, models, heat, usage } =
     useMemo(() => {
       const now = Date.now()
       const everything = filterRows(rows, filters)
       const ranged = rangeFilter(everything, range, now)
+      // The backfill rides the same two filters as the rows, so a chip that
+      // hides a tool or a machine hides its remembered days too.
+      const allHistory = filterHistory(history, filters)
+      const rangedHistory = rangeFilterHistory(allHistory, range, now)
       return {
         everything,
         ranged,
-        totals: insightTotals(ranged),
-        tokens: tokensByDay(ranged, now),
-        sessions: sessionsByDay(ranged, now),
+        rangedHistory,
+        totals: insightTotals(ranged, rangedHistory),
+        tokens: tokensByDay(ranged, now, rangedHistory),
+        sessions: sessionsByDay(ranged, now, rangedHistory),
         projects: byProject(ranged),
         models: byModel(ranged),
         // The Activity section — heatmap and streaks — is computed from ALL
         // rows regardless of the 7d/30d/90d/All range chips: a year of
         // context is the section's whole point. The chips keep driving the
         // stat strip and the day charts.
-        heat: heatmapWeeks(everything, now),
-        usage: usageStats(everything, now),
+        heat: heatmapWeeks(everything, now, allHistory),
+        usage: usageStats(everything, now, allHistory),
       }
-    }, [rows, filters, range])
+    }, [rows, history, filters, range])
 
   const stats: Array<{ label: string; value: string }> = [
     { label: 'Sessions', value: String(totals.sessions) },
@@ -803,13 +835,13 @@ function Insights({
         ))}
       </div>
 
-      {ranged.length === 0 && (
+      {ranged.length === 0 && rangedHistory.length === 0 && (
         <p className="text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
           No agent activity in this range.
         </p>
       )}
 
-      {ranged.length > 0 && (
+      {(ranged.length > 0 || rangedHistory.length > 0) && (
         <div className="@container">
           {/* Cards rather than a ruled strip: each figure is an independent
               claim, and on the dark canvas the panel-plus-inset-ring is what
@@ -837,9 +869,11 @@ function Insights({
         </div>
       )}
 
-      {everything.length > 0 && <ActivitySection heat={heat} usageRows={usageRows} />}
+      {(everything.length > 0 || usage.activeDays > 0) && (
+        <ActivitySection heat={heat} usageRows={usageRows} />
+      )}
 
-      {ranged.length > 0 && (
+      {(ranged.length > 0 || rangedHistory.length > 0) && (
         <div className="@container">
           <div className="flex flex-col gap-y-10">
             <div className="flex min-w-0 flex-col gap-y-2">
