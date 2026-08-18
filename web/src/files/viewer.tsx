@@ -1,6 +1,7 @@
-import { Check, Copy, FileText, X } from 'lucide-react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { Check, Copy, FileText, WrapText, X } from 'lucide-react'
 import { Dialog } from 'radix-ui'
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 
 import { useFlueClient } from '@/client/provider'
 import type { FileMsg, PathEntry } from '@/client/protocol'
@@ -25,11 +26,9 @@ export interface FileViewerProps {
   onClose: () => void
 }
 
-/* One monospace row is exactly this tall (leading-5), which is what lets the
- * body be a window computed by arithmetic instead of a virtualization
- * library: the daemon promises monospace text and the row height is ours. */
+/** An unwrapped monospace row's height (leading-5), the size estimate the
+ * virtualizer starts from; a wrapped row measures taller and is measured. */
 const LINE_PX = 20
-const OVERSCAN = 20
 
 /** The daemon's ceiling on text; past it only the head was sent. */
 const TEXT_CAP = 8 << 20
@@ -57,9 +56,25 @@ const REFUSALS: Record<string, string> = {
 
 type Phase =
   | { at: 'opening' }
-  | { at: 'text'; meta: FileMsg }
+  | { at: 'text'; meta: FileMsg; done: boolean }
   | { at: 'image'; meta: FileMsg }
   | { at: 'refused'; code: string }
+
+/** How the body of a markdown file shows: as a page, or as its lines. */
+type BodyMode = 'rendered' | 'raw'
+
+/** Loaded on the first markdown file, beside shiki, never in the bundle. */
+const MarkdownLazy = lazy(() =>
+  import('./markdown').then((m) => ({ default: m.MarkdownView })),
+)
+
+/**
+ * Above this size a markdown file opens raw, because rendering parses the
+ * whole document on the main thread in one go. Content is untrusted and one
+ * click must not buy a multi-second freeze; the Rendered press stays
+ * offered, so a reader who wants the page still gets it — knowingly.
+ */
+const RENDER_DEFAULT_MAX = 512 << 10
 
 /**
  * A file over the session: the answer to clicking a path the session named.
@@ -76,6 +91,8 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
   const [phase, setPhase] = useState<Phase>({ at: 'opening' })
   const [tokens, setTokens] = useState<PeekToken[][] | null>(null)
   const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const [wrap, setWrap] = useState(true)
+  const [mode, setMode] = useState<BodyMode>('raw')
   const [, setPainted] = useState(0)
   const linesRef = useRef<string[]>([])
   const frame = useRef(0)
@@ -125,7 +142,18 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
     const deliverMeta = (m: FileMsg) => {
       meta = m
       if (gone) return
-      setPhase(m.kind === 'image' ? { at: 'image', meta: m } : { at: 'text', meta: m })
+      setPhase(m.kind === 'image' ? { at: 'image', meta: m } : { at: 'text', meta: m, done: false })
+      // A whole markdown file opens as a page; a click that named a line
+      // opens on the lines the number means, with the page one press away.
+      setMode(
+        m.kind === 'text' &&
+          m.truncated !== true &&
+          m.size <= RENDER_DEFAULT_MAX &&
+          target.line === undefined &&
+          languageFor(m.path) === 'markdown'
+          ? 'rendered'
+          : 'raw',
+      )
     }
     const deliverChunk = (bytes: Uint8Array) => {
       parts.push(bytes)
@@ -133,17 +161,6 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
         push(decoder.decode(bytes, { stream: true }))
         repaint()
       }
-    }
-    const colour = () => {
-      if (meta === null || meta.kind !== 'text' || meta.truncated === true) return
-      const lang = languageFor(meta.path)
-      if (lang === null) return
-      // The caps hold before the join, so an oversized file never pays for
-      // a multi-megabyte string and a worker round trip to be told null.
-      if (meta.size > HIGHLIGHT_MAX_BYTES || linesRef.current.length > HIGHLIGHT_MAX_LINES) return
-      void highlight(linesRef.current.join('\n'), lang).then((rows) => {
-        if (!gone && rows !== null) setTokens(rows)
-      })
     }
     // Keyed per session as well as per clicked text: a relative path
     // resolves against a session's live working directory, so the same
@@ -159,9 +176,9 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
           linesRef.current.push(tail)
           tail = ''
         }
+        setPhase((p) => (p.at === 'text' ? { ...p, done: true } : p))
         repaint()
       }
-      colour()
       if (before === null || meta === null || meta.truncated === true) return
       const total = parts.reduce((n, p) => n + p.length, 0)
       if (total > CACHE_ENTRY_MAX) return
@@ -239,11 +256,51 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
     }
   }, [client, sessionId, target.path])
 
+  // Colouring waits for the view that wants it: a complete raw text body.
+  // A markdown file that opened rendered pays for tokens only when Raw first
+  // shows, a cached replay pays the same way, and the caps hold before any
+  // join or worker round trip so an oversized file never builds the string.
+  useEffect(() => {
+    if (phase.at !== 'text' || !phase.done || phase.meta.truncated === true) return
+    if (tokens !== null) return
+    const lang = languageFor(phase.meta.path)
+    if (lang === null) return
+    if (lang === 'markdown' && mode === 'rendered') return
+    if (phase.meta.size > HIGHLIGHT_MAX_BYTES || linesRef.current.length > HIGHLIGHT_MAX_LINES)
+      return
+    let stale = false
+    void highlight(linesRef.current.join('\n'), lang).then((rows) => {
+      if (!stale && rows !== null) setTokens(rows)
+    })
+    return () => {
+      stale = true
+    }
+  }, [phase, mode, tokens])
+
   const meta = phase.at === 'text' || phase.at === 'image' ? phase.meta : null
   const shownPath = meta?.path ?? target.path
   const slash = shownPath.lastIndexOf('/')
   const base = slash >= 0 ? shownPath.slice(slash + 1) : shownPath
   const dir = slash > 0 ? shownPath.slice(0, slash) : slash === 0 ? '/' : ''
+  const renderable =
+    phase.at === 'text' &&
+    phase.meta.truncated !== true &&
+    languageFor(phase.meta.path) === 'markdown'
+  const showsPage = renderable && mode === 'rendered'
+  const showsLines = phase.at === 'text' && !showsPage
+
+  // The page is one memoized element: react-markdown re-parses the whole
+  // document on every render it takes part in, so unrelated state — tokens
+  // arriving, a wrap toggle — must not hand it a fresh chance to.
+  const pageDone = phase.at === 'text' && phase.done
+  const pageText = useMemo(
+    () => (showsPage && pageDone ? linesRef.current.join('\n') : null),
+    [showsPage, pageDone],
+  )
+  const page = useMemo(
+    () => (pageText === null ? null : <MarkdownLazy text={pageText} />),
+    [pageText],
+  )
 
   return (
     <Dialog.Root
@@ -274,6 +331,40 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
               <span className="shrink-0 text-control whitespace-nowrap text-muted-foreground">
                 {fmtBytes(meta.size)}
               </span>
+            )}
+            {renderable && (
+              <div className="flex shrink-0 items-center gap-0.5">
+                <Button
+                  aria-pressed={mode === 'rendered'}
+                  size="xs"
+                  variant="ghost"
+                  className={mode === 'rendered' ? 'bg-muted/60' : 'text-muted-foreground'}
+                  onClick={() => setMode('rendered')}
+                >
+                  Rendered
+                </Button>
+                <Button
+                  aria-pressed={mode === 'raw'}
+                  size="xs"
+                  variant="ghost"
+                  className={mode === 'raw' ? 'bg-muted/60' : 'text-muted-foreground'}
+                  onClick={() => setMode('raw')}
+                >
+                  Raw
+                </Button>
+              </div>
+            )}
+            {showsLines && (
+              <Button
+                aria-label="Wrap lines"
+                aria-pressed={wrap}
+                size="icon-sm"
+                variant="ghost"
+                className={wrap ? 'bg-muted/60' : undefined}
+                onClick={() => setWrap((w) => !w)}
+              >
+                <WrapText />
+              </Button>
             )}
             <CopyPath path={shownPath} />
             <Dialog.Close asChild>
@@ -311,7 +402,35 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
                 Receiving the image…
               </p>
             ))}
-          {phase.at === 'text' && (
+          {showsPage && phase.at === 'text' && (
+            // data-file-body and the tab stop, exactly as the text window
+            // carries them: the dialog's opening focus lands here, so arrow
+            // and page keys scroll the page from the first keystroke.
+            <div
+              data-file-body
+              tabIndex={-1}
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain outline-none"
+            >
+              <div className="mx-auto w-full max-w-[72ch] px-6 py-4 text-sm">
+                {page !== null ? (
+                  <Suspense
+                    fallback={
+                      <p role="status" className="text-control text-muted-foreground">
+                        Rendering…
+                      </p>
+                    }
+                  >
+                    {page}
+                  </Suspense>
+                ) : (
+                  <p role="status" className="text-control text-muted-foreground">
+                    Receiving…
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+          {showsLines && (
             // Keyed by path, so a viewer whose target changes under it — a
             // later phase reuses the mounted dialog — starts its scroll and
             // its one-shot jump over rather than inheriting the old file's.
@@ -320,6 +439,7 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
               lines={linesRef.current}
               tokens={tokens}
               mark={target.line}
+              wrap={wrap}
             />
           )}
         </Dialog.Content>
@@ -332,61 +452,109 @@ function TextWindow({
   lines,
   tokens,
   mark,
+  wrap,
 }: {
   lines: string[]
   tokens: PeekToken[][] | null
   mark?: number
+  wrap: boolean
 }) {
   const boxRef = useRef<HTMLDivElement | null>(null)
   const jumped = useRef(false)
-  const [top, setTop] = useState(0)
-  const [tall, setTall] = useState(0)
 
-  useEffect(() => {
-    const box = boxRef.current
-    if (box === null) return
-    const measure = () => setTall(box.clientHeight)
-    measure()
-    const watcher = new ResizeObserver(measure)
-    watcher.observe(box)
-    return () => watcher.disconnect()
-  }, [])
+  // Measured rather than arithmetic, because a wrapped line is as tall as
+  // the width made it; the estimate only has to be right for the unwrapped
+  // common case and the virtualizer corrects the rest as rows mount.
+  const virtualizer = useVirtualizer({
+    count: lines.length,
+    getScrollElement: () => boxRef.current,
+    estimateSize: () => LINE_PX,
+    overscan: 24,
+    getItemKey: (index) => index,
+    // Both fallbacks are for an unlaid-out environment (jsdom): a rect so
+    // the first render windows instead of rendering nothing, and the
+    // estimate standing in for a measured height of zero, which would
+    // otherwise put every row of the file inside a zero-height viewport.
+    initialRect: { width: 800, height: 480 },
+    measureElement: (el) => {
+      const measured = el.getBoundingClientRect().height
+      return measured > 0 ? measured : LINE_PX
+    },
+  })
 
-  // One jump to the named line, as soon as enough of the file has arrived.
+  // One jump to the named line, as soon as enough of the file has arrived —
+  // re-issued for a few frames, because the first jump lands on estimated
+  // heights and wrapped rows above the mark measure taller after they mount,
+  // which the virtualizer does not re-anchor for on its own.
   useEffect(() => {
-    const box = boxRef.current
-    if (box === null || mark === undefined || jumped.current || lines.length < mark) return
+    if (mark === undefined || jumped.current || lines.length < mark) return
     jumped.current = true
-    box.scrollTop = Math.max(0, (mark - 4) * LINE_PX)
-    setTop(box.scrollTop)
-  }, [lines.length, mark])
+    let tries = 0
+    const land = () => {
+      virtualizer.scrollToIndex(mark - 1, { align: 'center' })
+      tries++
+      if (tries >= 8) return
+      const shown = virtualizer.getVirtualItems().some((i) => i.index === mark - 1)
+      if (!shown) requestAnimationFrame(land)
+    }
+    land()
+  }, [lines.length, mark, virtualizer])
 
-  const rows = Math.max(1, Math.ceil((tall > 0 ? tall : 480) / LINE_PX))
-  const first = Math.max(0, Math.floor(top / LINE_PX) - OVERSCAN)
-  const last = Math.min(lines.length, first + rows + OVERSCAN * 2)
+  // Flipping the wrap invalidates every height the virtualizer has learned.
+  useEffect(() => {
+    virtualizer.measure()
+  }, [wrap, virtualizer])
+
+  // Wide enough for the last line's number, so the column never jumps as
+  // scrolling reveals longer numbers.
+  const gutterCh = String(Math.max(lines.length, 1)).length
 
   return (
     <div
       ref={boxRef}
       data-file-body
       tabIndex={-1}
-      onScroll={(e) => setTop(e.currentTarget.scrollTop)}
       className="min-h-0 flex-1 overflow-auto overscroll-contain py-2 font-mono text-[12.5px] leading-5 outline-none"
     >
-      <div
-        className="w-max min-w-full"
-        style={{ paddingTop: first * LINE_PX, paddingBottom: (lines.length - last) * LINE_PX }}
-      >
-        {lines.slice(first, last).map((text, i) => {
-          const n = first + i + 1
+      <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map((item) => {
+          const n = item.index + 1
           return (
             <div
-              key={n}
+              key={item.key}
+              data-index={item.index}
+              ref={virtualizer.measureElement}
               data-file-row
               data-marked={n === mark ? 'true' : undefined}
-              className="h-5 pr-6 pl-4 whitespace-pre data-marked:bg-teal-500/15"
+              className={cn(
+                'absolute top-0 left-0 flex min-h-5 translate-y-(--row-y) data-marked:bg-teal-500/15',
+                wrap ? 'w-full' : 'w-max min-w-full',
+              )}
+              style={{ '--row-y': `${item.start}px` } as CSSProperties}
             >
-              {tokens?.[n - 1] !== undefined ? <TokenRow row={tokens[n - 1]!} /> : text}
+              <span
+                aria-hidden
+                data-file-gutter
+                // Sticky, so the numbers hold while an unwrapped line scrolls
+                // sideways beneath them; opaque for the same reason; and
+                // select-none, so a copied stretch of file carries no numbers.
+                className="sticky left-0 z-10 shrink-0 bg-popover pr-3 pl-4 text-right text-muted-foreground/50 select-none in-data-marked:text-teal-600"
+                style={{ width: `calc(${gutterCh}ch + 1.75rem)` }}
+              >
+                {n}
+              </span>
+              <div
+                className={cn(
+                  'pr-6',
+                  wrap ? 'min-w-0 flex-1 break-words whitespace-pre-wrap' : 'whitespace-pre',
+                )}
+              >
+                {tokens?.[item.index] !== undefined ? (
+                  <TokenRow row={tokens[item.index]!} />
+                ) : (
+                  lines[item.index]
+                )}
+              </div>
             </div>
           )
         })}

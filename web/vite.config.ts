@@ -205,13 +205,22 @@ export default defineConfig({
         // file really does contain no import statement.
         entryFileNames: (chunk) =>
           chunk.name === SW_ENTRY ? SW_FILE : 'assets/[name]-[hash].js',
-        // The highlighter's chunks — shiki and the tokenizing module that
-        // fronts it — go under assets/peek/, the directory isPrecacheable
-        // leaves out. They are reachable from the main-thread fallback path
+        // The viewer's on-demand chunks — shiki with the tokenizing module
+        // that fronts it, and the markdown renderer with its remark family —
+        // go under assets/peek/, the directory isPrecacheable leaves out.
+        // The shiki half is reachable from the worker's main-thread fallback
         // too, which is why the main build needs the same routing the worker
         // build has.
         chunkFileNames: (chunk) =>
-          chunk.moduleIds.some((id) => id.includes('/shiki/') || id.includes('files/tokenize'))
+          chunk.moduleIds.some(
+            (id) =>
+              id.includes('/shiki/') ||
+              id.includes('files/tokenize') ||
+              id.includes('files/markdown') ||
+              /node_modules\/[^/]*(react-markdown|remark|rehype|micromark|mdast|unist|unified|hast|vfile)/.test(
+                id,
+              ),
+          )
             ? 'assets/peek/[name]-[hash].js'
             : 'assets/[name]-[hash].js',
       },

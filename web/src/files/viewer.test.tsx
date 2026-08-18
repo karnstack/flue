@@ -7,6 +7,23 @@ import { fakeClient, type FakeSocket } from '@/testing/socket'
 import { FileViewer, type FileTarget } from './viewer'
 
 const openViewer = (target: FileTarget) => {
+  // jsdom lays nothing out, and the virtualizer windows on measured boxes —
+  // offsetWidth/offsetHeight for the scroll box, getBoundingClientRect for
+  // row measurement. Every element pretending to be 800x480 is what
+  // terminal.test.tsx's paneOf does for the same reason.
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(480)
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800)
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    width: 800,
+    height: 480,
+    top: 0,
+    left: 0,
+    right: 800,
+    bottom: 480,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  } as DOMRect)
   const onClose = vi.fn()
   const { client, last } = fakeClient()
   client.connect()
@@ -100,7 +117,7 @@ describe('FileViewer', () => {
     // No newline anywhere: the failure mode is one giant DOM row, blank
     // until eof. Chopping bounds the row and paints the head immediately.
     await flowed(sock, 'y'.repeat(20_000))
-    const rows = document.querySelectorAll('[data-file-row]')
+    const rows = document.querySelectorAll('[data-file-row] > div')
     expect(rows.length).toBeGreaterThan(0)
     for (const row of rows) {
       expect(row.textContent!.length).toBeLessThanOrEqual(8192)
@@ -115,8 +132,21 @@ describe('FileViewer', () => {
       sock.emitControl({ type: 'eof', ref: 7 })
       await new Promise((frame) => requestAnimationFrame(frame))
     })
-    expect(screen.getByText('two').getAttribute('data-marked')).toBe('true')
-    expect(screen.getByText('one').getAttribute('data-marked')).toBeNull()
+    const row = (text: string) => screen.getByText(text).closest('[data-file-row]')!
+    expect(row('two').getAttribute('data-marked')).toBe('true')
+    expect(row('one').getAttribute('data-marked')).toBeNull()
+  })
+
+  it('numbers every line in a gutter the selection cannot take', async () => {
+    const { sock, sent } = openViewer({ path: 'notes.txt' })
+    served(sock, sent!.reqId, { path: '/home/k/notes.txt' })
+    await flowed(sock, 'one\ntwo\nthree')
+    const gutter = screen
+      .getByText('two')
+      .closest('[data-file-row]')!
+      .querySelector('[data-file-gutter]')!
+    expect(gutter.textContent).toBe('2')
+    expect(gutter.className).toContain('select-none')
   })
 
   it('says how much of a shortened file it is showing', () => {
@@ -177,11 +207,13 @@ describe('FileViewer', () => {
       await new Promise((frame) => requestAnimationFrame(frame))
     })
     await waitFor(() => {
-      expect(document.querySelector('[data-file-row] span')).not.toBeNull()
+      expect(document.querySelector('[data-file-row] span:not([data-file-gutter])')).not.toBeNull()
     })
     // The colour must arrive through the scheme-aware classes, never as an
     // inline color — inline would pin the light palette under a dark scheme.
-    const span = document.querySelector<HTMLElement>('[data-file-row] span[style]')!
+    const span = document.querySelector<HTMLElement>(
+      '[data-file-row] span[style]:not([data-file-gutter])',
+    )!
     expect(span.style.color).toBe('')
     expect(span.style.getPropertyValue('--peek-light')).not.toBe('')
     expect(span.style.getPropertyValue('--peek-dark')).not.toBe('')
@@ -197,7 +229,7 @@ describe('FileViewer', () => {
       sock.emitControl({ type: 'eof', ref: 7 })
       await new Promise((done) => setTimeout(done, 50))
     })
-    expect(document.querySelector('[data-file-row] span')).toBeNull()
+    expect(document.querySelector('[data-file-row] span:not([data-file-gutter])')).toBeNull()
   })
 
   it('serves a reopen from the cache once the surrounding stats agree', async () => {
@@ -274,6 +306,113 @@ describe('FileViewer', () => {
     // Nothing was remembered, so the reopen reads again rather than stats
     // its way to a replay.
     expect(sock.control().filter((m) => m.type === 'read')).toHaveLength(2)
+  })
+
+  it('opens a complete markdown file rendered, raw one press away', async () => {
+    const { sock, sent } = openViewer({ path: 'README.md' })
+    served(sock, sent!.reqId, { path: '/home/k/README.md' })
+    await flowed(sock, '# Hello\n\nplain words')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 1, name: 'Hello' })).toBeTruthy()
+    })
+    expect(document.querySelector('[data-file-row]')).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Raw' }))
+    expect(screen.queryByRole('heading', { level: 1, name: 'Hello' })).toBeNull()
+    expect(document.querySelector('[data-file-row]')).not.toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Rendered' }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 1, name: 'Hello' })).toBeTruthy()
+    })
+  })
+
+  it('opens a very large markdown file raw, the page still one press away', async () => {
+    const { sock, sent } = openViewer({ path: 'HUGE.md' })
+    served(sock, sent!.reqId, { path: '/home/k/HUGE.md', size: (512 << 10) + 1 })
+    await flowed(sock, '# heavy')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    // Raw by default: one click must not buy a multi-second parse. The
+    // Rendered press remains for a reader who asks for it knowingly.
+    expect(document.querySelector('[data-file-row]')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Rendered' })).toBeTruthy()
+  })
+
+  it('gives the rendered page the dialog focus target', async () => {
+    const { sock, sent } = openViewer({ path: 'README.md' })
+    served(sock, sent!.reqId, { path: '/home/k/README.md' })
+    await flowed(sock, '# Hello')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    // The opening auto-focus looks for data-file-body; a rendered page
+    // without one leaves focus outside the dialog and the arrow keys dead.
+    const body = document.querySelector<HTMLElement>('[data-file-body]')
+    expect(body).not.toBeNull()
+    expect(body!.getAttribute('tabindex')).toBe('-1')
+  })
+
+  it('offers no rendered view for a file that is not markdown', async () => {
+    const { sock, sent } = openViewer({ path: 'notes.txt' })
+    served(sock, sent!.reqId, { path: '/home/k/notes.txt' })
+    await flowed(sock, 'plain')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    expect(screen.queryByRole('button', { name: 'Rendered' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Raw' })).toBeNull()
+  })
+
+  it('keeps a shortened markdown file raw, with no rendered option', async () => {
+    const { sock, sent } = openViewer({ path: 'big.md' })
+    served(sock, sent!.reqId, { path: '/home/k/big.md', size: 41943040, truncated: true })
+    await flowed(sock, '# Half a heading')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    expect(screen.queryByRole('button', { name: 'Rendered' })).toBeNull()
+    expect(document.querySelector('[data-file-row]')).not.toBeNull()
+  })
+
+  it('opens raw when the click named a line, rendering still offered', async () => {
+    const { sock, sent } = openViewer({ path: 'README.md', line: 2 })
+    served(sock, sent!.reqId, { path: '/home/k/README.md' })
+    await flowed(sock, '# Hello\nsecond line\nthird')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    expect(document.querySelector('[data-file-row]')).not.toBeNull()
+    expect(screen.getByText('second line').closest('[data-file-row]')!.getAttribute('data-marked')).toBe('true')
+    await userEvent.click(screen.getByRole('button', { name: 'Rendered' }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 1, name: 'Hello' })).toBeTruthy()
+    })
+  })
+
+  it('wraps long lines by default, and unwraps on the toggle', async () => {
+    const { sock, sent } = openViewer({ path: 'notes.txt' })
+    served(sock, sent!.reqId, { path: '/home/k/notes.txt' })
+    await flowed(sock, 'a very long line\nand another')
+    const body = () => document.querySelector('[data-file-row] > div')!
+    expect(body().className).toContain('whitespace-pre-wrap')
+    const toggle = screen.getByRole('button', { name: 'Wrap lines' })
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    await userEvent.click(toggle)
+    expect(body().className).not.toContain('whitespace-pre-wrap')
+    expect(body().className).toContain('whitespace-pre')
+    await userEvent.click(toggle)
+    expect(body().className).toContain('whitespace-pre-wrap')
   })
 
   it('offers the resolved path to the clipboard', async () => {
