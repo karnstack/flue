@@ -16,6 +16,7 @@
  */
 import type {
   AgentHistoryDay,
+  AgentHistoryTotals,
   AgentHit,
   AgentMessage,
   AgentSummary,
@@ -45,6 +46,15 @@ export interface AgentHitRow extends AgentHit {
  * mergedSessionCounts — so the stamp is load-bearing, not a label.
  */
 export interface HistoryDayRow extends AgentHistoryDay {
+  machineId: string
+}
+
+/**
+ * One model's lifetime accounting from a tool's own aggregate, machine
+ * stamped for the same reason. Lifetime only, so it merges into the
+ * all-time view alone — see insightTotals and byModel.
+ */
+export interface HistoryTotalsRow extends AgentHistoryTotals {
   machineId: string
 }
 
@@ -405,11 +415,12 @@ export function historyDayMs(date: string): number {
   return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()
 }
 
-/** The backfill days the chip filters admit — filterRows for HistoryDayRow. */
-export function filterHistory(
-  history: HistoryDayRow[],
+/** The backfill rows the chip filters admit — filterRows for anything
+ *  machine-and-tool stamped, which is every backfill shape. */
+export function filterHistory<T extends { tool: AgentTool; machineId: string }>(
+  history: T[],
   opts: { tools?: ReadonlySet<AgentTool>; machines?: ReadonlySet<string> } = {},
-): HistoryDayRow[] {
+): T[] {
   const { tools, machines } = opts
   return history.filter(
     (h) =>
@@ -486,31 +497,95 @@ function shiftDay(dayMs: number, days: number): number {
 }
 
 /** What the stat strip says about a set of rows. `costUsd` is null when no
- *  row records one, which is how the screen knows to drop the column whole. */
+ *  row records one, which is how the screen knows to drop the column whole.
+ *  `total` is every bucket together — the headline figure the tools' own
+ *  usage screens lead with. */
 export interface InsightTotals {
   sessions: number
   input: number
   output: number
   cacheRead: number
+  cacheWrite: number
+  total: number
   costUsd: number | null
 }
 
-export function insightTotals(rows: AgentRow[], history: HistoryDayRow[] = []): InsightTotals {
-  let input = 0
-  let output = 0
-  let cacheRead = 0
+/** The four buckets as a mutable accumulator. */
+interface Buckets {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+const zeroBuckets = (): Buckets => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+
+/**
+ * Per (machine, tool) bucket sums, transcripts and lifetime totals merged by
+ * taking the larger of each bucket — mergedSessionCounts' rule, for its
+ * reason: both witnesses describe the same tokens, the aggregate remembers
+ * the pruned ones, and summing would double-bill everything still on disk.
+ * The daily backfill cannot join this merge (its token figure folds cache
+ * reads into one number); the lifetime totals keep the buckets split, which
+ * is exactly why they can.
+ */
+function mergedBuckets(rows: AgentRow[], totals: HistoryTotalsRow[]): Map<string, Buckets> {
+  const indexed = new Map<string, Buckets>()
+  for (const r of rows) {
+    const key = `${r.machineId}|${r.tool}`
+    const b = indexed.get(key) ?? zeroBuckets()
+    b.input += r.tokens.input
+    b.output += r.tokens.output
+    b.cacheRead += r.tokens.cacheRead
+    b.cacheWrite += r.tokens.cacheWrite
+    indexed.set(key, b)
+  }
+  const reported = new Map<string, Buckets>()
+  for (const t of totals) {
+    const key = `${t.machineId}|${t.tool}`
+    const b = reported.get(key) ?? zeroBuckets()
+    b.input += t.tokens.input
+    b.output += t.tokens.output
+    b.cacheRead += t.tokens.cacheRead
+    b.cacheWrite += t.tokens.cacheWrite
+    reported.set(key, b)
+  }
+  const merged = new Map<string, Buckets>()
+  for (const key of new Set([...indexed.keys(), ...reported.keys()])) {
+    const a = indexed.get(key) ?? zeroBuckets()
+    const b = reported.get(key) ?? zeroBuckets()
+    merged.set(key, {
+      input: Math.max(a.input, b.input),
+      output: Math.max(a.output, b.output),
+      cacheRead: Math.max(a.cacheRead, b.cacheRead),
+      cacheWrite: Math.max(a.cacheWrite, b.cacheWrite),
+    })
+  }
+  return merged
+}
+
+export function insightTotals(
+  rows: AgentRow[],
+  history: HistoryDayRow[] = [],
+  totals: HistoryTotalsRow[] = [],
+): InsightTotals {
+  const out = zeroBuckets()
+  for (const b of mergedBuckets(rows, totals).values()) {
+    out.input += b.input
+    out.output += b.output
+    out.cacheRead += b.cacheRead
+    out.cacheWrite += b.cacheWrite
+  }
   let costUsd: number | null = null
   for (const r of rows) {
-    input += r.tokens.input
-    output += r.tokens.output
-    cacheRead += r.tokens.cacheRead
     if (r.costUsd !== undefined) costUsd = (costUsd ?? 0) + r.costUsd
   }
-  // Sessions merge with the backfill; the token figures cannot — the
-  // aggregates behind the backfill fold cache reads into one number, a
-  // different measurement — so they stay the transcripts' own and read as
-  // "at least" for any span the backfill extends.
-  return { sessions: mergedSessions(rows, history), input, output, cacheRead, costUsd }
+  return {
+    sessions: mergedSessions(rows, history),
+    ...out,
+    total: out.input + out.output + out.cacheRead + out.cacheWrite,
+    costUsd,
+  }
 }
 
 /** One day of the stacked chart: tokens per tool, on the session's start day. */
@@ -630,17 +705,42 @@ export function byProject(
 }
 
 /**
- * Token spend per model, largest first. A session's whole figure lands on its
- * latest model — the accounting is per session, not per line, so this is an
- * attribution rather than a measurement, and the latest model is the one the
- * session settled on. Sessions naming no model at all are left out.
+ * Token spend per model, largest first, in rowTokens' figure (input plus
+ * output). A session's whole figure lands on its latest model — the
+ * accounting is per session, not per line, so this is an attribution rather
+ * than a measurement, and the latest model is the one the session settled
+ * on. Sessions naming no model at all are left out.
+ *
+ * Lifetime totals, when given, merge per (machine, model) by the larger
+ * claim, so a model whose sessions were pruned still ranks by what the
+ * tool's own counters remember. The two attributions differ — the aggregate
+ * counts per request, the transcripts per session — which makes the max an
+ * approximation; it errs toward the aggregate, which is the more precise of
+ * the two.
  */
-export function byModel(rows: AgentRow[]): Array<{ model: string; tokens: number }> {
-  const spent = new Map<string, number>()
+export function byModel(
+  rows: AgentRow[],
+  totals: HistoryTotalsRow[] = [],
+): Array<{ model: string; tokens: number }> {
+  const indexed = new Map<string, number>()
   for (const r of rows) {
     const model = latestModel(r)
     if (model === null) continue
-    spent.set(model, (spent.get(model) ?? 0) + rowTokens(r))
+    const key = `${r.machineId}|${model}`
+    indexed.set(key, (indexed.get(key) ?? 0) + rowTokens(r))
+  }
+  const reported = new Map<string, number>()
+  for (const t of totals) {
+    const key = `${t.machineId}|${t.model}`
+    reported.set(key, (reported.get(key) ?? 0) + t.tokens.input + t.tokens.output)
+  }
+  const spent = new Map<string, number>()
+  for (const key of new Set([...indexed.keys(), ...reported.keys()])) {
+    // From the right, splitMergeKey's reason: the machine id is the half
+    // that may contain the separator.
+    const model = key.slice(key.lastIndexOf('|') + 1)
+    const n = Math.max(indexed.get(key) ?? 0, reported.get(key) ?? 0)
+    spent.set(model, (spent.get(model) ?? 0) + n)
   }
   return [...spent.entries()]
     .map(([model, tokens]) => ({ model, tokens }))
@@ -814,6 +914,7 @@ export function usageStats(
   rows: AgentRow[],
   now: number,
   history: HistoryDayRow[] = [],
+  totals: HistoryTotalsRow[] = [],
 ): UsageStats {
   const today = dayStartMs(now)
 
@@ -888,7 +989,11 @@ export function usageStats(
     cursor = shiftDay(cursor, -1)
   }
 
-  const models = byModel(rows)
+  // Favorite model reads the lifetime merge: the whole-history section this
+  // feeds already ignores the range chips, and a favorite computed from the
+  // surviving files alone would crown whichever model's transcripts the
+  // cleanup happened to spare.
+  const models = byModel(rows, totals)
   return {
     sessions: mergedSessions(rows, history),
     totalTokens,

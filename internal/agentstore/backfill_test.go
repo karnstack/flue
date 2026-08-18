@@ -205,3 +205,41 @@ func TestHistoryReadsClaudeStatsCache(t *testing.T) {
 		t.Fatalf("cached History = %+v, want %+v", again, want)
 	}
 }
+
+// TestHistoryTotalsFromStatsCache pins the lifetime side of the aggregate:
+// per-model bucket totals, sorted by model, with empty accountings dropped
+// and the same absent-file-means-nothing terms as the per-day read.
+func TestHistoryTotalsFromStatsCache(t *testing.T) {
+	home, _ := fakeHome(t)
+	x := New(t.TempDir(), home)
+	if got := x.HistoryTotals(); len(got) != 0 {
+		t.Fatalf("HistoryTotals with no stats-cache = %+v, want empty", got)
+	}
+
+	write(t, filepath.Join(home, ".claude", "stats-cache.json"), []byte(`{
+		"version": 5,
+		"dailyActivity": [{"date": "2026-04-07", "sessionCount": 4}],
+		"modelUsage": {
+			"claude-opus-4-7": {"inputTokens": 10, "outputTokens": 20, "cacheReadInputTokens": 300, "cacheCreationInputTokens": 4, "costUSD": 12.5},
+			"claude-fable-5": {"inputTokens": 1, "outputTokens": 2, "cacheReadInputTokens": 3, "cacheCreationInputTokens": 4},
+			"claude-idle-model": {"inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}
+		}
+	}`))
+	want := []HistoryTotals{
+		{Tool: ToolClaude, Model: "claude-fable-5", Tokens: TokenUsage{Input: 1, Output: 2, CacheRead: 3, CacheWrite: 4}},
+		{Tool: ToolClaude, Model: "claude-opus-4-7", Tokens: TokenUsage{Input: 10, Output: 20, CacheRead: 300, CacheWrite: 4}},
+	}
+	got := x.HistoryTotals()
+	if len(got) != len(want) {
+		t.Fatalf("HistoryTotals = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("HistoryTotals[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	// Both reads ride one parse and one cache.
+	if days := x.History(); len(days) != 1 {
+		t.Errorf("History alongside totals = %+v, want the one day", days)
+	}
+}

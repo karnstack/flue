@@ -77,14 +77,23 @@ func (c *conn) handleAgents(m wire.Agents) {
 	// directory, and global history merged into a per-project answer would
 	// inflate it.
 	var history []agentstore.HistoryDay
+	var totals []agentstore.HistoryTotals
 	if m.Cwd == "" {
 		for _, h := range idx.History() {
 			if agentstore.ToolAllowed(h.Tool, m.Tools) {
 				history = append(history, h)
 			}
 		}
+		for _, t := range idx.HistoryTotals() {
+			if agentstore.ToolAllowed(t.Tool, m.Tools) {
+				totals = append(totals, t)
+			}
+		}
 	}
-	_ = c.sendControl(wire.AgentIndex{Building: building, Sessions: sessions, History: history, ReqID: m.ReqID})
+	_ = c.sendControl(wire.AgentIndex{
+		Building: building, Sessions: sessions,
+		History: history, HistoryTotals: totals, ReqID: m.ReqID,
+	})
 }
 
 // beginAgentWork claims one of the connection's agent-work slots, answering

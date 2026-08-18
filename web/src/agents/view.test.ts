@@ -39,6 +39,7 @@ import {
   type AgentRow,
   type HeatCell,
   type HistoryDayRow,
+  type HistoryTotalsRow,
 } from './view'
 
 /** A local-time stamp, so day bucketing tests hold in any timezone. */
@@ -384,6 +385,8 @@ describe('insightTotals', () => {
       input: 110,
       output: 55,
       cacheRead: 33,
+      cacheWrite: 6,
+      total: 204,
       costUsd: null,
     })
   })
@@ -400,6 +403,8 @@ describe('insightTotals', () => {
       input: 0,
       output: 0,
       cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
       costUsd: null,
     })
   })
@@ -980,5 +985,92 @@ describe('applyAgentView with tombstones', () => {
     const rows = [row({ id: 'pruned', missing: true })]
     expect(insightTotals(rows).sessions).toBe(1)
     expect(usageStats(rows, NOW).activeDays).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Lifetime totals.
+
+function lifetime(
+  over: Partial<HistoryTotalsRow> & { tokens: HistoryTotalsRow['tokens'] },
+): HistoryTotalsRow {
+  return { tool: 'claude', model: 'claude-opus-4-7', machineId: 'local', ...over }
+}
+
+describe('insightTotals with lifetime totals', () => {
+  it('takes the larger claim per machine, tool and bucket, never the sum', () => {
+    // The transcripts still witness 100/50; the tool's own counters
+    // remember the pruned era: 1000 input, 30 output. Bucket-wise max, so
+    // the answer is the aggregate's input beside the transcripts' output.
+    const rows = [row({ id: 'a', tokens: { input: 100, output: 50, cacheRead: 30, cacheWrite: 5 } })]
+    const t = insightTotals(rows, [], [
+      lifetime({ tokens: { input: 1000, output: 30, cacheRead: 4000, cacheWrite: 2 } }),
+    ])
+    expect(t.input).toBe(1000)
+    expect(t.output).toBe(50)
+    expect(t.cacheRead).toBe(4000)
+    expect(t.cacheWrite).toBe(5)
+    expect(t.total).toBe(1000 + 50 + 4000 + 5)
+  })
+
+  it('sums across machines and models after the per-machine merge', () => {
+    const t = insightTotals([], [], [
+      lifetime({ tokens: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0 } }),
+      lifetime({ model: 'claude-fable-5', tokens: { input: 5, output: 2, cacheRead: 0, cacheWrite: 0 } }),
+      lifetime({ machineId: 'remote', tokens: { input: 100, output: 7, cacheRead: 0, cacheWrite: 0 } }),
+    ])
+    expect(t.input).toBe(10 + 5 + 100)
+    expect(t.output).toBe(1 + 2 + 7)
+  })
+
+  it('keeps a codex machine untouched by claude lifetime totals', () => {
+    const rows = [
+      row({ id: 'c', tool: 'codex', tokens: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0 } }),
+    ]
+    const t = insightTotals(rows, [], [
+      lifetime({ tokens: { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0 } }),
+    ])
+    expect(t.input).toBe(1007)
+    expect(t.output).toBe(503)
+  })
+})
+
+describe('byModel with lifetime totals', () => {
+  it('ranks a model by what the counters remember, and the favorite follows', () => {
+    // On disk only gpt-5.6-sol survives; the aggregate remembers opus
+    // carrying the real load. rowTokens' figure both sides: input + output.
+    const rows = [
+      row({
+        id: 'a',
+        tool: 'codex',
+        models: ['gpt-5.6-sol'],
+        tokens: { input: 9_000_000, output: 3_000_000, cacheRead: 0, cacheWrite: 0 },
+      }),
+      row({
+        id: 'b',
+        models: ['claude-opus-4-7'],
+        tokens: { input: 1_000_000, output: 500_000, cacheRead: 0, cacheWrite: 0 },
+      }),
+    ]
+    const totals = [
+      lifetime({ tokens: { input: 79_000_000, output: 476_000_000, cacheRead: 0, cacheWrite: 0 } }),
+    ]
+    const ranked = byModel(rows, totals)
+    expect(ranked[0]).toEqual({ model: 'claude-opus-4-7', tokens: 555_000_000 })
+    expect(usageStats(rows, NOW, [], totals).favoriteModel).toBe('opus-4-7')
+  })
+
+  it('never lets the merge double a model both witnesses saw', () => {
+    const rows = [
+      row({
+        id: 'a',
+        models: ['claude-opus-4-7'],
+        tokens: { input: 60, output: 40, cacheRead: 0, cacheWrite: 0 },
+      }),
+    ]
+    const ranked = byModel(rows, [
+      lifetime({ tokens: { input: 50, output: 30, cacheRead: 0, cacheWrite: 0 } }),
+    ])
+    expect(ranked).toEqual([{ model: 'claude-opus-4-7', tokens: 100 }])
   })
 })
