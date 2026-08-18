@@ -18,7 +18,21 @@ const openViewer = (target: FileTarget) => {
     </FlueClientProvider>,
   )
   const sent = sock.control().find((m) => m.type === 'read')
-  return { sock, sent, onClose, view, client }
+  // Answer every stat not yet answered with one entry (or nothing for null).
+  // The cache protocol stats around a read — before it starts, after it
+  // ends, and once more to validate a reopen — so tests answer by sweep.
+  const answeredStats = new Set<number>()
+  const answerStats = (entry: Record<string, unknown> | null) =>
+    act(async () => {
+      for (const m of sock.control().filter((x) => x.type === 'stat')) {
+        const id = m.reqId as number
+        if (answeredStats.has(id)) continue
+        answeredStats.add(id)
+        sock.emitControl({ type: 'stats', entries: entry === null ? [] : [entry], reqId: id })
+      }
+      await Promise.resolve()
+    })
+  return { sock, sent, onClose, view, client, answerStats }
 }
 
 const served = (sock: FakeSocket, reqId: unknown, over: Record<string, unknown> = {}) =>
@@ -186,25 +200,18 @@ describe('FileViewer', () => {
     expect(document.querySelector('[data-file-row] span')).toBeNull()
   })
 
-  it('serves a reopen from the cache after one confirming stat', async () => {
+  it('serves a reopen from the cache once the surrounding stats agree', async () => {
     const path = `cache-hit-${Math.random().toString(36).slice(2)}.txt`
-    const { sock, sent, view, client } = openViewer({ path })
+    const { sock, sent, view, client, answerStats } = openViewer({ path })
+    const entry = { path, exists: true, kind: 'file', size: 5, mtime: 111 }
+    await answerStats(entry) // the stat riding beside the read
     served(sock, sent!.reqId, { path: `/home/k/${path}`, size: 5 })
     await flowed(sock, 'hello')
     await act(async () => {
       sock.emitControl({ type: 'eof', ref: 7 })
       await new Promise((frame) => requestAnimationFrame(frame))
     })
-    // The viewer confirms what it is about to remember with a stat.
-    await act(async () => {
-      const ask = sock.control().find((m) => m.type === 'stat')!
-      sock.emitControl({
-        type: 'stats',
-        entries: [{ path, exists: true, kind: 'file', size: 5, mtime: 111 }],
-        reqId: ask.reqId as number,
-      })
-      await Promise.resolve()
-    })
+    await answerStats(entry) // the confirming stat after the stream
 
     view.rerender(<FlueClientProvider client={client}>{null}</FlueClientProvider>)
     view.rerender(
@@ -212,14 +219,8 @@ describe('FileViewer', () => {
         <FileViewer sessionId="s1" target={{ path }} onClose={vi.fn()} />
       </FlueClientProvider>,
     )
+    await answerStats(entry) // the reopen's validation
     await act(async () => {
-      const asks = sock.control().filter((m) => m.type === 'stat')
-      const again = asks[asks.length - 1]!
-      sock.emitControl({
-        type: 'stats',
-        entries: [{ path, exists: true, kind: 'file', size: 5, mtime: 111 }],
-        reqId: again.reqId as number,
-      })
       await new Promise((frame) => requestAnimationFrame(frame))
     })
     expect(screen.getByText('hello')).toBeTruthy()
@@ -228,22 +229,16 @@ describe('FileViewer', () => {
 
   it('re-reads when the stat says the file changed', async () => {
     const path = `cache-stale-${Math.random().toString(36).slice(2)}.txt`
-    const { sock, sent, view, client } = openViewer({ path })
+    const { sock, sent, view, client, answerStats } = openViewer({ path })
+    const entry = { path, exists: true, kind: 'file', size: 5, mtime: 111 }
+    await answerStats(entry)
     served(sock, sent!.reqId, { path: `/home/k/${path}`, size: 5 })
     await flowed(sock, 'hello')
     await act(async () => {
       sock.emitControl({ type: 'eof', ref: 7 })
       await new Promise((frame) => requestAnimationFrame(frame))
     })
-    await act(async () => {
-      const ask = sock.control().find((m) => m.type === 'stat')!
-      sock.emitControl({
-        type: 'stats',
-        entries: [{ path, exists: true, kind: 'file', size: 5, mtime: 111 }],
-        reqId: ask.reqId as number,
-      })
-      await Promise.resolve()
-    })
+    await answerStats(entry)
 
     view.rerender(<FlueClientProvider client={client}>{null}</FlueClientProvider>)
     view.rerender(
@@ -251,16 +246,33 @@ describe('FileViewer', () => {
         <FileViewer sessionId="s1" target={{ path }} onClose={vi.fn()} />
       </FlueClientProvider>,
     )
+    await answerStats({ ...entry, mtime: 999 })
+    expect(sock.control().filter((m) => m.type === 'read')).toHaveLength(2)
+  })
+
+  it('does not remember a file whose stamp moved while it streamed', async () => {
+    // The stale-bytes case: an edit lands between the stream and the
+    // confirming stat, same size. An after-only check would bless post-edit
+    // bytes with the post-edit stamp and serve them stale forever after.
+    const path = `cache-torn-${Math.random().toString(36).slice(2)}.txt`
+    const { sock, sent, view, client, answerStats } = openViewer({ path })
+    await answerStats({ path, exists: true, kind: 'file', size: 5, mtime: 100 })
+    served(sock, sent!.reqId, { path: `/home/k/${path}`, size: 5 })
+    await flowed(sock, 'hello')
     await act(async () => {
-      const asks = sock.control().filter((m) => m.type === 'stat')
-      const again = asks[asks.length - 1]!
-      sock.emitControl({
-        type: 'stats',
-        entries: [{ path, exists: true, kind: 'file', size: 5, mtime: 999 }],
-        reqId: again.reqId as number,
-      })
-      await Promise.resolve()
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
     })
+    await answerStats({ path, exists: true, kind: 'file', size: 5, mtime: 200 })
+
+    view.rerender(<FlueClientProvider client={client}>{null}</FlueClientProvider>)
+    view.rerender(
+      <FlueClientProvider client={client}>
+        <FileViewer sessionId="s1" target={{ path }} onClose={vi.fn()} />
+      </FlueClientProvider>,
+    )
+    // Nothing was remembered, so the reopen reads again rather than stats
+    // its way to a replay.
     expect(sock.control().filter((m) => m.type === 'read')).toHaveLength(2)
   })
 

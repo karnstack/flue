@@ -18,13 +18,10 @@ export interface PeekToken {
   dark?: string
 }
 
-/**
- * Past either cap the answer is null and the viewer keeps its plain rows.
- * The size cap is measured in UTF-16 units, a close proxy for bytes in the
- * code this exists for and always within 2x of the truth.
- */
-export const HIGHLIGHT_MAX_BYTES = 1 << 20
-export const HIGHLIGHT_MAX_LINES = 20_000
+// The caps live in caps.ts so the viewer can consult them without loading a
+// byte of shiki; re-exported here because they are part of this contract.
+export { HIGHLIGHT_MAX_BYTES, HIGHLIGHT_MAX_LINES } from './caps'
+import { HIGHLIGHT_MAX_BYTES, HIGHLIGHT_MAX_LINES } from './caps'
 
 const THEME_LIGHT = 'min-light'
 const THEME_DARK = 'min-dark'

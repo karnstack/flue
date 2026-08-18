@@ -3,11 +3,12 @@ import { Dialog } from 'radix-ui'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 
 import { useFlueClient } from '@/client/provider'
-import type { FileMsg } from '@/client/protocol'
+import type { FileMsg, PathEntry } from '@/client/protocol'
 import type { ReadHandle } from '@/client/client'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { cachedFile, rememberFile, CACHE_ENTRY_MAX } from './cache'
+import { HIGHLIGHT_MAX_BYTES, HIGHLIGHT_MAX_LINES } from './caps'
 import { highlight } from './highlight'
 import { languageFor } from './lang'
 import type { PeekToken } from './tokenize'
@@ -137,11 +138,19 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
       if (meta === null || meta.kind !== 'text' || meta.truncated === true) return
       const lang = languageFor(meta.path)
       if (lang === null) return
+      // The caps hold before the join, so an oversized file never pays for
+      // a multi-megabyte string and a worker round trip to be told null.
+      if (meta.size > HIGHLIGHT_MAX_BYTES || linesRef.current.length > HIGHLIGHT_MAX_LINES) return
       void highlight(linesRef.current.join('\n'), lang).then((rows) => {
         if (!gone && rows !== null) setTokens(rows)
       })
     }
-    const deliverEof = (fromWire: boolean) => {
+    // Keyed per session as well as per clicked text: a relative path
+    // resolves against a session's live working directory, so the same
+    // spelling in another session may name a different file entirely.
+    const cacheKey = `${sessionId}\u0000${target.path}`
+    const statOne = () => client.stat(sessionId, [target.path]).then(([e]) => e)
+    const deliverEof = (before: Promise<PathEntry | undefined> | null) => {
       if (meta?.kind === 'image') {
         if (!gone) setImageUrl(assembleDataUrl(meta.mime, parts))
       } else {
@@ -153,33 +162,37 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
         repaint()
       }
       colour()
-      if (!fromWire || meta === null || meta.truncated === true) return
+      if (before === null || meta === null || meta.truncated === true) return
       const total = parts.reduce((n, p) => n + p.length, 0)
       if (total > CACHE_ENTRY_MAX) return
-      // Confirm what is about to be remembered with the daemon's own stat,
-      // which is also what a reopen validates against. A file that changed
-      // while it streamed simply is not remembered.
+      // Remembered only when the stat taken as the read began and the stat
+      // taken after it agree on size and stamp, and both agree with the
+      // stream's own size. mtime is unix seconds, so a same-second edit can
+      // still slip this — but an edit during the stream cannot, which is
+      // what an after-only check got wrong: it blessed post-edit bytes with
+      // a post-edit stamp and served them stale on every reopen.
       const settled = meta
-      void client
-        .stat(sessionId, [target.path])
-        .then(([entry]) => {
-          if (entry?.exists !== true || entry.kind !== 'file') return
-          if ((entry.size ?? 0) !== settled.size) return
-          rememberFile(client, target.path, {
+      void Promise.all([before, statOne()])
+        .then(([pre, post]) => {
+          if (pre?.exists !== true || pre.kind !== 'file') return
+          if (post?.exists !== true || post.kind !== 'file') return
+          if ((pre.size ?? 0) !== settled.size || (post.size ?? 0) !== settled.size) return
+          if ((pre.mtime ?? 0) !== (post.mtime ?? 0)) return
+          rememberFile(client, cacheKey, {
             meta: settled,
-            mtime: entry.mtime ?? 0,
+            mtime: post.mtime ?? 0,
             bytes: joinBytes(parts, total),
           })
         })
         .catch(() => {})
     }
 
-    const readFromWire = () => {
+    const readFromWire = (before: Promise<PathEntry | undefined> | null) => {
       if (gone) return
       handle = client.read(sessionId, target.path, {
         file: deliverMeta,
         chunk: deliverChunk,
-        eof: () => deliverEof(true),
+        eof: () => deliverEof(before),
         fail: (f) => {
           if (!gone) setPhase({ at: 'refused', code: f.code })
         },
@@ -187,29 +200,34 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
     }
 
     const start = async () => {
-      const held = cachedFile(client, target.path)
+      const held = cachedFile(client, cacheKey)
       if (held === null) {
-        readFromWire()
+        // The before-stat rides in parallel with the read, so the cache's
+        // integrity costs the open no latency at all.
+        readFromWire(statOne().catch(() => undefined))
         return
       }
+      let confirmed: PathEntry | undefined
       try {
-        const [entry] = await client.stat(sessionId, [target.path])
+        confirmed = await statOne()
         if (gone) return
         if (
-          entry?.exists === true &&
-          entry.kind === 'file' &&
-          (entry.size ?? 0) === held.meta.size &&
-          (entry.mtime ?? 0) === held.mtime
+          confirmed?.exists === true &&
+          confirmed.kind === 'file' &&
+          (confirmed.size ?? 0) === held.meta.size &&
+          (confirmed.mtime ?? 0) === held.mtime
         ) {
           deliverMeta(held.meta)
           deliverChunk(held.bytes)
-          deliverEof(false)
+          deliverEof(null)
           return
         }
       } catch {
-        // The stat could not confirm the memory; the wire is the truth.
+        // The stat could not confirm the memory; the wire is the truth, and
+        // with nothing to agree with, this read is not remembered either.
       }
-      readFromWire()
+      if (gone) return
+      readFromWire(confirmed === undefined ? null : Promise.resolve(confirmed))
     }
     void start()
 
