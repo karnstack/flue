@@ -49,12 +49,22 @@ type Snapshot struct {
 	Ring      []byte    `json:"ring"`
 	CreatedAt time.Time `json:"createdAt"`
 	SavedAt   time.Time `json:"savedAt"`
-	// ClaudeSession is the Claude Code conversation this session was most
-	// plausibly working in, when there was one — see claude.go for how that
-	// is judged and how weak the judgement is. Empty is the ordinary case:
-	// most sessions are not running Claude Code, and nothing is printed for
-	// them. It is an id, never a command; the command is assembled at revival,
-	// so the wording lives in one place.
+	// Agent and AgentSession name the coding-agent conversation this session
+	// was most plausibly working in, when there was one — which tool
+	// ("claude", "codex", "pi") and the reference its resume command wants: a
+	// conversation id for Claude and Codex, a transcript path for Pi. See
+	// claude.go and agents.go for how that is judged and how weak the
+	// judgement is. Empty is the ordinary case: most sessions are not running
+	// a coding agent, and nothing is printed for them. A reference, never a
+	// command; the command is assembled at revival, so the wording lives in
+	// one place.
+	Agent        string `json:"agent,omitempty"`
+	AgentSession string `json:"agentSession,omitempty"`
+	// ClaudeSession is what AgentSession was called when Claude Code was the
+	// only store read. Still written when the agent is claude — so a snapshot
+	// laid down by this daemon keeps its hint across a downgrade — and still
+	// read, so a snapshot laid down by an older daemon keeps its hint across
+	// this upgrade. AgentSession wins when both are present.
 	ClaudeSession string `json:"claudeSession,omitempty"`
 	// Attempts counts the boots that have already tried and failed to revive
 	// this snapshot. Every snapshot a shutdown writes carries zero;
@@ -117,25 +127,58 @@ var settleModes = []byte(
 // Printed rather than run. The daemon revives into a login shell and typing
 // into somebody's terminal on their behalf is a different kind of act from
 // restoring what they were looking at: the shell may have been in the middle
-// of something, the id is a guess (claude.go says how much of one), and a
-// command that ran itself would be one the user never chose and cannot
-// un-choose. A line they can read and copy costs a keystroke and takes
-// nothing away.
+// of something, the reference is a guess (claude.go and agents.go say how
+// much of one), and a command that ran itself would be one the user never
+// chose and cannot un-choose. A line they can read and copy costs a
+// keystroke and takes nothing away.
 //
-// The id is written between the command and the end of the line with no
-// quoting, because it cannot need any: Claude Code names its transcripts with
-// hex and hyphens, and latestClaudeSession only ever returns a filename it
-// found on disk under that shape. Anything else would have failed the suffix
-// test that let it out of the directory scan.
-func reviveNote(claudeSession string) []byte {
-	if claudeSession == "" {
+// Claude and Codex references go on the line with no quoting, because they
+// cannot need any: both are conversation ids of hex and hyphens, found on
+// disk as filenames under exactly that shape. Pi's reference is a transcript
+// path, and a path answers to the shell, so it goes through shellWord. An
+// agent this build does not know — a snapshot written by a newer daemon —
+// gets the bare seam rather than a command nobody here can spell.
+func reviveNote(agent, ref string) []byte {
+	if ref == "" {
 		return reviveMarker
 	}
-	note := "\x1b[2mpick the Claude session back up with\x1b[0m \x1b[1mclaude --resume " +
-		claudeSession + "\x1b[0m\r\n\r\n"
+	var tool, cmd string
+	switch agent {
+	case agentClaude:
+		tool, cmd = "Claude", "claude --resume "+ref
+	case agentCodex:
+		tool, cmd = "Codex", "codex resume "+ref
+	case agentPi:
+		tool, cmd = "Pi", "pi --session "+shellWord(ref)
+	default:
+		return reviveMarker
+	}
+	note := "\x1b[2mpick the " + tool + " session back up with\x1b[0m \x1b[1m" +
+		cmd + "\x1b[0m\r\n\r\n"
 	out := make([]byte, 0, len(reviveMarker)+len(note))
 	out = append(out, reviveMarker...)
 	return append(out, note...)
+}
+
+// shellWord is s, quoted when a shell would read it as anything other than
+// one plain word. The safe alphabet is deliberately small; everything else
+// gets single quotes, the quoting that leaves no character special, with the
+// one character single quotes cannot hold spliced in the classic way.
+func shellWord(s string) string {
+	plain := s != ""
+	for i := 0; plain && i < len(s); i++ {
+		switch ch := s[i]; {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9':
+		case ch == '-' || ch == '_' || ch == '.' || ch == '/' || ch == ':' ||
+			ch == '@' || ch == '%' || ch == '+' || ch == '=' || ch == ',':
+		default:
+			plain = false
+		}
+	}
+	if plain {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Snapshot captures what a revival needs. ok is false for an exited or
@@ -172,10 +215,10 @@ func (s *Session) Snapshot() (Snapshot, bool) {
 // Snapshots returns one Snapshot per running session — the set a shutdown
 // should carry over.
 //
-// The Claude Code lookup happens here rather than inside Session.Snapshot for
-// one reason: it reads a directory, and s.mu is never held across a syscall.
+// The agent-store lookup happens here rather than inside Session.Snapshot for
+// one reason: it reads directories, and s.mu is never held across a syscall.
 // Snapshot returns with the lock released and the cwd already in hand, so the
-// scan costs one readdir per running session on a shutdown path that is
+// scan costs a few readdirs per running session on a shutdown path that is
 // already writing a file per session.
 func (r *Registry) Snapshots() []Snapshot {
 	var out []Snapshot
@@ -184,7 +227,10 @@ func (r *Registry) Snapshots() []Snapshot {
 		if !ok {
 			continue
 		}
-		snap.ClaudeSession = claudeSessionFor(snap.Cwd, snap.CreatedAt)
+		snap.Agent, snap.AgentSession = agentSessionFor(snap.Cwd, snap.CreatedAt)
+		if snap.Agent == agentClaude {
+			snap.ClaudeSession = snap.AgentSession
+		}
 		out = append(out, snap)
 	}
 	return out
@@ -205,7 +251,12 @@ func (r *Registry) Revive(snap Snapshot) (*Session, error) {
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
 		cwd, _ = os.UserHomeDir()
 	}
-	note := reviveNote(snap.ClaudeSession)
+	agent, ref := snap.Agent, snap.AgentSession
+	if ref == "" && snap.ClaudeSession != "" {
+		// A snapshot from before Agent existed: its one hint was Claude's.
+		agent, ref = agentClaude, snap.ClaudeSession
+	}
+	note := reviveNote(agent, ref)
 	preload := make([]byte, 0, len(snap.Ring)+len(settleModes)+len(note))
 	preload = append(preload, snap.Ring...)
 	// After the scrollback, so the replay cannot undo it, and before the
