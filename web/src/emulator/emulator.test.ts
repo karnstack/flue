@@ -284,6 +284,106 @@ describe('Emulator interface', () => {
     el.remove()
   })
 
+  describe('alt-screen scrolling', () => {
+    // Fullscreen TUIs — claude's fullscreen mode, vim, less — live on the
+    // alternate buffer, which keeps no scrollback, so the viewport scroll
+    // behind scrollLines has nothing to move there and a touch drag went
+    // nowhere. A desktop wheel scrolls those programs because xterm
+    // translates it — into arrow keys, or into wheel reports when the
+    // program tracks the mouse — and the seam owes a drag the same
+    // translation.
+
+    /** A mounted emulator with `modes` applied and its wire output captured. */
+    async function mounted(modes: string) {
+      const el = document.createElement('div')
+      document.body.appendChild(el)
+      const em = createXtermEmulator({ cols: 10, rows: 4 })
+      em.attachTo(el)
+      const seen: string[] = []
+      em.onData((b) => seen.push(new TextDecoder().decode(b)))
+      await settled(em, modes)
+      return { el, em, seen }
+    }
+
+    it('scrolls an alt-screen program with arrow keys', async () => {
+      const { el, em, seen } = await mounted('\x1b[?1049h')
+
+      em.scrollLines(-3)
+      expect(seen.join('')).toBe('\x1b[A\x1b[A\x1b[A')
+
+      seen.length = 0
+      em.scrollLines(2)
+      expect(seen.join('')).toBe('\x1b[B\x1b[B')
+
+      em.dispose()
+      el.remove()
+    })
+
+    it('encodes those arrows the way the program asked for', async () => {
+      // DECCKM. A program that turned application cursor keys on reads
+      // ESC O A as an arrow and ESC [ A as something else entirely.
+      const { el, em, seen } = await mounted('\x1b[?1049h\x1b[?1h')
+
+      em.scrollLines(-1)
+      expect(seen.join('')).toBe('\x1bOA')
+
+      em.dispose()
+      el.remove()
+    })
+
+    it('hands wheel events to xterm when the program tracks the mouse', async () => {
+      // claude's fullscreen TUI turns tracking on (1000h, SGR) and scrolls
+      // its transcript on wheel reports. Encoding a report by hand here
+      // would fork xterm's protocol logic, so the seam dispatches real
+      // wheel events at the screen and xterm's own encoder answers. jsdom
+      // lays nothing out and xterm refuses to report coordinates it cannot
+      // measure, so the report itself cannot be asserted — the events
+      // crossing the seam are what this checks. Capture phase, because
+      // xterm's own listener takes each event for its report and stops the
+      // propagation right there; the bubble never comes back out.
+      const { el, em, seen } = await mounted('\x1b[?1049h\x1b[?1000h\x1b[?1006h')
+      const wheels: number[] = []
+      el.addEventListener('wheel', (e) => wheels.push((e as WheelEvent).deltaY), {
+        capture: true,
+      })
+
+      em.scrollLines(-2)
+      expect(wheels).toEqual([-1, -1])
+      // And no arrows: a tracking program hears wheel reports, and arrow
+      // keys sent alongside them would move its cursor, not its viewport.
+      expect(seen.join('')).toBe('')
+
+      em.dispose()
+      el.remove()
+    })
+
+    it('falls back to arrows under X10 tracking, which has no wheel', async () => {
+      // Mode 9, the 1984 protocol: button presses only. xterm registers no
+      // wheel listener for it, so the dispatched events fall through to the
+      // same no-scrollback fallback a desktop wheel takes, and come out as
+      // arrows — not as reports X10 cannot carry, and not as nothing.
+      const { el, em, seen } = await mounted('\x1b[?1049h\x1b[?9h')
+
+      em.scrollLines(-1)
+      expect(seen.join('')).toBe('\x1b[A')
+
+      em.dispose()
+      el.remove()
+    })
+
+    it('leaves the main buffer to the viewport', async () => {
+      // Outside the alternate buffer the scrollback is real and xterm's own
+      // viewport scroll is the right thing; nothing may reach the wire.
+      const { el, em, seen } = await mounted('')
+
+      em.scrollLines(-2)
+      expect(seen.join('')).toBe('')
+
+      em.dispose()
+      el.remove()
+    })
+  })
+
   it('reports no measurement before it is mounted', () => {
     // The sizing policy divides by whatever this returns. A zero-sized answer
     // dressed up as a real one becomes an Infinity one line later; jsdom lays
