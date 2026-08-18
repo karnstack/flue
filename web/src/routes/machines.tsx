@@ -22,6 +22,7 @@
  */
 import { useState } from 'react'
 
+import { PairPanel } from '@/components/pair-panel'
 import { Button } from '@/components/ui/button'
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
 import { cn } from '@/lib/utils'
@@ -64,6 +65,8 @@ export function MachinesRoute() {
   const [machines, setMachines] = useState(() => ordered(listMachines()))
   /** What the last forget had to say for itself, when it could not finish. */
   const [failure, setFailure] = useState<string | null>(null)
+  /** Whether the pairing panel has taken the frame over. */
+  const [pairing, setPairing] = useState(false)
 
   // localStorage is this screen's whole source, and another tab's pairing
   // writes it without telling this one; re-reading on focus is what keeps a
@@ -104,13 +107,32 @@ export function MachinesRoute() {
     }
   }
 
+  if (pairing) {
+    /*
+     * The pairing panel, in the same frame the picker owns. It exists for the
+     * tab no outside link can reach — the app saved to a home screen keeps its
+     * own storage partition, and a QR read by the camera app opens in the
+     * browser proper, never in here — so the code has to be read, or the link
+     * pasted, by this page itself. Still no bare link to /pair: the panel only
+     * follows a link with a live token in it, which is the reason that page's
+     * own explainer gives.
+     */
+    return (
+      <Frame title="Pair a machine">
+        <p className={PROSE}>
+          Open flue on the machine that runs your sessions, go to Devices, and tap Pair device.
+          Then scan the code it shows with the camera below, or paste the link printed beside it.
+        </p>
+        <PairPanel onClose={() => setPairing(false)} />
+      </Frame>
+    )
+  }
+
   if (machines.length === 0) {
     /*
      * The old unpaired explainer, kept as this door's empty state: a browser
      * with no machines written down holds no key for anything, and the way out
-     * is still a ceremony that starts on the machine itself. No link to /pair,
-     * for the reason that page's own explainer gives — a pairing link is only
-     * good with a live token in it.
+     * is still a ceremony that starts on the machine itself.
      */
     return (
       <Frame title="No machines paired yet">
@@ -121,12 +143,12 @@ export function MachinesRoute() {
         </p>
         <p className={PROSE}>
           To let it in: open flue on the machine that runs your sessions, go to Devices, and tap
-          Pair device. Scan the code it shows with this device, or open the link printed beside it.
+          Pair device. The code it shows works once and expires after two minutes, so start it
+          with this device in your hand.
         </p>
-        <p className={PROSE}>
-          The code works once and expires after two minutes, so start it with this device in your
-          hand.
-        </p>
+        <Button className="self-start" onClick={() => setPairing(true)}>
+          Pair a machine
+        </Button>
       </Frame>
     )
   }
@@ -189,6 +211,19 @@ export function MachinesRoute() {
       <p role="status" className={cn(PROSE, 'empty:-mt-5')}>
         {failure}
       </p>
+      {/*
+        Quiet, like Forget: connecting is this screen's one job, and adding a
+        machine is the errand beside it. Same panel as the empty state's,
+        because a second machine is paired exactly the way the first one was.
+      */}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="self-start text-zinc-500 dark:text-zinc-400"
+        onClick={() => setPairing(true)}
+      >
+        Pair another machine
+      </Button>
     </Frame>
   )
 }
