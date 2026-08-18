@@ -11,7 +11,8 @@
  * `color` field. The wrapper's `.dark`-class theme mechanism goes unused on
  * purpose: this app themes by media query and has no .dark class to match.
  */
-import { Bar, BarChart, LabelList, XAxis, YAxis } from 'recharts'
+import { Bar, BarChart, LabelList, Rectangle, XAxis, YAxis } from 'recharts'
+import type { RectangleProps } from 'recharts'
 
 import { compactTokens, monthDay, type HeatCell, type HeatMonth } from '@/agents/view'
 import type { AgentTool } from '@/client/protocol'
@@ -32,6 +33,20 @@ const TOOL_CHART_CONFIG = {
 } satisfies ChartConfig
 
 const TOOL_KEYS = ['claude', 'codex', 'pi'] as const satisfies readonly AgentTool[]
+
+/**
+ * A stack segment that rounds its top only when it is the stack's crown —
+ * the last series with anything in it that day. A blanket radius would put
+ * pill-shaped joints in the middle of every mixed stack; a radius on the
+ * final series alone would leave a flat top on the days that series sat out.
+ */
+function crownedSegment(at: number) {
+  return function CrownedSegment(props: RectangleProps & { payload?: ToolDayDatum }) {
+    const rest = TOOL_KEYS.slice(at + 1)
+    const crowned = props.payload !== undefined && rest.every((k) => props.payload![k] <= 0)
+    return <Rectangle {...props} radius={crowned ? [3, 3, 0, 0] : 0} />
+  }
+}
 
 /** One day of a tool-banded chart: the label plus one value per tool. */
 export interface ToolDayDatum {
@@ -103,8 +118,14 @@ export function ToolDayChart({
             />
           }
         />
-        {TOOL_KEYS.map((tool) => (
-          <Bar key={tool} dataKey={tool} stackId="day" fill={`var(--color-${tool})`} />
+        {TOOL_KEYS.map((tool, at) => (
+          <Bar
+            key={tool}
+            dataKey={tool}
+            stackId="day"
+            fill={`var(--color-${tool})`}
+            shape={crownedSegment(at)}
+          />
         ))}
       </BarChart>
     </ChartContainer>
