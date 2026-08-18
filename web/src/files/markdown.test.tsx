@@ -66,6 +66,13 @@ describe('MarkdownView', () => {
     expect(screen.getByText(/the graph/)).toBeTruthy()
   })
 
+  it('hides YAML front matter instead of rendering its keys as prose', () => {
+    render(<MarkdownView text={'---\ntitle: secret notes\n---\n\n# Real heading'} />)
+    expect(screen.getByRole('heading', { level: 1, name: 'Real heading' })).toBeTruthy()
+    expect(screen.queryByText(/title: secret notes/)).toBeNull()
+    expect(document.querySelector('hr')).toBeNull()
+  })
+
   it('renders fenced code in a mono panel', () => {
     const { container } = render(<MarkdownView text={'```go\nfunc main() {}\n```'} />)
     const pre = container.querySelector('pre')

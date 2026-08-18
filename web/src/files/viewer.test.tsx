@@ -117,7 +117,7 @@ describe('FileViewer', () => {
     // No newline anywhere: the failure mode is one giant DOM row, blank
     // until eof. Chopping bounds the row and paints the head immediately.
     await flowed(sock, 'y'.repeat(20_000))
-    const rows = document.querySelectorAll('[data-file-row]')
+    const rows = document.querySelectorAll('[data-file-row] > div')
     expect(rows.length).toBeGreaterThan(0)
     for (const row of rows) {
       expect(row.textContent!.length).toBeLessThanOrEqual(8192)
@@ -329,6 +329,35 @@ describe('FileViewer', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { level: 1, name: 'Hello' })).toBeTruthy()
     })
+  })
+
+  it('opens a very large markdown file raw, the page still one press away', async () => {
+    const { sock, sent } = openViewer({ path: 'HUGE.md' })
+    served(sock, sent!.reqId, { path: '/home/k/HUGE.md', size: (512 << 10) + 1 })
+    await flowed(sock, '# heavy')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    // Raw by default: one click must not buy a multi-second parse. The
+    // Rendered press remains for a reader who asks for it knowingly.
+    expect(document.querySelector('[data-file-row]')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Rendered' })).toBeTruthy()
+  })
+
+  it('gives the rendered page the dialog focus target', async () => {
+    const { sock, sent } = openViewer({ path: 'README.md' })
+    served(sock, sent!.reqId, { path: '/home/k/README.md' })
+    await flowed(sock, '# Hello')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    // The opening auto-focus looks for data-file-body; a rendered page
+    // without one leaves focus outside the dialog and the arrow keys dead.
+    const body = document.querySelector<HTMLElement>('[data-file-body]')
+    expect(body).not.toBeNull()
+    expect(body!.getAttribute('tabindex')).toBe('-1')
   })
 
   it('offers no rendered view for a file that is not markdown', async () => {

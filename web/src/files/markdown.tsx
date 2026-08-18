@@ -2,6 +2,7 @@ import { createElement, type ReactNode } from 'react'
 import Markdown, { type Components } from 'react-markdown'
 import rehypeRaw from 'rehype-raw'
 import rehypeSanitize from 'rehype-sanitize'
+import remarkFrontmatter from 'remark-frontmatter'
 import remarkGfm from 'remark-gfm'
 
 import { cn } from '@/lib/utils'
@@ -91,7 +92,10 @@ const parts: Components = {
 export function MarkdownView({ text }: { text: string }) {
   return (
     <Markdown
-      remarkPlugins={[remarkGfm]}
+      // Front matter parses into a node nothing renders, which is the
+      // point: without the plugin a YAML preamble shows as a stray divider
+      // followed by its keys as paragraph soup.
+      remarkPlugins={[remarkGfm, remarkFrontmatter]}
       // Order is the contract: raw turns HTML text into nodes, sanitize
       // prunes those nodes, and only then does the component map render.
       rehypePlugins={[rehypeRaw, rehypeSanitize]}

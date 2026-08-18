@@ -1,7 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Check, Copy, FileText, WrapText, X } from 'lucide-react'
 import { Dialog } from 'radix-ui'
-import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 
 import { useFlueClient } from '@/client/provider'
 import type { FileMsg, PathEntry } from '@/client/protocol'
@@ -67,6 +67,14 @@ type BodyMode = 'rendered' | 'raw'
 const MarkdownLazy = lazy(() =>
   import('./markdown').then((m) => ({ default: m.MarkdownView })),
 )
+
+/**
+ * Above this size a markdown file opens raw, because rendering parses the
+ * whole document on the main thread in one go. Content is untrusted and one
+ * click must not buy a multi-second freeze; the Rendered press stays
+ * offered, so a reader who wants the page still gets it — knowingly.
+ */
+const RENDER_DEFAULT_MAX = 512 << 10
 
 /**
  * A file over the session: the answer to clicking a path the session named.
@@ -140,6 +148,7 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
       setMode(
         m.kind === 'text' &&
           m.truncated !== true &&
+          m.size <= RENDER_DEFAULT_MAX &&
           target.line === undefined &&
           languageFor(m.path) === 'markdown'
           ? 'rendered'
@@ -152,17 +161,6 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
         push(decoder.decode(bytes, { stream: true }))
         repaint()
       }
-    }
-    const colour = () => {
-      if (meta === null || meta.kind !== 'text' || meta.truncated === true) return
-      const lang = languageFor(meta.path)
-      if (lang === null) return
-      // The caps hold before the join, so an oversized file never pays for
-      // a multi-megabyte string and a worker round trip to be told null.
-      if (meta.size > HIGHLIGHT_MAX_BYTES || linesRef.current.length > HIGHLIGHT_MAX_LINES) return
-      void highlight(linesRef.current.join('\n'), lang).then((rows) => {
-        if (!gone && rows !== null) setTokens(rows)
-      })
     }
     // Keyed per session as well as per clicked text: a relative path
     // resolves against a session's live working directory, so the same
@@ -181,7 +179,6 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
         setPhase((p) => (p.at === 'text' ? { ...p, done: true } : p))
         repaint()
       }
-      colour()
       if (before === null || meta === null || meta.truncated === true) return
       const total = parts.reduce((n, p) => n + p.length, 0)
       if (total > CACHE_ENTRY_MAX) return
@@ -259,6 +256,27 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
     }
   }, [client, sessionId, target.path])
 
+  // Colouring waits for the view that wants it: a complete raw text body.
+  // A markdown file that opened rendered pays for tokens only when Raw first
+  // shows, a cached replay pays the same way, and the caps hold before any
+  // join or worker round trip so an oversized file never builds the string.
+  useEffect(() => {
+    if (phase.at !== 'text' || !phase.done || phase.meta.truncated === true) return
+    if (tokens !== null) return
+    const lang = languageFor(phase.meta.path)
+    if (lang === null) return
+    if (lang === 'markdown' && mode === 'rendered') return
+    if (phase.meta.size > HIGHLIGHT_MAX_BYTES || linesRef.current.length > HIGHLIGHT_MAX_LINES)
+      return
+    let stale = false
+    void highlight(linesRef.current.join('\n'), lang).then((rows) => {
+      if (!stale && rows !== null) setTokens(rows)
+    })
+    return () => {
+      stale = true
+    }
+  }, [phase, mode, tokens])
+
   const meta = phase.at === 'text' || phase.at === 'image' ? phase.meta : null
   const shownPath = meta?.path ?? target.path
   const slash = shownPath.lastIndexOf('/')
@@ -270,6 +288,19 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
     languageFor(phase.meta.path) === 'markdown'
   const showsPage = renderable && mode === 'rendered'
   const showsLines = phase.at === 'text' && !showsPage
+
+  // The page is one memoized element: react-markdown re-parses the whole
+  // document on every render it takes part in, so unrelated state — tokens
+  // arriving, a wrap toggle — must not hand it a fresh chance to.
+  const pageDone = phase.at === 'text' && phase.done
+  const pageText = useMemo(
+    () => (showsPage && pageDone ? linesRef.current.join('\n') : null),
+    [showsPage, pageDone],
+  )
+  const page = useMemo(
+    () => (pageText === null ? null : <MarkdownLazy text={pageText} />),
+    [pageText],
+  )
 
   return (
     <Dialog.Root
@@ -372,9 +403,16 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
               </p>
             ))}
           {showsPage && phase.at === 'text' && (
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            // data-file-body and the tab stop, exactly as the text window
+            // carries them: the dialog's opening focus lands here, so arrow
+            // and page keys scroll the page from the first keystroke.
+            <div
+              data-file-body
+              tabIndex={-1}
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain outline-none"
+            >
               <div className="mx-auto w-full max-w-[72ch] px-6 py-4 text-sm">
-                {phase.done ? (
+                {page !== null ? (
                   <Suspense
                     fallback={
                       <p role="status" className="text-control text-muted-foreground">
@@ -382,7 +420,7 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
                       </p>
                     }
                   >
-                    <MarkdownLazy text={linesRef.current.join('\n')} />
+                    {page}
                   </Suspense>
                 ) : (
                   <p role="status" className="text-control text-muted-foreground">
@@ -444,11 +482,22 @@ function TextWindow({
     },
   })
 
-  // One jump to the named line, as soon as enough of the file has arrived.
+  // One jump to the named line, as soon as enough of the file has arrived —
+  // re-issued for a few frames, because the first jump lands on estimated
+  // heights and wrapped rows above the mark measure taller after they mount,
+  // which the virtualizer does not re-anchor for on its own.
   useEffect(() => {
     if (mark === undefined || jumped.current || lines.length < mark) return
     jumped.current = true
-    virtualizer.scrollToIndex(mark - 1, { align: 'center' })
+    let tries = 0
+    const land = () => {
+      virtualizer.scrollToIndex(mark - 1, { align: 'center' })
+      tries++
+      if (tries >= 8) return
+      const shown = virtualizer.getVirtualItems().some((i) => i.index === mark - 1)
+      if (!shown) requestAnimationFrame(land)
+    }
+    land()
   }, [lines.length, mark, virtualizer])
 
   // Flipping the wrap invalidates every height the virtualizer has learned.
