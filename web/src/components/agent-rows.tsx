@@ -142,7 +142,7 @@ export function AgentList({ groups, showMachine }: { groups: AgentGroup[]; showM
               {g.rows.length}
             </span>
           </div>
-          <ul role="list" className="mt-1 flex flex-col divide-y divide-hairline">
+          <ul role="list" className="mt-1 flex flex-col">
             {g.rows.map((r) => (
               <AgentRowLine key={rowKey(r)} r={r} showMachine={showMachine} />
             ))}

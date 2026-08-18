@@ -2,7 +2,7 @@
  * The insights charts. The bar charts ride shadcn's chart wrapper over
  * Recharts — the one charting stack the component system blesses — while the
  * activity heatmap stays hand-rolled, since a contribution grid is not a
- * Recharts shape and eleven-pixel squares need no scales. Pure props in,
+ * Recharts shape and a grid of little squares needs no scales. Pure props in,
  * marks out: nothing here fetches, aggregates or reads a clock, which keeps
  * every number arguable in agents/view.ts where the aggregation lives.
  *
@@ -195,9 +195,11 @@ export function RankChart({ rows, label }: { rows: RankRow[]; label: string }) {
   )
 }
 
-/** One heatmap square's edge and the gap between squares, in px — small
- *  enough that a year of columns sits on a desktop, big enough to hover. */
-const HEAT_CELL = 11
+/** One heatmap square's edge and the gap between squares, in px — sized so
+ *  a year of columns fills the insights column near exactly, and generous
+ *  enough that a fingertip can land on one day. Must agree with the size
+ *  utilities on the squares below. */
+const HEAT_CELL = 13
 const HEAT_GAP = 3
 const HEAT_STEP = HEAT_CELL + HEAT_GAP
 
@@ -261,7 +263,7 @@ export function Heatmap({
         <div className="flex gap-x-[3px]">
           <div aria-hidden="true" className="flex w-7 flex-col gap-y-[3px]">
             {HEAT_DAY_LABELS.map((d, at) => (
-              <span key={at} className="h-[11px] text-[10px] leading-[11px] text-muted-foreground">
+              <span key={at} className="h-[13px] text-[10px] leading-[13px] text-muted-foreground">
                 {d}
               </span>
             ))}
@@ -277,11 +279,11 @@ export function Heatmap({
                   cell.future ? (
                     // Not yet a day: no fill, no hover — the square is
                     // absent, not quiet.
-                    <div key={cell.dayMs} className="size-[11px]" />
+                    <div key={cell.dayMs} className="size-[13px]" />
                   ) : (
                     <Tooltip key={cell.dayMs}>
                       <TooltipTrigger asChild>
-                        <div className={cn('size-[11px] rounded-[2px]', HEAT_FILLS[cell.level])} />
+                        <div className={cn('size-[13px] rounded-[2px]', HEAT_FILLS[cell.level])} />
                       </TooltipTrigger>
                       <TooltipContent sideOffset={6}>
                         <span className="font-medium">{heatDayLabel(cell.dayMs)}</span>
@@ -300,7 +302,7 @@ export function Heatmap({
           Less
           <span className="flex items-center gap-x-[3px]">
             {HEAT_FILLS.slice(1).map((fill) => (
-              <span key={fill} aria-hidden="true" className={cn('size-[11px] rounded-[2px]', fill)} />
+              <span key={fill} aria-hidden="true" className={cn('size-[13px] rounded-[2px]', fill)} />
             ))}
           </span>
           More

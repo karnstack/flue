@@ -794,7 +794,7 @@ function Insights({
   // page kept growing a dead right margin on wide screens: every block set
   // its own width and none agreed.
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-y-10">
+    <div className="mx-auto flex w-full max-w-4xl flex-col gap-y-10">
       <div role="group" aria-label="Range" className="flex items-center gap-1.5">
         {INSIGHT_RANGES.map((r) => (
           <FilterChip key={r} pressed={range === r} onPress={() => onRange(r)}>
@@ -811,16 +811,22 @@ function Insights({
 
       {ranged.length > 0 && (
         <div className="@container">
+          {/* Cards rather than a ruled strip: each figure is an independent
+              claim, and on the dark canvas the panel-plus-inset-ring is what
+              gives the row a shape the hairlines never quite did. */}
           <dl
             className={cn(
-              'grid grid-cols-2 gap-y-6',
+              'grid grid-cols-2 gap-3',
               stats.length === 5 ? '@2xl:grid-cols-5' : '@2xl:grid-cols-4',
             )}
           >
-            {stats.map((stat, at) => (
+            {stats.map((stat) => (
               // Reversed visually: the value reads above its label, while
               // the markup keeps dt before dd as a dl requires.
-              <div key={stat.label} className={statClasses(at, stats.length)}>
+              <div
+                key={stat.label}
+                className="flex flex-col-reverse gap-y-0.5 rounded-xl border border-hairline bg-card px-4 py-3.5 shadow-low dark:shadow-none dark:inset-ring dark:inset-ring-white/5"
+              >
                 <dt className="truncate text-control text-muted-foreground">{stat.label}</dt>
                 <dd className="text-2xl font-semibold tracking-tight text-zinc-950 tabular-nums dark:text-white">
                   {stat.value}
@@ -951,21 +957,3 @@ function ActivitySection({
   )
 }
 
-/**
- * A stat column's spacing and rules, per the surfaces guideline: vertical
- * hairlines between siblings, first-in-row without a leading pad, and the
- * whole scheme re-derived where the column count changes. Two across by
- * default, one row of all of them from @2xl up.
- */
-function statClasses(at: number, count: number): string {
-  const twoCol = at % 2 === 0 ? 'pr-4' : 'border-l border-hairline pl-4'
-  const secondRow = at >= 2 ? 'border-t border-hairline pt-4 @2xl:border-t-0 @2xl:pt-0' : ''
-  const wide =
-    at === 0
-      ? '@2xl:border-l-0 @2xl:pl-0 @2xl:pr-4'
-      : cn(
-          '@2xl:border-l @2xl:border-hairline @2xl:pl-4',
-          at < count - 1 ? '@2xl:pr-4' : '@2xl:pr-0',
-        )
-  return cn('flex min-w-0 flex-col-reverse justify-end gap-y-0.5', twoCol, secondRow, wide)
-}
