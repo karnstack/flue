@@ -48,12 +48,16 @@ export function createPathDetector(deps: DetectorDeps): LinkDetector {
     async verify(paths) {
       const t = now()
       const answers = new Map<string, boolean>()
-      const unknown: string[] = []
+      const wanted = new Set<string>()
       for (const p of paths) {
         const kept = held.get(p)
         if (kept !== undefined && kept.until > t) answers.set(p, kept.yes)
-        else if (!answers.has(p) && !unknown.includes(p)) unknown.push(p)
+        else if (!answers.has(p)) wanted.add(p)
       }
+      // The caller already caps a line's candidates; this is the second
+      // fence, so no single verification can flood the wire with stats
+      // whatever hands the list over.
+      const unknown = [...wanted].slice(0, STAT_BATCH * 2)
       for (let at = 0; at < unknown.length; at += STAT_BATCH) {
         const batch = unknown.slice(at, at + STAT_BATCH)
         try {

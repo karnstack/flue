@@ -27,6 +27,15 @@ const OVERSCAN = 20
 /** The daemon's ceiling on text; past it only the head was sent. */
 const TEXT_CAP = 8 << 20
 
+/**
+ * The most characters one rendered row may carry. File content is untrusted,
+ * and without this an 8 MiB single-line file is one eight-million-character
+ * DOM row — and a stream with no newline in it would paint nothing at all
+ * until eof. A longer line continues on the next row; for a file holding
+ * lines that size, the row numbering is presentation, not truth.
+ */
+const ROW_CAP = 8192
+
 const REFUSALS: Record<string, string> = {
   not_found: 'Nothing at this path under the session.',
   is_dir: 'That path is a directory.',
@@ -73,11 +82,27 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
         setPainted((n) => n + 1)
       })
     }
+    const emit = (row: string) => {
+      const clean = row.endsWith('\r') ? row.slice(0, -1) : row
+      if (clean.length <= ROW_CAP) {
+        linesRef.current.push(clean)
+        return
+      }
+      for (let at = 0; at < clean.length; at += ROW_CAP) {
+        linesRef.current.push(clean.slice(at, at + ROW_CAP))
+      }
+    }
     const push = (piece: string) => {
       if (piece === '') return
       const parts = (tail + piece).split('\n')
       tail = parts.pop() ?? ''
-      for (const p of parts) linesRef.current.push(p.endsWith('\r') ? p.slice(0, -1) : p)
+      for (const p of parts) emit(p)
+      // A newline may never come. Overflow leaves the tail as finished rows,
+      // which both bounds the tail and lets a newline-less stream paint.
+      while (tail.length >= ROW_CAP) {
+        linesRef.current.push(tail.slice(0, ROW_CAP))
+        tail = tail.slice(ROW_CAP)
+      }
     }
     const handle = client.read(sessionId, target.path, {
       file: (meta) => {
@@ -180,7 +205,12 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
               yet.
             </p>
           )}
-          {phase.at === 'text' && <TextWindow lines={linesRef.current} mark={target.line} />}
+          {phase.at === 'text' && (
+            // Keyed by path, so a viewer whose target changes under it — a
+            // later phase reuses the mounted dialog — starts its scroll and
+            // its one-shot jump over rather than inheriting the old file's.
+            <TextWindow key={target.path} lines={linesRef.current} mark={target.line} />
+          )}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

@@ -80,6 +80,19 @@ describe('FileViewer', () => {
     expect(document.querySelectorAll('[data-file-row]').length).toBeLessThan(200)
   })
 
+  it('chops a single enormous line into bounded rows, painting before eof', async () => {
+    const { sock, sent } = openViewer({ path: 'min.js' })
+    served(sock, sent!.reqId, { size: 200_001 })
+    // No newline anywhere: the failure mode is one giant DOM row, blank
+    // until eof. Chopping bounds the row and paints the head immediately.
+    await flowed(sock, 'y'.repeat(20_000))
+    const rows = document.querySelectorAll('[data-file-row]')
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(row.textContent!.length).toBeLessThanOrEqual(8192)
+    }
+  })
+
   it('marks the line the click named', async () => {
     const { sock, sent } = openViewer({ path: 'a.go', line: 2 })
     served(sock, sent!.reqId)

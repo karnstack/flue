@@ -42,6 +42,29 @@ describe('logicalLineAt', () => {
     expect(logicalLineAt(term, 4000)).toBeNull()
   })
 
+  it('gives up on a logical line past the walk caps, instead of assembling it', async () => {
+    // 226 wrapped rows of one logical line: a cat of something minified.
+    const term = await filled('x'.repeat(41 * 220), 40)
+    expect(logicalLineAt(term, 3)).toBeNull()
+    expect(await pathLinksAt(term, 3, yes)).toBeUndefined()
+  })
+
+  it('offers at most 32 candidates from one line, one stat worth', async () => {
+    const many = Array.from({ length: 40 }, (_, i) => `f${i}.md`).join(' ')
+    const term = await filled(many, 400)
+    const asked: string[][] = []
+    const counting = {
+      ...yes,
+      verify: (p: string[]) => {
+        asked.push(p)
+        return Promise.resolve(p.map(() => true))
+      },
+    }
+    await pathLinksAt(term, 1, counting)
+    expect(asked).toHaveLength(1)
+    expect(asked[0]!.length).toBeLessThanOrEqual(32)
+  })
+
   it('maps text indices to cells across wide glyphs', async () => {
     const term = await filled('日本 internal/a.md')
     const line = logicalLineAt(term, 1)!

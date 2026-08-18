@@ -15,6 +15,18 @@ import type { LinkDetector } from './types'
  */
 
 /**
+ * The walk's ceilings, and the matcher's. Terminal output is untrusted: a
+ * cat of minified JS makes one logical line of the whole scrollback, and
+ * without a ceiling every hover would reassemble and re-match all of it on
+ * the UI thread. A line past either cap offers no links at all — nothing a
+ * person means to click lives on a line that size — and a line under them
+ * offers at most the protocol's own 32, which is one stat.
+ */
+const MAX_LOGICAL_ROWS = 200
+const MAX_LOGICAL_CHARS = 8192
+const MAX_CANDIDATES = 32
+
+/**
  * One logical line: the row asked about plus every row soft-wrapped onto it,
  * with a buffer position recorded per UTF-16 unit as the text is assembled.
  * Match indices are string offsets while decorations want cells, and wide
@@ -29,12 +41,19 @@ export function logicalLineAt(
   const asked = bufferLine - 1
   if (!buf.getLine(asked)) return null
   let first = asked
-  while (first > 0 && buf.getLine(first)?.isWrapped) first--
+  while (first > 0 && buf.getLine(first)?.isWrapped) {
+    first--
+    if (asked - first >= MAX_LOGICAL_ROWS) return null
+  }
   let last = asked
-  while (buf.getLine(last + 1)?.isWrapped) last++
+  while (buf.getLine(last + 1)?.isWrapped) {
+    last++
+    if (last - first >= MAX_LOGICAL_ROWS) return null
+  }
   let text = ''
   const cells: IBufferCellPosition[] = []
   for (let y = first; y <= last; y++) {
+    if (text.length > MAX_LOGICAL_CHARS) return null
     const row = buf.getLine(y)
     if (!row) break
     for (let x = 0; x < row.length; x++) {
@@ -63,7 +82,10 @@ export async function pathLinksAt(
 ): Promise<ILink[] | undefined> {
   const line = logicalLineAt(term, bufferLine)
   if (line === null) return undefined
-  const candidates = detector.find(line.text)
+  if (line.text.length > MAX_LOGICAL_CHARS) return undefined
+  // At most the protocol's 32 paths per stat; a line carrying more than
+  // that many candidates is not one a person is reading for paths.
+  const candidates = detector.find(line.text).slice(0, MAX_CANDIDATES)
   if (candidates.length === 0) return undefined
   const real = await detector.verify(candidates.map((c) => c.path))
   const links: ILink[] = []

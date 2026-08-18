@@ -1322,6 +1322,13 @@ export class FlueClient {
             this.errorListeners.emit(msg)
             break
           }
+          // A refusal answering a read already let go of: nobody is behind
+          // it, and with no `file` ever coming, the reqId owes no cancel —
+          // retired here rather than leaking until teardown.
+          if (this.abandonedReads.delete(msg.reqId)) {
+            this.errorListeners.emit(msg)
+            break
+          }
           // A read's refusal, apart from `pending` for the same reason: its
           // codes name the file, not the session, and a read made no
           // reattach plan for the sweep below to retire.

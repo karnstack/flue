@@ -3235,6 +3235,37 @@ describe('FlueClient read', () => {
     expect(seen.meta).toBeNull()
   })
 
+  it('retires an abandoned read whose answer was a refusal, not a file', () => {
+    const { c, sock } = connected()
+    const { seen, sink } = collect()
+    const handle = c.read('s1', 'gone.txt', sink)
+    handle.cancel()
+    const sent = sock.sentControl().find((m) => m.type === 'read')!
+    sock.emitControl({
+      type: 'error',
+      code: 'not_found',
+      msg: 'cannot read that path',
+      reqId: sent.reqId as number,
+    })
+    // Nobody is behind it: no fail on the sink, and — the leak this pins —
+    // a later file answer for the same reqId is impossible, so nothing may
+    // treat the id as still abandoned. A second read must behave normally.
+    expect(seen.failed).toBeNull()
+    const again = collect()
+    c.read('s1', 'gone.txt', again.sink)
+    const sent2 = sock.sentControl().filter((m) => m.type === 'read')[1]!
+    sock.emitControl({
+      type: 'file',
+      ref: 9,
+      path: '/x/gone.txt',
+      size: 1,
+      mime: 'text/plain; charset=utf-8',
+      kind: 'text',
+      reqId: sent2.reqId as number,
+    })
+    expect(again.seen.meta).not.toBeNull()
+  })
+
   it('cancel twice sends one cancel', () => {
     const { c, sock } = connected()
     const { sink } = collect()
