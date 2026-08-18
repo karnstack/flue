@@ -132,8 +132,21 @@ describe('FileViewer', () => {
       sock.emitControl({ type: 'eof', ref: 7 })
       await new Promise((frame) => requestAnimationFrame(frame))
     })
-    expect(screen.getByText('two').getAttribute('data-marked')).toBe('true')
-    expect(screen.getByText('one').getAttribute('data-marked')).toBeNull()
+    const row = (text: string) => screen.getByText(text).closest('[data-file-row]')!
+    expect(row('two').getAttribute('data-marked')).toBe('true')
+    expect(row('one').getAttribute('data-marked')).toBeNull()
+  })
+
+  it('numbers every line in a gutter the selection cannot take', async () => {
+    const { sock, sent } = openViewer({ path: 'notes.txt' })
+    served(sock, sent!.reqId, { path: '/home/k/notes.txt' })
+    await flowed(sock, 'one\ntwo\nthree')
+    const gutter = screen
+      .getByText('two')
+      .closest('[data-file-row]')!
+      .querySelector('[data-file-gutter]')!
+    expect(gutter.textContent).toBe('2')
+    expect(gutter.className).toContain('select-none')
   })
 
   it('says how much of a shortened file it is showing', () => {
@@ -194,11 +207,13 @@ describe('FileViewer', () => {
       await new Promise((frame) => requestAnimationFrame(frame))
     })
     await waitFor(() => {
-      expect(document.querySelector('[data-file-row] span')).not.toBeNull()
+      expect(document.querySelector('[data-file-row] span:not([data-file-gutter])')).not.toBeNull()
     })
     // The colour must arrive through the scheme-aware classes, never as an
     // inline color — inline would pin the light palette under a dark scheme.
-    const span = document.querySelector<HTMLElement>('[data-file-row] span[style]')!
+    const span = document.querySelector<HTMLElement>(
+      '[data-file-row] span[style]:not([data-file-gutter])',
+    )!
     expect(span.style.color).toBe('')
     expect(span.style.getPropertyValue('--peek-light')).not.toBe('')
     expect(span.style.getPropertyValue('--peek-dark')).not.toBe('')
@@ -214,7 +229,7 @@ describe('FileViewer', () => {
       sock.emitControl({ type: 'eof', ref: 7 })
       await new Promise((done) => setTimeout(done, 50))
     })
-    expect(document.querySelector('[data-file-row] span')).toBeNull()
+    expect(document.querySelector('[data-file-row] span:not([data-file-gutter])')).toBeNull()
   })
 
   it('serves a reopen from the cache once the surrounding stats agree', async () => {
@@ -360,15 +375,15 @@ describe('FileViewer', () => {
     const { sock, sent } = openViewer({ path: 'notes.txt' })
     served(sock, sent!.reqId, { path: '/home/k/notes.txt' })
     await flowed(sock, 'a very long line\nand another')
-    const row = () => document.querySelector('[data-file-row]')!
-    expect(row().className).toContain('whitespace-pre-wrap')
+    const body = () => document.querySelector('[data-file-row] > div')!
+    expect(body().className).toContain('whitespace-pre-wrap')
     const toggle = screen.getByRole('button', { name: 'Wrap lines' })
     expect(toggle.getAttribute('aria-pressed')).toBe('true')
     await userEvent.click(toggle)
-    expect(row().className).not.toContain('whitespace-pre-wrap')
-    expect(row().className).toContain('whitespace-pre')
+    expect(body().className).not.toContain('whitespace-pre-wrap')
+    expect(body().className).toContain('whitespace-pre')
     await userEvent.click(toggle)
-    expect(row().className).toContain('whitespace-pre-wrap')
+    expect(body().className).toContain('whitespace-pre-wrap')
   })
 
   it('offers the resolved path to the clipboard', async () => {

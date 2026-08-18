@@ -50,6 +50,18 @@ describe('findPaths', () => {
     expect(line.slice(second!.start, second!.end)).toBe('~/x.md')
   })
 
+  it.each([
+    ['edit .gitignore now', ['.gitignore']],
+    ['reads .env and .env.local', ['.env', '.env.local']],
+    ['pins .mise.toml here', ['.mise.toml']],
+    ['a quoted ".bashrc" too', ['.bashrc']],
+    ['under .claude/worktrees today', ['.claude/worktrees']],
+    ['an ellipsis ... is not one', []],
+    ['nor a sentence that trails off....', []],
+  ])('dotfiles: %s -> %j', (text, want) => {
+    expect(paths(text)).toEqual(want)
+  })
+
   it('keeps a directory-shaped candidate; verification refuses it later', () => {
     expect(paths('under web/src/ somewhere')).toEqual(['web/src/'])
   })

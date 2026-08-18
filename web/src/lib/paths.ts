@@ -16,6 +16,9 @@ const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i
 const ROOTED = /^(?:~\/|\.\/|\.\.\/|\/)./
 const RELATIVE = /^[\w.~$@+-][\w.~$@+=%-]*(?:\/[\w.~$@+=%-]+)+\/?$/
 const BARE_FILE = /^[\w$@+-][\w.$@+-]*\.[A-Za-z][A-Za-z0-9]{0,15}$/
+/** A bare dotfile: `.gitignore`, `.env.local`. One leading dot, then a word
+ * character — which is what keeps an ellipsis from qualifying. */
+const DOTFILE = /^\.[A-Za-z0-9_][\w.$@+-]{0,63}$/
 const LINE_COL = /:(\d{1,7})(?::(\d{1,4}))?$/
 
 export function findPaths(text: string): LinkCandidate[] {
@@ -39,7 +42,8 @@ export function findPaths(text: string): LinkCandidate[] {
       if (suffix[2] !== undefined) col = Number(suffix[2])
     }
     if (path.length === 0 || SCHEME.test(path)) continue
-    if (!ROOTED.test(path) && !RELATIVE.test(path) && !BARE_FILE.test(path)) continue
+    if (!ROOTED.test(path) && !RELATIVE.test(path) && !BARE_FILE.test(path) && !DOTFILE.test(path))
+      continue
     found.push({ path, start, end: start + raw.length, line, col })
   }
   return found

@@ -456,6 +456,10 @@ function TextWindow({
     virtualizer.measure()
   }, [wrap, virtualizer])
 
+  // Wide enough for the last line's number, so the column never jumps as
+  // scrolling reveals longer numbers.
+  const gutterCh = String(Math.max(lines.length, 1)).length
+
   return (
     <div
       ref={boxRef}
@@ -474,16 +478,34 @@ function TextWindow({
               data-file-row
               data-marked={n === mark ? 'true' : undefined}
               className={cn(
-                'absolute top-0 left-0 min-h-5 translate-y-(--row-y) pr-6 pl-4 data-marked:bg-teal-500/15',
-                wrap ? 'w-full break-words whitespace-pre-wrap' : 'w-max min-w-full whitespace-pre',
+                'absolute top-0 left-0 flex min-h-5 translate-y-(--row-y) data-marked:bg-teal-500/15',
+                wrap ? 'w-full' : 'w-max min-w-full',
               )}
               style={{ '--row-y': `${item.start}px` } as CSSProperties}
             >
-              {tokens?.[item.index] !== undefined ? (
-                <TokenRow row={tokens[item.index]!} />
-              ) : (
-                lines[item.index]
-              )}
+              <span
+                aria-hidden
+                data-file-gutter
+                // Sticky, so the numbers hold while an unwrapped line scrolls
+                // sideways beneath them; opaque for the same reason; and
+                // select-none, so a copied stretch of file carries no numbers.
+                className="sticky left-0 z-10 shrink-0 bg-popover pr-3 pl-4 text-right text-muted-foreground/50 select-none in-data-marked:text-teal-600"
+                style={{ width: `calc(${gutterCh}ch + 1.75rem)` }}
+              >
+                {n}
+              </span>
+              <div
+                className={cn(
+                  'pr-6',
+                  wrap ? 'min-w-0 flex-1 break-words whitespace-pre-wrap' : 'whitespace-pre',
+                )}
+              >
+                {tokens?.[item.index] !== undefined ? (
+                  <TokenRow row={tokens[item.index]!} />
+                ) : (
+                  lines[item.index]
+                )}
+              </div>
             </div>
           )
         })}
