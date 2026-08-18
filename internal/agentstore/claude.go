@@ -269,6 +269,15 @@ func (p *claudeParser) assistantMessages(l claudeLine, m claudeMessage, ts strin
 		msg := Message{Role: "assistant", Ts: ts, Model: m.Model, Sidechain: l.IsSidechain, Offset: off}
 		switch blk.Type {
 		case "thinking":
+			// Claude Code redacts thinking on disk: measured across a real
+			// store, every thinking block carried a signature and an empty
+			// body. An empty disclosure row is worse than none, so a blank
+			// block is dropped — the same rule Codex's encrypted reasoning
+			// gets. A future version that writes the text back gets rendered
+			// again without anyone touching this.
+			if blk.Thinking == "" {
+				continue
+			}
 			msg.Kind, msg.Text = "thinking", blk.Thinking
 		case "text":
 			msg.Kind, msg.Text = "text", blk.Text

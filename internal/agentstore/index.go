@@ -205,7 +205,7 @@ const indexFileName = "index.json"
 // re-sweep and nothing else. Format 2 is the firstPromptBytes cap: summaries
 // written by format 1 can hold megabyte first prompts, which is exactly the
 // shape the cap exists to keep out of the index.
-const indexFormat = 2
+const indexFormat = 3
 
 // New returns an index over home's stores, persisting under persistDir. The
 // persisted file is loaded if it is there and readable; a corrupt or missing
@@ -426,6 +426,14 @@ func (x *Index) Snapshot(tools []string, cwd string) ([]Summary, bool) {
 	defer x.mu.Unlock()
 	out := []Summary{}
 	for _, e := range x.entries {
+		// A file with no conversation — hook echoes, a bare last-prompt
+		// stub, a session someone opened and closed — is bookkeeping, not a
+		// session. It stays in the index (so the sweep does not re-parse it
+		// forever) but never reaches a list: it has nothing to show, and its
+		// zero StartedAt would poison any date arithmetic a client does.
+		if e.Summary.MessageCount == 0 {
+			continue
+		}
 		if !toolAllowed(e.Summary.Tool, tools) {
 			continue
 		}

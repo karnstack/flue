@@ -138,6 +138,19 @@ func TestSummariesFromFixtures(t *testing.T) {
 // TestClaudeUsageCountsOncePerRequestID isolates the dedupe the table above
 // exercises in aggregate: req_A1 appears on three lines with the same usage
 // object, and a parser that summed naively would report triple.
+// TestClaudeEmptyThinkingIsDropped pins the redaction rule: Claude Code
+// writes thinking blocks with a signature and an empty body, and a viewer
+// row that expands to nothing is noise. A blank block yields no message; one
+// with text still does (the fixture's own thinking line proves the latter).
+func TestClaudeEmptyThinkingIsDropped(t *testing.T) {
+	p := claudeAdapter{}.parser("x.jsonl", parseState{})
+	line := `{"type":"assistant","requestId":"r1","timestamp":"2026-08-10T09:00:05.000Z","message":{"role":"assistant","model":"claude-fable-5","content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"text","text":"hi"}]}}`
+	msgs := p.line([]byte(line), 0)
+	if len(msgs) != 1 || msgs[0].Kind != "text" {
+		t.Fatalf("messages = %+v, want just the text block", msgs)
+	}
+}
+
 func TestClaudeUsageCountsOncePerRequestID(t *testing.T) {
 	st, _ := parseWhole(t, claudeAdapter{}, filepath.Join("testdata", "claude-session.jsonl"))
 	// req_A1 contributes 1500 cacheRead once; req_A2 adds 2100. Three req_A1

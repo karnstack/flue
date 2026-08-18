@@ -111,6 +111,28 @@ func TestSnapshotFilters(t *testing.T) {
 	}
 }
 
+// TestSnapshotHidesEmptySessions pins the stub filter: a transcript whose
+// lines are all bookkeeping (a real store is full of them — hook-only
+// sessions, bare last-prompt stubs) is indexed but never listed. Its zero
+// StartedAt would otherwise reach clients and poison their date arithmetic.
+func TestSnapshotHidesEmptySessions(t *testing.T) {
+	home, _ := fakeHome(t)
+	stub := filepath.Join(home, ".claude", "projects", claudeSlug("/home/dev/proj"),
+		"99999999-9999-4999-8999-999999999999.jsonl")
+	write(t, stub, []byte(`{"type":"last-prompt","leafUuid":"x","sessionId":"99999999-9999-4999-8999-999999999999"}`+"\n"))
+	x := New(t.TempDir(), home)
+	x.sweep()
+	sums, _ := x.Snapshot(nil, "")
+	if len(sums) != 3 {
+		t.Fatalf("Snapshot kept %d sessions, want 3 (the stub hidden)", len(sums))
+	}
+	for _, s := range sums {
+		if s.MessageCount == 0 {
+			t.Fatalf("an empty session reached the snapshot: %+v", s)
+		}
+	}
+}
+
 // TestIncrementalParseResumesFromTheStoredOffset proves the resume is real:
 // after the first sweep the already-parsed prefix is overwritten in place
 // with same-length garbage, so only a parser that never re-reads it can get
