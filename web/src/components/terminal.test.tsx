@@ -1986,3 +1986,58 @@ describe('the new-session control', () => {
     expect(onNewSession).toHaveBeenCalledWith(null)
   })
 })
+
+describe('Terminal file links', () => {
+  it('hands the emulator a detector that stats through this session', async () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    act(() => sock.emitControl(attached({ ref: 2, id: 's1' })))
+
+    const answer = em.live().detector!.verify(['internal/a.go'])
+    const sent = sock.ofType('stat')[0]!
+    expect(sent).toMatchObject({ type: 'stat', id: 's1', paths: ['internal/a.go'] })
+    act(() => {
+      sock.emitControl({
+        type: 'stats',
+        entries: [{ path: 'internal/a.go', exists: true, kind: 'file' }],
+        reqId: sent.reqId as number,
+      })
+    })
+    await expect(answer).resolves.toEqual([true])
+  })
+
+  it('opens the viewer when a verified path is clicked, and reads it', () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    act(() => sock.emitControl(attached({ ref: 2, id: 's1' })))
+
+    act(() => em.live().detector!.open({ path: 'src/foo.ts', start: 0, end: 10, line: 12 }))
+
+    expect(screen.getByRole('dialog', { name: 'foo.ts' })).toBeTruthy()
+    expect(sock.ofType('read')[0]).toMatchObject({ type: 'read', id: 's1', path: 'src/foo.ts' })
+  })
+
+  it('closing the viewer cancels the read and refocuses the terminal', async () => {
+    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    act(() => sock.emitControl(attached({ ref: 2, id: 's1' })))
+
+    act(() => em.live().detector!.open({ path: 'src/foo.ts', start: 0, end: 10 }))
+    const read = sock.ofType('read')[0]!
+    const before = em.live().focusCalls
+    act(() => {
+      sock.emitControl({
+        type: 'file',
+        ref: 9,
+        path: '/w/src/foo.ts',
+        size: 5,
+        mime: 'text/plain; charset=utf-8',
+        kind: 'text',
+        reqId: read.reqId as number,
+      })
+    })
+
+    await userEvent.keyboard('{Escape}')
+
+    expect(screen.queryByRole('dialog', { name: 'foo.ts' })).toBeNull()
+    expect(sock.ofType('cancel')[0]).toMatchObject({ type: 'cancel', ref: 9 })
+    expect(em.live().focusCalls).toBeGreaterThan(before)
+  })
+})
