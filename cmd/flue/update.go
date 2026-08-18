@@ -365,6 +365,12 @@ func restartForUpdate(w io.Writer, latest string) error {
 				return err
 			}
 			fmt.Fprintf(w, "  ✓ daemon restarted, running flue %s on 127.0.0.1:%d\n", got, port)
+			// Same honesty rule as runRestart: holder-backed sessions rode
+			// across the bounce; only the FLUE_NO_HOLDER escape hatch still
+			// pays for an update with its sessions.
+			if os.Getenv("FLUE_NO_HOLDER") == "" {
+				fmt.Fprintf(w, "  ✓ sessions kept running; tabs reconnect on their own\n")
+			}
 			return nil
 		}
 	}
