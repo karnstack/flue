@@ -1,9 +1,8 @@
 package holdwire
 
 import (
+	"encoding/json"
 	"time"
-
-	"github.com/karnstack/flue/internal/session"
 )
 
 // Req is one request on a control connection, or the attach header on an
@@ -59,27 +58,31 @@ type Event struct {
 // exactly what it is told. Run is what execs; Argv is what Info reports —
 // the same split registry.start keeps, for the same reason.
 type SpawnReq struct {
-	ID        string       `json:"id"`
-	Run       []string     `json:"run"`
-	Argv      []string     `json:"argv"`
-	Env       []string     `json:"env"`
-	Cwd       string       `json:"cwd"`
-	Cols      uint16       `json:"cols"`
-	Rows      uint16       `json:"rows"`
-	RingSize  int          `json:"ringSize,omitempty"`
-	Preload   []byte       `json:"preload,omitempty"`
-	Restore   session.Info `json:"restore"`
-	Group     string       `json:"group,omitempty"`
-	Ephemeral bool         `json:"ephemeral,omitempty"`
+	ID       string   `json:"id"`
+	Run      []string `json:"run"`
+	Argv     []string `json:"argv"`
+	Env      []string `json:"env"`
+	Cwd      string   `json:"cwd"`
+	Cols     uint16   `json:"cols"`
+	Rows     uint16   `json:"rows"`
+	RingSize int      `json:"ringSize,omitempty"`
+	Preload  []byte   `json:"preload,omitempty"`
+	// Restore is a session.Info, carried raw: this package sits below the
+	// session package (which imports it from the daemon side), so it cannot
+	// name the type without a cycle. Both ends marshal the same struct.
+	Restore   json.RawMessage `json:"restore,omitempty"`
+	Group     string          `json:"group,omitempty"`
+	Ephemeral bool            `json:"ephemeral,omitempty"`
 }
 
 // Hello is the holder's self-description: enough for a daemon that has just
 // started to rebuild its registry entry from the socket alone.
 type Hello struct {
-	Proto   int          `json:"proto"`
-	Version string       `json:"version"` // flue version the holder runs
-	Pid     int          `json:"pid"`     // the child's pid, 0 before spawn
-	Info    session.Info `json:"info"`
-	BaseSeq uint64       `json:"baseSeq"`
-	EndSeq  uint64       `json:"endSeq"`
+	Proto   int    `json:"proto"`
+	Version string `json:"version"` // flue version the holder runs
+	Pid     int    `json:"pid"`     // the child's pid, 0 before spawn
+	// Info is a session.Info, raw for the same reason as SpawnReq.Restore.
+	Info    json.RawMessage `json:"info,omitempty"`
+	BaseSeq uint64          `json:"baseSeq"`
+	EndSeq  uint64          `json:"endSeq"`
 }

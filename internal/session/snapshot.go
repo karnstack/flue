@@ -43,8 +43,8 @@ type Snapshot struct {
 	// session is never snapshotted at all — see Session.Snapshot.
 	Group string `json:"group,omitempty"`
 	Cwd   string `json:"cwd"`
-	Cols   uint16   `json:"cols"`
-	Rows   uint16   `json:"rows"`
+	Cols  uint16 `json:"cols"`
+	Rows  uint16 `json:"rows"`
 	// The ring's retained bytes. encoding/json carries []byte as base64.
 	Ring      []byte    `json:"ring"`
 	CreatedAt time.Time `json:"createdAt"`

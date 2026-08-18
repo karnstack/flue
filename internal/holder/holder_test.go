@@ -124,6 +124,17 @@ func (c *client) mustOK(req holdwire.Req) holdwire.Resp {
 	return resp
 }
 
+func helloInfo(t *testing.T, h *holdwire.Hello) session.Info {
+	t.Helper()
+	var info session.Info
+	if len(h.Info) > 0 {
+		if err := json.Unmarshal(h.Info, &info); err != nil {
+			t.Fatalf("hello info: %v", err)
+		}
+	}
+	return info
+}
+
 func spawnReq(cmd string) *holdwire.SpawnReq {
 	return &holdwire.SpawnReq{
 		ID:   "cafebabe11111111",
@@ -153,8 +164,8 @@ func TestHolderSpawnHelloAttachWrite(t *testing.T) {
 	}
 
 	hello = c.mustOK(holdwire.Req{Verb: "hello"}).Hello
-	if hello.Pid == 0 || hello.Info.State != "running" || hello.Info.ID != "cafebabe11111111" {
-		t.Fatalf("post-spawn hello = %+v", hello)
+	if info := helloInfo(t, hello); hello.Pid == 0 || info.State != "running" || info.ID != "cafebabe11111111" {
+		t.Fatalf("post-spawn hello = %+v (info %+v)", hello, info)
 	}
 
 	// Attach from zero: backlog plus stream carries everything.
@@ -253,9 +264,9 @@ func TestHolderResizePropagates(t *testing.T) {
 	c := dialControl(t, dir)
 	c.mustOK(holdwire.Req{Verb: "spawn", Spawn: spawnReq("exec cat")})
 	c.mustOK(holdwire.Req{Verb: "resize", Cols: 132, Rows: 43})
-	hello := c.mustOK(holdwire.Req{Verb: "hello"}).Hello
-	if hello.Info.Cols != 132 || hello.Info.Rows != 43 {
-		t.Fatalf("size after resize = %dx%d, want 132x43", hello.Info.Cols, hello.Info.Rows)
+	info := helloInfo(t, c.mustOK(holdwire.Req{Verb: "hello"}).Hello)
+	if info.Cols != 132 || info.Rows != 43 {
+		t.Fatalf("size after resize = %dx%d, want 132x43", info.Cols, info.Rows)
 	}
 }
 
@@ -266,15 +277,19 @@ func TestHolderSpawnHonorsPreloadAndRestore(t *testing.T) {
 	c := dialControl(t, dir)
 	req := spawnReq("exec cat")
 	req.Preload = []byte("old-scrollback\r\n")
-	req.Restore = session.Info{Title: "carried title"}
+	restore, err := json.Marshal(session.Info{Title: "carried title"})
+	if err != nil {
+		t.Fatalf("marshal restore: %v", err)
+	}
+	req.Restore = restore
 	c.mustOK(holdwire.Req{Verb: "spawn", Spawn: req})
 
 	tail := c.mustOK(holdwire.Req{Verb: "tail", N: 4096})
 	if !strings.HasPrefix(string(tail.Data), "old-scrollback") {
 		t.Fatalf("tail = %q, want the preload first", tail.Data)
 	}
-	hello := c.mustOK(holdwire.Req{Verb: "hello"}).Hello
-	if hello.Info.Title != "carried title" {
-		t.Fatalf("Title = %q, want the restored one", hello.Info.Title)
+	info := helloInfo(t, c.mustOK(holdwire.Req{Verb: "hello"}).Hello)
+	if info.Title != "carried title" {
+		t.Fatalf("Title = %q, want the restored one", info.Title)
 	}
 }

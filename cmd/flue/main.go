@@ -28,6 +28,7 @@ import (
 	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
 	"github.com/karnstack/flue/internal/fleet"
+	"github.com/karnstack/flue/internal/holder"
 	"github.com/karnstack/flue/internal/service"
 	"github.com/karnstack/flue/internal/session"
 	"github.com/karnstack/flue/internal/transport/local"
@@ -91,6 +92,10 @@ func main() {
 		err = cmdRelay(os.Args[2:])
 	case "update":
 		err = cmdUpdate()
+	case "_holder":
+		// Hidden: the daemon's per-session holder process. Never typed by a
+		// person, so it stays out of usage().
+		err = holder.Main(version, os.Args[2:])
 	case "version", "--version", "-v":
 		err = cmdVersion()
 	case "-h", "--help", "help":

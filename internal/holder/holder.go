@@ -8,6 +8,7 @@ package holder
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -38,6 +39,25 @@ var (
 	eventPoll      = 250 * time.Millisecond
 	activeThrottle = time.Second
 )
+
+// Main is the `flue _holder` entry point: it parses the holder's one flag
+// and serves. The ready pipe rides on fd 3 when the spawner passed one —
+// the contract SpawnRemote holds up from the other side.
+func Main(version string, args []string) error {
+	fs := flag.NewFlagSet("_holder", flag.ContinueOnError)
+	dir := fs.String("dir", "", "holder directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dir == "" {
+		return errors.New("holder: --dir is required")
+	}
+	var ready io.WriteCloser
+	if f := os.NewFile(3, "ready"); f != nil {
+		ready = f
+	}
+	return Serve(*dir, version, ready)
+}
 
 // Serve owns one session for the life of the process. It returns after a
 // close request, after self-reap, or on a listener error. ready, when
@@ -167,7 +187,11 @@ func (h *holder) handle(req holdwire.Req) holdwire.Resp {
 	case "hello":
 		hello := &holdwire.Hello{Proto: holdwire.Proto, Version: h.version}
 		if s != nil {
-			hello.Info = s.Info()
+			info, err := json.Marshal(s.Info())
+			if err != nil {
+				return fail(err)
+			}
+			hello.Info = info
 			hello.Pid = s.Pid()
 			hello.BaseSeq, hello.EndSeq = s.Seqs()
 		}
@@ -179,6 +203,12 @@ func (h *holder) handle(req holdwire.Req) holdwire.Resp {
 		if s != nil {
 			return fail(errors.New("holder already runs a session"))
 		}
+		var restore session.Info
+		if len(req.Spawn.Restore) > 0 {
+			if err := json.Unmarshal(req.Spawn.Restore, &restore); err != nil {
+				return fail(err)
+			}
+		}
 		sess, err := session.StartChild(session.ChildConfig{
 			ID:        req.Spawn.ID,
 			Run:       req.Spawn.Run,
@@ -189,7 +219,7 @@ func (h *holder) handle(req holdwire.Req) holdwire.Resp {
 			Rows:      req.Spawn.Rows,
 			RingSize:  req.Spawn.RingSize,
 			Preload:   req.Spawn.Preload,
-			Restore:   req.Spawn.Restore,
+			Restore:   restore,
 			Group:     req.Spawn.Group,
 			Ephemeral: req.Spawn.Ephemeral,
 		})
