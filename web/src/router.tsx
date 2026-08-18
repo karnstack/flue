@@ -175,16 +175,19 @@ const sessionsRoute = createRoute({
 
 /**
  * The agents browser. One route, three presentations — the sessions list, the
- * insights, and the search results — with only the search in the URL: `q` is
- * what the back button should undo, while the view toggle and the chip
- * filters are glances that would make history noise.
+ * insights, and the search results. `q` rides the URL as history (a search is
+ * what the back button should undo); `view=insights` rides it as state, written
+ * with replace so a reload lands back on the insights and the back button
+ * never wades through toggle flips. The chip filters stay out: they are
+ * glances, not places.
  */
 const agentsRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/agents',
-  validateSearch: (search: Record<string, unknown>): { q?: string } => {
-    const out: { q?: string } = {}
+  validateSearch: (search: Record<string, unknown>): { q?: string; view?: 'insights' } => {
+    const out: { q?: string; view?: 'insights' } = {}
     if (typeof search.q === 'string' && search.q !== '') out.q = search.q
+    if (search.view === 'insights') out.view = 'insights'
     return out
   },
   component: AgentsRoute,

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { AdjustmentsHorizontalIcon, MagnifyingGlassIcon } from '@heroicons/react/16/solid'
 
-import { HBars, Heatmap, StackedBars } from '@/agents/charts'
+import { Heatmap, RankChart, ToolDayChart } from '@/agents/charts'
 import {
   AGENT_GROUPING_LABELS,
   AGENT_GROUPINGS,
@@ -86,9 +86,6 @@ const TOOL_DOT_BG: Record<AgentTool, string> = {
   pi: 'bg-tool-pi',
 }
 
-/** The stacked chart's fills, in AGENT_TOOLS order. */
-const TOOL_FILLS = ['fill-tool-claude', 'fill-tool-codex', 'fill-tool-pi']
-
 /**
  * The agents browser: every reachable machine's agent transcripts, merged,
  * arranged, aggregated and searched.
@@ -106,14 +103,24 @@ export function AgentsRoute() {
   // Non-strict for the viewer's reason: the registered route id wears the
   // shell layout's prefix, and the test harness mounts this under a bare
   // path, so a lookup pinned to either id would fail under the other.
-  const search = useSearch({ strict: false }) as { q?: string }
+  const search = useSearch({ strict: false }) as { q?: string; view?: 'insights' }
   const q = search.q ?? ''
 
   const [machines, setMachines] = useState<MachineState[] | null>(null)
   const [byMachine, setByMachine] = useState<ReadonlyMap<string, MachineAgents>>(new Map())
 
   const [view, setView] = useState<AgentViewConfig>(DEFAULT_AGENT_VIEW)
-  const [mode, setMode] = useState<Mode>('sessions')
+  // The presentation toggle lives in the URL (`?view=insights`) so a reload
+  // lands where the reader was; written with replace, so flipping it never
+  // stacks history the back button has to unwind.
+  const mode: Mode = search.view === 'insights' ? 'insights' : 'sessions'
+  const setMode = (next: Mode) => {
+    void navigate({
+      to: '/agents',
+      search: { q: search.q, view: next === 'insights' ? ('insights' as const) : undefined },
+      replace: true,
+    })
+  }
   const [range, setRange] = useState<InsightRange>('30d')
   const [toolFilter, setToolFilter] = useState<ReadonlySet<AgentTool>>(() => new Set())
   const [machineFilter, setMachineFilter] = useState<ReadonlySet<string>>(() => new Set())
@@ -325,9 +332,12 @@ export function AgentsRoute() {
     })
 
   const submitSearch = (value: string) => {
+    // The view survives a search and its clearing — a reader who searched
+    // from the insights comes back to the insights.
     void navigate({
       to: '/agents',
-      search: value.trim() === '' ? {} : { q: value.trim() },
+      search:
+        value.trim() === '' ? { view: search.view } : { q: value.trim(), view: search.view },
     })
   }
 
@@ -718,21 +728,33 @@ function Insights({
   range: InsightRange
   onRange(range: InsightRange): void
 }) {
-  const now = Date.now()
-  const everything = filterRows(rows, filters)
-  const ranged = rangeFilter(everything, range, now)
-  const totals = insightTotals(ranged)
-  const tokens = tokensByDay(ranged, now)
-  const sessions = sessionsByDay(ranged, now)
-  const projects = byProject(ranged)
-  const models = byModel(ranged)
-
-  // The Activity section — heatmap and streaks — is computed from ALL rows
-  // regardless of the 7d/30d/90d/All range chips: a year of context is the
-  // section's whole point. The chips keep driving the stat strip and the two
-  // day charts, exactly as before.
-  const heat = heatmapWeeks(everything, now)
-  const usage = usageStats(everything, now)
+  // One memo for all of the arithmetic, keyed on what actually changes: the
+  // fleet re-emits every few seconds and re-renders this route, and a fresh
+  // Date.now() per render was minting brand-new chart arrays each time —
+  // which Recharts read as new data and re-animated, so the rank labels
+  // blinked every poll. The clock is sampled when the inputs change, not
+  // when React happens to run.
+  const { everything, ranged, totals, tokens, sessions, projects, models, heat, usage } =
+    useMemo(() => {
+      const now = Date.now()
+      const everything = filterRows(rows, filters)
+      const ranged = rangeFilter(everything, range, now)
+      return {
+        everything,
+        ranged,
+        totals: insightTotals(ranged),
+        tokens: tokensByDay(ranged, now),
+        sessions: sessionsByDay(ranged, now),
+        projects: byProject(ranged),
+        models: byModel(ranged),
+        // The Activity section — heatmap and streaks — is computed from ALL
+        // rows regardless of the 7d/30d/90d/All range chips: a year of
+        // context is the section's whole point. The chips keep driving the
+        // stat strip and the day charts.
+        heat: heatmapWeeks(everything, now),
+        usage: usageStats(everything, now),
+      }
+    }, [rows, filters, range])
 
   const stats: Array<{ label: string; value: string }> = [
     { label: 'Sessions', value: String(totals.sessions) },
@@ -767,8 +789,12 @@ function Insights({
     usageRows.push({ label: 'Longest session', value: fmtDuration(usage.longestSessionMs) })
   }
 
+  // One centred, bounded column carries the whole story in reading order —
+  // the year of activity, then the numbers, then the charts. Unbounded, the
+  // page kept growing a dead right margin on wide screens: every block set
+  // its own width and none agreed.
   return (
-    <div className="flex flex-col gap-y-8">
+    <div className="mx-auto flex w-full max-w-5xl flex-col gap-y-10">
       <div role="group" aria-label="Range" className="flex items-center gap-1.5">
         {INSIGHT_RANGES.map((r) => (
           <FilterChip key={r} pressed={range === r} onPress={() => onRange(r)}>
@@ -805,44 +831,11 @@ function Insights({
         </div>
       )}
 
-      {everything.length > 0 && (
-        <div className="@container">
-          <div className="flex flex-col gap-y-2">
-            <h3 className="text-sm font-medium text-zinc-950 dark:text-white">Activity</h3>
-            {/* Flex, not a fractional grid: grid columns stretch to the
-                container, which flung the stats to the far edge and left a
-                gulf beside the heatmap. Here both blocks keep their natural
-                width, sit a fixed gap apart, and the stats wrap under the
-                grid when the row runs out — the values right-align inside
-                their own bounded column, not against the viewport. */}
-            <div className="flex flex-wrap items-start gap-x-14 gap-y-6">
-              <div className="min-w-0 max-w-full">
-                <Heatmap
-                  label="Activity: tokens per day over the last year"
-                  weeks={heat.weeks}
-                  months={heat.months}
-                />
-              </div>
-              {/* Plain rows rather than a dl: the stat strip above is the
-                  screen's one definition list, and these are quieter. */}
-              <div className="flex w-60 shrink-0 flex-col gap-y-1.5 pt-4">
-                {usageRows.map((s) => (
-                  <div key={s.label} className="flex items-baseline justify-between gap-x-4">
-                    <span className="text-control text-muted-foreground">{s.label}</span>
-                    <span className="text-control font-medium text-zinc-950 tabular-nums dark:text-white">
-                      {s.value}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {everything.length > 0 && <ActivitySection heat={heat} usageRows={usageRows} />}
 
       {ranged.length > 0 && (
         <div className="@container">
-          <div className="grid grid-cols-1 gap-x-8 gap-y-8 @3xl:grid-cols-2">
+          <div className="flex flex-col gap-y-10">
             <div className="flex min-w-0 flex-col gap-y-2">
               <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
                 <h3 className="text-sm font-medium text-zinc-950 dark:text-white">
@@ -863,14 +856,10 @@ function Insights({
                   ))}
                 </span>
               </div>
-              <StackedBars
+              <ToolDayChart
                 label="Tokens per day, by tool"
-                colors={TOOL_FILLS}
-                points={tokens.map((d) => ({
-                  label: d.label,
-                  title: stackTitle(d.label, d.byTool, d.total),
-                  parts: AGENT_TOOLS.map((tool) => d.byTool[tool]),
-                }))}
+                format={compactTokens}
+                data={tokens.map((d) => ({ label: d.label, ...d.byTool }))}
               />
             </div>
 
@@ -880,21 +869,16 @@ function Insights({
               </h3>
               {/* The same tool bands as the tokens chart beside it — one
                   legend serves both — with the y scale in plain counts. */}
-              <StackedBars
+              <ToolDayChart
                 label="Sessions per day, by tool"
-                colors={TOOL_FILLS}
                 format={(n) => String(Math.round(n))}
-                points={sessions.map((d) => ({
-                  label: d.label,
-                  title: sessionsTitle(d.label, d.byTool, d.count),
-                  parts: AGENT_TOOLS.map((tool) => d.byTool[tool]),
-                }))}
+                data={sessions.map((d) => ({ label: d.label, ...d.byTool }))}
               />
             </div>
 
             <div className="flex min-w-0 flex-col gap-y-2">
               <h3 className="text-sm font-medium text-zinc-950 dark:text-white">Top projects</h3>
-              <HBars
+              <RankChart
                 label="Top projects by tokens"
                 rows={projects.map((p) => ({
                   key: p.cwd,
@@ -907,7 +891,7 @@ function Insights({
 
             <div className="flex min-w-0 flex-col gap-y-2">
               <h3 className="text-sm font-medium text-zinc-950 dark:text-white">Models</h3>
-              <HBars
+              <RankChart
                 label="Models by tokens"
                 rows={models.map((m) => ({
                   key: m.model,
@@ -924,30 +908,47 @@ function Insights({
   )
 }
 
-/** One stacked bar's hover sentence, naming only the tools that spent. */
-function stackTitle(
-  label: string,
-  byTool: Record<AgentTool, number>,
-  total: number,
-): string {
-  const parts = AGENT_TOOLS.filter((tool) => byTool[tool] > 0).map(
-    (tool) => `${TOOL_LABELS[tool]} ${compactTokens(byTool[tool])}`,
+/**
+ * The activity year: the heatmap across the full row, then its numbers as a
+ * quiet divider-separated strip beneath — the same vocabulary as the big
+ * strip at the top of the screen, one step smaller. A side column was tried
+ * and flung the numbers to the pane's far edge with a gulf between; as a
+ * footer the stats read as a caption to the year, at every width.
+ */
+function ActivitySection({
+  heat,
+  usageRows,
+}: {
+  heat: ReturnType<typeof heatmapWeeks>
+  usageRows: Array<{ label: string; value: string }>
+}) {
+  return (
+    <div className="@container">
+      <div className="flex flex-col items-center gap-y-5">
+        <Heatmap
+          label="Activity: tokens per day over the last year"
+          weeks={heat.weeks}
+          months={heat.months}
+        />
+        <div className="flex flex-wrap justify-center gap-y-4">
+          {usageRows.map((s, at) => (
+            <div
+              key={s.label}
+              className={cn(
+                'flex flex-col gap-y-0.5 pr-8',
+                at > 0 && 'border-l border-hairline pl-8',
+              )}
+            >
+              <span className="text-sm font-medium text-zinc-950 tabular-nums dark:text-white">
+                {s.value}
+              </span>
+              <span className="truncate text-control text-muted-foreground">{s.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   )
-  const detail = parts.length > 0 ? ` (${parts.join(', ')})` : ''
-  return `${label} · ${compactTokens(total)} tokens${detail}`
-}
-
-/** The sessions chart's hover line, counts rather than token units. */
-function sessionsTitle(
-  label: string,
-  byTool: Record<AgentTool, number>,
-  total: number,
-): string {
-  const parts = AGENT_TOOLS.filter((tool) => byTool[tool] > 0).map(
-    (tool) => `${TOOL_LABELS[tool]} ${byTool[tool]}`,
-  )
-  const detail = parts.length > 0 ? ` (${parts.join(', ')})` : ''
-  return `${label} · ${total} ${total === 1 ? 'session' : 'sessions'}${detail}`
 }
 
 /**

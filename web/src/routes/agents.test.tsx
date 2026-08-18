@@ -38,7 +38,7 @@ function summary(over: Partial<AgentSummary> & { id: string }): AgentSummary {
  * One machine by default, because the machine chips and headings are the
  * fleet's own tests' business; this suite is about the agent verbs.
  */
-async function mountAgents() {
+async function mountAgents(initialPath = '/agents') {
   const local = fakeClient()
   const fleet = new FleetClient([{ id: 'local', name: '', client: local.client, pinned: false }])
 
@@ -51,7 +51,7 @@ async function mountAgents() {
   ])
   const router = createRouter({
     routeTree,
-    history: createMemoryHistory({ initialEntries: ['/agents'] }),
+    history: createMemoryHistory({ initialEntries: [initialPath] }),
   })
   await router.load()
 
@@ -334,6 +334,18 @@ describe('AgentsRoute', () => {
     const labels = screen.getAllByRole('term').map((el) => el.textContent)
     expect(labels).toEqual(['Sessions', 'Input tokens', 'Output tokens', 'Cache read'])
     expect(screen.getByText('1.2K')).toBeTruthy()
+    expect(screen.getByText('Tokens per day')).toBeTruthy()
+  })
+
+  it('opens straight onto the insights when the URL says so', async () => {
+    // `?view=insights` is what a reload of the insights carries; landing on
+    // the sessions instead would throw the reader back where they were not.
+    const { sock, welcome } = await mountAgents('/agents?view=insights')
+    welcome(['agents'])
+    await waitFor(() => expect(sock.ofType('agents')).toHaveLength(1))
+    indexed(sock, [summary({ id: 'a1', startedAt: new Date().toISOString() })])
+
+    await waitFor(() => expect(screen.getByRole('group', { name: 'Range' })).toBeTruthy())
     expect(screen.getByText('Tokens per day')).toBeTruthy()
   })
 })

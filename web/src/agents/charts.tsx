@@ -1,151 +1,120 @@
 /*
- * The insights charts, hand-rolled: three small SVG-or-simpler renderers and
- * no chart dependency. Pure props in, marks out — nothing here fetches,
- * aggregates or reads a clock, which keeps every number arguable in
- * agents/view.ts where the aggregation lives.
+ * The insights charts. The bar charts ride shadcn's chart wrapper over
+ * Recharts — the one charting stack the component system blesses — while the
+ * activity heatmap stays hand-rolled, since a contribution grid is not a
+ * Recharts shape and eleven-pixel squares need no scales. Pure props in,
+ * marks out: nothing here fetches, aggregates or reads a clock, which keeps
+ * every number arguable in agents/view.ts where the aggregation lives.
  *
- * Shared style, per the spec: no axis boxes, one hairline at the base, sparse
- * day labels, y labels in compact units, corners barely eased. Each mark
- * carries a `<title>` (or a title attribute) so hovering answers with the
- * exact figure the compact label rounded away.
- *
- * The two day charts draw into a stable viewBox and scale to their width, so
- * the geometry is arithmetic on the data alone; the labels scale with it,
- * which at half width is small type but never overlapping type.
+ * Colour reaches Recharts through the CSS variables styles.css already
+ * themes (--color-tool-*, --color-accent-bg), passed via each config's
+ * `color` field. The wrapper's `.dark`-class theme mechanism goes unused on
+ * purpose: this app themes by media query and has no .dark class to match.
  */
-import type { CSSProperties } from 'react'
+import { Bar, BarChart, LabelList, XAxis, YAxis } from 'recharts'
 
 import { compactTokens, monthDay, type HeatCell, type HeatMonth } from '@/agents/view'
+import type { AgentTool } from '@/client/protocol'
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
-/** The drawing's coordinate space. Height per the spec, width chosen so a
- *  two-across arrangement renders near 1:1. */
-const W = 640
-const H = 160
+/** The tool series, coloured by the identity tokens styles.css themes. */
+const TOOL_CHART_CONFIG = {
+  claude: { label: 'Claude', color: 'var(--color-tool-claude)' },
+  codex: { label: 'Codex', color: 'var(--color-tool-codex)' },
+  pi: { label: 'Pi', color: 'var(--color-tool-pi)' },
+} satisfies ChartConfig
 
-/** Room above the tallest bar, so the max label never kisses the frame. */
-const PLOT_TOP = 14
-/** The band under the baseline that the day labels sit in. */
-const X_BAND = 18
+const TOOL_KEYS = ['claude', 'codex', 'pi'] as const satisfies readonly AgentTool[]
 
-const BASE_Y = H - X_BAND
-const PLOT_H = BASE_Y - PLOT_TOP
-
-/** How wide one bar and its gap are, from how many bars there are. */
-function geometry(n: number): { gap: number; barW: number } {
-  if (n <= 0) return { gap: 0, barW: 0 }
-  const gap = n > 1 ? Math.min(4, (W / n) * 0.15) : 0
-  return { gap, barW: (W - gap * (n - 1)) / n }
-}
-
-/** Which bars get a day label: the first, the last, and two waypoints. */
-function labelIndices(n: number): number[] {
-  if (n <= 1) return [0]
-  return [...new Set([0, Math.round((n - 1) / 3), Math.round(((n - 1) * 2) / 3), n - 1])]
-}
-
-/** The label row under the baseline, shared by both day charts. */
-function XLabels({ points, barW, gap }: { points: Array<{ label: string }>; barW: number; gap: number }) {
-  return (
-    <>
-      {labelIndices(points.length).map((at) => {
-        const x = at * (barW + gap)
-        const anchor = at === 0 ? 'start' : at === points.length - 1 ? 'end' : 'middle'
-        return (
-          <text
-            key={at}
-            x={anchor === 'start' ? x : anchor === 'end' ? x + barW : x + barW / 2}
-            y={H - 5}
-            textAnchor={anchor}
-            className="fill-muted-foreground text-[10px]"
-          >
-            {points[at]!.label}
-          </text>
-        )
-      })}
-    </>
-  )
-}
-
-/** The compact y scale: the max at the top, half of it midway. */
-function YLabels({ max, format }: { max: number; format: (n: number) => string }) {
-  return (
-    <>
-      <text x={0} y={PLOT_TOP - 4} className="fill-muted-foreground text-[10px]">
-        {format(max)}
-      </text>
-      <text x={0} y={PLOT_TOP + PLOT_H / 2 - 3} className="fill-muted-foreground text-[10px]">
-        {format(max / 2)}
-      </text>
-    </>
-  )
-}
-
-export interface StackPoint {
+/** One day of a tool-banded chart: the label plus one value per tool. */
+export interface ToolDayDatum {
   label: string
-  /** The hover sentence for this bar, carried whole from the caller. */
-  title: string
-  /** One value per series, in the order `colors` names them. */
-  parts: number[]
+  claude: number
+  codex: number
+  pi: number
 }
 
 /**
- * Bars of stacked bands — tokens per day, banded by tool. `colors` are fill
- * utility classes, one per series, so the tool tokens in styles.css are named
- * exactly once by the caller.
+ * A day-by-day stacked bar chart banded by tool — tokens and session counts
+ * share it, differing only in how the numbers print.
  */
-export function StackedBars({
-  points,
-  colors,
+export function ToolDayChart({
+  data,
   label,
-  format = compactTokens,
+  format,
 }: {
-  points: StackPoint[]
-  colors: string[]
+  data: ToolDayDatum[]
   label: string
-  /** How the y scale prints — token units by default, plain counts for the
-   *  sessions chart. */
-  format?: (n: number) => string
+  format: (n: number) => string
 }) {
-  if (points.length === 0) return null
-  const totals = points.map((p) => p.parts.reduce((sum, v) => sum + v, 0))
-  const max = Math.max(1, ...totals)
-  const { gap, barW } = geometry(points.length)
+  if (data.length === 0) return null
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label} className="w-full">
-      <YLabels max={max} format={format} />
-      {points.map((p, at) => {
-        const x = at * (barW + gap)
-        let y = BASE_Y
-        return (
-          <g key={at}>
-            <title>{p.title}</title>
-            {p.parts.map((value, series) => {
-              const h = (value / max) * PLOT_H
-              y -= h
-              return value > 0 ? (
-                <rect
-                  key={series}
-                  x={x}
-                  y={y}
-                  width={barW}
-                  height={h}
-                  rx={1}
-                  className={colors[series]}
-                />
-              ) : null
-            })}
-          </g>
-        )
-      })}
-      <line x1={0} x2={W} y1={BASE_Y} y2={BASE_Y} className="stroke-hairline" />
-      <XLabels points={points} barW={barW} gap={gap} />
-    </svg>
+    <ChartContainer config={TOOL_CHART_CONFIG} className="aspect-auto h-48 w-full">
+      <BarChart
+        accessibilityLayer
+        data={data}
+        margin={{ top: 4, right: 0, left: 0, bottom: 0 }}
+        aria-label={label}
+      >
+        <XAxis
+          dataKey="label"
+          tickLine={false}
+          axisLine={{ stroke: 'var(--color-hairline)' }}
+          tickMargin={6}
+          minTickGap={48}
+          interval="preserveStartEnd"
+          tick={{ fontSize: 10 }}
+        />
+        <YAxis
+          width={36}
+          tickLine={false}
+          axisLine={false}
+          tickCount={3}
+          allowDecimals={false}
+          tickFormatter={format}
+          tick={{ fontSize: 10 }}
+        />
+        <ChartTooltip
+          cursor={{ fill: 'var(--color-row-hover)' }}
+          content={
+            <ChartTooltipContent
+              formatter={(value, name) => (
+                <div className="flex w-full items-center gap-x-1.5">
+                  <span
+                    aria-hidden="true"
+                    className="size-2 shrink-0 rounded-[2px]"
+                    style={{ backgroundColor: `var(--color-${String(name)})` }}
+                  />
+                  <span className="text-muted-foreground">
+                    {TOOL_CHART_CONFIG[name as AgentTool]?.label ?? String(name)}
+                  </span>
+                  <span className="ml-auto pl-3 font-medium tabular-nums">
+                    {format(Number(value))}
+                  </span>
+                </div>
+              )}
+            />
+          }
+        />
+        {TOOL_KEYS.map((tool) => (
+          <Bar key={tool} dataKey={tool} stackId="day" fill={`var(--color-${tool})`} />
+        ))}
+      </BarChart>
+    </ChartContainer>
   )
 }
 
-export interface HBarRow {
+export interface RankRow {
+  /** A unique identity — the cwd, the model id — never the display label,
+   *  because two projects can share a basename and a category axis keyed on
+   *  a duplicated label folds their bars into one. */
   key: string
   label: string
   value: number
@@ -153,45 +122,76 @@ export interface HBarRow {
   title?: string
 }
 
-/**
- * Ranked rows — top projects, models — as label, proportional bar, compact
- * value. HTML rather than one SVG, and deliberately: the labels have to cut
- * themselves short the way every other label on the screen does, and SVG text
- * cannot, so each bar is a plain proportional fill beside real text.
- */
-export function HBars({
-  rows,
-  label,
-  // The accent at reduced strength rather than a neutral: these rank a
-  // single measure, exactly the claim the heatmap makes, and the grey read
-  // as disabled beside four coloured charts.
-  colorClass = 'bg-accent-bg/60',
-}: {
-  rows: HBarRow[]
-  label: string
-  colorClass?: string
-}) {
+const RANK_CONFIG = {
+  value: { label: 'Tokens', color: 'var(--color-accent-bg)' },
+} satisfies ChartConfig
+
+/** Ranked horizontal bars — top projects, models — in the accent. */
+export function RankChart({ rows, label }: { rows: RankRow[]; label: string }) {
   if (rows.length === 0) return null
-  const max = Math.max(1, ...rows.map((r) => r.value))
+  const labels = new Map(rows.map((r) => [r.key, r.label]))
+  const cut = (name: string) => (name.length > 13 ? `${name.slice(0, 12)}…` : name)
   return (
-    <div role="img" aria-label={label} className="flex flex-col gap-y-1.5">
-      {rows.map((r) => (
-        <div key={r.key} title={r.title ?? r.label} className="flex items-center gap-x-2">
-          <span className="w-24 shrink-0 truncate text-control text-muted-foreground">
-            {r.label}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span
-              className={cn('block h-3 rounded-[1px]', colorClass, 'w-(--bar-w)')}
-              style={{ '--bar-w': `${Math.max(0.5, (r.value / max) * 100)}%` } as CSSProperties}
+    <ChartContainer
+      config={RANK_CONFIG}
+      className="aspect-auto w-full"
+      style={{ height: rows.length * 28 + 8 }}
+    >
+      <BarChart
+        accessibilityLayer
+        data={rows}
+        layout="vertical"
+        margin={{ top: 0, right: 44, left: 0, bottom: 0 }}
+        aria-label={label}
+      >
+        <XAxis type="number" hide />
+        <YAxis
+          type="category"
+          dataKey="key"
+          width={104}
+          tickLine={false}
+          axisLine={false}
+          tick={{ fontSize: 11 }}
+          tickFormatter={(key: string) => cut(labels.get(key) ?? key)}
+        />
+        <ChartTooltip
+          cursor={{ fill: 'var(--color-row-hover)' }}
+          content={
+            <ChartTooltipContent
+              hideIndicator
+              labelFormatter={(_value, payload) => {
+                const first = payload?.[0]?.payload as RankRow | undefined
+                return first?.title ?? first?.label ?? ''
+              }}
+              formatter={(value) => (
+                <span className="ml-auto font-medium tabular-nums">
+                  {compactTokens(Number(value))}
+                </span>
+              )}
             />
-          </span>
-          <span className="w-12 shrink-0 text-right text-xs text-muted-foreground tabular-nums">
-            {compactTokens(r.value)}
-          </span>
-        </div>
-      ))}
-    </div>
+          }
+        />
+        {/* Not animated: the grow-in hides the value labels for its
+            duration, which reads as a blink whenever the data legitimately
+            refreshes. A ranked list is read, not watched. */}
+        <Bar
+          dataKey="value"
+          fill="var(--color-value)"
+          fillOpacity={0.7}
+          radius={2}
+          barSize={14}
+          isAnimationActive={false}
+        >
+          <LabelList
+            dataKey="value"
+            position="right"
+            formatter={(v: unknown) => compactTokens(Number(v))}
+            className="fill-muted-foreground"
+            fontSize={11}
+          />
+        </Bar>
+      </BarChart>
+    </ChartContainer>
   )
 }
 
@@ -230,7 +230,7 @@ function heatDayLabel(dayMs: number): string {
 /**
  * The activity heatmap — a year of days, one square each, Monday at the top
  * of every column. Plain divs rather than SVG: the squares are a fixed size
- * by design, so there is no geometry to scale, and a `title` per square is
+ * by design, so there is no geometry to scale, and a tooltip per square is
  * the whole interaction. The one wrapper scrolls sideways, which is how a
  * 390px phone gets the year without crushing it.
  */
@@ -245,7 +245,7 @@ export function Heatmap({
 }) {
   if (weeks.length === 0) return null
   return (
-    <div className="overflow-x-auto">
+    <div className="max-w-full overflow-x-auto">
       <div role="img" aria-label={label} className="w-max">
         <div className="relative h-4" style={{ marginLeft: HEAT_INSET }}>
           {months.map((m) => (
@@ -281,9 +281,7 @@ export function Heatmap({
                   ) : (
                     <Tooltip key={cell.dayMs}>
                       <TooltipTrigger asChild>
-                        <div
-                          className={cn('size-[11px] rounded-[2px]', HEAT_FILLS[cell.level])}
-                        />
+                        <div className={cn('size-[11px] rounded-[2px]', HEAT_FILLS[cell.level])} />
                       </TooltipTrigger>
                       <TooltipContent sideOffset={6}>
                         <span className="font-medium">{heatDayLabel(cell.dayMs)}</span>
