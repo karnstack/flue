@@ -73,7 +73,8 @@ func claudeProjectDir(home, cwd string) string {
 }
 
 // latestClaudeSession is the id of the most recently written conversation in
-// dir, provided it was written at or after notBefore.
+// dir, provided it was written at or after notBefore — plus when it was
+// written, so agentSessionFor can weigh it against the other tools' stores.
 //
 // The deadline is the entire filter, and it is what keeps this from attaching
 // a stranger's conversation to a shell that never ran Claude Code. A session's
@@ -87,13 +88,13 @@ func claudeProjectDir(home, cwd string) string {
 // Code has never been run in; an unreadable one is a permissions problem the
 // user has bigger reasons to care about; a file whose mtime cannot be read is
 // skipped. None of them is worth a log line on a shutdown path.
-func latestClaudeSession(dir string, notBefore time.Time) (string, bool) {
+func latestClaudeSession(dir string, notBefore time.Time) (string, time.Time, bool) {
 	if dir == "" {
-		return "", false
+		return "", time.Time{}, false
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", false
+		return "", time.Time{}, false
 	}
 	var (
 		best   string
@@ -113,19 +114,5 @@ func latestClaudeSession(dir string, notBefore time.Time) (string, bool) {
 		}
 		best, bestAt = strings.TrimSuffix(e.Name(), transcriptSuffix), at
 	}
-	return best, best != ""
-}
-
-// claudeSessionFor is the conversation a session running in cwd since since
-// most plausibly belongs to, or "" when there is no evidence of one.
-func claudeSessionFor(cwd string, since time.Time) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	id, ok := latestClaudeSession(claudeProjectDir(home, cwd), since)
-	if !ok {
-		return ""
-	}
-	return id
+	return best, bestAt, best != ""
 }

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Launchd manages the login service through launchctl on darwin.
@@ -15,10 +16,13 @@ type Launchd struct {
 	home string
 	uid  int
 	run  Runner
+	// sleep is time.Sleep, held as a field so awaitBootout's polling is
+	// testable without the test actually waiting.
+	sleep func(time.Duration)
 }
 
 func NewLaunchd(exe, home string, uid int, r Runner) *Launchd {
-	return &Launchd{exe: exe, home: home, uid: uid, run: r}
+	return &Launchd{exe: exe, home: home, uid: uid, run: r, sleep: time.Sleep}
 }
 
 func (l *Launchd) unitPath() string {
@@ -29,6 +33,40 @@ func (l *Launchd) domainTarget() string { return fmt.Sprintf("gui/%d", l.uid) }
 func (l *Launchd) serviceTarget() string {
 	return fmt.Sprintf("gui/%d/%s", l.uid, LaunchdLabel)
 }
+
+// awaitBootout waits for a booted-out label to actually leave the domain.
+//
+// bootout is asynchronous: it starts the teardown — SIGTERM, then launchd's
+// exit timeout — and returns without waiting for the process to die, so the
+// label stays registered for as long as the daemon takes to exit. flue's
+// daemon takes real time on purpose (SIGTERM is the path that saves session
+// snapshots), and a bootstrap issued while the label is still draining is
+// refused with the famously unhelpful "Bootstrap failed: 5: Input/output
+// error". That is exactly what `flue disable && flue enable` used to hit:
+// disable's bootout was still draining when enable's bootstrap arrived.
+//
+// So: poll `launchctl print` until the label is gone — an error from print is
+// the success condition — and give up after bootoutWait rather than hang a
+// CLI on a daemon that will not die; launchd's own exit timeout SIGKILLs
+// stragglers, and if even that has not happened the following bootstrap
+// fails with an error worth reporting.
+func (l *Launchd) awaitBootout() {
+	for i := 0; i < int(bootoutWait/bootoutPoll); i++ {
+		if _, err := l.run.Run("launchctl", "print", l.serviceTarget()); err != nil {
+			return
+		}
+		l.sleep(bootoutPoll)
+	}
+}
+
+const (
+	// bootoutWait is how long awaitBootout is willing to watch a label drain.
+	// Long enough for a graceful exit that is busy writing snapshots, and
+	// comfortably past launchd's default exit timeout, after which nothing
+	// more is coming.
+	bootoutWait = 20 * time.Second
+	bootoutPoll = 100 * time.Millisecond
+)
 
 // Enable writes the plist and bootstraps it — the modern spelling, not
 // `launchctl load`. When the label is already bootstrapped, bootstrap
@@ -65,8 +103,14 @@ func (l *Launchd) Enable() error {
 		// The loaded job predates the plist on disk. Bootout errors are
 		// tolerated — if the label somehow unloaded itself between print and
 		// here, the re-bootstrap is the call that matters and its error is
-		// the one worth reporting.
+		// the one worth reporting. The wait between the two is load-bearing:
+		// see awaitBootout. This branch is also where `flue disable && flue
+		// enable` lands — disable's own bootout may still be draining when
+		// enable runs, in which case the print above finds the label loaded
+		// and the bootout here is a no-op against a teardown already in
+		// flight.
 		_, _ = l.run.Run("launchctl", "bootout", l.serviceTarget())
+		l.awaitBootout()
 		if bout, berr := l.run.Run("launchctl", "bootstrap", l.domainTarget(), l.unitPath()); berr != nil {
 			return fmt.Errorf("launchctl bootstrap after bootout: %v: %s", berr, bout)
 		}
@@ -86,9 +130,12 @@ func (l *Launchd) Enable() error {
 // The bootout error is tolerated for the reason Enable tolerates it: an
 // unloaded label is not a failure to stop it, and the bootstrap — which reads
 // the plist fresh, so it also converges any drift — is the call whose error
-// matters.
+// matters. awaitBootout between the two is what makes the sequence work at
+// all: bootout only starts the teardown, and bootstrapping the same label
+// while it drains is refused with EIO.
 func (l *Launchd) Restart() error {
 	_, _ = l.run.Run("launchctl", "bootout", l.serviceTarget())
+	l.awaitBootout()
 	if out, err := l.run.Run("launchctl", "bootstrap", l.domainTarget(), l.unitPath()); err != nil {
 		return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
 	}

@@ -203,7 +203,7 @@ func TestASetupInOneTerminalPairsInTheNextBreath(t *testing.T) {
 	if legs != 1 {
 		t.Fatalf("relay legs started = %d; the running daemon never picked up the join", legs)
 	}
-	if strings.Contains(out.String(), "flue disable && flue enable") {
+	if strings.Contains(out.String(), "flue restart") {
 		t.Errorf("join told the user to restart a daemon it had just reconfigured:\n%s", out.String())
 	}
 

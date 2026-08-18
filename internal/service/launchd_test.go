@@ -5,20 +5,26 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeRunner records every command and answers from a script keyed by the
 // command's verb — launchctl's first argument. CI never talks to launchd.
 type fakeRunner struct {
 	calls    [][]string
-	fail     map[string]error  // verb -> error, every call
-	failOnce map[string]error  // verb -> error, consumed by the first call
-	out      map[string]string // verb -> combined output
+	fail     map[string]error   // verb -> error, every call
+	failOnce map[string]error   // verb -> error, consumed by the first call
+	seq      map[string][]error // verb -> errors consumed call by call, then fall through
+	out      map[string]string  // verb -> combined output
 }
 
 func (f *fakeRunner) Run(name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string{name}, args...))
 	v := verbOf(name, args)
+	if q := f.seq[v]; len(q) > 0 {
+		f.seq[v] = q[1:]
+		return []byte(f.out[v]), q[0]
+	}
 	if err, ok := f.failOnce[v]; ok {
 		delete(f.failOnce, v)
 		return []byte(f.out[v]), err
@@ -49,7 +55,11 @@ func (f *fakeRunner) verbs() []string {
 func newLaunchdUnderTest(t *testing.T, r Runner) (*Launchd, string) {
 	t.Helper()
 	home := t.TempDir()
-	return NewLaunchd("/usr/local/bin/flue", home, 501, r), filepath.Join(home, "Library", "LaunchAgents", "sh.flue.daemon.plist")
+	l := NewLaunchd("/usr/local/bin/flue", home, 501, r)
+	// awaitBootout polls in real time; tests script the poll answers and
+	// must never actually sleep between them.
+	l.sleep = func(time.Duration) {}
+	return l, filepath.Join(home, "Library", "LaunchAgents", "sh.flue.daemon.plist")
 }
 
 func TestLaunchdEnableWritesTheUnitAndBootstraps(t *testing.T) {
@@ -116,13 +126,15 @@ func TestLaunchdEnableConvergesAChangedExe(t *testing.T) {
 	r.calls = nil
 	// The label is loaded, so the first bootstrap refuses; after bootout the
 	// domain is clear and the second bootstrap succeeds — failOnce, exactly
-	// like the real launchctl.
+	// like the real launchctl. The print script is the loaded check answering
+	// "loaded", then the bootout-drain poll answering "gone".
 	r.failOnce = map[string]error{"bootstrap": errFake("Bootstrap failed: 5: Input/output error")}
+	r.seq = map[string][]error{"print": {nil, errFake("could not find service")}}
 	if err := NewLaunchd("/opt/homebrew/bin/flue", home, 501, r).Enable(); err != nil {
 		t.Fatalf("Enable with the new exe: %v", err)
 	}
-	if vs := r.verbs(); strings.Join(vs, ",") != "bootstrap,print,bootout,bootstrap" {
-		t.Fatalf("verbs = %v, want [bootstrap print bootout bootstrap]", vs)
+	if vs := r.verbs(); strings.Join(vs, ",") != "bootstrap,print,bootout,print,bootstrap" {
+		t.Fatalf("verbs = %v, want [bootstrap print bootout print bootstrap]", vs)
 	}
 	got, err := os.ReadFile(filepath.Join(home, "Library", "LaunchAgents", "sh.flue.daemon.plist"))
 	if err != nil {
@@ -227,12 +239,14 @@ func TestLaunchdRestartBootsOutAndBootstraps(t *testing.T) {
 		t.Fatalf("Enable: %v", err)
 	}
 	r.calls = nil
+	// The drain poll finds the label already gone on its first look.
+	r.fail = map[string]error{"print": errFake("could not find service")}
 
 	if err := l.Restart(); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	if vs := strings.Join(r.verbs(), ","); vs != "bootout,bootstrap" {
-		t.Fatalf("verbs = %v, want [bootout bootstrap]", r.verbs())
+	if vs := strings.Join(r.verbs(), ","); vs != "bootout,print,bootstrap" {
+		t.Fatalf("verbs = %v, want [bootout print bootstrap]", r.verbs())
 	}
 	want := []string{"launchctl", "bootstrap", "gui/501", plist}
 	if got := r.calls[len(r.calls)-1]; strings.Join(got, " ") != strings.Join(want, " ") {
@@ -244,7 +258,11 @@ func TestLaunchdRestartBootsOutAndBootstraps(t *testing.T) {
 // not loaded has nothing to boot out, and that is not a failure to stop it —
 // the bootstrap is what a restart is for.
 func TestLaunchdRestartToleratesAnUnloadedLabel(t *testing.T) {
-	r := &fakeRunner{fail: map[string]error{"bootout": errFake("Boot-out failed: 5: Input/output error")}}
+	r := &fakeRunner{fail: map[string]error{
+		"bootout": errFake("Boot-out failed: 5: Input/output error"),
+		// Nothing loaded, so the drain poll's print refuses too.
+		"print": errFake("could not find service"),
+	}}
 	l, _ := newLaunchdUnderTest(t, r)
 	if err := l.Enable(); err != nil {
 		t.Fatalf("Enable: %v", err)
@@ -255,10 +273,92 @@ func TestLaunchdRestartToleratesAnUnloadedLabel(t *testing.T) {
 	}
 }
 
+// TestLaunchdEnableWaitsOutADrainingBootout is the `flue disable && flue
+// enable` shape that used to fail with "Bootstrap failed: 5: Input/output
+// error": disable's bootout only *starts* the teardown, and the label is
+// still registered — draining — when enable's bootstrap arrives. Enable must
+// wait for the label to leave the domain before bootstrapping again, polling
+// print until it refuses.
+func TestLaunchdEnableWaitsOutADrainingBootout(t *testing.T) {
+	r := &fakeRunner{
+		// The first bootstrap refuses because the draining label still owns
+		// the name; the one after the drain succeeds.
+		failOnce: map[string]error{"bootstrap": errFake("Bootstrap failed: 5: Input/output error")},
+		// print: the loaded check sees the label, two drain polls still see
+		// it, the third finds it gone.
+		seq: map[string][]error{"print": {nil, nil, nil, errFake("could not find service")}},
+	}
+	l, _ := newLaunchdUnderTest(t, r)
+	var slept int
+	l.sleep = func(time.Duration) { slept++ }
+
+	if err := l.Enable(); err != nil {
+		t.Fatalf("Enable against a draining bootout: %v", err)
+	}
+	want := "bootstrap,print,bootout,print,print,print,bootstrap"
+	if vs := strings.Join(r.verbs(), ","); vs != want {
+		t.Fatalf("verbs = %v, want [%s]", r.verbs(), want)
+	}
+	if slept != 2 {
+		t.Fatalf("slept %d times, want 2 — once after each poll that still saw the label", slept)
+	}
+}
+
+// TestLaunchdRestartWaitsOutADrainingBootout: Restart's own bootout is just
+// as asynchronous, and the graceful exit it triggers — the one that saves
+// session snapshots — is exactly the slow kind.
+func TestLaunchdRestartWaitsOutADrainingBootout(t *testing.T) {
+	r := &fakeRunner{seq: map[string][]error{"print": {nil, nil, errFake("could not find service")}}}
+	l, _ := newLaunchdUnderTest(t, r)
+	if err := l.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	r.calls = nil
+
+	if err := l.Restart(); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if vs := strings.Join(r.verbs(), ","); vs != "bootout,print,print,print,bootstrap" {
+		t.Fatalf("verbs = %v, want [bootout print print print bootstrap]", r.verbs())
+	}
+}
+
+// TestLaunchdRestartGivesUpWaitingEventually: a label that never drains must
+// not hang the CLI forever. The wait is bounded; after it, the bootstrap is
+// attempted anyway and its own answer is the verdict.
+func TestLaunchdRestartGivesUpWaitingEventually(t *testing.T) {
+	r := &fakeRunner{} // print always succeeds: the label never leaves
+	l, _ := newLaunchdUnderTest(t, r)
+	if err := l.Enable(); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	r.calls = nil
+
+	if err := l.Restart(); err != nil {
+		t.Fatalf("Restart after an exhausted wait: %v", err)
+	}
+	vs := r.verbs()
+	if vs[len(vs)-1] != "bootstrap" {
+		t.Fatalf("verbs end with %q, want the bootstrap still attempted", vs[len(vs)-1])
+	}
+	prints := 0
+	for _, v := range vs {
+		if v == "print" {
+			prints++
+		}
+	}
+	if want := int(bootoutWait / bootoutPoll); prints != want {
+		t.Fatalf("polled print %d times, want exactly the bounded %d", prints, want)
+	}
+}
+
 func TestLaunchdRestartReportsABootstrapFailure(t *testing.T) {
 	r := &fakeRunner{
-		fail: map[string]error{"bootstrap": errFake("exit status 5")},
-		out:  map[string]string{"bootstrap": "Bootstrap failed: 5: Input/output error"},
+		fail: map[string]error{
+			"bootstrap": errFake("exit status 5"),
+			"print":     errFake("could not find service"),
+		},
+		out: map[string]string{"bootstrap": "Bootstrap failed: 5: Input/output error"},
 	}
 	l, _ := newLaunchdUnderTest(t, r)
 

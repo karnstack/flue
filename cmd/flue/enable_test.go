@@ -240,6 +240,60 @@ func TestRunDisableIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestRunRestartBouncesTheDaemonAndWaits: the one-command spelling of the
+// old `flue disable && flue enable` dance — restart through the manager,
+// then wait for a daemon to answer before claiming success.
+func TestRunRestartBouncesTheDaemonAndWaits(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	token, err := config.LoadOrCreateToken()
+	if err != nil {
+		t.Fatalf("LoadOrCreateToken: %v", err)
+	}
+	port := newTestDaemon(t, token)
+	if err := daemon.WriteRuntime(port); err != nil {
+		t.Fatalf("WriteRuntime: %v", err)
+	}
+
+	m := &fakeManager{st: service.Status{Installed: true, Running: true}}
+	swapManager(t, m)
+
+	var out bytes.Buffer
+	if err := runRestart(&out, 2*time.Second); err != nil {
+		t.Fatalf("runRestart: %v", err)
+	}
+	if m.restartCalls != 1 {
+		t.Fatalf("Restart called %d times, want 1", m.restartCalls)
+	}
+	for _, want := range []string{
+		"✓ login service restarted",
+		fmt.Sprintf("✓ daemon running on 127.0.0.1:%d", port),
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("transcript missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestRunRestartRefusesWithoutTheService: restart is a promise about an
+// existing arrangement. Nothing installed means nothing to bounce, and the
+// error points at flue enable rather than half-installing one here.
+func TestRunRestartRefusesWithoutTheService(t *testing.T) {
+	m := &fakeManager{}
+	swapManager(t, m)
+
+	var out bytes.Buffer
+	err := runRestart(&out, 200*time.Millisecond)
+	if err == nil {
+		t.Fatal("runRestart = nil with no service installed, want an error")
+	}
+	if !strings.Contains(err.Error(), "flue enable") {
+		t.Fatalf("error %q does not point at flue enable", err)
+	}
+	if m.restartCalls != 0 {
+		t.Fatalf("Restart called %d times on a not-installed service, want 0", m.restartCalls)
+	}
+}
+
 func TestServiceLine(t *testing.T) {
 	cases := []struct {
 		st   service.Status
@@ -257,8 +311,8 @@ func TestServiceLine(t *testing.T) {
 }
 
 func TestUsageNamesAllFourCommands(t *testing.T) {
-	// The CLI surface is a spec commitment: four commands plus serve.
-	for _, cmd := range []string{"flue enable", "flue disable", "flue status", "flue open", "flue serve"} {
+	// The CLI surface is a spec commitment: the service commands plus serve.
+	for _, cmd := range []string{"flue enable", "flue disable", "flue restart", "flue status", "flue open", "flue serve"} {
 		if !strings.Contains(usageText, cmd) {
 			t.Errorf("usage() is missing %q", cmd)
 		}

@@ -83,6 +83,8 @@ func main() {
 		err = cmdEnable()
 	case "disable":
 		err = cmdDisable()
+	case "restart":
+		err = cmdRestart()
 	case "status":
 		err = cmdStatus()
 	case "relay":
@@ -107,6 +109,7 @@ const usageText = `flue — your terminal, as a browser tab
 
   flue enable             install the login service, start the daemon, open the UI
   flue disable            remove the login service
+  flue restart            restart the daemon; live sessions ride across on snapshots
   flue status             daemon, login service, and session diagnostics
   flue relay setup        deploy a relay to your own Cloudflare account
   flue relay join URL --secret S --fleet K   point this machine at an existing relay
@@ -1526,6 +1529,45 @@ func awaitDaemon(wait time.Duration) (int, error) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return 0, fmt.Errorf("the login service is installed but no daemon answered within %s; run \"flue status\" to see what it is doing", wait)
+}
+
+func cmdRestart() error { return runRestart(os.Stdout, enableWait) }
+
+// runRestart bounces the daemon through the service manager — the one-command
+// spelling of what used to take `flue disable && flue enable`, for the binary
+// swapped outside flue update (brew upgrade, go install). The service manager
+// stops the daemon with SIGTERM, the path cmdServe saves session snapshots
+// on, so live sessions ride across and come back under the new build.
+//
+// It refuses when the service is not installed rather than installing it:
+// restart is a promise about an existing arrangement, and the darwin Restart
+// bootstraps the plist already on disk — a file Disable removed. The person
+// with no service wants flue enable, and the error says so.
+func runRestart(w io.Writer, wait time.Duration) error {
+	mgr, err := newServiceManager()
+	if err != nil {
+		if errors.Is(err, service.ErrUnsupported) {
+			return fmt.Errorf("%w; restart your flue serve process instead", err)
+		}
+		return err
+	}
+	st, err := mgr.Status()
+	if err != nil {
+		return err
+	}
+	if !st.Installed {
+		return errors.New("login service is not installed; run \"flue enable\" to install and start it")
+	}
+	if err := mgr.Restart(); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "\n  ✓ login service restarted\n")
+	port, err := awaitDaemon(wait)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "  ✓ daemon running on 127.0.0.1:%d\n", port)
+	return nil
 }
 
 func cmdDisable() error { return runDisable(os.Stdout) }
