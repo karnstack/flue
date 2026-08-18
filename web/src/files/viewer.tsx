@@ -1,10 +1,17 @@
 import { Check, Copy, FileText, X } from 'lucide-react'
 import { Dialog } from 'radix-ui'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 
 import { useFlueClient } from '@/client/provider'
-import type { FileMsg } from '@/client/protocol'
+import type { FileMsg, PathEntry } from '@/client/protocol'
+import type { ReadHandle } from '@/client/client'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { cachedFile, rememberFile, CACHE_ENTRY_MAX } from './cache'
+import { HIGHLIGHT_MAX_BYTES, HIGHLIGHT_MAX_LINES } from './caps'
+import { highlight } from './highlight'
+import { languageFor } from './lang'
+import type { PeekToken } from './tokenize'
 
 export interface FileTarget {
   path: string
@@ -60,21 +67,31 @@ type Phase =
  * Content paints as it arrives — the head of a large file is on screen before
  * the tail has left the daemon, which over a relay is the difference between
  * reading now and watching a spinner. Painting is paced to one state change
- * per animation frame so a fast stream cannot outrun the renderer.
+ * per animation frame so a fast stream cannot outrun the renderer. A complete
+ * file colours afterwards, off the main thread, and is remembered in memory
+ * so reopening it costs one stat and no read.
  */
 export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
   const client = useFlueClient()
   const [phase, setPhase] = useState<Phase>({ at: 'opening' })
+  const [tokens, setTokens] = useState<PeekToken[][] | null>(null)
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
   const [, setPainted] = useState(0)
   const linesRef = useRef<string[]>([])
   const frame = useRef(0)
 
   useEffect(() => {
+    let gone = false
     linesRef.current = []
     setPhase({ at: 'opening' })
+    setTokens(null)
+    setImageUrl(null)
     const decoder = new TextDecoder()
+    const parts: Uint8Array[] = []
     let tail = ''
-    let kind: 'text' | 'image' = 'text'
+    let meta: FileMsg | null = null
+    let handle: ReadHandle | null = null
+
     const repaint = () => {
       if (frame.current !== 0) return
       frame.current = requestAnimationFrame(() => {
@@ -94,9 +111,9 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
     }
     const push = (piece: string) => {
       if (piece === '') return
-      const parts = (tail + piece).split('\n')
-      tail = parts.pop() ?? ''
-      for (const p of parts) emit(p)
+      const rows = (tail + piece).split('\n')
+      tail = rows.pop() ?? ''
+      for (const r of rows) emit(r)
       // A newline may never come. Overflow leaves the tail as finished rows,
       // which both bounds the tail and lets a newline-less stream paint.
       while (tail.length >= ROW_CAP) {
@@ -104,34 +121,119 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
         tail = tail.slice(ROW_CAP)
       }
     }
-    const handle = client.read(sessionId, target.path, {
-      file: (meta) => {
-        kind = meta.kind
-        if (meta.kind === 'image') {
-          setPhase({ at: 'image', meta })
-          // The stream is already coming; nothing here can show it yet.
-          queueMicrotask(() => handle.cancel())
-          return
-        }
-        setPhase({ at: 'text', meta })
-      },
-      chunk: (bytes) => {
-        if (kind === 'image') return
+
+    const deliverMeta = (m: FileMsg) => {
+      meta = m
+      if (gone) return
+      setPhase(m.kind === 'image' ? { at: 'image', meta: m } : { at: 'text', meta: m })
+    }
+    const deliverChunk = (bytes: Uint8Array) => {
+      parts.push(bytes)
+      if (meta?.kind !== 'image') {
         push(decoder.decode(bytes, { stream: true }))
         repaint()
-      },
-      eof: () => {
+      }
+    }
+    const colour = () => {
+      if (meta === null || meta.kind !== 'text' || meta.truncated === true) return
+      const lang = languageFor(meta.path)
+      if (lang === null) return
+      // The caps hold before the join, so an oversized file never pays for
+      // a multi-megabyte string and a worker round trip to be told null.
+      if (meta.size > HIGHLIGHT_MAX_BYTES || linesRef.current.length > HIGHLIGHT_MAX_LINES) return
+      void highlight(linesRef.current.join('\n'), lang).then((rows) => {
+        if (!gone && rows !== null) setTokens(rows)
+      })
+    }
+    // Keyed per session as well as per clicked text: a relative path
+    // resolves against a session's live working directory, so the same
+    // spelling in another session may name a different file entirely.
+    const cacheKey = `${sessionId}\u0000${target.path}`
+    const statOne = () => client.stat(sessionId, [target.path]).then(([e]) => e)
+    const deliverEof = (before: Promise<PathEntry | undefined> | null) => {
+      if (meta?.kind === 'image') {
+        if (!gone) setImageUrl(assembleDataUrl(meta.mime, parts))
+      } else {
         push(decoder.decode())
         if (tail !== '') {
           linesRef.current.push(tail)
           tail = ''
         }
         repaint()
-      },
-      fail: (f) => setPhase({ at: 'refused', code: f.code }),
-    })
+      }
+      colour()
+      if (before === null || meta === null || meta.truncated === true) return
+      const total = parts.reduce((n, p) => n + p.length, 0)
+      if (total > CACHE_ENTRY_MAX) return
+      // Remembered only when the stat taken as the read began and the stat
+      // taken after it agree on size and stamp, and both agree with the
+      // stream's own size. mtime is unix seconds, so a same-second edit can
+      // still slip this — but an edit during the stream cannot, which is
+      // what an after-only check got wrong: it blessed post-edit bytes with
+      // a post-edit stamp and served them stale on every reopen.
+      const settled = meta
+      void Promise.all([before, statOne()])
+        .then(([pre, post]) => {
+          if (pre?.exists !== true || pre.kind !== 'file') return
+          if (post?.exists !== true || post.kind !== 'file') return
+          if ((pre.size ?? 0) !== settled.size || (post.size ?? 0) !== settled.size) return
+          if ((pre.mtime ?? 0) !== (post.mtime ?? 0)) return
+          rememberFile(client, cacheKey, {
+            meta: settled,
+            mtime: post.mtime ?? 0,
+            bytes: joinBytes(parts, total),
+          })
+        })
+        .catch(() => {})
+    }
+
+    const readFromWire = (before: Promise<PathEntry | undefined> | null) => {
+      if (gone) return
+      handle = client.read(sessionId, target.path, {
+        file: deliverMeta,
+        chunk: deliverChunk,
+        eof: () => deliverEof(before),
+        fail: (f) => {
+          if (!gone) setPhase({ at: 'refused', code: f.code })
+        },
+      })
+    }
+
+    const start = async () => {
+      const held = cachedFile(client, cacheKey)
+      if (held === null) {
+        // The before-stat rides in parallel with the read, so the cache's
+        // integrity costs the open no latency at all.
+        readFromWire(statOne().catch(() => undefined))
+        return
+      }
+      let confirmed: PathEntry | undefined
+      try {
+        confirmed = await statOne()
+        if (gone) return
+        if (
+          confirmed?.exists === true &&
+          confirmed.kind === 'file' &&
+          (confirmed.size ?? 0) === held.meta.size &&
+          (confirmed.mtime ?? 0) === held.mtime
+        ) {
+          deliverMeta(held.meta)
+          deliverChunk(held.bytes)
+          deliverEof(null)
+          return
+        }
+      } catch {
+        // The stat could not confirm the memory; the wire is the truth, and
+        // with nothing to agree with, this read is not remembered either.
+      }
+      if (gone) return
+      readFromWire(confirmed === undefined ? null : Promise.resolve(confirmed))
+    }
+    void start()
+
     return () => {
-      handle.cancel()
+      gone = true
+      handle?.cancel()
       if (frame.current !== 0) cancelAnimationFrame(frame.current)
       frame.current = 0
     }
@@ -199,17 +301,26 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
               {REFUSALS[phase.code] ?? 'The machine refused this read.'}
             </p>
           )}
-          {phase.at === 'image' && (
-            <p role="alert" className="flex-1 px-4 py-3 text-control text-muted-foreground">
-              An image ({phase.meta.mime}, {fmtBytes(phase.meta.size)}). The viewer cannot show one
-              yet.
-            </p>
-          )}
+          {phase.at === 'image' &&
+            (imageUrl !== null ? (
+              <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
+                <img alt={base} src={imageUrl} className="max-h-full max-w-full object-contain" />
+              </div>
+            ) : (
+              <p role="status" className="flex-1 px-4 py-3 text-control text-muted-foreground">
+                Receiving the image…
+              </p>
+            ))}
           {phase.at === 'text' && (
             // Keyed by path, so a viewer whose target changes under it — a
             // later phase reuses the mounted dialog — starts its scroll and
             // its one-shot jump over rather than inheriting the old file's.
-            <TextWindow key={target.path} lines={linesRef.current} mark={target.line} />
+            <TextWindow
+              key={target.path}
+              lines={linesRef.current}
+              tokens={tokens}
+              mark={target.line}
+            />
           )}
         </Dialog.Content>
       </Dialog.Portal>
@@ -217,7 +328,15 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
   )
 }
 
-function TextWindow({ lines, mark }: { lines: string[]; mark?: number }) {
+function TextWindow({
+  lines,
+  tokens,
+  mark,
+}: {
+  lines: string[]
+  tokens: PeekToken[][] | null
+  mark?: number
+}) {
   const boxRef = useRef<HTMLDivElement | null>(null)
   const jumped = useRef(false)
   const [top, setTop] = useState(0)
@@ -267,12 +386,36 @@ function TextWindow({ lines, mark }: { lines: string[]; mark?: number }) {
               data-marked={n === mark ? 'true' : undefined}
               className="h-5 pr-6 pl-4 whitespace-pre data-marked:bg-teal-500/15"
             >
-              {text}
+              {tokens?.[n - 1] !== undefined ? <TokenRow row={tokens[n - 1]!} /> : text}
             </div>
           )
         })}
       </div>
     </div>
+  )
+}
+
+function TokenRow({ row }: { row: PeekToken[] }) {
+  return (
+    <>
+      {row.map((t, i) => (
+        <span
+          key={i}
+          // Both colours ride in as custom properties and come out through
+          // classes, never as a `color` on the style attribute: a style
+          // attribute outranks every stylesheet rule, so it would pin the
+          // light colour under a dark scheme no matter what the dark:
+          // variant asked for.
+          className={cn(
+            t.light !== undefined && 'text-(--peek-light)',
+            t.dark !== undefined && 'dark:text-(--peek-dark)',
+          )}
+          style={{ '--peek-light': t.light, '--peek-dark': t.dark } as CSSProperties}
+        >
+          {t.text}
+        </span>
+      ))}
+    </>
   )
 }
 
@@ -293,6 +436,26 @@ function CopyPath({ path }: { path: string }) {
       {held ? <Check /> : <Copy />}
     </Button>
   )
+}
+
+function joinBytes(parts: Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total)
+  let at = 0
+  for (const p of parts) {
+    out.set(p, at)
+    at += p.length
+  }
+  return out
+}
+
+function assembleDataUrl(mime: string, parts: Uint8Array[]): string {
+  let bin = ''
+  for (const part of parts) {
+    for (let at = 0; at < part.length; at += 0x8000) {
+      bin += String.fromCharCode(...part.subarray(at, at + 0x8000))
+    }
+  }
+  return `data:${mime};base64,${btoa(bin)}`
 }
 
 function fmtBytes(n: number): string {

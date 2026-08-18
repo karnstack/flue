@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -18,7 +18,21 @@ const openViewer = (target: FileTarget) => {
     </FlueClientProvider>,
   )
   const sent = sock.control().find((m) => m.type === 'read')
-  return { sock, sent, onClose, view, client }
+  // Answer every stat not yet answered with one entry (or nothing for null).
+  // The cache protocol stats around a read — before it starts, after it
+  // ends, and once more to validate a reopen — so tests answer by sweep.
+  const answeredStats = new Set<number>()
+  const answerStats = (entry: Record<string, unknown> | null) =>
+    act(async () => {
+      for (const m of sock.control().filter((x) => x.type === 'stat')) {
+        const id = m.reqId as number
+        if (answeredStats.has(id)) continue
+        answeredStats.add(id)
+        sock.emitControl({ type: 'stats', entries: entry === null ? [] : [entry], reqId: id })
+      }
+      await Promise.resolve()
+    })
+  return { sock, sent, onClose, view, client, answerStats }
 }
 
 const served = (sock: FakeSocket, reqId: unknown, over: Record<string, unknown> = {}) =>
@@ -53,8 +67,8 @@ describe('FileViewer', () => {
   })
 
   it('paints chunks as they arrive, then finishes on eof', async () => {
-    const { sock, sent } = openViewer({ path: 'a.go' })
-    served(sock, sent!.reqId)
+    const { sock, sent } = openViewer({ path: 'notes.txt' })
+    served(sock, sent!.reqId, { path: '/home/k/notes.txt' })
     await flowed(sock, 'package main\n\nfunc main()')
     expect(screen.getByText('package main')).toBeTruthy()
     await act(async () => {
@@ -94,8 +108,8 @@ describe('FileViewer', () => {
   })
 
   it('marks the line the click named', async () => {
-    const { sock, sent } = openViewer({ path: 'a.go', line: 2 })
-    served(sock, sent!.reqId)
+    const { sock, sent } = openViewer({ path: 'notes.txt', line: 2 })
+    served(sock, sent!.reqId, { path: '/home/k/notes.txt' })
     await flowed(sock, 'one\ntwo\nthree')
     await act(async () => {
       sock.emitControl({ type: 'eof', ref: 7 })
@@ -124,16 +138,6 @@ describe('FileViewer', () => {
     expect(screen.getByRole('alert').textContent).toMatch(/directory/)
   })
 
-  it('declines an image honestly, and stops the stream', async () => {
-    const { sock, sent } = openViewer({ path: 'shot.png' })
-    served(sock, sent!.reqId, { mime: 'image/png', kind: 'image', size: 184320 })
-    await act(async () => {
-      await Promise.resolve()
-    })
-    expect(screen.getByRole('alert').textContent).toMatch(/image/i)
-    expect(sock.control().find((m) => m.type === 'cancel')).toMatchObject({ type: 'cancel', ref: 7 })
-  })
-
   it('reports Escape to its owner', async () => {
     const { sock, sent, onClose } = openViewer({ path: 'a.go' })
     served(sock, sent!.reqId)
@@ -148,6 +152,128 @@ describe('FileViewer', () => {
     // closing the dialog does; the whole tab going away is teardown's case.
     view.rerender(<FlueClientProvider client={client}>{null}</FlueClientProvider>)
     expect(sock.control().find((m) => m.type === 'cancel')).toMatchObject({ type: 'cancel', ref: 7 })
+  })
+
+  it('renders an image from its assembled chunks as a data URL', async () => {
+    const { sock, sent } = openViewer({ path: 'shot.png' })
+    served(sock, sent!.reqId, { path: '/home/k/shot.png', mime: 'image/png', kind: 'image', size: 8 })
+    await flowed(sock, 'fake')
+    await flowed(sock, 'png!')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    const img = screen.getByRole('img', { name: 'shot.png' })
+    expect(img.getAttribute('src')).toMatch(/^data:image\/png;base64,/)
+    expect(sock.control().find((m) => m.type === 'cancel')).toBeUndefined()
+  })
+
+  it('swaps plain rows for highlighted spans once the file is complete', async () => {
+    const { sock, sent } = openViewer({ path: 'a.ts' })
+    served(sock, sent!.reqId, { path: '/home/k/a.ts' })
+    await flowed(sock, 'const x = 1')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    await waitFor(() => {
+      expect(document.querySelector('[data-file-row] span')).not.toBeNull()
+    })
+    // The colour must arrive through the scheme-aware classes, never as an
+    // inline color — inline would pin the light palette under a dark scheme.
+    const span = document.querySelector<HTMLElement>('[data-file-row] span[style]')!
+    expect(span.style.color).toBe('')
+    expect(span.style.getPropertyValue('--peek-light')).not.toBe('')
+    expect(span.style.getPropertyValue('--peek-dark')).not.toBe('')
+    expect(span.className).toContain('text-(--peek-light)')
+    expect(span.className).toContain('dark:text-(--peek-dark)')
+  })
+
+  it('keeps plain rows for a shortened file', async () => {
+    const { sock, sent } = openViewer({ path: 'big.ts' })
+    served(sock, sent!.reqId, { path: '/home/k/big.ts', size: 41943040, truncated: true })
+    await flowed(sock, 'const x = 1')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((done) => setTimeout(done, 50))
+    })
+    expect(document.querySelector('[data-file-row] span')).toBeNull()
+  })
+
+  it('serves a reopen from the cache once the surrounding stats agree', async () => {
+    const path = `cache-hit-${Math.random().toString(36).slice(2)}.txt`
+    const { sock, sent, view, client, answerStats } = openViewer({ path })
+    const entry = { path, exists: true, kind: 'file', size: 5, mtime: 111 }
+    await answerStats(entry) // the stat riding beside the read
+    served(sock, sent!.reqId, { path: `/home/k/${path}`, size: 5 })
+    await flowed(sock, 'hello')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    await answerStats(entry) // the confirming stat after the stream
+
+    view.rerender(<FlueClientProvider client={client}>{null}</FlueClientProvider>)
+    view.rerender(
+      <FlueClientProvider client={client}>
+        <FileViewer sessionId="s1" target={{ path }} onClose={vi.fn()} />
+      </FlueClientProvider>,
+    )
+    await answerStats(entry) // the reopen's validation
+    await act(async () => {
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    expect(screen.getByText('hello')).toBeTruthy()
+    expect(sock.control().filter((m) => m.type === 'read')).toHaveLength(1)
+  })
+
+  it('re-reads when the stat says the file changed', async () => {
+    const path = `cache-stale-${Math.random().toString(36).slice(2)}.txt`
+    const { sock, sent, view, client, answerStats } = openViewer({ path })
+    const entry = { path, exists: true, kind: 'file', size: 5, mtime: 111 }
+    await answerStats(entry)
+    served(sock, sent!.reqId, { path: `/home/k/${path}`, size: 5 })
+    await flowed(sock, 'hello')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    await answerStats(entry)
+
+    view.rerender(<FlueClientProvider client={client}>{null}</FlueClientProvider>)
+    view.rerender(
+      <FlueClientProvider client={client}>
+        <FileViewer sessionId="s1" target={{ path }} onClose={vi.fn()} />
+      </FlueClientProvider>,
+    )
+    await answerStats({ ...entry, mtime: 999 })
+    expect(sock.control().filter((m) => m.type === 'read')).toHaveLength(2)
+  })
+
+  it('does not remember a file whose stamp moved while it streamed', async () => {
+    // The stale-bytes case: an edit lands between the stream and the
+    // confirming stat, same size. An after-only check would bless post-edit
+    // bytes with the post-edit stamp and serve them stale forever after.
+    const path = `cache-torn-${Math.random().toString(36).slice(2)}.txt`
+    const { sock, sent, view, client, answerStats } = openViewer({ path })
+    await answerStats({ path, exists: true, kind: 'file', size: 5, mtime: 100 })
+    served(sock, sent!.reqId, { path: `/home/k/${path}`, size: 5 })
+    await flowed(sock, 'hello')
+    await act(async () => {
+      sock.emitControl({ type: 'eof', ref: 7 })
+      await new Promise((frame) => requestAnimationFrame(frame))
+    })
+    await answerStats({ path, exists: true, kind: 'file', size: 5, mtime: 200 })
+
+    view.rerender(<FlueClientProvider client={client}>{null}</FlueClientProvider>)
+    view.rerender(
+      <FlueClientProvider client={client}>
+        <FileViewer sessionId="s1" target={{ path }} onClose={vi.fn()} />
+      </FlueClientProvider>,
+    )
+    // Nothing was remembered, so the reopen reads again rather than stats
+    // its way to a replay.
+    expect(sock.control().filter((m) => m.type === 'read')).toHaveLength(2)
   })
 
   it('offers the resolved path to the clipboard', async () => {

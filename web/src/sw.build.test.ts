@@ -29,18 +29,38 @@ let sw = ''
 let injection = ''
 let flueBuild: FlueBuild = { version: '', precache: [] }
 const emittedAssets: string[] = []
+const peekAssets: string[] = []
+const moduleIdsByAsset = new Map<string, string[]>()
+
+/**
+ * The module families that must never reach a precached chunk: everything
+ * the viewer loads on demand. The chunk-routing in vite.config.ts is an
+ * allowlist of names, and an allowlist fails open — a transitive dependency
+ * it never heard of splits into its own chunk and rides the precache with
+ * every test green. This pattern is the fail-closed side of that bargain.
+ */
+const PEEK_GRAPH =
+  /node_modules[/\\][^]*?(shiki|react-markdown|remark|rehype|micromark|mdast|unist|unified|hast|vfile|parse5)|files[/\\](tokenize|markdown|highlight\.worker)/
 
 beforeAll(async () => {
   const result = await build({ logLevel: 'silent', build: { write: false } })
 
   const bundles = (Array.isArray(result) ? result : [result]) as Array<{
-    output?: Array<{ fileName?: string; code?: unknown }>
+    output?: Array<{ fileName?: string; code?: unknown; moduleIds?: string[] }>
   }>
 
   for (const bundle of bundles) {
     for (const item of bundle.output ?? []) {
       const name = item.fileName ?? ''
       if (name === 'sw.js') sw = typeof item.code === 'string' ? item.code : ''
+      if (Array.isArray(item.moduleIds)) moduleIdsByAsset.set(name, item.moduleIds)
+      // assets/peek/ is the highlighter and the markdown renderer — loaded
+      // on first use, runtime-cached, and deliberately never precached; the
+      // assertions for that are their own cases below.
+      if (name.startsWith('assets/peek/')) {
+        peekAssets.push(name)
+        continue
+      }
       if (name.startsWith('assets/') && /\.(js|css)$/.test(name)) emittedAssets.push(name)
     }
   }
@@ -75,6 +95,30 @@ describe('emitted service worker', () => {
       // Root-absolute: a bare `assets/...` would resolve against the worker's
       // own URL rather than the origin root.
       expect(flueBuild.precache).toContain(`/${asset}`)
+    }
+  })
+
+  it('pushes no highlighter chunk onto a device that never opened a file', () => {
+    // One chunk per grammar lives under assets/peek/. They load on the first
+    // file of their language and the runtime cache keeps them; precaching
+    // would download every language against the chance any is ever wanted.
+    expect(flueBuild.precache.filter((p) => p.startsWith('/assets/peek/'))).toEqual([])
+    // Non-vacuous: were code-splitting to regress and shiki to ride the main
+    // bundle, the filter above would pass on an empty set while every device
+    // precached megabytes. The chunks must actually exist to be excluded.
+    expect(peekAssets.length).toBeGreaterThan(0)
+  })
+
+  it('keeps the on-demand module graph out of every precached chunk', () => {
+    // The routing in vite.config.ts is an allowlist of package names, and an
+    // allowlist fails open: a transitive dependency it never heard of splits
+    // into its own chunk, lands outside assets/peek/, and rides the precache
+    // with every other test green. This closes that: nothing precached may
+    // contain a module from the viewer's on-demand families.
+    for (const asset of emittedAssets) {
+      const ids = moduleIdsByAsset.get(asset) ?? []
+      const strays = ids.filter((id) => PEEK_GRAPH.test(id))
+      expect(strays, `${asset} carries on-demand modules`).toEqual([])
     }
   })
 
