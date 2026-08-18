@@ -128,7 +128,7 @@ var signals = map[string]syscall.Signal{
 // attachment is one client's hold on one session.
 type attachment struct {
 	ref uint32
-	s   *session.Session
+	s   session.Handle
 	sub *session.Sub
 
 	// done is closed by detach. It is what tells this attachment's stream
@@ -952,7 +952,7 @@ func (c *conn) revokeDevice(id string) {
 
 // attachTo subscribes to s from lastSeq and starts streaming output. reqID
 // is echoed on the Attached so the client can match the reply to its request.
-func (c *conn) attachTo(s *session.Session, lastSeq uint64, reqID uint64) {
+func (c *conn) attachTo(s session.Handle, lastSeq uint64, reqID uint64) {
 	sub := s.Subscribe(lastSeq)
 	// head is where the replayed backlog ends. The scrollback carries the
 	// shell's own DA/DECRQM/OSC-11 probe replies, and the emulator answers
@@ -1075,7 +1075,7 @@ func (c *conn) endStream(a *attachment) {
 // reads "running" and will not read "exited" until the supervisor's next poll.
 // Reading the state once would report no exit at all for every client-issued
 // close.
-func (c *conn) awaitExit(s *session.Session) (session.Info, bool) {
+func (c *conn) awaitExit(s session.Handle) (session.Info, bool) {
 	deadline := time.NewTimer(exitReportWait)
 	defer deadline.Stop()
 	tick := time.NewTicker(exitPoll)

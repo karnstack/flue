@@ -31,10 +31,7 @@ func TestProcessCwdReportsSpawnDir(t *testing.T) {
 	want := resolved(t, dir)
 
 	r := NewRegistry(nil)
-	s, err := r.Spawn(SpawnOpts{Cwd: dir, Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cwd: dir, Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -60,10 +57,7 @@ func TestInfoTracksCd(t *testing.T) {
 	want := resolved(t, dirB)
 
 	r := NewRegistry(nil)
-	s, err := r.Spawn(SpawnOpts{Cwd: dirA, Cmd: []string{"sh"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cwd: dirA, Cmd: []string{"sh"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 
 	if err := s.Write([]byte("cd \"" + dirB + "\"\n")); err != nil {
@@ -91,10 +85,7 @@ func TestInfoTracksCd(t *testing.T) {
 func TestInfoKeepsCwdWhenReadFails(t *testing.T) {
 	dir := t.TempDir()
 	r := NewRegistry(nil)
-	s, err := r.Spawn(SpawnOpts{Cwd: dir, Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cwd: dir, Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 
 	// One honest reading first, so "unchanged" names a value a real read
@@ -119,10 +110,7 @@ func TestInfoKeepsCwdWhenReadFails(t *testing.T) {
 func TestInfoIgnoresCwdAfterExit(t *testing.T) {
 	dir := t.TempDir()
 	r := NewRegistry(nil)
-	s, err := r.Spawn(SpawnOpts{Cwd: dir, Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cwd: dir, Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -142,4 +130,33 @@ func TestInfoIgnoresCwdAfterExit(t *testing.T) {
 	if got := s.Info().Cwd; got != last {
 		t.Fatalf("Info().Cwd = %q after exit, want the last known %q", got, last)
 	}
+}
+
+// spawnLocal is Spawn for tests that reach the engine's internals: the
+// registry hands back a Handle, and these tests need the *Session behind it.
+func spawnLocal(t *testing.T, r *Registry, opts SpawnOpts) *Session {
+	t.Helper()
+	h, err := r.Spawn(opts)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	s, ok := h.(*Session)
+	if !ok {
+		t.Fatalf("Spawn returned %T, want *Session", h)
+	}
+	return s
+}
+
+// reviveLocal is Revive with the same convenience and the same reason.
+func reviveLocal(t *testing.T, r *Registry, snap Snapshot) *Session {
+	t.Helper()
+	h, err := r.Revive(snap)
+	if err != nil {
+		t.Fatalf("Revive: %v", err)
+	}
+	s, ok := h.(*Session)
+	if !ok {
+		t.Fatalf("Revive returned %T, want *Session", h)
+	}
+	return s
 }

@@ -11,10 +11,7 @@ import (
 
 func spawnRunning(t *testing.T, r *Registry) *Session {
 	t.Helper()
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 100, Rows: 30})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 100, Rows: 30})
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
@@ -23,10 +20,7 @@ func TestSnapshotsCoverRunningSessionsOnly(t *testing.T) {
 	r := NewRegistry(nil)
 	running := spawnRunning(t, r)
 
-	exited, err := r.Spawn(SpawnOpts{Cmd: []string{"true"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	exited := spawnLocal(t, r, SpawnOpts{Cmd: []string{"true"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = exited.Close() })
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -67,10 +61,7 @@ func TestReviveRestoresIdentityAndScrollback(t *testing.T) {
 		Ring:  []byte("the old scrollback"),
 	}
 
-	s, err := r.Revive(snap)
-	if err != nil {
-		t.Fatalf("Revive: %v", err)
-	}
+	s := reviveLocal(t, r, snap)
 	t.Cleanup(func() { _ = s.Close() })
 
 	if s.ID() != "cafebabe00000001" {
@@ -153,10 +144,7 @@ func TestReviveSettlesTheModesTheDeadShellLeftBehind(t *testing.T) {
 
 func TestReviveFallsBackToHomeWhenTheCwdIsGone(t *testing.T) {
 	r := NewRegistry(nil)
-	s, err := r.Revive(Snapshot{V: 1, ID: "cafebabe00000002", Cwd: "/no/such/dir/anywhere"})
-	if err != nil {
-		t.Fatalf("Revive: %v", err)
-	}
+	s := reviveLocal(t, r, Snapshot{V: 1, ID: "cafebabe00000002", Cwd: "/no/such/dir/anywhere"})
 	t.Cleanup(func() { _ = s.Close() })
 
 	home, _ := os.UserHomeDir()
@@ -428,10 +416,7 @@ func TestSnapshotCarriesMetadataAcrossARestart(t *testing.T) {
 	if len(snaps) != 1 {
 		t.Fatalf("loaded %d snapshots, want the one running session", len(snaps))
 	}
-	revived, err := second.Revive(snaps[0])
-	if err != nil {
-		t.Fatalf("Revive: %v", err)
-	}
+	revived := reviveLocal(t, second, snaps[0])
 	t.Cleanup(func() { _ = revived.Close() })
 
 	info := revived.Info()
@@ -465,10 +450,7 @@ func TestSnapshotCarriesMetadataAcrossARestart(t *testing.T) {
 func TestReviveStampsCreatedAtWhenTheSnapshotHasNone(t *testing.T) {
 	now := time.Date(2026, 8, 8, 11, 30, 0, 0, time.UTC)
 	r := NewRegistry(func() time.Time { return now })
-	s, err := r.Revive(Snapshot{V: 1, ID: "cafebabe00000005", Cwd: t.TempDir()})
-	if err != nil {
-		t.Fatalf("Revive: %v", err)
-	}
+	s := reviveLocal(t, r, Snapshot{V: 1, ID: "cafebabe00000005", Cwd: t.TempDir()})
 	t.Cleanup(func() { _ = s.Close() })
 
 	info := s.Info()

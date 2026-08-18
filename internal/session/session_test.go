@@ -37,10 +37,7 @@ func waitFor(t *testing.T, sub *Sub, want string, timeout time.Duration) []byte 
 
 func TestSpawnProducesOutput(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "echo hello-flue"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "echo hello-flue"}, Cols: 80, Rows: 24})
 	defer s.Close()
 
 	sub := s.Subscribe(0)
@@ -50,13 +47,10 @@ func TestSpawnProducesOutput(t *testing.T) {
 
 func TestResizePropagatesToPTY(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{
+	s := spawnLocal(t, r, SpawnOpts{
 		Cmd:  []string{"sh", "-c", "sleep 0.3; stty size"},
 		Cols: 80, Rows: 24,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	defer s.Close()
 
 	sub := s.Subscribe(0)
@@ -73,10 +67,7 @@ func TestResizePropagatesToPTY(t *testing.T) {
 
 func TestWriteReachesPTY(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
 	defer s.Close()
 
 	sub := s.Subscribe(0)
@@ -90,10 +81,7 @@ func TestWriteReachesPTY(t *testing.T) {
 
 func TestTwoSubscribersBothReceive(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
 	defer s.Close()
 
 	a := s.Subscribe(0)
@@ -110,15 +98,12 @@ func TestTwoSubscribersBothReceive(t *testing.T) {
 
 func TestSubscribeTruncatedWhenSeqEvicted(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{
+	s := spawnLocal(t, r, SpawnOpts{
 		Cmd:      []string{"sh", "-c", "printf 'a%.0s' $(seq 1 4096)"},
 		Cols:     80,
 		Rows:     24,
 		RingSize: 64,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	defer s.Close()
 
 	sub := s.Subscribe(0)
@@ -150,10 +135,7 @@ func TestExitedSessionsReapedAfterRetention(t *testing.T) {
 	clock := func() time.Time { return now }
 	r := NewRegistry(clock)
 
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "exit 3"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "exit 3"}, Cols: 80, Rows: 24})
 
 	deadline := time.After(5 * time.Second)
 	for s.Info().State != "exited" {
@@ -181,13 +163,10 @@ func TestExitedSessionsReapedAfterRetention(t *testing.T) {
 
 func TestTitleFromOSC(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{
+	s := spawnLocal(t, r, SpawnOpts{
 		Cmd:  []string{"sh", "-c", "printf '\\033]0;flue-title\\007'; sleep 0.2"},
 		Cols: 80, Rows: 24,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	defer s.Close()
 
 	deadline := time.After(5 * time.Second)
@@ -245,10 +224,7 @@ func waitGone(t *testing.T, pid int, timeout time.Duration) {
 // consumer (e.g. a WebSocket handler) reading <-sub.C would block forever.
 func TestSubscribeAfterCloseReturnsClosedChannel(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -307,13 +283,10 @@ func TestCloseTerminatesBackgroundChildren(t *testing.T) {
 	spy := installKillSpy(t)
 
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{
+	s := spawnLocal(t, r, SpawnOpts{
 		Cmd:  []string{"sh", "-c", "trap '' HUP; sleep 1000 & echo child-pid=$!"},
 		Cols: 80, Rows: 24,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 
 	sub := s.Subscribe(0)
 	out := waitFor(t, sub, "child-pid=", 5*time.Second)
@@ -353,13 +326,10 @@ func TestCloseTerminatesBackgroundChildren(t *testing.T) {
 // mask a leader-only Signal implementation.
 func TestSignalReachesChildProcess(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{
+	s := spawnLocal(t, r, SpawnOpts{
 		Cmd:  []string{"sh", "-c", "trap '' HUP; sleep 1000 & echo child-pid=$!; wait"},
 		Cols: 80, Rows: 24,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	defer s.Close()
 
 	sub := s.Subscribe(0)
@@ -415,10 +385,7 @@ func TestResizeHoldsTheSessionLockAcrossTheIoctl(t *testing.T) {
 	t.Cleanup(func() { setWinsize = orig })
 
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "sleep 5"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "sleep 5"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 
 	resized := make(chan error, 1)
@@ -559,7 +526,7 @@ func mustNotBlock(t *testing.T, what string, timeout time.Duration, f func()) {
 // the "exited" state. Once observed, the supervisor has already reaped the
 // child: only reapIfExited returning true reaches markExited, which sets
 // State, ExitCode and exitedAt in one locked section.
-func waitExited(t *testing.T, s *Session, timeout time.Duration) {
+func waitExited(t *testing.T, s Handle, timeout time.Duration) {
 	t.Helper()
 	deadline := time.After(timeout)
 	for s.Info().State != "exited" {
@@ -601,10 +568,7 @@ func TestSignalAfterGroupIsGoneIssuesNoSyscall(t *testing.T) {
 	spy := installKillSpy(t)
 
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
 	defer s.Close()
 
 	waitSupervisorGone(t, s, 5*time.Second)
@@ -632,10 +596,7 @@ func TestCloseAfterGroupIsGoneIssuesNoSyscallButStillTearsDown(t *testing.T) {
 	spy := installKillSpy(t)
 
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
 
 	waitSupervisorGone(t, s, 5*time.Second)
 	spy.reset()
@@ -689,10 +650,7 @@ func TestNoGroupSignalIsIssuedBeforeTheGroupHasBeenProbed(t *testing.T) {
 	// The sleep is not decoration: it guarantees the child is still running
 	// when the lock below is taken, so the supervisor cannot have published
 	// the exit already and leave this measuring nothing.
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "sleep 0.1; exit 0"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "sleep 0.1; exit 0"}, Cols: 80, Rows: 24})
 
 	locked := true
 	unlock := func() {
@@ -788,15 +746,12 @@ func TestMasterEndedWithLiveChildKeepsSessionUsable(t *testing.T) {
 	spy := installKillSpy(t)
 
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{
+	s := spawnLocal(t, r, SpawnOpts{
 		Cmd: []string{"sh", "-c",
 			"trap '' HUP TERM INT; sleep 30 >/dev/null 2>&1 </dev/null & " +
 				"echo child-pid=$!; sleep 0.2; exec >/dev/null 2>&1 </dev/null; wait"},
 		Cols: 80, Rows: 24,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	defer s.Close()
 
 	sub := s.Subscribe(0)
@@ -888,10 +843,7 @@ func TestConcurrentCloseSignalAndRegistryOps(t *testing.T) {
 
 	for i := 0; i < 25; i++ {
 		r := NewRegistry(clock)
-		s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "echo tick"}, Cols: 80, Rows: 24})
-		if err != nil {
-			t.Fatalf("Spawn: %v", err)
-		}
+		s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "echo tick"}, Cols: 80, Rows: 24})
 		sub := s.Subscribe(0)
 
 		var wg sync.WaitGroup
@@ -948,10 +900,7 @@ func TestConcurrentCloseSignalAndRegistryOps(t *testing.T) {
 // and only then asks for a signal.
 func TestGroupSignalRequestIsAnsweredWhileTheSessionLockIsHeld(t *testing.T) {
 	r := NewRegistry(time.Now)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
 	defer s.Close()
 
 	s.mu.Lock()
@@ -1062,13 +1011,10 @@ func TestExitWithOutOfGroupSlaveHolderClosesSubscribers(t *testing.T) {
 	// the wrong reason. The holder sleeps just long enough to outlive the
 	// test: it is outside the group, so Close's kill cannot reach it and a
 	// long sleep would linger after the run.
-	s, err := r.Spawn(SpawnOpts{
+	s, _ := r.Spawn(SpawnOpts{
 		Cmd:  []string{"sh", "-c", "setsid sh -c 'exec sleep 3' & echo held-open; sleep 0.2"},
 		Cols: 80, Rows: 24,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	defer s.Close()
 
 	sub := s.Subscribe(0)

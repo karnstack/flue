@@ -27,7 +27,7 @@ type Registry struct {
 	clock func() time.Time
 
 	mu       sync.Mutex
-	sessions map[string]*Session
+	sessions map[string]handle
 	// metaDir is where session metadata is persisted, or "" for nowhere.
 	// Empty is the default and it disables persistence outright: a registry
 	// only writes files once somebody has said where, so tests and any daemon
@@ -42,7 +42,7 @@ func NewRegistry(clock func() time.Time) *Registry {
 	if clock == nil {
 		clock = time.Now
 	}
-	return &Registry{clock: clock, sessions: map[string]*Session{}}
+	return &Registry{clock: clock, sessions: map[string]handle{}}
 }
 
 // loginShell returns the user's shell: $SHELL when set, otherwise the user
@@ -173,7 +173,7 @@ func newID() string {
 // Spawn starts a new session. An empty Cmd runs the user's login shell as a
 // login shell, inheriting the environment: flue is a terminal, and a
 // sanitised environment would defeat the purpose.
-func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
+func (r *Registry) Spawn(opts SpawnOpts) (Handle, error) {
 	return r.start(opts, newID(), nil, Info{})
 }
 
@@ -190,7 +190,7 @@ func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
 // process about to be started rather than to the one that ended, and a zero
 // CreatedAt is read as "this session begins now" — the Spawn case, and equally
 // a snapshot written before that field existed.
-func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info) (*Session, error) {
+func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info) (Handle, error) {
 	shell := loginShell()
 	argv := opts.Cmd
 	// run is what gets exec'd; argv stays the caller's own command and is
@@ -326,7 +326,7 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info
 	return s, nil
 }
 
-func (r *Registry) Get(id string) (*Session, bool) {
+func (r *Registry) Get(id string) (Handle, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.sessions[id]
@@ -425,10 +425,10 @@ func (r *Registry) AdoptMetas(dir string) {
 	}
 }
 
-func (r *Registry) List() []*Session {
+func (r *Registry) List() []Handle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]*Session, 0, len(r.sessions))
+	out := make([]Handle, 0, len(r.sessions))
 	for _, s := range r.sessions {
 		out = append(out, s)
 	}
@@ -456,8 +456,8 @@ func (r *Registry) List() []*Session {
 func (r *Registry) Reap() {
 	now := r.clock()
 
-	var victims []*Session
-	var orphans []*Session
+	var victims []handle
+	var orphans []handle
 	r.mu.Lock()
 	for id, s := range r.sessions {
 		exited, at, ephemeral := s.exitStatus()

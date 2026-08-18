@@ -1699,7 +1699,7 @@ func TestThePairingPageCannotSpendAHandoffToken(t *testing.T) {
 
 // --- carried constraint 2: an exited session must not park the handler ---
 
-func waitForExit(t *testing.T, s *session.Session) {
+func waitForExit(t *testing.T, s session.Handle) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
