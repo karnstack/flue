@@ -1,4 +1,4 @@
-import { encodeBinary, FRAME_OUTPUT, type Attached, type SizeChanged } from '@/client/protocol'
+import { encodeBinary, FRAME_FILE, FRAME_OUTPUT, type Attached, type SizeChanged } from '@/client/protocol'
 import { FlueClient, type SocketLike } from '@/client/client'
 
 const utf8 = new TextEncoder()
@@ -43,6 +43,11 @@ export class FakeSocket implements SocketLike {
 
   emitOutput(ref: number, body: string) {
     this.onmessage?.(encodeBinary(FRAME_OUTPUT, ref, utf8.encode(body)))
+  }
+
+  /** One 0x02 frame: a chunk of a file being read, under its stream's ref. */
+  emitFile(ref: number, body: string) {
+    this.onmessage?.(encodeBinary(FRAME_FILE, ref, utf8.encode(body)))
   }
 
   control(): Array<Record<string, unknown>> {
