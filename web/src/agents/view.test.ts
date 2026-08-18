@@ -443,14 +443,16 @@ describe('tokensByDay', () => {
 })
 
 describe('sessionsByDay', () => {
-  it('counts starts per day across the same zero-filled span', () => {
+  it('counts starts per day across the same zero-filled span, split by tool', () => {
     const rows = [
       row({ id: 'a', startedAt: at(2026, 7, 17, 9) }),
-      row({ id: 'b', startedAt: at(2026, 7, 17, 20) }),
+      row({ id: 'b', tool: 'codex', startedAt: at(2026, 7, 17, 20) }),
       row({ id: 'c', startedAt: at(2026, 7, 18, 9) }),
     ]
     const days = sessionsByDay(rows, NOW)
     expect(days.map((d) => d.count)).toEqual([2, 1])
+    expect(days[0]!.byTool).toEqual({ claude: 1, codex: 1, pi: 0 })
+    expect(days[1]!.byTool).toEqual({ claude: 1, codex: 0, pi: 0 })
   })
 })
 

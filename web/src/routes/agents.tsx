@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { AdjustmentsHorizontalIcon, MagnifyingGlassIcon } from '@heroicons/react/16/solid'
 
-import { Bars, HBars, Heatmap, StackedBars } from '@/agents/charts'
+import { HBars, Heatmap, StackedBars } from '@/agents/charts'
 import {
   AGENT_GROUPING_LABELS,
   AGENT_GROUPINGS,
@@ -809,8 +809,14 @@ function Insights({
         <div className="@container">
           <div className="flex flex-col gap-y-2">
             <h3 className="text-sm font-medium text-zinc-950 dark:text-white">Activity</h3>
-            <div className="grid grid-cols-1 gap-x-8 gap-y-6 @3xl:grid-cols-3">
-              <div className="min-w-0 @3xl:col-span-2">
+            {/* Flex, not a fractional grid: grid columns stretch to the
+                container, which flung the stats to the far edge and left a
+                gulf beside the heatmap. Here both blocks keep their natural
+                width, sit a fixed gap apart, and the stats wrap under the
+                grid when the row runs out — the values right-align inside
+                their own bounded column, not against the viewport. */}
+            <div className="flex flex-wrap items-start gap-x-14 gap-y-6">
+              <div className="min-w-0 max-w-full">
                 <Heatmap
                   label="Activity: tokens per day over the last year"
                   weeks={heat.weeks}
@@ -819,11 +825,11 @@ function Insights({
               </div>
               {/* Plain rows rather than a dl: the stat strip above is the
                   screen's one definition list, and these are quieter. */}
-              <div className="flex flex-col gap-y-1.5 self-start">
+              <div className="flex w-60 shrink-0 flex-col gap-y-1.5 pt-4">
                 {usageRows.map((s) => (
                   <div key={s.label} className="flex items-baseline justify-between gap-x-4">
                     <span className="text-control text-muted-foreground">{s.label}</span>
-                    <span className="text-control text-zinc-950 tabular-nums dark:text-white">
+                    <span className="text-control font-medium text-zinc-950 tabular-nums dark:text-white">
                       {s.value}
                     </span>
                   </div>
@@ -872,12 +878,16 @@ function Insights({
               <h3 className="text-sm font-medium text-zinc-950 dark:text-white">
                 Sessions per day
               </h3>
-              <Bars
-                label="Sessions per day"
+              {/* The same tool bands as the tokens chart beside it — one
+                  legend serves both — with the y scale in plain counts. */}
+              <StackedBars
+                label="Sessions per day, by tool"
+                colors={TOOL_FILLS}
+                format={(n) => String(Math.round(n))}
                 points={sessions.map((d) => ({
                   label: d.label,
-                  title: `${d.label} · ${d.count} ${d.count === 1 ? 'session' : 'sessions'}`,
-                  value: d.count,
+                  title: sessionsTitle(d.label, d.byTool, d.count),
+                  parts: AGENT_TOOLS.map((tool) => d.byTool[tool]),
                 }))}
               />
             </div>
@@ -925,6 +935,19 @@ function stackTitle(
   )
   const detail = parts.length > 0 ? ` (${parts.join(', ')})` : ''
   return `${label} · ${compactTokens(total)} tokens${detail}`
+}
+
+/** The sessions chart's hover line, counts rather than token units. */
+function sessionsTitle(
+  label: string,
+  byTool: Record<AgentTool, number>,
+  total: number,
+): string {
+  const parts = AGENT_TOOLS.filter((tool) => byTool[tool] > 0).map(
+    (tool) => `${TOOL_LABELS[tool]} ${byTool[tool]}`,
+  )
+  const detail = parts.length > 0 ? ` (${parts.join(', ')})` : ''
+  return `${label} · ${total} ${total === 1 ? 'session' : 'sessions'}${detail}`
 }
 
 /**

@@ -16,6 +16,7 @@
 import type { CSSProperties } from 'react'
 
 import { compactTokens, monthDay, type HeatCell, type HeatMonth } from '@/agents/view'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 /** The drawing's coordinate space. Height per the spec, width chosen so a
@@ -98,10 +99,14 @@ export function StackedBars({
   points,
   colors,
   label,
+  format = compactTokens,
 }: {
   points: StackPoint[]
   colors: string[]
   label: string
+  /** How the y scale prints — token units by default, plain counts for the
+   *  sessions chart. */
+  format?: (n: number) => string
 }) {
   if (points.length === 0) return null
   const totals = points.map((p) => p.parts.reduce((sum, v) => sum + v, 0))
@@ -109,7 +114,7 @@ export function StackedBars({
   const { gap, barW } = geometry(points.length)
   return (
     <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label} className="w-full">
-      <YLabels max={max} format={compactTokens} />
+      <YLabels max={max} format={format} />
       {points.map((p, at) => {
         const x = at * (barW + gap)
         let y = BASE_Y
@@ -140,45 +145,6 @@ export function StackedBars({
   )
 }
 
-export interface BarPoint {
-  label: string
-  title: string
-  value: number
-}
-
-/** Plain bars — sessions per day — in the quiet neutral, not a tool colour. */
-export function Bars({ points, label }: { points: BarPoint[]; label: string }) {
-  if (points.length === 0) return null
-  const max = Math.max(1, ...points.map((p) => p.value))
-  const { gap, barW } = geometry(points.length)
-  const format = (n: number) => String(Math.round(n))
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={label} className="w-full">
-      <YLabels max={max} format={format} />
-      {points.map((p, at) => {
-        const h = (p.value / max) * PLOT_H
-        return (
-          <g key={at}>
-            <title>{p.title}</title>
-            {p.value > 0 && (
-              <rect
-                x={at * (barW + gap)}
-                y={BASE_Y - h}
-                width={barW}
-                height={h}
-                rx={1}
-                className="fill-zinc-400 dark:fill-zinc-600"
-              />
-            )}
-          </g>
-        )
-      })}
-      <line x1={0} x2={W} y1={BASE_Y} y2={BASE_Y} className="stroke-hairline" />
-      <XLabels points={points} barW={barW} gap={gap} />
-    </svg>
-  )
-}
-
 export interface HBarRow {
   key: string
   label: string
@@ -196,7 +162,10 @@ export interface HBarRow {
 export function HBars({
   rows,
   label,
-  colorClass = 'bg-zinc-400 dark:bg-zinc-600',
+  // The accent at reduced strength rather than a neutral: these rank a
+  // single measure, exactly the claim the heatmap makes, and the grey read
+  // as disabled beside four coloured charts.
+  colorClass = 'bg-accent-bg/60',
 }: {
   rows: HBarRow[]
   label: string
@@ -251,6 +220,13 @@ const HEAT_FILLS = [
 /** The weekday gutter, GitHub's cut of it: three names carry the whole axis. */
 const HEAT_DAY_LABELS = ['Mon', '', 'Wed', '', 'Fri', '', '']
 
+/** The hover's day line: weekday plus date, so a square answers "which
+ *  Tuesday" without the reader counting rows. */
+function heatDayLabel(dayMs: number): string {
+  const weekday = new Date(dayMs).toLocaleDateString(undefined, { weekday: 'short' })
+  return `${weekday} ${monthDay(dayMs)}`
+}
+
 /**
  * The activity heatmap — a year of days, one square each, Monday at the top
  * of every column. Plain divs rather than SVG: the squares are a fixed size
@@ -290,25 +266,37 @@ export function Heatmap({
               </span>
             ))}
           </div>
-          {weeks.map((week) => (
-            <div key={week[0]!.dayMs} className="flex flex-col gap-y-[3px]">
-              {week.map((cell) =>
-                cell.future ? (
-                  // Not yet a day: no fill, no title — the square is absent,
-                  // not quiet.
-                  <div key={cell.dayMs} className="size-[11px]" />
-                ) : (
-                  <div
-                    key={cell.dayMs}
-                    title={`${monthDay(cell.dayMs)} · ${
-                      cell.tokens > 0 ? `${compactTokens(cell.tokens)} tok` : 'quiet'
-                    }`}
-                    className={cn('size-[11px] rounded-[2px]', HEAT_FILLS[cell.level])}
-                  />
-                ),
-              )}
-            </div>
-          ))}
+          {/* One provider over the whole grid, so after the first square
+              opens its neighbours answer instantly — the sweep-across-a-year
+              gesture this graphic exists for. The native title attribute was
+              here first and looked like the nineties. */}
+          <TooltipProvider delayDuration={150}>
+            {weeks.map((week) => (
+              <div key={week[0]!.dayMs} className="flex flex-col gap-y-[3px]">
+                {week.map((cell) =>
+                  cell.future ? (
+                    // Not yet a day: no fill, no hover — the square is
+                    // absent, not quiet.
+                    <div key={cell.dayMs} className="size-[11px]" />
+                  ) : (
+                    <Tooltip key={cell.dayMs}>
+                      <TooltipTrigger asChild>
+                        <div
+                          className={cn('size-[11px] rounded-[2px]', HEAT_FILLS[cell.level])}
+                        />
+                      </TooltipTrigger>
+                      <TooltipContent sideOffset={6}>
+                        <span className="font-medium">{heatDayLabel(cell.dayMs)}</span>
+                        <span className="text-background/70">
+                          {cell.tokens > 0 ? `${compactTokens(cell.tokens)} tok` : 'quiet'}
+                        </span>
+                      </TooltipContent>
+                    </Tooltip>
+                  ),
+                )}
+              </div>
+            ))}
+          </TooltipProvider>
         </div>
         <div className="mt-2 flex items-center justify-end gap-x-1.5 text-control text-muted-foreground">
           Less

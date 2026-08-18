@@ -406,10 +406,11 @@ export interface TokensDayPoint {
   total: number
 }
 
-/** One day of the plain chart: how many sessions began. */
+/** One day of the sessions chart: how many began, and whose they were. */
 export interface SessionsDayPoint {
   dayMs: number
   label: string
+  byTool: Record<AgentTool, number>
   count: number
 }
 
@@ -460,18 +461,24 @@ export function tokensByDay(rows: AgentRow[], now: number): TokensDayPoint[] {
 }
 
 export function sessionsByDay(rows: AgentRow[], now: number): SessionsDayPoint[] {
-  const counts = new Map<number, number>()
+  const counts = new Map<number, Record<AgentTool, number>>()
   for (const r of rows) {
     const at = Date.parse(r.startedAt)
     if (Number.isNaN(at)) continue
     const day = dayStartMs(at)
-    counts.set(day, (counts.get(day) ?? 0) + 1)
+    const point = counts.get(day) ?? { claude: 0, codex: 0, pi: 0 }
+    point[r.tool] += 1
+    counts.set(day, point)
   }
-  return daySpan(rows, now).map((day) => ({
-    dayMs: day,
-    label: monthDay(day),
-    count: counts.get(day) ?? 0,
-  }))
+  return daySpan(rows, now).map((day) => {
+    const byTool = counts.get(day) ?? { claude: 0, codex: 0, pi: 0 }
+    return {
+      dayMs: day,
+      label: monthDay(day),
+      byTool,
+      count: byTool.claude + byTool.codex + byTool.pi,
+    }
+  })
 }
 
 /** The projects that spent the most, largest first, at most `top` of them. */
