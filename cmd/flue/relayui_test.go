@@ -765,7 +765,7 @@ func TestRelayJoinFromTheCLIRestartsARunningDaemonsLeg(t *testing.T) {
 	if !strings.Contains(printed, "wss://relay.example.com") {
 		t.Errorf("join does not report the daemon dialling the new relay:\n%s", printed)
 	}
-	if strings.Contains(printed, "flue disable && flue enable") {
+	if strings.Contains(printed, "flue restart") {
 		t.Errorf("join still tells the user to restart a daemon it just reconfigured:\n%s", printed)
 	}
 }
@@ -797,7 +797,7 @@ func TestRelayJoinKeepsTheRestartNoteForADaemonItCannotTell(t *testing.T) {
 		t.Fatalf("runRelayJoin: %v", err)
 	}
 	printed := out.String()
-	if !strings.Contains(printed, "could not be told") || !strings.Contains(printed, "flue disable && flue enable") {
+	if !strings.Contains(printed, "could not be told") || !strings.Contains(printed, "flue restart") {
 		t.Errorf("a daemon that could not be told was not reported, so nothing tells the user to restart it:\n%s", printed)
 	}
 }

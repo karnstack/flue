@@ -435,7 +435,7 @@ func tellTheDaemon(w io.Writer) (running bool) {
 	steps, err := reloadRelayLeg(port)
 	if err != nil {
 		fmt.Fprintf(w, "  ! the daemon on 127.0.0.1:%d could not be told (%v)\n", port, err)
-		fmt.Fprintln(w, "    restart it to pick this up: flue disable && flue enable, or restart flue serve")
+		fmt.Fprintln(w, "    restart it to pick this up: flue restart, or restart flue serve")
 		return true
 	}
 	for _, step := range steps {
