@@ -67,6 +67,23 @@ export interface TerminalTheme {
 }
 
 /**
+ * A path-shaped span found in one logical line of terminal text.
+ *
+ * Produced by `lib/paths.ts` and consumed by whichever emulator decorates the
+ * span; defined here because both sides of the seam speak it. `start`/`end`
+ * are indices into the logical line, `end` one past the last character with
+ * any `:line[:col]` suffix included — the decorated stretch. `path` is the
+ * text to hand the daemon: suffix and wrapping punctuation removed.
+ */
+export interface LinkCandidate {
+  path: string
+  start: number
+  end: number
+  line?: number
+  col?: number
+}
+
+/**
  * The narrow seam between flue and whatever emulates the terminal.
  *
  * xterm.js implements this today. Keeping it small and free of xterm-specific
