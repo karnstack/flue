@@ -129,6 +129,41 @@ func sessionEnv(environ []string, shell string) []string {
 	return append(env, "SHELL="+shell)
 }
 
+// execArgv decides what start actually execs for a caller-supplied command.
+// Commands the daemon can resolve itself — a path, or a bare name LookPath
+// finds — run as given. A bare name the daemon cannot find is not yet a
+// failure: a service-started daemon carries launchd's or systemd's bare
+// PATH, and the agent tools flue resumes ("claude", "codex", "pi") live in
+// directories only the user's shell config adds. Those go to the login
+// shell to resolve, exactly as they would had the user typed them into a
+// session — which is also what makes a hand-started daemon and a
+// service-started one behave the same. A name nobody can find still fails
+// visibly: the shell prints its own not-found into the terminal and exits.
+func execArgv(shell string, argv []string) []string {
+	if strings.ContainsRune(argv[0], '/') {
+		return argv
+	}
+	if _, err := exec.LookPath(argv[0]); err == nil {
+		return argv
+	}
+	return wrapInLoginShell(shell, argv)
+}
+
+// wrapInLoginShell rewrites argv to run under the user's login shell:
+// interactive, so rc files run and build the user's real PATH — zsh only
+// reads ~/.zshrc when interactive, and that is where PATH lives for most
+// setups — and an exec of the original command, so the shell replaces
+// itself and the session's pid stays the program's own for cwd and signal
+// tracking. Each word is single-quoted with the POSIX escape for embedded
+// quotes, which fish happens to parse identically.
+func wrapInLoginShell(shell string, argv []string) []string {
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+	}
+	return []string{shell, "-l", "-i", "-c", "exec " + strings.Join(quoted, " ")}
+}
+
 func newID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
@@ -158,8 +193,16 @@ func (r *Registry) Spawn(opts SpawnOpts) (*Session, error) {
 func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info) (*Session, error) {
 	shell := loginShell()
 	argv := opts.Cmd
+	// run is what gets exec'd; argv stays the caller's own command and is
+	// what Info records — the login-shell wrapper execArgv may add is how a
+	// session starts, not what it is, and a snapshot revived elsewhere should
+	// re-resolve against that machine's daemon, not replay this one's detour.
+	var run []string
 	if len(argv) == 0 {
 		argv = []string{shell, "-l"}
+		run = argv
+	} else {
+		run = execArgv(shell, argv)
 	}
 
 	// An empty Cwd is a caller with no preference, and it must not fall
@@ -176,7 +219,7 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info
 		cwd, _ = os.UserHomeDir()
 	}
 
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := exec.Command(run[0], run[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = sessionEnv(os.Environ(), shell)
 
