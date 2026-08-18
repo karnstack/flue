@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { AdjustmentsHorizontalIcon, MagnifyingGlassIcon } from '@heroicons/react/16/solid'
 
-import { Bars, HBars, StackedBars } from '@/agents/charts'
+import { Bars, HBars, Heatmap, StackedBars } from '@/agents/charts'
 import {
   AGENT_GROUPING_LABELS,
   AGENT_GROUPINGS,
@@ -16,7 +16,9 @@ import {
   compactTokens,
   DEFAULT_AGENT_VIEW,
   filterRows,
+  fmtDuration,
   groupHits,
+  heatmapWeeks,
   insightTotals,
   INSIGHT_RANGE_LABELS,
   INSIGHT_RANGES,
@@ -26,6 +28,7 @@ import {
   splitSnippet,
   tokensByDay,
   TOOL_LABELS,
+  usageStats,
   type AgentHitRow,
   type AgentRow,
   type AgentViewConfig,
@@ -700,8 +703,9 @@ function basenameOf(path: string): string {
 }
 
 /**
- * The insights presentation: a range, a stat strip, four charts. Every number
- * comes out of agents/view.ts; this renders and nothing else.
+ * The insights presentation: a range, a stat strip, the activity year, four
+ * charts. Every number comes out of agents/view.ts; this renders and nothing
+ * else.
  */
 function Insights({
   rows,
@@ -715,12 +719,20 @@ function Insights({
   onRange(range: InsightRange): void
 }) {
   const now = Date.now()
-  const ranged = rangeFilter(filterRows(rows, filters), range, now)
+  const everything = filterRows(rows, filters)
+  const ranged = rangeFilter(everything, range, now)
   const totals = insightTotals(ranged)
   const tokens = tokensByDay(ranged, now)
   const sessions = sessionsByDay(ranged, now)
   const projects = byProject(ranged)
   const models = byModel(ranged)
+
+  // The Activity section — heatmap and streaks — is computed from ALL rows
+  // regardless of the 7d/30d/90d/All range chips: a year of context is the
+  // section's whole point. The chips keep driving the stat strip and the two
+  // day charts, exactly as before.
+  const heat = heatmapWeeks(everything, now)
+  const usage = usageStats(everything, now)
 
   const stats: Array<{ label: string; value: string }> = [
     { label: 'Sessions', value: String(totals.sessions) },
@@ -730,6 +742,29 @@ function Insights({
   ]
   if (totals.costUsd !== null) {
     stats.push({ label: 'Recorded cost', value: compactCost(totals.costUsd) })
+  }
+
+  // The quiet label/value rows beside the heatmap; a row whose value would
+  // read as null or zero is left out rather than printed empty.
+  const days = (n: number) => `${n} ${n === 1 ? 'day' : 'days'}`
+  const usageRows: Array<{ label: string; value: string }> = []
+  if (usage.activeDays > 0) {
+    usageRows.push({ label: 'Active days', value: `${usage.activeDays} of ${usage.spanDays}` })
+  }
+  if (usage.longestStreak > 0) {
+    usageRows.push({ label: 'Longest streak', value: days(usage.longestStreak) })
+  }
+  if (usage.currentStreak > 0) {
+    usageRows.push({ label: 'Current streak', value: days(usage.currentStreak) })
+  }
+  if (usage.mostActiveDay !== null) {
+    usageRows.push({ label: 'Most active day', value: usage.mostActiveDay })
+  }
+  if (usage.favoriteModel !== null) {
+    usageRows.push({ label: 'Favorite model', value: usage.favoriteModel })
+  }
+  if (usage.longestSessionMs > 0) {
+    usageRows.push({ label: 'Longest session', value: fmtDuration(usage.longestSessionMs) })
   }
 
   return (
@@ -742,107 +777,138 @@ function Insights({
         ))}
       </div>
 
-      {ranged.length === 0 ? (
+      {ranged.length === 0 && (
         <p className="text-base/6 text-zinc-500 sm:text-sm/6 dark:text-zinc-400">
           No agent activity in this range.
         </p>
-      ) : (
-        <>
-          <div className="@container">
-            <dl
-              className={cn(
-                'grid grid-cols-2 gap-y-6',
-                stats.length === 5 ? '@2xl:grid-cols-5' : '@2xl:grid-cols-4',
-              )}
-            >
-              {stats.map((stat, at) => (
-                // Reversed visually: the value reads above its label, while
-                // the markup keeps dt before dd as a dl requires.
-                <div key={stat.label} className={statClasses(at, stats.length)}>
-                  <dt className="truncate text-control text-muted-foreground">{stat.label}</dt>
-                  <dd className="text-2xl font-semibold tracking-tight text-zinc-950 tabular-nums dark:text-white">
-                    {stat.value}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </div>
+      )}
 
-          <div className="@container">
-            <div className="grid grid-cols-1 gap-x-8 gap-y-8 @3xl:grid-cols-2">
-              <div className="flex min-w-0 flex-col gap-y-2">
-                <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-                  <h3 className="text-sm font-medium text-zinc-950 dark:text-white">
-                    Tokens per day
-                  </h3>
-                  <span className="flex items-center gap-x-3">
-                    {AGENT_TOOLS.map((tool) => (
-                      <span
-                        key={tool}
-                        className="flex items-center gap-x-1.5 text-control text-muted-foreground"
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={cn('size-1.5 shrink-0 rounded-full', TOOL_DOT_BG[tool])}
-                        />
-                        {TOOL_LABELS[tool]}
-                      </span>
-                    ))}
-                  </span>
-                </div>
-                <StackedBars
-                  label="Tokens per day, by tool"
-                  colors={TOOL_FILLS}
-                  points={tokens.map((d) => ({
-                    label: d.label,
-                    title: stackTitle(d.label, d.byTool, d.total),
-                    parts: AGENT_TOOLS.map((tool) => d.byTool[tool]),
-                  }))}
+      {ranged.length > 0 && (
+        <div className="@container">
+          <dl
+            className={cn(
+              'grid grid-cols-2 gap-y-6',
+              stats.length === 5 ? '@2xl:grid-cols-5' : '@2xl:grid-cols-4',
+            )}
+          >
+            {stats.map((stat, at) => (
+              // Reversed visually: the value reads above its label, while
+              // the markup keeps dt before dd as a dl requires.
+              <div key={stat.label} className={statClasses(at, stats.length)}>
+                <dt className="truncate text-control text-muted-foreground">{stat.label}</dt>
+                <dd className="text-2xl font-semibold tracking-tight text-zinc-950 tabular-nums dark:text-white">
+                  {stat.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      )}
+
+      {everything.length > 0 && (
+        <div className="@container">
+          <div className="flex flex-col gap-y-2">
+            <h3 className="text-sm font-medium text-zinc-950 dark:text-white">Activity</h3>
+            <div className="grid grid-cols-1 gap-x-8 gap-y-6 @3xl:grid-cols-3">
+              <div className="min-w-0 @3xl:col-span-2">
+                <Heatmap
+                  label="Activity: tokens per day over the last year"
+                  weeks={heat.weeks}
+                  months={heat.months}
                 />
               </div>
-
-              <div className="flex min-w-0 flex-col gap-y-2">
-                <h3 className="text-sm font-medium text-zinc-950 dark:text-white">
-                  Sessions per day
-                </h3>
-                <Bars
-                  label="Sessions per day"
-                  points={sessions.map((d) => ({
-                    label: d.label,
-                    title: `${d.label} · ${d.count} ${d.count === 1 ? 'session' : 'sessions'}`,
-                    value: d.count,
-                  }))}
-                />
-              </div>
-
-              <div className="flex min-w-0 flex-col gap-y-2">
-                <h3 className="text-sm font-medium text-zinc-950 dark:text-white">Top projects</h3>
-                <HBars
-                  label="Top projects by tokens"
-                  rows={projects.map((p) => ({
-                    key: p.cwd,
-                    label: p.label,
-                    title: p.cwd,
-                    value: p.tokens,
-                  }))}
-                />
-              </div>
-
-              <div className="flex min-w-0 flex-col gap-y-2">
-                <h3 className="text-sm font-medium text-zinc-950 dark:text-white">Models</h3>
-                <HBars
-                  label="Models by tokens"
-                  rows={models.map((m) => ({
-                    key: m.model,
-                    label: shortModel(m.model),
-                    title: m.model,
-                    value: m.tokens,
-                  }))}
-                />
+              {/* Plain rows rather than a dl: the stat strip above is the
+                  screen's one definition list, and these are quieter. */}
+              <div className="flex flex-col gap-y-1.5 self-start">
+                {usageRows.map((s) => (
+                  <div key={s.label} className="flex items-baseline justify-between gap-x-4">
+                    <span className="text-control text-muted-foreground">{s.label}</span>
+                    <span className="text-control text-zinc-950 tabular-nums dark:text-white">
+                      {s.value}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
-        </>
+        </div>
+      )}
+
+      {ranged.length > 0 && (
+        <div className="@container">
+          <div className="grid grid-cols-1 gap-x-8 gap-y-8 @3xl:grid-cols-2">
+            <div className="flex min-w-0 flex-col gap-y-2">
+              <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+                <h3 className="text-sm font-medium text-zinc-950 dark:text-white">
+                  Tokens per day
+                </h3>
+                <span className="flex items-center gap-x-3">
+                  {AGENT_TOOLS.map((tool) => (
+                    <span
+                      key={tool}
+                      className="flex items-center gap-x-1.5 text-control text-muted-foreground"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={cn('size-1.5 shrink-0 rounded-full', TOOL_DOT_BG[tool])}
+                      />
+                      {TOOL_LABELS[tool]}
+                    </span>
+                  ))}
+                </span>
+              </div>
+              <StackedBars
+                label="Tokens per day, by tool"
+                colors={TOOL_FILLS}
+                points={tokens.map((d) => ({
+                  label: d.label,
+                  title: stackTitle(d.label, d.byTool, d.total),
+                  parts: AGENT_TOOLS.map((tool) => d.byTool[tool]),
+                }))}
+              />
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-y-2">
+              <h3 className="text-sm font-medium text-zinc-950 dark:text-white">
+                Sessions per day
+              </h3>
+              <Bars
+                label="Sessions per day"
+                points={sessions.map((d) => ({
+                  label: d.label,
+                  title: `${d.label} · ${d.count} ${d.count === 1 ? 'session' : 'sessions'}`,
+                  value: d.count,
+                }))}
+              />
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-y-2">
+              <h3 className="text-sm font-medium text-zinc-950 dark:text-white">Top projects</h3>
+              <HBars
+                label="Top projects by tokens"
+                rows={projects.map((p) => ({
+                  key: p.cwd,
+                  label: p.label,
+                  title: p.cwd,
+                  value: p.tokens,
+                }))}
+              />
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-y-2">
+              <h3 className="text-sm font-medium text-zinc-950 dark:text-white">Models</h3>
+              <HBars
+                label="Models by tokens"
+                rows={models.map((m) => ({
+                  key: m.model,
+                  label: shortModel(m.model),
+                  title: m.model,
+                  value: m.tokens,
+                }))}
+              />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

@@ -15,7 +15,7 @@
  */
 import type { CSSProperties } from 'react'
 
-import { compactTokens } from '@/agents/view'
+import { compactTokens, monthDay, type HeatCell, type HeatMonth } from '@/agents/view'
 import { cn } from '@/lib/utils'
 
 /** The drawing's coordinate space. Height per the spec, width chosen so a
@@ -222,6 +222,104 @@ export function HBars({
           </span>
         </div>
       ))}
+    </div>
+  )
+}
+
+/** One heatmap square's edge and the gap between squares, in px — small
+ *  enough that a year of columns sits on a desktop, big enough to hover. */
+const HEAT_CELL = 11
+const HEAT_GAP = 3
+const HEAT_STEP = HEAT_CELL + HEAT_GAP
+
+/** How far the columns start in from the left: the weekday gutter (w-7 is
+ *  28px) plus one column gap, so the month labels can line up by offset. */
+const HEAT_INSET = 31
+
+/** The level fills, level 0 first. A quiet day wears the same barely-there
+ *  tint the chart baselines are drawn in, legible on both themes; the four
+ *  active levels ramp the one accent by opacity. Teal rather than a tool
+ *  colour, because each square aggregates every tool at once. */
+const HEAT_FILLS = [
+  'bg-hairline',
+  'bg-accent-bg/30',
+  'bg-accent-bg/50',
+  'bg-accent-bg/75',
+  'bg-accent-bg',
+]
+
+/** The weekday gutter, GitHub's cut of it: three names carry the whole axis. */
+const HEAT_DAY_LABELS = ['Mon', '', 'Wed', '', 'Fri', '', '']
+
+/**
+ * The activity heatmap — a year of days, one square each, Monday at the top
+ * of every column. Plain divs rather than SVG: the squares are a fixed size
+ * by design, so there is no geometry to scale, and a `title` per square is
+ * the whole interaction. The one wrapper scrolls sideways, which is how a
+ * 390px phone gets the year without crushing it.
+ */
+export function Heatmap({
+  weeks,
+  months,
+  label,
+}: {
+  weeks: HeatCell[][]
+  months: HeatMonth[]
+  label: string
+}) {
+  if (weeks.length === 0) return null
+  return (
+    <div className="overflow-x-auto">
+      <div role="img" aria-label={label} className="w-max">
+        <div className="relative h-4" style={{ marginLeft: HEAT_INSET }}>
+          {months.map((m) => (
+            <span
+              key={m.week}
+              className="absolute top-0 text-[10px] text-muted-foreground"
+              style={{ left: m.week * HEAT_STEP }}
+            >
+              {m.label}
+            </span>
+          ))}
+        </div>
+        <div className="flex gap-x-[3px]">
+          <div aria-hidden="true" className="flex w-7 flex-col gap-y-[3px]">
+            {HEAT_DAY_LABELS.map((d, at) => (
+              <span key={at} className="h-[11px] text-[10px] leading-[11px] text-muted-foreground">
+                {d}
+              </span>
+            ))}
+          </div>
+          {weeks.map((week) => (
+            <div key={week[0]!.dayMs} className="flex flex-col gap-y-[3px]">
+              {week.map((cell) =>
+                cell.future ? (
+                  // Not yet a day: no fill, no title — the square is absent,
+                  // not quiet.
+                  <div key={cell.dayMs} className="size-[11px]" />
+                ) : (
+                  <div
+                    key={cell.dayMs}
+                    title={`${monthDay(cell.dayMs)} · ${
+                      cell.tokens > 0 ? `${compactTokens(cell.tokens)} tok` : 'quiet'
+                    }`}
+                    className={cn('size-[11px] rounded-[2px]', HEAT_FILLS[cell.level])}
+                  />
+                ),
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="mt-2 flex items-center justify-end gap-x-1.5 text-control text-muted-foreground">
+          Less
+          <span className="flex items-center gap-x-[3px]">
+            {HEAT_FILLS.slice(1).map((fill) => (
+              <span key={fill} aria-hidden="true" className={cn('size-[11px] rounded-[2px]', fill)} />
+            ))}
+          </span>
+          More
+        </div>
+      </div>
     </div>
   )
 }

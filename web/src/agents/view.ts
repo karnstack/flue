@@ -236,8 +236,9 @@ export function dayStartMs(ms: number): number {
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-/** `Aug 12`, with the year on when it is not this year's. */
-function monthDay(dayMs: number, now?: number): string {
+/** `Aug 12`, with the year on when it is not this year's. Exported for the
+ *  heatmap's hover sentences, which name days a year back without a clock. */
+export function monthDay(dayMs: number, now?: number): string {
   const d = new Date(dayMs)
   const base = `${MONTHS[d.getMonth()]} ${d.getDate()}`
   if (now !== undefined && d.getFullYear() !== new Date(now).getFullYear()) {
@@ -412,8 +413,17 @@ export interface SessionsDayPoint {
   count: number
 }
 
+/** The widest day chart drawn, whatever the data claims. One day one bar
+ *  means the array below becomes DOM, and a single session wearing a bogus
+ *  ancient stamp (a zero time serialises as year 1) would otherwise ask for
+ *  hundreds of thousands of bars and hang the tab. A year is also simply the
+ *  most a per-day chart can say before the bars are hairlines. */
+const DAY_SPAN_CAP = 366
+
 /** The continuous run of days from the earliest row to `now`, zero-filled —
- *  a chart with the quiet days missing would lie about the pace. */
+ *  a chart with the quiet days missing would lie about the pace — and capped
+ *  at DAY_SPAN_CAP days ending today. Rows before the window still count in
+ *  the stat strip; they just fall off the left edge of the chart. */
 function daySpan(rows: AgentRow[], now: number): number[] {
   let first = Number.POSITIVE_INFINITY
   for (const r of rows) {
@@ -421,8 +431,9 @@ function daySpan(rows: AgentRow[], now: number): number[] {
     if (!Number.isNaN(at)) first = Math.min(first, dayStartMs(at))
   }
   if (!Number.isFinite(first)) return []
-  const days: number[] = []
   const last = dayStartMs(now)
+  first = Math.max(first, shiftDay(last, -(DAY_SPAN_CAP - 1)))
+  const days: number[] = []
   for (let day = first; day <= last; day = shiftDay(day, 1)) days.push(day)
   return days
 }
@@ -492,6 +503,239 @@ export function byModel(rows: AgentRow[]): Array<{ model: string; tokens: number
   return [...spent.entries()]
     .map(([model, tokens]) => ({ model, tokens }))
     .sort((a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model))
+}
+
+// ---------------------------------------------------------------------------
+// Activity heatmap and streaks.
+
+/** One day square of the activity heatmap. */
+export interface HeatCell {
+  dayMs: number
+  /** Input plus output of the sessions that began this day, rowTokens' figure. */
+  tokens: number
+  /** 0 for a quiet day; 1 to 4 for an active day, per heatmapWeeks' quartiles. */
+  level: number
+  /** Marks a day the calendar has not reached, which draws as nothing. */
+  future?: boolean
+}
+
+/** A month heading over the heatmap: the week column it first holds. */
+export interface HeatMonth {
+  week: number
+  label: string
+}
+
+/** How many complete weeks the heatmap reaches back past the current one: a
+ *  year of squares, the span the contribution graphs it echoes settled on. */
+const HEAT_WEEKS_BACK = 52
+
+/** The closest two month labels may sit, in week columns — nearer than three
+ *  and the shorter names overprint each other at the size they are drawn. */
+const MONTH_LABEL_MIN_GAP = 3
+
+/** The Monday-first weekday index of the day `ms` falls in. */
+function mondayIndex(ms: number): number {
+  return (new Date(ms).getDay() + 6) % 7
+}
+
+/**
+ * The activity heatmap's cells: the last 52 full weeks plus the current
+ * partial one, column-major — one array per week, seven cells Monday first —
+ * ending today, with the current week's remaining days marked `future`.
+ * Tokens land on the day a session began, the attribution every insight on
+ * this screen shares.
+ *
+ * Levels are quartiles by rank among the active days (the empirical CDF),
+ * not fractions of the maximum: token totals are wildly skewed — one long
+ * session can dwarf a month — so thresholds cut from the values' range would
+ * paint almost every active day in the faintest tint. Ranked, the busiest
+ * quarter of days is always darkest, equal totals share a level, and the
+ * lone-active-day case reads full strength rather than faint.
+ *
+ * A bogus ancient stamp (a zero time serialises as year 1) costs one range
+ * check here: the window is bounded by construction, 53 columns and no more,
+ * and days outside it are never aggregated, let alone walked to.
+ */
+export function heatmapWeeks(
+  rows: AgentRow[],
+  now: number,
+): { weeks: HeatCell[][]; months: HeatMonth[] } {
+  const today = dayStartMs(now)
+  const thisMonday = shiftDay(today, -mondayIndex(today))
+  const firstMonday = shiftDay(thisMonday, -HEAT_WEEKS_BACK * 7)
+
+  const tokens = new Map<number, number>()
+  for (const r of rows) {
+    const at = Date.parse(r.startedAt)
+    if (Number.isNaN(at)) continue
+    const day = dayStartMs(at)
+    if (day < firstMonday || day > today) continue
+    tokens.set(day, (tokens.get(day) ?? 0) + rowTokens(r))
+  }
+
+  const active = [...tokens.values()].filter((v) => v > 0).sort((a, b) => a - b)
+  const levelOf = (t: number): number => {
+    if (t <= 0 || active.length === 0) return 0
+    let rank = 0
+    for (const v of active) {
+      if (v > t) break
+      rank++
+    }
+    return Math.min(4, Math.ceil((4 * rank) / active.length))
+  }
+
+  const weeks: HeatCell[][] = []
+  for (let monday = firstMonday; monday <= thisMonday; monday = shiftDay(monday, 7)) {
+    const week: HeatCell[] = []
+    for (let i = 0; i < 7; i++) {
+      const day = shiftDay(monday, i)
+      if (day > today) {
+        week.push({ dayMs: day, tokens: 0, level: 0, future: true })
+        continue
+      }
+      const t = tokens.get(day) ?? 0
+      week.push({ dayMs: day, tokens: t, level: levelOf(t) })
+    }
+    weeks.push(week)
+  }
+
+  // A label where a month first holds a week's Monday, unless the previous
+  // label sits nearer than the minimum — the window's left edge often changes
+  // month within a column or two, and both labels cannot be read.
+  const months: HeatMonth[] = []
+  let prevMonth = -1
+  let lastAt = Number.NEGATIVE_INFINITY
+  weeks.forEach((week, col) => {
+    const month = new Date(week[0]!.dayMs).getMonth()
+    if (month === prevMonth) return
+    prevMonth = month
+    if (col - lastAt < MONTH_LABEL_MIN_GAP) return
+    months.push({ week: col, label: MONTHS[month]! })
+    lastAt = col
+  })
+
+  return { weeks, months }
+}
+
+/** What the activity section says beside the heatmap. */
+export interface UsageStats {
+  sessions: number
+  totalTokens: number
+  /** Days on which at least one session began. */
+  activeDays: number
+  /** Days from the first session start to today inclusive, capped at
+   *  DAY_SPAN_CAP exactly as daySpan caps — the year-1 guard again, so one
+   *  broken stamp cannot claim a seven-hundred-thousand-day history. */
+  spanDays: number
+  /** The start day with the most tokens, `Aug 16` style, ties to the more
+   *  recent day. Null when no day earned a token. */
+  mostActiveDay: string | null
+  /** The model with the most tokens, shortModel'd, or null when no session
+   *  names one. byModel's attribution: a session lands on its latest model. */
+  favoriteModel: string | null
+  /** The longest endedAt minus startedAt over rows whose stamps are sane:
+   *  both readable, forward-running, and no longer than the span cap — an
+   *  epoch-zero start beside a real end claims a two-thousand-year session,
+   *  which is a broken clock, not a record. Zero when nothing qualifies. */
+  longestSessionMs: number
+  /** The longest run of consecutive active days anywhere in the history. */
+  longestStreak: number
+  /** The run of consecutive active days ending today — or ending yesterday,
+   *  which still counts: a streak is not broken by a today that has not had
+   *  its first session yet, only by a whole day that passed without one. */
+  currentStreak: number
+}
+
+/**
+ * The heatmap's companion figures. Every walk here is over the set of active
+ * days, never the calendar between them: the streak loops touch one member
+ * per active day, so the ancient-stamp guard costs a set entry rather than a
+ * march from year 1 to now.
+ */
+export function usageStats(rows: AgentRow[], now: number): UsageStats {
+  const today = dayStartMs(now)
+
+  let totalTokens = 0
+  let longestSessionMs = 0
+  const byStartDay = new Map<number, number>()
+  for (const r of rows) {
+    totalTokens += rowTokens(r)
+    const started = Date.parse(r.startedAt)
+    if (!Number.isNaN(started)) {
+      const day = dayStartMs(started)
+      byStartDay.set(day, (byStartDay.get(day) ?? 0) + rowTokens(r))
+    }
+    const ended = Date.parse(r.endedAt)
+    if (!Number.isNaN(started) && !Number.isNaN(ended)) {
+      const ms = ended - started
+      if (ms > 0 && ms <= DAY_SPAN_CAP * DAY_MS) longestSessionMs = Math.max(longestSessionMs, ms)
+    }
+  }
+
+  let first = Number.POSITIVE_INFINITY
+  for (const day of byStartDay.keys()) first = Math.min(first, day)
+  let spanDays = 0
+  if (Number.isFinite(first)) {
+    first = Math.max(first, shiftDay(today, -(DAY_SPAN_CAP - 1)))
+    // Rounded for dayLabel's reason: a daylight-saving hour must not make a
+    // whole day appear or vanish.
+    spanDays = Math.max(1, Math.round((today - first) / DAY_MS) + 1)
+  }
+
+  let mostDay: number | null = null
+  let mostTokens = 0
+  for (const [day, t] of byStartDay) {
+    if (t > mostTokens || (t === mostTokens && mostDay !== null && t > 0 && day > mostDay)) {
+      mostDay = day
+      mostTokens = t
+    }
+  }
+
+  const active = [...byStartDay.keys()].sort((a, b) => a - b)
+  let longestStreak = 0
+  let run = 0
+  let prev: number | null = null
+  for (const day of active) {
+    run = prev !== null && shiftDay(prev, 1) === day ? run + 1 : 1
+    prev = day
+    longestStreak = Math.max(longestStreak, run)
+  }
+
+  const activeSet = new Set(active)
+  let currentStreak = 0
+  let cursor = activeSet.has(today) ? today : shiftDay(today, -1)
+  while (activeSet.has(cursor)) {
+    currentStreak++
+    cursor = shiftDay(cursor, -1)
+  }
+
+  const models = byModel(rows)
+  return {
+    sessions: rows.length,
+    totalTokens,
+    activeDays: byStartDay.size,
+    spanDays,
+    mostActiveDay: mostDay === null ? null : monthDay(mostDay, now),
+    favoriteModel: models.length === 0 ? null : shortModel(models[0]!.model),
+    longestSessionMs,
+    longestStreak,
+    currentStreak,
+  }
+}
+
+/**
+ * A duration in the two coarsest units that still say something: `6d 16h`,
+ * `5h 12m`, `42m`, and `<1m` below a minute — a third unit would be false
+ * precision at the widths these are printed in, exactly compactTokens' case.
+ */
+export function fmtDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 60_000) return '<1m'
+  const minutes = Math.floor(ms / 60_000)
+  const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
+  if (days > 0) return `${days}d ${hours % 24}h`
+  if (hours > 0) return `${hours}h ${minutes % 60}m`
+  return `${minutes}m`
 }
 
 // ---------------------------------------------------------------------------

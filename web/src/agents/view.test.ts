@@ -14,8 +14,10 @@ import {
   DEFAULT_AGENT_VIEW,
   displayTitle,
   filterRows,
+  fmtDuration,
   groupHits,
   groupRows,
+  heatmapWeeks,
   insightTotals,
   keyMessages,
   latestModel,
@@ -28,8 +30,10 @@ import {
   shortModel,
   splitSnippet,
   tokensByDay,
+  usageStats,
   type AgentHitRow,
   type AgentRow,
+  type HeatCell,
 } from './view'
 
 /** A local-time stamp, so day bucketing tests hold in any timezone. */
@@ -424,6 +428,18 @@ describe('tokensByDay', () => {
     expect(tokensByDay([row({ id: 'x', startedAt: 'nope' })], NOW)).toEqual([])
     expect(tokensByDay([], NOW)).toEqual([])
   })
+
+  it('caps the span when a stamp claims the distant past', () => {
+    // A zero time serialises as year 1; one such row must not ask for
+    // hundreds of thousands of bars.
+    const rows = [
+      row({ id: 'ancient', startedAt: '0001-01-01T00:00:00Z' }),
+      row({ id: 'b', startedAt: at(2026, 7, 18, 9) }),
+    ]
+    const days = tokensByDay(rows, NOW)
+    expect(days.length).toBeLessThanOrEqual(366)
+    expect(days.at(-1)!.total).toBeGreaterThan(0)
+  })
 })
 
 describe('sessionsByDay', () => {
@@ -461,6 +477,204 @@ describe('byModel', () => {
       row({ id: 'c', models: [] }),
     ]
     expect(byModel(rows)).toEqual([{ model: 'claude-opus-4', tokens: 110 }])
+  })
+})
+
+describe('heatmapWeeks', () => {
+  const dayOf = (y: number, m: number, d: number) => dayStartMs(new Date(y, m, d).getTime())
+
+  function cellFor(weeks: HeatCell[][], dayMs: number): HeatCell {
+    for (const week of weeks) for (const cell of week) if (cell.dayMs === dayMs) return cell
+    throw new Error('day not on the map')
+  }
+
+  it('spans 52 full weeks plus the current one, seven cells each, Monday first', () => {
+    const { weeks } = heatmapWeeks([], NOW)
+    expect(weeks.length).toBeGreaterThanOrEqual(52)
+    expect(weeks.length).toBeLessThanOrEqual(53)
+    for (const week of weeks) expect(week).toHaveLength(7)
+    // NOW is a Tuesday, so the last column's Monday is the day before.
+    expect(weeks.at(-1)![0]!.dayMs).toBe(dayOf(2026, 7, 17))
+  })
+
+  it('lands a known Tuesday in row 1 of the last column', () => {
+    const { weeks } = heatmapWeeks([row({ id: 'x', startedAt: at(2026, 7, 18, 9) })], NOW)
+    const last = weeks.at(-1)!
+    expect(last[1]!.dayMs).toBe(dayOf(2026, 7, 18))
+    expect(last[1]!.tokens).toBe(150)
+    // The lone active day reads full strength, per the rank-quartile choice.
+    expect(last[1]!.level).toBe(4)
+  })
+
+  it('flags the current week days past today as future, and nothing else', () => {
+    const { weeks } = heatmapWeeks([], NOW)
+    const last = weeks.at(-1)!
+    // Monday and Tuesday have happened; Wednesday through Sunday have not.
+    expect(last.map((c) => c.future === true)).toEqual([
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+    ])
+    for (const week of weeks.slice(0, -1)) {
+      for (const cell of week) expect(cell.future).toBeUndefined()
+    }
+  })
+
+  it('gives every day level 0 when there are no rows', () => {
+    const { weeks } = heatmapWeeks([], NOW)
+    for (const cell of weeks.flat()) {
+      expect(cell.level).toBe(0)
+      expect(cell.tokens).toBe(0)
+    }
+  })
+
+  it('keeps levels monotone with token totals, quartile by quartile', () => {
+    // Eight active days spending 10..80; ranked quartiles read 1,1,2,2,3,3,4,4.
+    const rows = Array.from({ length: 8 }, (_, i) =>
+      row({
+        id: `d${i}`,
+        startedAt: at(2026, 7, 3 + i, 9),
+        tokens: { input: (i + 1) * 10, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+    )
+    const { weeks } = heatmapWeeks(rows, NOW)
+    const levels = Array.from({ length: 8 }, (_, i) => cellFor(weeks, dayOf(2026, 7, 3 + i)).level)
+    expect(levels).toEqual([1, 1, 2, 2, 3, 3, 4, 4])
+  })
+
+  it('drops a year-1 stamp at the window edge rather than walking to it', () => {
+    const rows = [
+      row({ id: 'ancient', startedAt: '0001-01-01T00:00:00Z' }),
+      row({ id: 'fresh', startedAt: at(2026, 7, 18, 9) }),
+    ]
+    const { weeks } = heatmapWeeks(rows, NOW)
+    expect(weeks.length).toBeLessThanOrEqual(53)
+    expect(weeks.flat().reduce((sum, c) => sum + c.tokens, 0)).toBe(150)
+  })
+
+  it('labels a month at the week its Mondays reach it, never crowding', () => {
+    const { weeks, months } = heatmapWeeks([], NOW)
+    // A year holds twelve month starts; at most a couple are skipped for
+    // sitting too close to the label before them.
+    expect(months.length).toBeGreaterThanOrEqual(10)
+    const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    for (const m of months) {
+      const monday = new Date(weeks[m.week]![0]!.dayMs)
+      expect(names[monday.getMonth()]).toBe(m.label)
+    }
+    for (let i = 1; i < months.length; i++) {
+      expect(months[i]!.week - months[i - 1]!.week).toBeGreaterThanOrEqual(3)
+    }
+  })
+})
+
+describe('usageStats', () => {
+  it('counts a run of active days up to today as the current streak', () => {
+    const rows = [
+      row({ id: 'a', startedAt: at(2026, 7, 16, 9) }),
+      row({ id: 'b', startedAt: at(2026, 7, 17, 9) }),
+      row({ id: 'c', startedAt: at(2026, 7, 18, 9) }),
+    ]
+    const s = usageStats(rows, NOW)
+    expect(s.currentStreak).toBe(3)
+    expect(s.longestStreak).toBe(3)
+    expect(s.activeDays).toBe(3)
+    expect(s.sessions).toBe(3)
+    expect(s.totalTokens).toBe(450)
+  })
+
+  it('still counts a run that ended yesterday — today may not have started', () => {
+    const rows = [15, 16, 17].map((d) => row({ id: `d${d}`, startedAt: at(2026, 7, d, 9) }))
+    expect(usageStats(rows, NOW).currentStreak).toBe(3)
+  })
+
+  it('lets a gap break a streak, and a run two days old is no streak at all', () => {
+    const rows = [10, 11, 12, 15, 16].map((d) => row({ id: `d${d}`, startedAt: at(2026, 7, d, 9) }))
+    const s = usageStats(rows, NOW)
+    expect(s.longestStreak).toBe(3)
+    expect(s.currentStreak).toBe(0)
+  })
+
+  it('caps spanDays at 366 for a lone year-1 stamp, without a calendar walk', () => {
+    const s = usageStats([row({ id: 'ancient', startedAt: '0001-01-01T00:00:00Z' })], NOW)
+    expect(s.spanDays).toBe(366)
+    expect(s.activeDays).toBe(1)
+    expect(s.longestStreak).toBe(1)
+    expect(s.currentStreak).toBe(0)
+    // The default endedAt is fine but the start claims year 1: a two-thousand-
+    // year session is a broken clock, not a record.
+    expect(s.longestSessionMs).toBe(0)
+  })
+
+  it('measures spanDays from the first start to today inclusive', () => {
+    expect(usageStats([row({ id: 'a', startedAt: at(2026, 7, 12, 9) })], NOW).spanDays).toBe(7)
+  })
+
+  it('picks the favorite model by tokens, not by session count', () => {
+    const rows = [
+      row({ id: 'a', models: ['claude-opus-4'], tokens: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 } }),
+      row({ id: 'b', models: ['claude-opus-4'], tokens: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 } }),
+      row({ id: 'c', models: ['claude-sonnet-4-5-20250929'], tokens: { input: 900, output: 100, cacheRead: 0, cacheWrite: 0 } }),
+    ]
+    expect(usageStats(rows, NOW).favoriteModel).toBe('sonnet-4-5')
+    expect(usageStats([row({ id: 'x', models: [] })], NOW).favoriteModel).toBeNull()
+  })
+
+  it('names the day with the most tokens', () => {
+    const rows = [
+      row({
+        id: 'big',
+        startedAt: at(2026, 7, 16, 9),
+        tokens: { input: 900, output: 100, cacheRead: 0, cacheWrite: 0 },
+      }),
+      row({ id: 'small', startedAt: at(2026, 7, 17, 9) }),
+    ]
+    expect(usageStats(rows, NOW).mostActiveDay).toBe('Aug 16')
+  })
+
+  it('takes the longest session from sane stamps only', () => {
+    const rows = [
+      row({
+        id: 'ok',
+        startedAt: at(2026, 7, 18, 9),
+        endedAt: new Date(2026, 7, 18, 10, 30).toISOString(),
+      }),
+      row({ id: 'no-start', startedAt: 'nope', endedAt: at(2026, 7, 18, 10) }),
+      row({ id: 'backwards', startedAt: at(2026, 7, 18, 10), endedAt: at(2026, 7, 18, 9) }),
+    ]
+    expect(usageStats(rows, NOW).longestSessionMs).toBe(90 * 60_000)
+  })
+
+  it('answers zeros and nulls for no rows at all', () => {
+    expect(usageStats([], NOW)).toEqual({
+      sessions: 0,
+      totalTokens: 0,
+      activeDays: 0,
+      spanDays: 0,
+      mostActiveDay: null,
+      favoriteModel: null,
+      longestSessionMs: 0,
+      longestStreak: 0,
+      currentStreak: 0,
+    })
+  })
+})
+
+describe('fmtDuration', () => {
+  it('prints days with hours, hours with minutes, minutes alone', () => {
+    expect(fmtDuration(6 * 86_400_000 + 16 * 3_600_000)).toBe('6d 16h')
+    expect(fmtDuration(5 * 3_600_000 + 12 * 60_000)).toBe('5h 12m')
+    expect(fmtDuration(42 * 60_000)).toBe('42m')
+  })
+
+  it('says <1m under a minute and for garbage', () => {
+    expect(fmtDuration(59_999)).toBe('<1m')
+    expect(fmtDuration(0)).toBe('<1m')
+    expect(fmtDuration(Number.NaN)).toBe('<1m')
   })
 })
 
