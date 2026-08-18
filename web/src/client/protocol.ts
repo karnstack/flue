@@ -781,6 +781,19 @@ export interface AgentHistoryDay {
 }
 
 /**
+ * One model's share of one tool's lifetime accounting, in the summaries' own
+ * four buckets — unlike the per-day figures these keep cache reads separate,
+ * so they merge cleanly with transcript-derived numbers. Lifetime only: they
+ * cannot be sliced by range, so a client folds them into its all-time view
+ * alone.
+ */
+export interface AgentHistoryTotals {
+  tool: AgentTool
+  model: string
+  tokens: AgentTokenUsage
+}
+
+/**
  * One message of a transcript, normalised across the three tools' formats.
  * `text` carries whatever the kind implies: prose, thinking, a tool call's
  * input JSON, or a tool result's body.
@@ -840,6 +853,9 @@ export interface AgentIndexMsg {
   /** Per-day backfill from the tools' own aggregates. Absent on daemons
    *  from before the field existed, which merges as no backfill at all. */
   history?: AgentHistoryDay[]
+  /** Lifetime per-model totals from the same aggregates, on the same
+   *  absent-means-none terms. */
+  historyTotals?: AgentHistoryTotals[]
   reqId: number
 }
 

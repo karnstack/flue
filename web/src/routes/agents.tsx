@@ -35,6 +35,7 @@ import {
   type AgentRow,
   type AgentViewConfig,
   type HistoryDayRow,
+  type HistoryTotalsRow,
   type InsightRange,
 } from '@/agents/view'
 import { AgentEmptyState, AgentList, AgentSkeleton, ToolDot } from '@/components/agent-rows'
@@ -51,7 +52,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import type { AgentHistoryDay, AgentSummary, AgentTool } from '@/client/protocol'
+import type {
+  AgentHistoryDay,
+  AgentHistoryTotals,
+  AgentSummary,
+  AgentTool,
+} from '@/client/protocol'
 import { useFleet } from '@/fleet/provider'
 import type { MachineState } from '@/fleet/types'
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
@@ -71,7 +77,13 @@ const BUILD_POLL_BUDGET_MS = 60_000
 /** What one machine has said about its transcripts, or not yet. */
 type MachineAgents =
   | { at: 'loading' }
-  | { at: 'ready'; rows: AgentSummary[]; history: AgentHistoryDay[]; building: boolean }
+  | {
+      at: 'ready'
+      rows: AgentSummary[]
+      history: AgentHistoryDay[]
+      totals: AgentHistoryTotals[]
+      building: boolean
+    }
   | { at: 'failed' }
 
 /** Everything a finished fan-out search has to say. */
@@ -186,6 +198,7 @@ export function AgentsRoute() {
               rows: msg.sessions,
               // Absent on daemons from before the field: no backfill.
               history: msg.history ?? [],
+              totals: msg.historyTotals ?? [],
               building: msg.building,
             }),
           )
@@ -308,6 +321,16 @@ export function AgentsRoute() {
     for (const [id, state] of byMachine) {
       if (state.at !== 'ready') continue
       for (const h of state.history) out.push({ ...h, machineId: id })
+    }
+    return out
+  }, [byMachine])
+
+  /** Every machine's lifetime per-model totals, stamped the same way. */
+  const totalsRows: HistoryTotalsRow[] = useMemo(() => {
+    const out: HistoryTotalsRow[] = []
+    for (const [id, state] of byMachine) {
+      if (state.at !== 'ready') continue
+      for (const t of state.totals) out.push({ ...t, machineId: id })
     }
     return out
   }, [byMachine])
@@ -464,6 +487,7 @@ export function AgentsRoute() {
             <Insights
               rows={rows}
               history={historyRows}
+              lifetime={totalsRows}
               filters={filters}
               range={range}
               onRange={setRange}
@@ -745,12 +769,14 @@ function basenameOf(path: string): string {
 function Insights({
   rows,
   history,
+  lifetime,
   filters,
   range,
   onRange,
 }: {
   rows: AgentRow[]
   history: HistoryDayRow[]
+  lifetime: HistoryTotalsRow[]
   filters: { tools: ReadonlySet<AgentTool>; machines: ReadonlySet<string> }
   range: InsightRange
   onRange(range: InsightRange): void
@@ -770,26 +796,34 @@ function Insights({
       // hides a tool or a machine hides its remembered days too.
       const allHistory = filterHistory(history, filters)
       const rangedHistory = rangeFilterHistory(allHistory, range, now)
+      const allLifetime = filterHistory(lifetime, filters)
+      // The lifetime totals cannot be sliced by range, so they join the
+      // arithmetic only where the view is itself all-time: the All chip's
+      // stat cards and models chart, and the whole-history Activity section.
+      const rangedLifetime = range === 'all' ? allLifetime : []
       return {
         everything,
         ranged,
         rangedHistory,
-        totals: insightTotals(ranged, rangedHistory),
+        totals: insightTotals(ranged, rangedHistory, rangedLifetime),
         tokens: tokensByDay(ranged, now, rangedHistory),
         sessions: sessionsByDay(ranged, now, rangedHistory),
         projects: byProject(ranged),
-        models: byModel(ranged),
+        models: byModel(ranged, rangedLifetime),
         // The Activity section — heatmap and streaks — is computed from ALL
         // rows regardless of the 7d/30d/90d/All range chips: a year of
         // context is the section's whole point. The chips keep driving the
         // stat strip and the day charts.
         heat: heatmapWeeks(everything, now, allHistory),
-        usage: usageStats(everything, now, allHistory),
+        usage: usageStats(everything, now, allHistory, allLifetime),
       }
-    }, [rows, history, filters, range])
+    }, [rows, history, lifetime, filters, range])
 
   const stats: Array<{ label: string; value: string }> = [
     { label: 'Sessions', value: String(totals.sessions) },
+    // The headline the tools' own usage screens lead with: every bucket
+    // together, cache included.
+    { label: 'Total tokens', value: compactTokens(totals.total) },
     { label: 'Input tokens', value: compactTokens(totals.input) },
     { label: 'Output tokens', value: compactTokens(totals.output) },
     { label: 'Cache read', value: compactTokens(totals.cacheRead) },
@@ -849,7 +883,13 @@ function Insights({
           <dl
             className={cn(
               'grid grid-cols-2 gap-3',
-              stats.length === 5 ? '@2xl:grid-cols-5' : '@2xl:grid-cols-4',
+              // Five across is the widest a row of these stays legible;
+              // six splits into two balanced rows of three instead.
+              stats.length === 6
+                ? '@2xl:grid-cols-3'
+                : stats.length === 5
+                  ? '@2xl:grid-cols-5'
+                  : '@2xl:grid-cols-4',
             )}
           >
             {stats.map((stat) => (

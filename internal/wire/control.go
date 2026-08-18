@@ -634,6 +634,12 @@ type AgentIndex struct {
 	// simply sends sessions alone, which is what every daemon did before
 	// the field existed.
 	History []agentstore.HistoryDay `json:"history,omitempty"`
+	// HistoryTotals is the same aggregates' lifetime per-model accounting,
+	// in the summaries' own four buckets (see agentstore.HistoryTotals).
+	// Lifetime only — it cannot be sliced by range — so a client folds it
+	// into its all-time view alone. Filtered and omitted exactly as History
+	// is, and additive on the same terms.
+	HistoryTotals []agentstore.HistoryTotals `json:"historyTotals,omitempty"`
 	// ReqID echoes the reqId of the agents this answers.
 	ReqID uint64 `json:"reqId,omitempty"`
 }

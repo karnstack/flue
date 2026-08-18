@@ -332,8 +332,16 @@ describe('AgentsRoute', () => {
     // the stat rather than the mode tab of the same name. No cost column:
     // no transcript recorded one, so the column is dropped whole.
     const labels = screen.getAllByRole('term').map((el) => el.textContent)
-    expect(labels).toEqual(['Sessions', 'Input tokens', 'Output tokens', 'Cache read'])
+    expect(labels).toEqual([
+      'Sessions',
+      'Total tokens',
+      'Input tokens',
+      'Output tokens',
+      'Cache read',
+    ])
     expect(screen.getByText('1.2K')).toBeTruthy()
+    // Total tokens is every bucket together: 1200 + 800 + 50 + 0.
+    expect(screen.getByText('2.1K')).toBeTruthy()
     expect(screen.getByText('Tokens per day')).toBeTruthy()
   })
 

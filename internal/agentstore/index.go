@@ -216,6 +216,7 @@ type Index struct {
 	histSize    int64
 	histMtimeNs int64
 	hist        []HistoryDay
+	histTotals  []HistoryTotals
 }
 
 // indexFileName is the one file this package writes.
