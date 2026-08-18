@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { AdjustmentsHorizontalIcon, MagnifyingGlassIcon } from '@heroicons/react/16/solid'
+import {
+  AdjustmentsHorizontalIcon,
+  ChevronDownIcon,
+  MagnifyingGlassIcon,
+} from '@heroicons/react/16/solid'
 
 import { Heatmap, RankChart, ToolDayChart } from '@/agents/charts'
 import {
@@ -14,6 +18,7 @@ import {
   byProject,
   compactTokens,
   DEFAULT_AGENT_VIEW,
+  dirChoices,
   filterHistory,
   filterRows,
   fmtDuration,
@@ -33,6 +38,7 @@ import {
   type AgentHitRow,
   type AgentRow,
   type AgentViewConfig,
+  type DirChoice,
   type HistoryDayRow,
   type HistoryTotalsRow,
   type InsightRange,
@@ -42,6 +48,12 @@ import { PageHeader } from '@/components/page-header'
 import { since } from '@/components/session-table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
@@ -138,6 +150,7 @@ export function AgentsRoute() {
   const [range, setRange] = useState<InsightRange>('30d')
   const [toolFilter, setToolFilter] = useState<ReadonlySet<AgentTool>>(() => new Set())
   const [machineFilter, setMachineFilter] = useState<ReadonlySet<string>>(() => new Set())
+  const [dirFilter, setDirFilter] = useState<ReadonlySet<string>>(() => new Set())
 
   const [results, setResults] = useState<SearchState | null>(null)
 
@@ -338,10 +351,15 @@ export function AgentsRoute() {
     () => ({ tools: toolFilter, machines: machineFilter }),
     [toolFilter, machineFilter],
   )
+  // The directory cut joins the list's filters and not `filters` itself: the
+  // insights take `filters` too, and the backfill they merge carries no cwd,
+  // so a directory narrowing there would cut the transcripts while the
+  // history stood whole and the two would disagree about the same days.
   const groups = useMemo(
-    () => applyAgentView(rows, view, filters, Date.now()),
-    [rows, view, filters],
+    () => applyAgentView(rows, view, { ...filters, dirs: dirFilter }, Date.now()),
+    [rows, view, filters, dirFilter],
   )
+  const dirs = useMemo(() => dirChoices(rows, dirFilter), [rows, dirFilter])
 
   const online = (machines ?? []).filter((m) => m.status === 'online')
   const unreachable = (machines ?? []).filter((m) => m.status === 'unreachable')
@@ -369,6 +387,13 @@ export function AgentsRoute() {
     setMachineFilter((prev) => {
       const next = new Set(prev)
       if (!next.delete(id)) next.add(id)
+      return next
+    })
+
+  const toggleDir = (cwd: string) =>
+    setDirFilter((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(cwd)) next.add(cwd)
       return next
     })
 
@@ -480,6 +505,15 @@ export function AgentsRoute() {
                 ))}
               </div>
             )}
+
+            {mode === 'sessions' && dirs.length > 1 && (
+              <DirFilterMenu
+                choices={dirs}
+                selected={dirFilter}
+                onToggle={toggleDir}
+                onClear={() => setDirFilter(new Set())}
+              />
+            )}
           </div>
 
           {mode === 'insights' ? (
@@ -574,6 +608,62 @@ function ModeTab({
     >
       {children}
     </Button>
+  )
+}
+
+/**
+ * The project filter: a menu rather than a chip row, because a fleet's
+ * distinct directories number in the dozens where its tools number three.
+ * Selection keys on the whole cwd, dirChoices' reason, while each entry
+ * shows the basename with the full path as its hover title. Checks toggle
+ * without closing the menu, so narrowing to two projects is two clicks
+ * rather than two open-pick-reopen rounds.
+ */
+function DirFilterMenu({
+  choices,
+  selected,
+  onToggle,
+  onClear,
+}: {
+  choices: DirChoice[]
+  selected: ReadonlySet<string>
+  onToggle(cwd: string): void
+  onClear(): void
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Badge asChild variant={selected.size > 0 ? 'secondary' : 'outline'}>
+          <button type="button" aria-label="Filter by project" className="cursor-pointer">
+            {selected.size === 0 ? 'Project' : `Project · ${selected.size}`}
+            <ChevronDownIcon aria-hidden="true" className="size-3" />
+          </button>
+        </Badge>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent aria-label="Projects" className="w-64">
+        <DropdownMenuCheckboxItem
+          checked={selected.size === 0}
+          onSelect={(event) => event.preventDefault()}
+          onCheckedChange={onClear}
+        >
+          All projects
+        </DropdownMenuCheckboxItem>
+        {choices.map((c) => (
+          <DropdownMenuCheckboxItem
+            key={c.cwd}
+            checked={selected.has(c.cwd)}
+            onSelect={(event) => event.preventDefault()}
+            onCheckedChange={() => onToggle(c.cwd)}
+            title={c.cwd}
+          >
+            <span className="min-w-0 flex-1 truncate">{c.label}</span>
+            <span className="text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
+              {c.count}
+            </span>
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
