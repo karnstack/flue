@@ -2,6 +2,7 @@ import {
   CAPS,
   decodeBinary,
   encodeBinary,
+  FRAME_FILE,
   FRAME_INPUT,
   FRAME_OUTPUT,
   PROTOCOL_VERSION,
@@ -13,6 +14,7 @@ import {
   type ClientMessage,
   type DeviceInfo,
   type ErrorMsg,
+  type FileMsg,
   type Pairing,
   type PathEntry,
   type Preview,
@@ -72,6 +74,13 @@ const PEEK_TIMEOUT_MS = 5_000
 const STAT_TIMEOUT_MS = 5_000
 
 /**
+ * How long a `read` waits for its `file` before giving up. Only the opening
+ * answer is timed: once the stream exists, its end is `eof` or the death of
+ * the socket, and `teardown` settles the latter.
+ */
+const READ_TIMEOUT_MS = 10_000
+
+/**
  * How long each agent-transcript request waits before giving up.
  *
  * They need a deadline for `peek`'s exact reason: the agent verbs are newer
@@ -118,6 +127,34 @@ const MAX_INPUT_BYTES = 1 << 19
 function dimension(n: number): number {
   if (!Number.isFinite(n)) return 1
   return Math.min(0xffff, Math.max(1, Math.round(n)))
+}
+
+/**
+ * How a read's refusal or collapse reaches its sink: one of the protocol's
+ * codes (`not_found`, `is_dir`, `too_large`, `denied`, `bad_path`, `busy`,
+ * `unsupported`), or this client's own `timeout` and `lost`.
+ */
+export interface ReadFailure {
+  code: string
+  msg: string
+}
+
+/**
+ * The consumer half of one streaming read. A sink rather than a promise
+ * because a read is not one answer: `file` names the stream, chunks paint as
+ * they arrive, and `eof` or a failure ends it. Exactly one of `eof` and
+ * `fail` is called, and never after `cancel`.
+ */
+export interface ReadSink {
+  file(meta: FileMsg): void
+  chunk(bytes: Uint8Array): void
+  eof(): void
+  fail(f: ReadFailure): void
+}
+
+/** The caller's grip on a read in flight. Idempotent; safe at every stage. */
+export interface ReadHandle {
+  cancel(): void
 }
 
 type Listener<T extends unknown[]> = (...args: T) => void
@@ -271,6 +308,30 @@ export class FlueClient {
    * deadline, or the sweep in `teardown`.
    */
   private statAsks = new Map<number, Settlers<PathEntry[]>>()
+
+  /**
+   * Read asks in flight, by reqId — the stretch before `file` names a ref.
+   * The deadline lives here so every path out of the map can disarm it.
+   */
+  private readAsks = new Map<number, { sink: ReadSink; deadline: ReturnType<typeof setTimeout> }>()
+
+  /**
+   * Live streams, by ref. A `0x02` frame or an `eof` naming a ref missing
+   * here is discarded, not protested: a cancel and a finishing read cross on
+   * the wire routinely, and refs only ever count up, so a cancelled ref never
+   * names a later read.
+   */
+  private reads = new Map<number, { sink: ReadSink; reqId: number }>()
+
+  /** Which ref answered which ask, so a handle can cancel after `file`. */
+  private readRefs = new Map<number, number>()
+
+  /**
+   * Reads let go of before their `file` arrived. The moment it lands, the
+   * stream is cancelled rather than adopted — the exact mechanism `abandoned`
+   * is for attach, named per reply for the same reason.
+   */
+  private abandonedReads = new Set<number>()
 
   /**
    * The agent-transcript requests on the wire, reqId -> whoever is waiting —
@@ -683,6 +744,58 @@ export class FlueClient {
   }
 
   /**
+   * Start reading one file, resolved against one session's live working
+   * directory. The daemon answers `file` naming a ref, streams the content as
+   * `0x02` frames under it, and ends with `eof` — or refuses with an error
+   * echoing the reqId, which arrives as `fail` with the code intact.
+   *
+   * The handle's `cancel` does the right thing at every stage: before `file`,
+   * it marks the ask abandoned and sends `cancel` the moment the ref lands;
+   * after, it sends `cancel{ref}` and goes deaf to the stream, because frames
+   * already in flight belong to the daemon's writer and cross the wire
+   * legitimately.
+   */
+  read(id: string, path: string, sink: ReadSink): ReadHandle {
+    if (!this.ready || !this.sock) {
+      // Failed on a microtask rather than synchronously, so a caller wiring
+      // its state up around this call is finished doing so when it hears.
+      queueMicrotask(() => sink.fail({ code: 'lost', msg: 'flue: not connected' }))
+      return { cancel: () => {} }
+    }
+    const reqId = this.nextReqId++
+    const deadline = setTimeout(() => {
+      if (!this.readAsks.delete(reqId)) return
+      // The daemon may still answer; a `file` past this point is cancelled
+      // rather than delivered, exactly as an explicit cancel would have it.
+      this.abandonedReads.add(reqId)
+      sink.fail({ code: 'timeout', msg: 'flue: the daemon did not answer' })
+    }, READ_TIMEOUT_MS)
+    this.readAsks.set(reqId, { sink, deadline })
+    if (!this.send({ type: 'read', id, path, reqId })) {
+      clearTimeout(deadline)
+      this.readAsks.delete(reqId)
+      queueMicrotask(() => sink.fail({ code: 'lost', msg: 'flue: not connected' }))
+      return { cancel: () => {} }
+    }
+    return { cancel: () => this.cancelRead(reqId) }
+  }
+
+  private cancelRead(reqId: number) {
+    const ask = this.readAsks.get(reqId)
+    if (ask !== undefined) {
+      clearTimeout(ask.deadline)
+      this.readAsks.delete(reqId)
+      this.abandonedReads.add(reqId)
+      return
+    }
+    const ref = this.readRefs.get(reqId)
+    if (ref === undefined) return
+    this.readRefs.delete(reqId)
+    this.reads.delete(ref)
+    this.send({ type: 'cancel', ref })
+  }
+
+  /**
    * Ask for the index of agent transcripts, optionally narrowed by tool or
    * working directory.
    *
@@ -1048,6 +1161,12 @@ export class FlueClient {
       this.reportLocal(`data frame: ${describe(err)}`)
       return
     }
+    if (frame.type === FRAME_FILE) {
+      // Routed by the frame type, never the ref, and a ref this client does
+      // not hold is a stream it cancelled: discarded without complaint.
+      this.reads.get(frame.ref)?.sink.chunk(frame.payload)
+      return
+    }
     if (frame.type !== FRAME_OUTPUT) return
 
     // Offsets are only tracked for refs this client knows, but the bytes are
@@ -1137,6 +1256,33 @@ export class FlueClient {
         break
       }
 
+      case 'file': {
+        if (msg.reqId !== undefined && this.abandonedReads.delete(msg.reqId)) {
+          // Asked for, then let go of before the answer arrived. Cancel the
+          // stream rather than adopting one nobody is behind — the same move
+          // an abandoned attach makes with detach.
+          this.send({ type: 'cancel', ref: msg.ref })
+          break
+        }
+        const ask = msg.reqId !== undefined ? this.readAsks.get(msg.reqId) : undefined
+        if (ask === undefined) break
+        clearTimeout(ask.deadline)
+        this.readAsks.delete(msg.reqId!)
+        this.readRefs.set(msg.reqId!, msg.ref)
+        this.reads.set(msg.ref, { sink: ask.sink, reqId: msg.reqId! })
+        ask.sink.file(msg)
+        break
+      }
+
+      case 'eof': {
+        const stream = this.reads.get(msg.ref)
+        if (stream === undefined) break
+        this.reads.delete(msg.ref)
+        this.readRefs.delete(stream.reqId)
+        stream.sink.eof()
+        break
+      }
+
       // The agent answers settle exactly as `preview` does: by reqId, to the
       // one asker, and an answer nobody is waiting for — the asker timed out,
       // or a daemon volunteered one — is dropped rather than raised.
@@ -1173,6 +1319,17 @@ export class FlueClient {
           if (asked !== undefined) {
             this.statAsks.delete(msg.reqId)
             asked.reject(new Error(msg.msg || msg.code))
+            this.errorListeners.emit(msg)
+            break
+          }
+          // A read's refusal, apart from `pending` for the same reason: its
+          // codes name the file, not the session, and a read made no
+          // reattach plan for the sweep below to retire.
+          const reading = this.readAsks.get(msg.reqId)
+          if (reading !== undefined) {
+            clearTimeout(reading.deadline)
+            this.readAsks.delete(msg.reqId)
+            reading.sink.fail({ code: msg.code, msg: msg.msg })
             this.errorListeners.emit(msg)
             break
           }
@@ -1322,6 +1479,21 @@ export class FlueClient {
     const unanswered = [...this.statAsks.values()]
     this.statAsks.clear()
     for (const s of unanswered) s.reject(new Error('flue: connection lost'))
+    // Reads die with their socket at both stages: the asks still waiting on a
+    // `file`, and the streams mid-flight. The daemon closes every open read
+    // when the connection drops, so nothing here owes it a cancel — and the
+    // abandoned set clears for the same reason.
+    const asking = [...this.readAsks.values()]
+    this.readAsks.clear()
+    for (const r of asking) {
+      clearTimeout(r.deadline)
+      r.sink.fail({ code: 'lost', msg: 'flue: connection lost' })
+    }
+    const streaming = [...this.reads.values()]
+    this.reads.clear()
+    this.readRefs.clear()
+    this.abandonedReads.clear()
+    for (const r of streaming) r.sink.fail({ code: 'lost', msg: 'flue: connection lost' })
     for (const waiting of [this.agentIndexAsks, this.agentPageAsks, this.agentHitsAsks] as const) {
       const asks = [...waiting.values()]
       waiting.clear()
