@@ -137,11 +137,15 @@ export interface Emulator {
   /** Change the rendered dimensions. */
   resize(cols: number, rows: number): void
   /**
-   * Scroll the viewport by whole lines; positive is toward newer output.
+   * Scroll by whole lines; positive is toward newer output.
    *
    * This exists for touch: xterm's own viewport scrolls on wheel events and
    * nothing else, so a phone gets no scrolling at all unless the view
-   * translates drags into this.
+   * translates drags into this. What a line of scroll *is* depends on the
+   * buffer, and that is the emulator's call, not the view's: over the main
+   * buffer it moves the viewport through the scrollback, and over the
+   * alternate buffer — which keeps no scrollback — it becomes the input a
+   * fullscreen TUI scrolls by, exactly as a desktop wheel would.
    */
   scrollLines(n: number): void
   /** Capture the current screen. */

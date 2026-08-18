@@ -257,7 +257,49 @@ export function createXtermEmulator(opts: XtermOptions = {}): Emulator {
     },
 
     scrollLines(n: number) {
-      term.scrollLines(n)
+      // On the main buffer the scrollback is real and moving the viewport
+      // over it is the whole job. The alternate buffer keeps none, so there
+      // the viewport has nothing to move and the drag has to become input —
+      // which is exactly what xterm already does for a desktop wheel, and
+      // what a fullscreen TUI (claude, vim, less) is listening for.
+      if (term.buffer.active.type !== 'alternate') {
+        term.scrollLines(n)
+        return
+      }
+      const lines = Math.abs(n)
+      if (disposed || lines === 0) return
+      if (term.modes.mouseTrackingMode !== 'none') {
+        // A tracking program hears wheel reports, and the encoding of a
+        // report depends on which protocol and encoding it picked. That
+        // logic already lives in xterm behind its wheel listener, so rather
+        // than fork it, hand xterm the wheel events a desktop would have:
+        // one per line, at the middle of the screen, which is near enough
+        // to where a finger dragging the content is.
+        const screen = term.element?.querySelector(SCREEN_SELECTOR)
+        if (!(screen instanceof HTMLElement)) return
+        const rect = screen.getBoundingClientRect()
+        // Each dispatch runs listeners synchronously, and a listener's data
+        // callback is app code that could tear this emulator down mid-loop.
+        for (let i = 0; i < lines && !disposed; i++) {
+          screen.dispatchEvent(
+            new WheelEvent('wheel', {
+              bubbles: true,
+              cancelable: true,
+              clientX: rect.x + rect.width / 2,
+              clientY: rect.y + rect.height / 2,
+              deltaY: n < 0 ? -1 : 1,
+              deltaMode: WheelEvent.DOM_DELTA_LINE,
+            }),
+          )
+        }
+        return
+      }
+      // No tracking: arrow keys, the translation every terminal settled on
+      // for a wheel over an alternate screen. Through term.input rather than
+      // straight down the wire so the keystrokes flow out through onData
+      // like any other. DECCKM decides the encoding, same as a real press.
+      const arrow = (term.modes.applicationCursorKeysMode ? '\x1bO' : '\x1b[') + (n < 0 ? 'A' : 'B')
+      term.input(arrow.repeat(lines), true)
     },
 
     snapshot(): Grid {
