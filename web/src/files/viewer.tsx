@@ -1,4 +1,5 @@
-import { Check, Copy, FileText, X } from 'lucide-react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { Check, Copy, FileText, WrapText, X } from 'lucide-react'
 import { Dialog } from 'radix-ui'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 
@@ -25,11 +26,9 @@ export interface FileViewerProps {
   onClose: () => void
 }
 
-/* One monospace row is exactly this tall (leading-5), which is what lets the
- * body be a window computed by arithmetic instead of a virtualization
- * library: the daemon promises monospace text and the row height is ours. */
+/** An unwrapped monospace row's height (leading-5), the size estimate the
+ * virtualizer starts from; a wrapped row measures taller and is measured. */
 const LINE_PX = 20
-const OVERSCAN = 20
 
 /** The daemon's ceiling on text; past it only the head was sent. */
 const TEXT_CAP = 8 << 20
@@ -76,6 +75,7 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
   const [phase, setPhase] = useState<Phase>({ at: 'opening' })
   const [tokens, setTokens] = useState<PeekToken[][] | null>(null)
   const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const [wrap, setWrap] = useState(true)
   const [, setPainted] = useState(0)
   const linesRef = useRef<string[]>([])
   const frame = useRef(0)
@@ -275,6 +275,18 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
                 {fmtBytes(meta.size)}
               </span>
             )}
+            {phase.at === 'text' && (
+              <Button
+                aria-label="Wrap lines"
+                aria-pressed={wrap}
+                size="icon-sm"
+                variant="ghost"
+                className={wrap ? 'bg-muted/60' : undefined}
+                onClick={() => setWrap((w) => !w)}
+              >
+                <WrapText />
+              </Button>
+            )}
             <CopyPath path={shownPath} />
             <Dialog.Close asChild>
               <Button aria-label="Close file" size="icon-sm" variant="ghost">
@@ -320,6 +332,7 @@ export function FileViewer({ sessionId, target, onClose }: FileViewerProps) {
               lines={linesRef.current}
               tokens={tokens}
               mark={target.line}
+              wrap={wrap}
             />
           )}
         </Dialog.Content>
@@ -332,61 +345,76 @@ function TextWindow({
   lines,
   tokens,
   mark,
+  wrap,
 }: {
   lines: string[]
   tokens: PeekToken[][] | null
   mark?: number
+  wrap: boolean
 }) {
   const boxRef = useRef<HTMLDivElement | null>(null)
   const jumped = useRef(false)
-  const [top, setTop] = useState(0)
-  const [tall, setTall] = useState(0)
 
-  useEffect(() => {
-    const box = boxRef.current
-    if (box === null) return
-    const measure = () => setTall(box.clientHeight)
-    measure()
-    const watcher = new ResizeObserver(measure)
-    watcher.observe(box)
-    return () => watcher.disconnect()
-  }, [])
+  // Measured rather than arithmetic, because a wrapped line is as tall as
+  // the width made it; the estimate only has to be right for the unwrapped
+  // common case and the virtualizer corrects the rest as rows mount.
+  const virtualizer = useVirtualizer({
+    count: lines.length,
+    getScrollElement: () => boxRef.current,
+    estimateSize: () => LINE_PX,
+    overscan: 24,
+    getItemKey: (index) => index,
+    // Both fallbacks are for an unlaid-out environment (jsdom): a rect so
+    // the first render windows instead of rendering nothing, and the
+    // estimate standing in for a measured height of zero, which would
+    // otherwise put every row of the file inside a zero-height viewport.
+    initialRect: { width: 800, height: 480 },
+    measureElement: (el) => {
+      const measured = el.getBoundingClientRect().height
+      return measured > 0 ? measured : LINE_PX
+    },
+  })
 
   // One jump to the named line, as soon as enough of the file has arrived.
   useEffect(() => {
-    const box = boxRef.current
-    if (box === null || mark === undefined || jumped.current || lines.length < mark) return
+    if (mark === undefined || jumped.current || lines.length < mark) return
     jumped.current = true
-    box.scrollTop = Math.max(0, (mark - 4) * LINE_PX)
-    setTop(box.scrollTop)
-  }, [lines.length, mark])
+    virtualizer.scrollToIndex(mark - 1, { align: 'center' })
+  }, [lines.length, mark, virtualizer])
 
-  const rows = Math.max(1, Math.ceil((tall > 0 ? tall : 480) / LINE_PX))
-  const first = Math.max(0, Math.floor(top / LINE_PX) - OVERSCAN)
-  const last = Math.min(lines.length, first + rows + OVERSCAN * 2)
+  // Flipping the wrap invalidates every height the virtualizer has learned.
+  useEffect(() => {
+    virtualizer.measure()
+  }, [wrap, virtualizer])
 
   return (
     <div
       ref={boxRef}
       data-file-body
       tabIndex={-1}
-      onScroll={(e) => setTop(e.currentTarget.scrollTop)}
       className="min-h-0 flex-1 overflow-auto overscroll-contain py-2 font-mono text-[12.5px] leading-5 outline-none"
     >
-      <div
-        className="w-max min-w-full"
-        style={{ paddingTop: first * LINE_PX, paddingBottom: (lines.length - last) * LINE_PX }}
-      >
-        {lines.slice(first, last).map((text, i) => {
-          const n = first + i + 1
+      <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map((item) => {
+          const n = item.index + 1
           return (
             <div
-              key={n}
+              key={item.key}
+              data-index={item.index}
+              ref={virtualizer.measureElement}
               data-file-row
               data-marked={n === mark ? 'true' : undefined}
-              className="h-5 pr-6 pl-4 whitespace-pre data-marked:bg-teal-500/15"
+              className={cn(
+                'absolute top-0 left-0 min-h-5 translate-y-(--row-y) pr-6 pl-4 data-marked:bg-teal-500/15',
+                wrap ? 'w-full break-words whitespace-pre-wrap' : 'w-max min-w-full whitespace-pre',
+              )}
+              style={{ '--row-y': `${item.start}px` } as CSSProperties}
             >
-              {tokens?.[n - 1] !== undefined ? <TokenRow row={tokens[n - 1]!} /> : text}
+              {tokens?.[item.index] !== undefined ? (
+                <TokenRow row={tokens[item.index]!} />
+              ) : (
+                lines[item.index]
+              )}
             </div>
           )
         })}

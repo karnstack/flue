@@ -7,6 +7,23 @@ import { fakeClient, type FakeSocket } from '@/testing/socket'
 import { FileViewer, type FileTarget } from './viewer'
 
 const openViewer = (target: FileTarget) => {
+  // jsdom lays nothing out, and the virtualizer windows on measured boxes —
+  // offsetWidth/offsetHeight for the scroll box, getBoundingClientRect for
+  // row measurement. Every element pretending to be 800x480 is what
+  // terminal.test.tsx's paneOf does for the same reason.
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(480)
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800)
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    width: 800,
+    height: 480,
+    top: 0,
+    left: 0,
+    right: 800,
+    bottom: 480,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  } as DOMRect)
   const onClose = vi.fn()
   const { client, last } = fakeClient()
   client.connect()
@@ -274,6 +291,21 @@ describe('FileViewer', () => {
     // Nothing was remembered, so the reopen reads again rather than stats
     // its way to a replay.
     expect(sock.control().filter((m) => m.type === 'read')).toHaveLength(2)
+  })
+
+  it('wraps long lines by default, and unwraps on the toggle', async () => {
+    const { sock, sent } = openViewer({ path: 'notes.txt' })
+    served(sock, sent!.reqId, { path: '/home/k/notes.txt' })
+    await flowed(sock, 'a very long line\nand another')
+    const row = () => document.querySelector('[data-file-row]')!
+    expect(row().className).toContain('whitespace-pre-wrap')
+    const toggle = screen.getByRole('button', { name: 'Wrap lines' })
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    await userEvent.click(toggle)
+    expect(row().className).not.toContain('whitespace-pre-wrap')
+    expect(row().className).toContain('whitespace-pre')
+    await userEvent.click(toggle)
+    expect(row().className).toContain('whitespace-pre-wrap')
   })
 
   it('offers the resolved path to the clipboard', async () => {
