@@ -38,7 +38,16 @@
  * back short is a relay having a bad minute rather than a machine leaving.
  */
 import { daemonSocketUrl, FlueClient, type ConnStatus } from '@/client/client'
-import type { ErrorMsg, Preview, SessionInfo, Welcome } from '@/client/protocol'
+import type {
+  AgentHitsMsg,
+  AgentIndexMsg,
+  AgentPageMsg,
+  AgentTool,
+  ErrorMsg,
+  Preview,
+  SessionInfo,
+  Welcome,
+} from '@/client/protocol'
 import { sameKey, verifyCert } from '@/crypto/cert'
 import {
   KEY_BYTES,
@@ -579,6 +588,49 @@ export class FleetClient {
     const client = this.clientFor(machineId)
     if (client === null) return Promise.reject(new Error('flue: no such machine'))
     return client.peek(id, bytes)
+  }
+
+  /**
+   * The agent-transcript index of one machine, and below it the page and
+   * search verbs, all routed as `peekOn` routes a preview — including the
+   * part the promise makes plain: a machine the fleet does not hold is a
+   * rejection, never a promise nothing settles. Each is asked *for* the
+   * reader, by a screen that has to decide between showing transcripts and
+   * saying why it cannot, and a silent no-op would leave it deciding neither.
+   */
+  agentsOn(
+    machineId: string,
+    opts?: { tools?: AgentTool[]; cwd?: string },
+  ): Promise<AgentIndexMsg> {
+    const client = this.clientFor(machineId)
+    if (client === null) return Promise.reject(new Error('flue: no such machine'))
+    return client.agents(opts)
+  }
+
+  /** One window of one transcript, from the machine that holds the file. */
+  agentReadOn(
+    machineId: string,
+    tool: AgentTool,
+    id: string,
+    offset: number,
+    opts?: { dir?: 'forward' | 'backward'; limit?: number },
+  ): Promise<AgentPageMsg> {
+    const client = this.clientFor(machineId)
+    if (client === null) return Promise.reject(new Error('flue: no such machine'))
+    return client.agentRead(tool, id, offset, opts)
+  }
+
+  /** Search one machine's transcripts. Fanning wider is the caller's affair:
+   *  each machine answers for its own disk, so a fleet-wide search is one of
+   *  these per machine, merged by whoever asked. */
+  agentSearchOn(
+    machineId: string,
+    query: string,
+    opts?: { tools?: AgentTool[]; cwd?: string; limit?: number },
+  ): Promise<AgentHitsMsg> {
+    const client = this.clientFor(machineId)
+    if (client === null) return Promise.reject(new Error('flue: no such machine'))
+    return client.agentSearch(query, opts)
   }
 
   /**

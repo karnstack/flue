@@ -135,6 +135,19 @@
   --color-accent-bg: var(--color-teal-500);
 
   /*
+   * The three agent tools' identity colours: the dot on a transcript row, the
+   * bands of the stacked chart, the legend chips. Identity, not accent — teal
+   * keeps its one-primary-button job — and not neutrals either, since zinc
+   * stays the only neutral in the app. Claude's is a warm clay picked to read
+   * as Anthropic's without quoting a brand token; Codex and Pi take sky and
+   * violet at the steps whose contrast survives both themes. The dark theme
+   * lightens each below, the same move --color-accent-fg makes.
+   */
+  --color-tool-claude: #c96442;
+  --color-tool-codex: var(--color-sky-600);
+  --color-tool-pi: var(--color-violet-600);
+
+  /*
    * The control type size: 13px, not the 14px a stock shadcn button carries.
    *
    * This is the single most visible number in the whole overhaul. flue's
@@ -359,6 +372,12 @@
       --flue-line: --alpha(var(--color-white) / 10%);
       --flue-muted: var(--color-zinc-400);
       --color-accent-fg: var(--color-teal-400);
+
+      /* The tool identity colours, lifted a step for the dark canvas — at
+       * their light-theme strength all three sink into near-black. */
+      --color-tool-claude: #e08962;
+      --color-tool-codex: var(--color-sky-400);
+      --color-tool-pi: var(--color-violet-400);
 
       --flue-hairline: --alpha(var(--color-white) / 6%);
       --flue-hover: --alpha(var(--color-white) / 5%);

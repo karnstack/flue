@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/karnstack/flue/internal/agentstore"
 	"github.com/karnstack/flue/internal/config"
 	"github.com/karnstack/flue/internal/crypto"
 	"github.com/karnstack/flue/internal/daemon"
@@ -286,6 +287,20 @@ func cmdServe(args []string) error {
 	// on. Nothing is asked until a tab reads the endpoint, and nothing waits
 	// on the answer; see release.go.
 	srv.SetReleaseChecker(newReleaseChecker(version))
+
+	// The agent transcript index, behind the agents/agentRead/agentSearch
+	// verbs: it reads the stores Claude Code, Codex and Pi keep under the
+	// user's home, and caches its summaries beside the snapshots in the
+	// config directory. Wired only when both directories resolve — a daemon
+	// that cannot name a home has no stores to read, and one that cannot
+	// reach its config directory has nowhere safe to cache what it learned —
+	// and skipped rather than fatal either way: the welcome simply never
+	// advertises the capability, which is the additive-feature contract.
+	if home, err := os.UserHomeDir(); err == nil {
+		if cfgDir, err := config.Dir(); err == nil {
+			srv.SetAgentIndex(agentstore.New(filepath.Join(cfgDir, "agents"), home))
+		}
+	}
 
 	// Only now, after the bind is confirmed and the runtime record is in place,
 	// so the link is never printed for a daemon that turned out not to be

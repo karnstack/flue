@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/karnstack/flue/internal/agentstore"
 	"github.com/karnstack/flue/internal/session"
 )
 
@@ -309,6 +310,49 @@ type PairStart struct{}
 // PairCancel leaves pairing mode, invalidating any outstanding token.
 type PairCancel struct{}
 
+// Agents asks for the machine's agent transcript sessions — the
+// conversations Claude Code, Codex and Pi keep on disk — and is answered by
+// agentIndex. Tools and Cwd are filters: a list screen scoped to one tool or
+// one project sends them, and an empty filter means everything.
+type Agents struct {
+	Tools []string `json:"tools,omitempty"`
+	Cwd   string   `json:"cwd,omitempty"`
+	// ReqID correlates this request with the agentIndex or error answering it.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// AgentRead asks for one page of one transcript, addressed by (tool, id)
+// rather than by path: the daemon's index is the only thing that knows where
+// a session lives, and a path on the wire would be an invitation to name one.
+// Answered by agentPage.
+//
+// Offset is a byte offset into the transcript file — 0, a fileSize, or a
+// start or next a previous page reported. Dir is "forward" or "backward",
+// forward when absent; backward is how "load earlier" and "jump to the end"
+// (offset = fileSize) both work. Limit caps the page's messages, clamped to
+// the daemon's ceiling rather than refused, the way peek's bytes is.
+type AgentRead struct {
+	Tool   string `json:"tool"`
+	ID     string `json:"id"`
+	Offset int64  `json:"offset"`
+	Dir    string `json:"dir,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+	// ReqID correlates this request with the agentPage or error answering it.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// AgentSearch asks for the messages matching a query, case-insensitive,
+// newest sessions first. Tools and Cwd filter as on Agents; Limit caps the
+// hits. Answered by agentHits.
+type AgentSearch struct {
+	Query string   `json:"query"`
+	Tools []string `json:"tools,omitempty"`
+	Cwd   string   `json:"cwd,omitempty"`
+	Limit int      `json:"limit,omitempty"`
+	// ReqID correlates this request with the agentHits or error answering it.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
 // Server -> client control messages.
 
 type Welcome struct {
@@ -574,6 +618,82 @@ type Revoked struct {
 	Reason string `json:"reason"`
 }
 
+// AgentIndex answers agents. Building says an index sweep is still running,
+// so the list is what the daemon knows so far and asking again will know
+// more — the client's cue to re-poll rather than to conclude the machine has
+// no sessions.
+type AgentIndex struct {
+	Building bool                 `json:"building"`
+	Sessions []agentstore.Summary `json:"sessions"`
+	// ReqID echoes the reqId of the agents this answers.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// MarshalJSON writes an empty list as [] rather than null, for the reason
+// Sessions does: "no transcripts on this machine" is reached by building the
+// zero value, the field is not optional, and the client declares it an array.
+func (a AgentIndex) MarshalJSON() ([]byte, error) {
+	// The alias sheds this method, so json.Marshal below does not recurse.
+	type alias AgentIndex
+	if a.Sessions == nil {
+		a.Sessions = []agentstore.Summary{}
+	}
+	return json.Marshal(alias(a))
+}
+
+// AgentPage answers agentRead: a window of messages and where the window
+// sits. Start is the offset of the first returned message's line; Next is
+// where a forward parse would continue; Eof says the parse reached the end
+// of the file as it stood — not that the transcript is finished, since the
+// session may still be running and appending. FileSize is the size at read
+// time, which is also the offset that jumps a backward read to the end.
+type AgentPage struct {
+	Tool     string               `json:"tool"`
+	ID       string               `json:"id"`
+	Messages []agentstore.Message `json:"messages"`
+	Start    int64                `json:"start"`
+	Next     int64                `json:"next"`
+	Eof      bool                 `json:"eof"`
+	FileSize int64                `json:"fileSize"`
+	// ReqID echoes the reqId of the agentRead this answers.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// MarshalJSON writes an empty page as [] rather than null — an empty
+// transcript is reached by the ordinary path, and the client maps over the
+// list.
+func (a AgentPage) MarshalJSON() ([]byte, error) {
+	// The alias sheds this method, so json.Marshal below does not recurse.
+	type alias AgentPage
+	if a.Messages == nil {
+		a.Messages = []agentstore.Message{}
+	}
+	return json.Marshal(alias(a))
+}
+
+// AgentHits answers agentSearch. Truncated says the answer is a prefix — the
+// hit cap or the scan budget was reached with sessions unread — and Building
+// says what it says on AgentIndex: a sweep is running, and asking again may
+// find more.
+type AgentHits struct {
+	Building  bool             `json:"building"`
+	Truncated bool             `json:"truncated"`
+	Hits      []agentstore.Hit `json:"hits"`
+	// ReqID echoes the reqId of the agentSearch this answers.
+	ReqID uint64 `json:"reqId,omitempty"`
+}
+
+// MarshalJSON writes an empty list as [] rather than null; "nothing matched"
+// is the ordinary answer to a search, and it is reached by the zero value.
+func (a AgentHits) MarshalJSON() ([]byte, error) {
+	// The alias sheds this method, so json.Marshal below does not recurse.
+	type alias AgentHits
+	if a.Hits == nil {
+		a.Hits = []agentstore.Hit{}
+	}
+	return json.Marshal(alias(a))
+}
+
 // typeName maps a message value to its wire discriminator.
 func typeName(msg any) (string, bool) {
 	switch msg.(type) {
@@ -619,6 +739,12 @@ func typeName(msg any) (string, bool) {
 		return "pairStart", true
 	case PairCancel:
 		return "pairCancel", true
+	case Agents:
+		return "agents", true
+	case AgentRead:
+		return "agentRead", true
+	case AgentSearch:
+		return "agentSearch", true
 	case Welcome:
 		return "welcome", true
 	case Sessions:
@@ -639,6 +765,12 @@ func typeName(msg any) (string, bool) {
 		return "revoked", true
 	case RelayState:
 		return "relay", true
+	case AgentIndex:
+		return "agentIndex", true
+	case AgentPage:
+		return "agentPage", true
+	case AgentHits:
+		return "agentHits", true
 	}
 	return "", false
 }
@@ -723,6 +855,12 @@ func DecodeControl(b []byte) (any, error) {
 			return *t, nil
 		case *PairCancel:
 			return *t, nil
+		case *Agents:
+			return *t, nil
+		case *AgentRead:
+			return *t, nil
+		case *AgentSearch:
+			return *t, nil
 		case *Welcome:
 			return *t, nil
 		case *Sessions:
@@ -742,6 +880,12 @@ func DecodeControl(b []byte) (any, error) {
 		case *Revoked:
 			return *t, nil
 		case *RelayState:
+			return *t, nil
+		case *AgentIndex:
+			return *t, nil
+		case *AgentPage:
+			return *t, nil
+		case *AgentHits:
 			return *t, nil
 		}
 		return nil, fmt.Errorf("wire: unhandled message %T", v)
@@ -810,6 +954,18 @@ func DecodeControl(b []byte) (any, error) {
 		return deref(into(&Revoked{}))
 	case "relay":
 		return deref(into(&RelayState{}))
+	case "agents":
+		return deref(into(&Agents{}))
+	case "agentRead":
+		return deref(into(&AgentRead{}))
+	case "agentSearch":
+		return deref(into(&AgentSearch{}))
+	case "agentIndex":
+		return deref(into(&AgentIndex{}))
+	case "agentPage":
+		return deref(into(&AgentPage{}))
+	case "agentHits":
+		return deref(into(&AgentHits{}))
 	}
 	return nil, fmt.Errorf("wire: unknown control message type %q", probe.Type)
 }

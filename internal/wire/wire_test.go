@@ -659,6 +659,37 @@ func TestFileAndReadRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAgentRepliesEncodeEmptyListsAsArrays holds the agent replies to the
+// invariant Sessions, DeviceList and Stats keep: a zero-value reply ships []
+// and never null. The golden cases pin the spelling of populated and empty
+// messages alike, but a fixture pins what is written down, not what a caller
+// may build — and "no transcripts", "an empty page" and "nothing matched" are
+// all reached by building the zero value, which is the one path that would
+// ship null.
+func TestAgentRepliesEncodeEmptyListsAsArrays(t *testing.T) {
+	cases := []struct {
+		msg   any
+		field string
+	}{
+		{AgentIndex{ReqID: 1}, "sessions"},
+		{AgentPage{Tool: "claude", ID: "s1", ReqID: 2}, "messages"},
+		{AgentHits{ReqID: 3}, "hits"},
+	}
+	for _, c := range cases {
+		b, err := EncodeControl(c.msg)
+		if err != nil {
+			t.Fatalf("EncodeControl(%T): %v", c.msg, err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(b, &fields); err != nil {
+			t.Fatalf("Unmarshal(%T): %v", c.msg, err)
+		}
+		if string(fields[c.field]) != "[]" {
+			t.Errorf("%T.%s = %s, want []", c.msg, c.field, fields[c.field])
+		}
+	}
+}
+
 // deepEqual recursively compares two any values for equality, handling
 // nested maps and slices. Used by TestGoldenControlMessages to verify
 // round-trip fidelity while tolerating type differences between JSON

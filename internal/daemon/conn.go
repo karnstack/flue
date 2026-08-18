@@ -71,6 +71,12 @@ const (
 // client whether the affordances are worth drawing.
 const capMultiplex = "multiplex"
 
+// capAgents says this daemon answers the agent transcript verbs — agents,
+// agentRead, agentSearch. Advertised only when a transcript index is actually
+// wired (SetAgentIndex), so a client gates the whole screen on it rather than
+// discovering the absence one bad_message at a time.
+const capAgents = "agents"
+
 var (
 	errConnClosed     = errors.New("daemon: connection closed")
 	errConnBacklogged = errors.New("daemon: client is not draining its socket")
@@ -246,6 +252,13 @@ type conn struct {
 	// rather than a subscription, and nothing that walks attachments should
 	// find one.
 	reads map[uint32]*fileRead
+
+	// agentWork counts the agent transcript verbs this connection has in
+	// flight — the goroutines handleAgentRead and handleAgentSearch spawn. A
+	// counter rather than a table like reads, because there is nothing to
+	// cancel by name: each goroutine replies once and ends. The cap it
+	// enforces is maxAgentWork; see the comment there.
+	agentWork int
 
 	// pumps counts the file pumps still running. closeAll waits on it, so no
 	// goroutine holding a file descriptor outlives serve.
@@ -448,16 +461,24 @@ func (c *conn) serve() {
 		c.closeAll()
 	}()
 
+	// What this daemon can do beyond the base protocol, for a client to
+	// feature-detect on. "multiplex" says spawn accepts group and ephemeral,
+	// and update accepts ephemeral: a client talking to a daemon that does
+	// not say it hides the split and scratch affordances rather than spawning
+	// sessions whose extra fields silently dropped. "agents" says the
+	// transcript verbs are live, and it is conditional where multiplex is
+	// not: the verbs exist only when an index was wired, and a cap that named
+	// an absent feature would have the client draw a screen whose every
+	// request bounces.
+	caps := []string{capMultiplex}
+	if c.srv.agentIndex() != nil {
+		caps = append(caps, capAgents)
+	}
 	_ = c.sendControl(wire.Welcome{
 		DaemonID: "local",
 		Host:     c.srv.hostname,
 		Ver:      c.srv.version,
-		// What this daemon can do beyond the base protocol, for a client to
-		// feature-detect on. "multiplex" says spawn accepts group and
-		// ephemeral, and update accepts ephemeral: a client talking to a
-		// daemon that does not say it hides the split and scratch affordances
-		// rather than spawning sessions whose extra fields silently dropped.
-		Caps: []string{capMultiplex},
+		Caps:     caps,
 		// Read here, once, at the moment this connection opens. The status is
 		// not a stream — nothing pushes an update when the relay reconnects —
 		// so what a client holds is what was true when it arrived, which is
@@ -789,6 +810,15 @@ func (c *conn) handleControl(msg any) {
 			return
 		}
 		_ = a.s.Close()
+
+	case wire.Agents:
+		c.handleAgents(m)
+
+	case wire.AgentRead:
+		c.handleAgentRead(m)
+
+	case wire.AgentSearch:
+		c.handleAgentSearch(m)
 
 	case wire.Devices:
 		list, err := c.srv.deviceList()

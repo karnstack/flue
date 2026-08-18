@@ -10,6 +10,12 @@ import {
   FRAME_INPUT,
   FRAME_OUTPUT,
   PROTOCOL_VERSION,
+  type AgentHitsMsg,
+  type AgentIndexMsg,
+  type AgentPageMsg,
+  type AgentReadMsg,
+  type AgentSearchMsg,
+  type AgentsMsg,
   type AttachMsg,
   type Attached,
   type CancelMsg,
@@ -266,6 +272,16 @@ describe('control message golden file', () => {
       'fileImage',
       'eof',
       'cancel',
+      'agents',
+      'agentsFiltered',
+      'agentIndex',
+      'agentIndexEmpty',
+      'agentRead',
+      'agentPage',
+      'agentPageEmpty',
+      'agentSearch',
+      'agentHits',
+      'agentHitsEmpty',
     ])
   })
 
@@ -783,6 +799,173 @@ describe('control message golden file', () => {
 
     const stop: CancelMsg = { type: 'cancel', ref: 4 }
     expect(fixture('cancel')).toStrictEqual(stop)
+  })
+
+  it('decodes agents, bare and filtered', () => {
+    // Absent filters mean "everything", so they have to stay off the wire
+    // rather than be filled in as [] — an empty tools list would be a request
+    // for no tool's transcripts at all.
+    const bare: AgentsMsg = { type: 'agents', reqId: 16 }
+    expect(fixture('agents')).toStrictEqual(bare)
+
+    const filtered: AgentsMsg = {
+      type: 'agents',
+      tools: ['claude', 'pi'],
+      cwd: '/home/karn/code/flue',
+      reqId: 17,
+    }
+    expect(fixture('agentsFiltered')).toStrictEqual(filtered)
+  })
+
+  it('decodes an agentIndex, including every field of a summary', () => {
+    // `costUsd` is deliberately absent: it is omitempty on the Go side and
+    // only a Pi transcript records cost, so the interface must declare it
+    // optional rather than required.
+    const want: AgentIndexMsg = {
+      type: 'agentIndex',
+      building: true,
+      sessions: [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          tool: 'claude',
+          cwd: '/home/karn/code/flue',
+          title: 'Fix flaky nginx test',
+          firstPrompt: 'fix the flaky nginx config test',
+          startedAt: '2026-08-10T09:00:02Z',
+          endedAt: '2026-08-10T09:00:20Z',
+          messageCount: 6,
+          toolCallCount: 1,
+          models: ['claude-fable-5'],
+          tokens: { input: 42, output: 65, cacheRead: 3600, cacheWrite: 600 },
+          fileSize: 8123,
+          resume: {
+            cmd: ['claude', '--resume', '11111111-1111-4111-8111-111111111111'],
+            cwd: '/home/karn/code/flue',
+          },
+        },
+      ],
+      reqId: 16,
+    }
+    expect(fixture('agentIndex')).toStrictEqual(want)
+  })
+
+  it('decodes an empty agentIndex as [], not null', () => {
+    // A machine with no transcripts is the ordinary first answer, and every
+    // consumer maps over the field; the daemon's MarshalJSON alias is what
+    // keeps a nil slice from arriving as null.
+    const want: AgentIndexMsg = { type: 'agentIndex', building: false, sessions: [], reqId: 17 }
+    expect(fixture('agentIndexEmpty')).toStrictEqual(want)
+  })
+
+  it('decodes an agentRead', () => {
+    const want: AgentReadMsg = {
+      type: 'agentRead',
+      tool: 'claude',
+      id: '11111111-1111-4111-8111-111111111111',
+      offset: 4096,
+      dir: 'backward',
+      limit: 100,
+      reqId: 18,
+    }
+    expect(fixture('agentRead')).toStrictEqual(want)
+  })
+
+  it('decodes an agentPage, including every field of a message', () => {
+    // The first message carries only the required fields, the second all six
+    // optional ones — the same both-directions pinning the sessions fixture
+    // does, so an omitempty lost on either side fails here.
+    const want: AgentPageMsg = {
+      type: 'agentPage',
+      tool: 'claude',
+      id: '11111111-1111-4111-8111-111111111111',
+      messages: [
+        {
+          role: 'user',
+          kind: 'text',
+          ts: '2026-08-10T09:00:02Z',
+          text: 'fix the flaky nginx config test',
+          offset: 1024,
+        },
+        {
+          role: 'assistant',
+          kind: 'tool_call',
+          ts: '2026-08-10T09:00:07Z',
+          model: 'claude-fable-5',
+          text: '{"command":"grep -n timeout nginx.test.ts"}',
+          toolName: 'Bash',
+          sidechain: true,
+          truncated: true,
+          offset: 2048,
+        },
+      ],
+      start: 1024,
+      next: 4096,
+      eof: false,
+      fileSize: 8123,
+      reqId: 18,
+    }
+    expect(fixture('agentPage')).toStrictEqual(want)
+  })
+
+  it('decodes an empty agentPage as [], not null', () => {
+    const want: AgentPageMsg = {
+      type: 'agentPage',
+      tool: 'pi',
+      id: '33333333-3333-4333-8333-333333333333',
+      messages: [],
+      start: 0,
+      next: 0,
+      eof: true,
+      fileSize: 0,
+      reqId: 19,
+    }
+    expect(fixture('agentPageEmpty')).toStrictEqual(want)
+  })
+
+  it('decodes an agentSearch', () => {
+    const want: AgentSearchMsg = {
+      type: 'agentSearch',
+      query: 'nginx config',
+      tools: ['claude'],
+      cwd: '/home/karn/code/flue',
+      limit: 50,
+      reqId: 20,
+    }
+    expect(fixture('agentSearch')).toStrictEqual(want)
+  })
+
+  it('decodes agentHits, and an empty one as [], not null', () => {
+    const want: AgentHitsMsg = {
+      type: 'agentHits',
+      building: false,
+      truncated: true,
+      hits: [
+        {
+          tool: 'claude',
+          id: '11111111-1111-4111-8111-111111111111',
+          cwd: '/home/karn/code/flue',
+          title: 'Fix flaky nginx test',
+          ts: '2026-08-10T09:00:02Z',
+          role: 'user',
+          snippet: 'fix the flaky nginx config test',
+          offset: 1024,
+        },
+      ],
+      reqId: 20,
+    }
+    expect(fixture('agentHits')).toStrictEqual(want)
+
+    // No matches is the ordinary answer to most queries, and `building: true`
+    // rides it here on purpose: an empty answer during a sweep is "nothing
+    // yet", not "nothing", and the pair must survive decoding together.
+    const empty: AgentHitsMsg = {
+      type: 'agentHits',
+      building: true,
+      truncated: false,
+      hits: [],
+      reqId: 21,
+    }
+    expect(fixture('agentHitsEmpty')).toStrictEqual(empty)
   })
 })
 
@@ -2817,6 +3000,247 @@ describe('FlueClient peek', () => {
     expect(() =>
       sock.emitControl({ type: 'preview', id: 's1', data: '', cols: 80, rows: 24, reqId: 999 }),
     ).not.toThrow()
+    expect(c.status).toBe('open')
+  })
+})
+
+describe('FlueClient agent transcripts', () => {
+  /** A complete empty page, so a case only names the fields it is about. */
+  const page = (over: Partial<AgentPageMsg>): AgentPageMsg => ({
+    type: 'agentPage',
+    tool: 'claude',
+    id: 'a1',
+    messages: [],
+    start: 0,
+    next: 0,
+    eof: true,
+    fileSize: 0,
+    reqId: 1,
+    ...over,
+  })
+
+  it('resolves agents with the index that echoes its reqId', async () => {
+    const { c, sock } = connected()
+
+    const answer = c.agents({ tools: ['claude', 'pi'], cwd: '/home/karn/code/flue' })
+    expect(sock.sentControl().filter((m) => m.type === 'agents')).toStrictEqual([
+      { type: 'agents', tools: ['claude', 'pi'], cwd: '/home/karn/code/flue', reqId: 1 },
+    ])
+
+    const index: AgentIndexMsg = { type: 'agentIndex', building: false, sessions: [], reqId: 1 }
+    sock.emitControl(index)
+
+    // The whole message, not a projection: `building` is what tells a screen
+    // to ask again, and a client that peeled fields off would drop it.
+    await expect(answer).resolves.toStrictEqual(index)
+  })
+
+  it('keeps unnamed filters off the wire rather than filling them in', async () => {
+    // Absent means "everything"; `tools: []` would ask for no tool's
+    // transcripts at all — the same absent-versus-empty line update walks.
+    const { c, sock } = connected()
+    const answer = c.agents()
+    expect(sock.sentControl().filter((m) => m.type === 'agents')).toStrictEqual([
+      { type: 'agents', reqId: 1 },
+    ])
+    sock.emitControl({ type: 'agentIndex', building: false, sessions: [], reqId: 1 })
+    await answer
+  })
+
+  it('resolves agentRead with the page that echoes its reqId', async () => {
+    const { c, sock } = connected()
+
+    const answer = c.agentRead('claude', 'a1', 4096, { dir: 'backward', limit: 100 })
+    expect(sock.sentControl().filter((m) => m.type === 'agentRead')).toStrictEqual([
+      { type: 'agentRead', tool: 'claude', id: 'a1', offset: 4096, dir: 'backward', limit: 100, reqId: 1 },
+    ])
+
+    const answered = page({ start: 2048, next: 4096, fileSize: 4096 })
+    sock.emitControl(answered)
+    await expect(answer).resolves.toStrictEqual(answered)
+  })
+
+  it('reads forward by default, with dir and limit off the wire', async () => {
+    // Absent is "the daemon's defaults", exactly as peek's absent `bytes` is.
+    const { c, sock } = connected()
+    const answer = c.agentRead('codex', 'r1', 0)
+    expect(sock.sentControl().filter((m) => m.type === 'agentRead')).toStrictEqual([
+      { type: 'agentRead', tool: 'codex', id: 'r1', offset: 0, reqId: 1 },
+    ])
+    sock.emitControl(page({ tool: 'codex', id: 'r1' }))
+    await answer
+  })
+
+  it('resolves agentSearch with the hits that echo its reqId', async () => {
+    const { c, sock } = connected()
+
+    const answer = c.agentSearch('nginx config', { tools: ['claude'], limit: 50 })
+    expect(sock.sentControl().filter((m) => m.type === 'agentSearch')).toStrictEqual([
+      { type: 'agentSearch', query: 'nginx config', tools: ['claude'], limit: 50, reqId: 1 },
+    ])
+
+    const hits: AgentHitsMsg = { type: 'agentHits', building: true, truncated: false, hits: [], reqId: 1 }
+    sock.emitControl(hits)
+    await expect(answer).resolves.toStrictEqual(hits)
+  })
+
+  it('hands each concurrent ask its own answer, in whatever order they return', async () => {
+    // Three verbs in flight at once is the transcripts screen's ordinary
+    // state — the list, a page, a search — and the daemon may answer in any
+    // order. Each answer must find its own asker and only its own.
+    const { c, sock } = connected()
+
+    const index = c.agents() // reqId 1
+    const read = c.agentRead('pi', 'p1', 0) // reqId 2
+    const search = c.agentSearch('nginx') // reqId 3
+
+    sock.emitControl({ type: 'agentHits', building: false, truncated: false, hits: [], reqId: 3 })
+    sock.emitControl(page({ tool: 'pi', id: 'p1', reqId: 2 }))
+    sock.emitControl({ type: 'agentIndex', building: false, sessions: [], reqId: 1 })
+
+    await expect(index).resolves.toMatchObject({ type: 'agentIndex', reqId: 1 })
+    await expect(read).resolves.toMatchObject({ type: 'agentPage', reqId: 2 })
+    await expect(search).resolves.toMatchObject({ type: 'agentHits', reqId: 3 })
+  })
+
+  it('rejects when the daemon refuses the request', async () => {
+    const { c, sock } = connected()
+
+    const answer = c.agentRead('claude', 'gone', 0) // reqId 1
+    sock.emitControl({ type: 'error', code: 'not_found', msg: 'no such transcript', reqId: 1 })
+
+    await expect(answer).rejects.toThrow('no such transcript')
+  })
+
+  it('leaves attach bookkeeping alone when an agent ask is refused', async () => {
+    // `not_found` answers an attach and an agent ask alike, and only the
+    // attach's version means "stop asking for this session". The agent ask's
+    // refusal must settle its own promise and touch nothing else: the gone
+    // announcement stays quiet, and the attach in flight is answered normally
+    // afterwards.
+    const { c, sock } = connected()
+    const gone = vi.fn()
+    c.onSessionGone(gone)
+    const refs: number[] = []
+    c.onAttached((a) => refs.push(a.ref))
+
+    c.attach('s1', 0) // reqId 1
+    const answer = c.agents() // reqId 2
+    sock.emitControl({ type: 'error', code: 'not_found', msg: 'no agent index', reqId: 2 })
+    await expect(answer).rejects.toThrow('no agent index')
+
+    expect(gone).not.toHaveBeenCalled()
+    sock.emitControl({
+      type: 'attached',
+      ref: 1,
+      id: 's1',
+      cols: 80,
+      rows: 24,
+      title: '',
+      seq: 0,
+      head: 0,
+      truncated: false,
+      primary: true,
+      reqId: 1,
+    })
+    expect(refs).toEqual([1])
+  })
+
+  it('still surfaces the refusal through onError', () => {
+    // The promise is the asker's channel; onError is everyone else's. A
+    // correlated refusal reaches both, as a peek's does.
+    const { c, sock } = connected()
+    const errs: string[] = []
+    c.onError((e) => errs.push(e.code))
+
+    const answer = c.agentSearch('q') // reqId 1
+    answer.catch(() => {})
+    sock.emitControl({ type: 'error', code: 'bad_message', msg: 'bad query', reqId: 1 })
+
+    expect(errs).toEqual(['bad_message'])
+  })
+
+  it('rejects rather than holding while the socket is down', async () => {
+    // Dropped for peek's reason: all three answer somebody looking at a
+    // screen right now, and an answer from behind a ten-second backoff
+    // reaches a screen that has moved on.
+    const h = harness()
+    h.c.connect()
+
+    await expect(h.c.agents()).rejects.toThrow(/not connected/)
+    await expect(h.c.agentRead('claude', 'a1', 0)).rejects.toThrow(/not connected/)
+    await expect(h.c.agentSearch('q')).rejects.toThrow(/not connected/)
+  })
+
+  it('rejects whatever was on the wire when the connection goes', async () => {
+    const { c, sock } = connected()
+    const index = c.agents()
+    const read = c.agentRead('pi', 'p1', 0)
+    const search = c.agentSearch('nginx')
+
+    sock.onclose?.()
+
+    await expect(index).rejects.toThrow(/connection lost/)
+    await expect(read).rejects.toThrow(/connection lost/)
+    await expect(search).rejects.toThrow(/connection lost/)
+  })
+
+  it("gives up on a silent daemon at each verb's own deadline", async () => {
+    // The deadlines exist for peek's reason: a daemon older than these verbs
+    // answers each with an uncorrelated bad_message that reaches no asker.
+    // Three deadlines rather than one because the work behind them differs —
+    // an in-memory index, one file's window, a bounded scan of many files —
+    // and this pins each constant, not merely that a timer exists.
+    vi.useFakeTimers()
+    const { c } = connected()
+
+    const settled: string[] = []
+    c.agents().catch(() => settled.push('agents'))
+    c.agentRead('claude', 'a1', 0).catch(() => settled.push('agentRead'))
+    c.agentSearch('q').catch(() => settled.push('agentSearch'))
+
+    await vi.advanceTimersByTimeAsync(9_999)
+    expect(settled).toEqual([])
+    await vi.advanceTimersByTimeAsync(1) // 10s
+    expect(settled).toEqual(['agents'])
+    await vi.advanceTimersByTimeAsync(5_000) // 15s
+    expect(settled).toEqual(['agents', 'agentRead'])
+    await vi.advanceTimersByTimeAsync(5_000) // 20s
+    expect(settled).toEqual(['agents', 'agentRead', 'agentSearch'])
+  })
+
+  it('leaves an ask pending when a response names a different reqId', async () => {
+    vi.useFakeTimers()
+    const { c, sock } = connected()
+
+    let state = 'pending'
+    const answer = c.agents() // reqId 1
+    answer.then(
+      () => (state = 'resolved'),
+      () => (state = 'rejected'),
+    )
+
+    sock.emitControl({ type: 'agentIndex', building: false, sessions: [], reqId: 999 })
+    // And a right-reqId answer of the wrong kind settles nothing either: the
+    // map per response type is what keeps each promise's answer its own.
+    sock.emitControl(page({ reqId: 1 }))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(state).toBe('pending')
+
+    sock.emitControl({ type: 'agentIndex', building: false, sessions: [], reqId: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(state).toBe('resolved')
+  })
+
+  it('ignores an agent answer nobody is waiting for', () => {
+    // An asker that timed out, or a daemon volunteering: neither may throw on
+    // the receive path, which serves every other message too.
+    const { c, sock } = connected()
+    expect(() => {
+      sock.emitControl({ type: 'agentIndex', building: false, sessions: [], reqId: 7 })
+      sock.emitControl(page({ reqId: 7 }))
+      sock.emitControl({ type: 'agentHits', building: false, truncated: false, hits: [], reqId: 7 })
+    }).not.toThrow()
     expect(c.status).toBe('open')
   })
 })

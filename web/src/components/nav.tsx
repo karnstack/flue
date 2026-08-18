@@ -4,10 +4,16 @@ import {
   CommandLineIcon,
   DevicePhoneMobileIcon,
   GlobeAltIcon,
+  SparklesIcon,
 } from '@heroicons/react/16/solid'
 
 export const NAV_ITEMS = [
   { to: '/sessions', label: 'Sessions', icon: CommandLineIcon },
+  // Beneath Sessions because it answers the same question one step removed:
+  // Sessions is what the machines are doing now, Agents is what the agent
+  // CLIs did on them. Always listed — a fleet without the capability learns
+  // why on the screen itself, not from a menu entry that comes and goes.
+  { to: '/agents', label: 'Agents', icon: SparklesIcon },
   { to: '/devices', label: 'Devices', icon: DevicePhoneMobileIcon },
   // Beneath Devices because it is the answer to the question Devices raises:
   // pairing is gated shut until this machine has an address a second device

@@ -352,6 +352,72 @@ export interface PairCancelMsg {
   type: 'pairCancel'
 }
 
+/**
+ * Which agent CLI wrote a transcript — the three stores the daemon indexes.
+ * A name rather than a path, because paths never cross this wire: the daemon
+ * resolves each tool's own directory layout and hands back ids.
+ */
+export type AgentTool = 'claude' | 'codex' | 'pi'
+
+/**
+ * Ask for the daemon's index of agent transcripts. Answered by `agentIndex`
+ * echoing `reqId`, which is required rather than optional here: this request
+ * answers a promise with exactly one asker, so a copy with no reqId would be
+ * an answer with no one to give it to. The two filters narrow rather than
+ * page — the index is summaries only, small enough to send whole.
+ */
+export interface AgentsMsg {
+  type: 'agents'
+  /** Only these tools' transcripts. Absent means all of them. */
+  tools?: AgentTool[]
+  /** Only sessions recorded under this working directory. Absent means all. */
+  cwd?: string
+  reqId: number
+}
+
+/**
+ * Read one window of a transcript, addressed by tool and id the way the index
+ * reported them. Answered by `agentPage` echoing `reqId`, or by
+ * `error{not_found}` for a file that has vanished since the index saw it.
+ *
+ * `offset` is a byte offset into the transcript file, not a message count —
+ * it is what `agentPage.next` and `agentPage.start` hand back, so paging is
+ * offset-in, offset-out and never drifts when the file grows. An offset that
+ * lands mid-line is aligned to the next newline by the daemon rather than
+ * refused, which is what makes `fileSize` a valid place to start reading
+ * backward from.
+ */
+export interface AgentReadMsg {
+  type: 'agentRead'
+  tool: AgentTool
+  id: string
+  offset: number
+  /**
+   * Which way to parse from `offset`. Absent means forward. Backward reads
+   * the window that *ends* at `offset` — the "load earlier" gesture, and,
+   * aimed at `fileSize`, the jump straight to a transcript's end.
+   */
+  dir?: 'forward' | 'backward'
+  /** The most messages wanted back. Absent means the daemon's default. */
+  limit?: number
+  reqId: number
+}
+
+/**
+ * Search every indexed transcript for a substring, case-insensitively.
+ * Answered by `agentHits` echoing `reqId`. The filters are `agents`'s two,
+ * for the same narrowing; `limit` caps the hits, absent meaning the daemon's
+ * default, and the daemon bounds its own scan besides — see `agentHits`.
+ */
+export interface AgentSearchMsg {
+  type: 'agentSearch'
+  query: string
+  tools?: AgentTool[]
+  cwd?: string
+  limit?: number
+  reqId: number
+}
+
 export type ClientMessage =
   | HelloMsg
   | ListMsg
@@ -370,6 +436,9 @@ export type ClientMessage =
   | RevokeMsg
   | PairStartMsg
   | PairCancelMsg
+  | AgentsMsg
+  | AgentReadMsg
+  | AgentSearchMsg
 
 // Server -> client.
 
@@ -640,6 +709,153 @@ export interface Revoked {
   reason: string
 }
 
+/**
+ * Token counts summed over one transcript, in the four buckets every tool's
+ * accounting reduces to. Whole rather than optional field by field: a tool
+ * that reports no usage sums to zeros, so no consumer guards a bucket.
+ */
+export interface AgentTokenUsage {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+/**
+ * One transcript as the daemon's index summarises it — everything a list row
+ * needs without opening the file. Derived entirely from what the tool wrote
+ * to disk; nothing here was ever this daemon's own session.
+ */
+export interface AgentSummary {
+  /** The tool's own id for the session — a filename or a recorded field. */
+  id: string
+  tool: AgentTool
+  /** The directory the agent was working in, which is how sessions group. */
+  cwd: string
+  /**
+   * The best name the transcript offers — a title the user or the tool set.
+   * Absent when it offers none; `firstPrompt` is the fallback a row shows.
+   */
+  title?: string
+  /** The first thing the user asked, when a transcript records one. */
+  firstPrompt?: string
+  /** RFC 3339, the first and last message timestamps. */
+  startedAt: string
+  endedAt: string
+  messageCount: number
+  toolCallCount: number
+  /** Every model the session touched. Empty, never absent. */
+  models: string[]
+  tokens: AgentTokenUsage
+  /** Absent unless the transcript records cost itself — Pi's do. */
+  costUsd?: number
+  /** Bytes on disk — what `agentRead` offsets are measured against. */
+  fileSize: number
+  /**
+   * The command that picks this conversation back up in its own tool, and
+   * the directory to run it in. Absent when the cwd is unknown, because a
+   * resume launched from the wrong directory is worse than none.
+   */
+  resume?: { cmd: string[]; cwd: string }
+}
+
+/**
+ * One message of a transcript, normalised across the three tools' formats.
+ * `text` carries whatever the kind implies: prose, thinking, a tool call's
+ * input JSON, or a tool result's body.
+ */
+export interface AgentMessage {
+  role: 'user' | 'assistant' | 'system'
+  kind: 'text' | 'thinking' | 'tool_call' | 'tool_result'
+  /** RFC 3339. Absent when the source line carries no timestamp. */
+  ts?: string
+  /** Absent except on assistant messages whose line names one. */
+  model?: string
+  text: string
+  /** Set for a tool_call, and for a tool_result when the source says. */
+  toolName?: string
+  /** A subagent's line rather than the main conversation's. Absent is false. */
+  sidechain?: boolean
+  /** `text` was cut at the daemon's per-block cap. Absent is false. */
+  truncated?: boolean
+  /**
+   * The byte offset of the source line — the stable anchor: a paging key for
+   * `agentRead`, a stable list key for a renderer, and where a search hit
+   * jumps to.
+   */
+  offset: number
+}
+
+/**
+ * One search match. `offset` addresses the matched message exactly as
+ * `AgentMessage.offset` does, so a hit is also the `agentRead` that shows it
+ * in context.
+ */
+export interface AgentHit {
+  tool: AgentTool
+  id: string
+  cwd: string
+  /** The summary's title, when it has one, so a hit can name its session. */
+  title?: string
+  /** The matched message's timestamp, when it has one. */
+  ts?: string
+  role: 'user' | 'assistant' | 'system'
+  /** The match with ~80 chars of context each side, one line, no markup. */
+  snippet: string
+  offset: number
+}
+
+/**
+ * Answers `agents` with the index as it stands right now. `building` true
+ * means a sweep is still in flight and the snapshot may be short — the answer
+ * arrives immediately either way, and a caller that wants the rest asks
+ * again rather than waiting on a fuller one.
+ */
+export interface AgentIndexMsg {
+  type: 'agentIndex'
+  building: boolean
+  /** Empty rather than absent when nothing is indexed. */
+  sessions: AgentSummary[]
+  reqId: number
+}
+
+/**
+ * Answers `agentRead` with one window of messages. `start` is the offset of
+ * the first returned message's line and `next` the offset after the last
+ * consumed one, so the two directions page with the same two numbers. `eof`
+ * means the parse reached the end of the file *at parse time* — not that the
+ * transcript is complete, since a live agent is still appending; the same
+ * doctrine as reading files.
+ */
+export interface AgentPageMsg {
+  type: 'agentPage'
+  tool: AgentTool
+  id: string
+  /** Empty rather than absent for a window with nothing in it. */
+  messages: AgentMessage[]
+  start: number
+  next: number
+  eof: boolean
+  /** The file's size at parse time — where a jump-to-end reads back from. */
+  fileSize: number
+  reqId: number
+}
+
+/**
+ * Answers `agentSearch`. `truncated` true means the daemon's own cap on the
+ * scan was hit and there may be more; `building` means the index sweep was
+ * incomplete when the scan ran, exactly as on `agentIndex`, so a caller may
+ * ask again for a fuller answer.
+ */
+export interface AgentHitsMsg {
+  type: 'agentHits'
+  building: boolean
+  truncated: boolean
+  /** Empty rather than absent when nothing matched. */
+  hits: AgentHit[]
+  reqId: number
+}
+
 export type ServerMessage =
   | Welcome
   | RelayState
@@ -655,3 +871,6 @@ export type ServerMessage =
   | DeviceList
   | Pairing
   | Revoked
+  | AgentIndexMsg
+  | AgentPageMsg
+  | AgentHitsMsg
