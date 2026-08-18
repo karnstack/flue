@@ -179,6 +179,64 @@ func TestRemoteDialRebuildsFromTheSocket(t *testing.T) {
 	_ = second.Close()
 }
 
+// A spawn the holder refuses must not leave the holder idling behind an
+// empty directory: SpawnRemote retires it, so the failure costs nothing but
+// the error.
+func TestRemoteSpawnFailureRetiresTheHolder(t *testing.T) {
+	dir := holderDir(t)
+	exe, _ := os.Executable()
+	cfg := session.ChildConfig{
+		ID:   "cafebabe77777777",
+		Run:  []string{"/no/such/binary/anywhere"},
+		Argv: []string{"nope"},
+		Env:  []string{"PATH=/usr/bin:/bin"},
+		Cwd:  "/",
+		Cols: 80, Rows: 24,
+	}
+	if _, err := session.SpawnRemote(exe, dir, cfg, nil); err == nil {
+		t.Fatal("SpawnRemote succeeded with an unexecable command")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("holder dir survived a failed spawn")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Race guard for the stream path: chunks arriving while subscribers detach.
+// The send happens under the Remote's lock with the closed flag checked;
+// without that this test panics under -race with a send on a closed channel.
+func TestRemoteSubscribeUnsubscribeChurn(t *testing.T) {
+	dir := holderDir(t)
+	r := spawnCat(t, dir)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			_ = r.Write([]byte("chunk of output to fan out\n"))
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		sub := r.Subscribe(0)
+		// Sometimes drain a little, sometimes drop immediately: both sides
+		// of the race need exercising.
+		if i%2 == 0 {
+			select {
+			case <-sub.C:
+			case <-time.After(time.Millisecond):
+			}
+		}
+		r.Unsubscribe(sub)
+	}
+	<-done
+}
+
 func TestRemoteCloseRemovesTheHolderDir(t *testing.T) {
 	dir := holderDir(t)
 	r := spawnCat(t, dir)

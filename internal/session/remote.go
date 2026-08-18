@@ -170,7 +170,7 @@ func SpawnRemote(exe, dir string, cfg ChildConfig, clock func() time.Time) (*Rem
 	}
 	restore, err := json.Marshal(cfg.Restore)
 	if err != nil {
-		r.teardown()
+		_ = r.Close()
 		return nil, err
 	}
 	spawn := &holdwire.SpawnReq{
@@ -179,16 +179,27 @@ func SpawnRemote(exe, dir string, cfg ChildConfig, clock func() time.Time) (*Rem
 		Preload: cfg.Preload, Restore: restore,
 		Group: cfg.Group, Ephemeral: cfg.Ephemeral,
 	}
+	// Failures from here retire the holder outright rather than merely
+	// hanging up: a holder with no session and no daemon would otherwise
+	// idle until its self-reap, and its directory would sit as junk for
+	// the next boot to sweep. Close tells it to exit and removes the dir.
 	if _, err := r.call(holdwire.Req{Verb: "spawn", Spawn: spawn}); err != nil {
-		r.teardown()
+		_ = r.Close()
 		return nil, err
 	}
 	if err := r.refreshHello(); err != nil {
-		r.teardown()
+		_ = r.Close()
 		return nil, err
 	}
 	return r, nil
 }
+
+// ErrHolderGone reports a holder socket nobody answers: the holder process
+// itself is not there. Callers deciding whether a holder directory may be
+// swept need exactly this distinction — a holder that answered the dial but
+// then failed the handshake is alive, and its session is not theirs to
+// destroy.
+var ErrHolderGone = errors.New("session: holder is gone")
 
 // DialRemote rebuilds a Remote from a live holder's socket and the identity
 // record beside it: the reattach path. The record's daemon-owned fields
@@ -196,7 +207,7 @@ func SpawnRemote(exe, dir string, cfg ChildConfig, clock func() time.Time) (*Rem
 func DialRemote(dir string, rec IdentityRecord, clock func() time.Time) (*Remote, error) {
 	r, err := newRemote(dir, clock)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrHolderGone, err)
 	}
 	if err := r.refreshHello(); err != nil {
 		r.teardown()
@@ -601,11 +612,27 @@ func (r *Remote) Subscribe(fromSeq uint64) *Sub {
 			if typ != holdwire.TChunk {
 				continue
 			}
+			// The send happens under r.mu with the closed flag checked, the
+			// same discipline the engine keeps with s.mu: Unsubscribe and
+			// Close close this channel under the same lock, so without it a
+			// concurrent close between the check and the send is a send on a
+			// closed channel — a panic, in the daemon. The send itself never
+			// blocks, so the lock is held for an instant.
+			r.mu.Lock()
+			if sub.closed {
+				r.mu.Unlock()
+				return
+			}
+			dropped := false
 			select {
 			case ch <- p:
 			default:
 				// Too far behind, the engine's own rule: drop, and the
 				// subscriber reattaches from its lastSeq.
+				dropped = true
+			}
+			r.mu.Unlock()
+			if dropped {
 				return
 			}
 		}

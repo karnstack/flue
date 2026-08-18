@@ -78,7 +78,7 @@ func Serve(dir, version string, ready io.WriteCloser) error {
 		_ = ready.Close()
 	}
 
-	h := &holder{dir: dir, version: version, done: make(chan struct{})}
+	h := &holder{dir: dir, version: version, born: time.Now(), done: make(chan struct{})}
 	go h.watch()
 
 	go func() {
@@ -102,6 +102,7 @@ func Serve(dir, version string, ready io.WriteCloser) error {
 type holder struct {
 	dir     string
 	version string
+	born    time.Time
 
 	mu       sync.Mutex
 	sess     *session.Session
@@ -383,13 +384,24 @@ func (h *holder) watch() {
 		h.mu.Lock()
 		s, seen, held := h.sess, h.lastSeen, len(h.ctrl) > 0
 		h.mu.Unlock()
-		if s == nil || held {
+		if held {
 			continue
 		}
-		if s.Info().State != "exited" {
+		// A live child pins the holder no matter how absent the daemon is —
+		// keeping that process running is the product. What may be reaped is
+		// a holder with nothing to hold: its child exited, or a session was
+		// never spawned at all (a daemon that died mid-handshake and whose
+		// successor has no identity record to reattach by).
+		if s != nil && s.Info().State != "exited" {
 			continue
 		}
-		if seen.IsZero() || time.Since(seen) < orphanGrace {
+		// The idle clock starts when the last daemon hung up, or at birth
+		// for a holder no daemon ever spoke to.
+		idle := seen
+		if idle.IsZero() {
+			idle = h.born
+		}
+		if time.Since(idle) < orphanGrace {
 			continue
 		}
 		_ = os.RemoveAll(h.dir)
