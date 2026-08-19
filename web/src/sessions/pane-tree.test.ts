@@ -10,7 +10,6 @@ import {
   splitInTabs,
   splitLeaf,
   tabOf,
-  topLeftLeaf,
   topRightLeaf,
   withRatio,
   type PaneTree,
@@ -139,18 +138,6 @@ describe('tabs of trees', () => {
         b: { split: 'column', ratio: 0.5, a: leaf('b'), b: leaf('c') },
       }),
     ).toBe('b')
-  })
-
-  it('names the top-left pane: the a side of every split, all the way down', () => {
-    expect(topLeftLeaf(AB)).toBe('a')
-    expect(
-      topLeftLeaf({
-        split: 'column',
-        ratio: 0.5,
-        a: { split: 'row', ratio: 0.5, a: leaf('x'), b: leaf('y') },
-        b: leaf('z'),
-      }),
-    ).toBe('x')
   })
 })
 

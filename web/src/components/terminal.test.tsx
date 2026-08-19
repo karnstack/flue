@@ -595,7 +595,7 @@ describe('Terminal', () => {
   describe('the tag strip', () => {
     const strip = () => document.querySelector<HTMLElement>('[data-flue-tags]')
 
-    it('floats the session tags in the top-left corner, on the controls layer', () => {
+    it('leads the control row, where the corner is already spent on chrome', () => {
       const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
       act(() =>
         sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api', 'prod'] })] }),
@@ -603,11 +603,9 @@ describe('Terminal', () => {
 
       expect(screen.getByText('api')).toBeTruthy()
       expect(screen.getByText('prod')).toBeTruthy()
-      // Opposite corner from the control strip, same z-10: xterm's own layers
-      // carry z-indexes, and an unindexed sibling loses to them.
-      expect(strip()!.className).toMatch(/\btop-3\b/)
-      expect(strip()!.className).toMatch(/\bleft-3\b/)
-      expect(strip()!.className).toMatch(/\bz-10\b/)
+      // Inline in the top-right control row, not floating over the output.
+      expect(strip()!.closest('[data-flue-controls]')).toBeTruthy()
+      expect(strip()!.className).not.toMatch(/\babsolute\b/)
     })
 
     it('draws nothing at all for a session without tags', () => {
@@ -667,15 +665,6 @@ describe('Terminal', () => {
       expect(screen.getByText('api')).toBeTruthy()
     })
 
-    it('yields the corner when the surface hands the tags to another pane', () => {
-      const { sock } = mountTerminal((e) => (
-        <Terminal sessionId="s1" showTags={false} createEmulator={e.create} />
-      ))
-      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
-
-      expect(strip()).toBeNull()
-    })
-
     it('sits above the key bar on a coarse pointer, off the first line of output', () => {
       coarsePointer()
       const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
@@ -686,14 +675,14 @@ describe('Terminal', () => {
       expect(strip()!.className).not.toMatch(/\btop-3\b/)
     })
 
-    it('survives the minimal chrome, so a split pane still says whose it is', () => {
+    it('stays out of the minimal chrome, whose surface shows them elsewhere', () => {
       const { sock } = mountTerminal((e) => (
         <Terminal sessionId="s1" chrome="minimal" createEmulator={e.create} />
       ))
       act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
 
-      expect(strip()).not.toBeNull()
-      expect(screen.getByText('api')).toBeTruthy()
+      expect(strip()).toBeNull()
+      expect(screen.queryByText('api')).toBeNull()
     })
   })
 

@@ -106,17 +106,6 @@ export function topRightLeaf(t: PaneTree): string {
 }
 
 /**
- * The leaf whose box touches the surface's top-left corner: the `a` side of
- * a split is its left or top either way, so the walk never branches. It is
- * where the tag strip lives, for the chips' reason — the tags name the
- * group, not a pane, so they sit at the surface's own corner.
- */
-export function topLeftLeaf(t: PaneTree): string {
-  if ('leaf' in t) return t.leaf
-  return topLeftLeaf(t.a)
-}
-
-/**
  * Bring a tab list in line with the panes that exist: prune every tab's
  * tree, drop tabs that emptied, and give each unplaced newcomer a tab of its
  * own — which is both what "new tab" resolves to before its placement lands

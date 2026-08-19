@@ -100,13 +100,6 @@ export interface TerminalProps {
    */
   chrome?: 'full' | 'minimal'
   /**
-   * Whether this pane wears the group's tag strip. The tags name the group,
-   * not a pane, so a multi-pane surface shows them once — the route points
-   * this at its top-left leaf, the way chipsPane points the chips at the
-   * top-right one. A lone terminal wears them by default.
-   */
-  showTags?: boolean
-  /**
    * Whether the pane pins itself to the visual viewport (lib/viewport.ts).
    * True everywhere the terminal is the page — which is what the pinning
    * formula assumes. The desktop scratch modal turns it off: a centered
@@ -219,7 +212,6 @@ export function Terminal({
   onNewSession,
   onSplit,
   chrome = 'full',
-  showTags = true,
   fitViewport = true,
   viewportInset = 0,
   ownsTitle = true,
@@ -1265,22 +1257,18 @@ export function Terminal({
         />
       )}
       {/*
-        The group's tags, once per surface (see showTags), in the corner the
-        control strip leaves free — except on a finger, where the top-left
-        is the first line of whatever just ran; there the strip sits above
-        the key bar instead. Same z-10 as the controls, for the reason
-        theirs carries; the badges wear the chip surface so they read
-        quietly over whatever palette the pane is painted in. The strip
-        takes no pointer beyond its own footprint — nothing in it stretches
-        over the terminal.
+        The group's tags on a finger, above the key bar: both corners are
+        spoken for there — the top-left is the first line of whatever just
+        ran, the top-right is the control row, and a thumb's badges deserve
+        more width than the row spares. Full chrome only, so a surface reads
+        them once (see chipsPane). A fine pointer gets them in the control
+        row below instead. The strip takes no pointer beyond its own
+        footprint.
       */}
-      {showTags && tags.length > 0 && (
+      {chrome === 'full' && coarse && tags.length > 0 && (
         <div
           data-flue-tags=""
-          className={cn(
-            'absolute left-3 z-10 flex max-w-[40%] flex-wrap items-center gap-1.5',
-            coarse ? 'bottom-17' : 'top-3',
-          )}
+          className="absolute bottom-17 left-3 z-10 flex max-w-[70%] flex-wrap items-center gap-1.5"
         >
           <TagBadges
             tags={tags}
@@ -1291,7 +1279,21 @@ export function Terminal({
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar
           eats their clicks. */}
-      <div className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
+      <div data-flue-controls="" className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
+        {/*
+          The group's tags lead the row: the corner is already spent on
+          chrome, so badges here cover nothing new. Height of the icon
+          buttons beside them, and clipped rather than wrapped — a row that
+          grows downward would be floating over output again.
+        */}
+        {chrome === 'full' && !coarse && tags.length > 0 && (
+          <div data-flue-tags="" className="flex h-7 max-w-64 items-center gap-1.5 overflow-hidden">
+            <TagBadges
+              tags={tags}
+              className="bg-(--chip-bg) text-(--chip-dim) ring-1 ring-(--chip-ring) backdrop-blur-sm"
+            />
+          </div>
+        )}
         {chrome === 'full' && <ThemeMenu value={themeId} dark={dark} onChange={handleTheme} />}
         {chrome === 'full' && (
           <>
