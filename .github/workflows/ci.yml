@@ -5,8 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# id-token lets the Codecov upload authenticate over GitHub OIDC, so a
+# public-repo upload needs no CODECOV_TOKEN secret.
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   checks:
@@ -35,7 +38,15 @@ jobs:
       # of both `lint` and `test`, and a single invocation runs it once where
       # two separate steps built the frontend twice.
       - name: Lint and test
-        run: make lint test
+        run: make lint test GOTESTFLAGS="-coverprofile=coverage.out -covermode=atomic"
+
+      # fail_ci_if_error stays at its default (false): a Codecov outage must
+      # not fail the build, the same bar the shellcheck guard below holds.
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          use_oidc: true
 
       # ubuntu-latest images ship shellcheck, so this step normally does
       # nothing. The guard is what keeps it honest: the unconditional

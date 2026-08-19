@@ -24,3 +24,6 @@ flued
 /site/.wrangler/
 # tsc --noEmit with incremental drops this beside web/tsconfig.json.
 web/tsconfig.tsbuildinfo
+# `make test-go GOTESTFLAGS=-coverprofile=coverage.out` drops this at the
+# root; CI uploads it to Codecov.
+coverage.out

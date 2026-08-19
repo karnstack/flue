@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/karnstack/flue/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/karnstack/flue/ci.yml?branch=main&label=ci" alt="CI status"></a>
+  <a href="https://codecov.io/gh/karnstack/flue"><img src="https://codecov.io/gh/karnstack/flue/graph/badge.svg" alt="Coverage"></a>
   <a href="https://github.com/karnstack/flue/releases/latest"><img src="https://img.shields.io/github/v/release/karnstack/flue?label=release" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
 </p>
