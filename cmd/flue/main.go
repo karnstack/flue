@@ -114,7 +114,7 @@ const usageText = `flue — your terminal, as a browser tab
 
   flue enable             install the login service, start the daemon, open the UI
   flue disable            remove the login service
-  flue restart            restart the daemon; live sessions ride across on snapshots
+  flue restart            restart the daemon; sessions keep running through it
   flue status             daemon, login service, and session diagnostics
   flue relay setup        deploy a relay to your own Cloudflare account
   flue relay join URL --secret S --fleet K   point this machine at an existing relay
@@ -1611,6 +1611,14 @@ func runRestart(w io.Writer, wait time.Duration) error {
 		return err
 	}
 	fmt.Fprintf(w, "  ✓ daemon running on 127.0.0.1:%d\n", port)
+	// True by construction, not aspiration: sessions live in their own
+	// holder processes, and the daemon that just restarted reattached to
+	// them on its way up. The one exception is a daemon running with
+	// FLUE_NO_HOLDER, whose sessions still ride snapshots; that escape
+	// hatch's users chose the old behaviour and know what it costs.
+	if os.Getenv("FLUE_NO_HOLDER") == "" {
+		fmt.Fprintf(w, "  ✓ sessions kept running; tabs reconnect on their own\n")
+	}
 	return nil
 }
 

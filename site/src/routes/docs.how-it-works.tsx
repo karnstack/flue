@@ -26,10 +26,11 @@ const COMMANDS: { cmd: string; what: string }[] = [
 function HowItWorks() {
   return (
     <DocPage slug="how-it-works" title={DOC.title} blurb={DOC.blurb}>
-      <Section title="One daemon owns the shells">
+      <Section title="Sessions own their shells">
         <Lead>
-          A small Go daemon holds the terminals and their scrollback. Everything that draws them is
-          a client, including the tab you are reading this in.
+          Every session is a small process of its own that holds the shell and its scrollback. A Go
+          daemon coordinates them, and everything that draws them is a client, including the tab
+          you are reading this in.
         </Lead>
         <P>
           The whole product rests on that one move. Normally a shell belongs to the window that
@@ -38,8 +39,12 @@ function HowItWorks() {
         </P>
         <P>
           Closing the tab does not kill the session. It only detaches it. The build keeps running,
-          the agent keeps working, the SSH session stays up. Reattach and the daemon replays the
+          the agent keeps working, the SSH session stays up. Reattach and the session replays the
           scrollback you missed.
+        </P>
+        <P>
+          It outlives the daemon too. Updating flue, restarting it, even a crash: sessions keep
+          running through all of it, and the next daemon picks them back up where they were.
         </P>
       </Section>
 

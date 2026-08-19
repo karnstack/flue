@@ -81,6 +81,15 @@ not lost, but nothing runs until it wakes.
 
 The full version is at [flue.sh/docs/setup](https://flue.sh/docs/setup).
 
+## Sessions outlive flue
+
+Every session runs in its own small holder process, not inside the daemon.
+Updating flue, restarting it, even the daemon crashing outright: the shells
+and agents keep running, and the next daemon picks them back up with their
+scrollback where you left it. A machine reboot is the one thing that ends a
+session, and even then flue brings it back with its history, a fresh shell,
+and the command that resumes the agent conversation it was in.
+
 ## The CLI
 
 ```

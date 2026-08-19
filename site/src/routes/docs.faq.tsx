@@ -119,8 +119,21 @@ const QUESTIONS: { q: string; verdict: string; body?: ReactNode }[] = [
     verdict: 'Nothing. Closing detaches the session. It does not kill it.',
     body: (
       <P>
-        The daemon owns the shell and its scrollback, so the build keeps running. Reattach from any
-        device and it replays what you missed.
+        The session owns its shell and its scrollback, so the build keeps running. Reattach from
+        any device and it replays what you missed.
+      </P>
+    ),
+  },
+  {
+    q: 'What happens to my sessions when flue updates or restarts?',
+    verdict: 'Nothing. Sessions outlive the daemon.',
+    body: (
+      <P>
+        Every session runs in its own small holder process, separate from the daemon. Update flue,
+        restart it, even have it crash: the shells and agents keep running, and the next daemon
+        picks them back up with their scrollback intact. A machine reboot is the one thing that
+        ends a session, and even then flue brings it back with its history, a fresh shell, and the
+        command that resumes the agent conversation it was in.
       </P>
     ),
   },
