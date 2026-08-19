@@ -250,7 +250,8 @@ function UpgradeDialog({
           <DialogTitle>{latest ? `Update to flue ${latest}` : 'Update flue'}</DialogTitle>
           <DialogDescription className="text-sm/6 text-pretty text-zinc-600 sm:text-xs/5 dark:text-zinc-400">
             Replacing the binary is something only this machine can do, so it happens in a terminal
-            rather than here. Whichever way flue was installed, run its line and restart the daemon.{' '}
+            rather than here. Whichever way flue was installed, run its line and restart the
+            daemon. Your sessions keep running through the restart.{' '}
             {url !== undefined && (
               <>
                 <TextLink href={url} target="_blank">
