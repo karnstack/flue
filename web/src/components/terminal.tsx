@@ -137,6 +137,9 @@ export const TERMINAL_SHORTCUT_HINT = 'Ctrl+Shift+Enter'
  */
 const RESET = new TextEncoder().encode('\x1bc')
 
+/** How long a connect stays a skeleton before the pill spells it out. */
+const SLOW_CONNECT_MS = 2000
+
 const EXIT_NOTICE = (code: number) =>
   new TextEncoder().encode(`\r\n\x1b[90m[process exited: ${code}]\x1b[0m\r\n`)
 
@@ -239,6 +242,20 @@ export function Terminal({
   // The daemon's reason, for the pill's second line. Seeded alongside the
   // phase and replaced by the event so both mount orders read the same.
   const [revokedWhy, setRevokedWhy] = useState<string | null>(() => client.revoked)
+  // A fresh connect resolves in a blink on a local daemon, and a worded pill
+  // for that blink reads as a flash on every tab switch — the group view
+  // remounts the pane. The pill waits this long behind a wordless skeleton;
+  // a connect still pending by then is genuinely slow and worth the words.
+  // Reconnecting is exempt: an outage is news however briefly it lasts.
+  const [slowConnect, setSlowConnect] = useState(false)
+  useEffect(() => {
+    if (phase !== 'connecting') {
+      setSlowConnect(false)
+      return
+    }
+    const t = setTimeout(() => setSlowConnect(true), SLOW_CONNECT_MS)
+    return () => clearTimeout(t)
+  }, [phase])
   const [mode, setMode] = useState<KeyboardMode>('tab')
   // Coarse pointer once per mount: whether this device's primary pointer is a
   // finger decides the key bar's existence, and a pointer does not change
@@ -1366,7 +1383,17 @@ export function Terminal({
         <ShortcutsHelp chipStyle={chipStyle} chip={!coarse} />
           </>
         )}
-        {phase !== 'live' && (
+        {phase === 'connecting' && !slowConnect && (
+          // The young connect's stand-in: a chip-shaped shimmer, sized like
+          // the pill so nothing shifts when the words do arrive. See
+          // slowConnect for why the words wait.
+          <div
+            role="status"
+            aria-label="Connecting"
+            className="h-7 w-24 rounded-lg bg-(--chip-bg) ring-1 ring-(--chip-ring) backdrop-blur-sm motion-safe:animate-pulse"
+          />
+        )}
+        {phase !== 'live' && !(phase === 'connecting' && !slowConnect) && (
           // Dark in both themes, like the pane it floats over usually is; the
           // translucent ground and backdrop-blur keep it legible over whatever
           // the screen underneath was showing. The dot is the phase at a
