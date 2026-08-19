@@ -212,34 +212,6 @@ export interface Emulator {
    */
   paste(text: string): void
   /**
-   * Forget the reporting modes a replayed backlog turned on.
-   *
-   * A session's scrollback is bytes, not state, so replaying it re-runs
-   * every mode change the shell ever wrote — including the ones belonging to
-   * a program that has since exited or been killed with the daemon. Mouse
-   * tracking and focus reporting are the two that matter, because they are
-   * the only modes that put bytes on the wire with nobody typing: an armed
-   * emulator sends an SGR report for every pointer move, and the shell
-   * behind it receives that as somebody typing "35;61;22M" at the prompt.
-   *
-   * Only those two, and deliberately. Application cursor keys and bracketed
-   * paste are also replayable and also stale, but they change what a
-   * keystroke means rather than inventing keystrokes, so clearing them
-   * against a live program would break arrows and pastes in a client that
-   * had nothing wrong with it. See settleModes in internal/session for the
-   * wider reset, which runs where there is no live program to break.
-   *
-   * Local to this emulator. Nothing reaches the shell.
-   */
-  stopReporting(): void
-  /**
-   * Whether this emulator would report pointer movement to the program.
-   *
-   * Exists so the reset above can be tested for what it does rather than for
-   * the bytes it writes.
-   */
-  reportsPointer(): boolean
-  /**
    * Mount into the DOM.
    *
    * One emulator, one mount. Mounting twice opens a second renderer over the

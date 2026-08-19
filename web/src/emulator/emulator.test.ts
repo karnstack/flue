@@ -241,49 +241,6 @@ describe('Emulator interface', () => {
     })
   })
 
-  it('stops reporting the pointer a replayed program had asked for', async () => {
-    // The bug this is the floor for: a snapshot's scrollback carries the
-    // mouse-tracking sequence of a program that died with the daemon, so
-    // replaying it arms an emulator sitting in front of a fresh shell. From
-    // there every mouse move is an SGR report typed at the prompt.
-    const el = document.createElement('div')
-    document.body.appendChild(el)
-    const em = createXtermEmulator({ cols: 10, rows: 4 })
-    em.attachTo(el)
-    const seen: string[] = []
-    em.onData((b) => seen.push(new TextDecoder().decode(b)))
-    await settled(em, '\x1b[?1003h\x1b[?1006h\x1b[?1004h')
-
-    expect(em.reportsPointer()).toBe(true)
-    // Everything the arming itself put on the wire is the bug, not the fix —
-    // an unfocused terminal answers ESC[?1004h with a focus-out report right
-    // away, which is exactly the kind of typing-with-nobody-there this
-    // clears. What matters below is that the clearing adds none of its own.
-    seen.length = 0
-    em.stopReporting()
-    await settled(em, '')
-
-    expect(em.reportsPointer()).toBe(false)
-    expect(seen.join('')).toBe('')
-    em.dispose()
-    el.remove()
-  })
-
-  it('leaves a live program its pointer reporting', async () => {
-    // stopReporting is aimed at a replay, never at output. A program that
-    // turns tracking on after the backlog has drained keeps it.
-    const el = document.createElement('div')
-    document.body.appendChild(el)
-    const em = createXtermEmulator({ cols: 10, rows: 4 })
-    em.attachTo(el)
-    em.stopReporting()
-    await settled(em, '\x1b[?1002h')
-
-    expect(em.reportsPointer()).toBe(true)
-    em.dispose()
-    el.remove()
-  })
-
   describe('alt-screen scrolling', () => {
     // Fullscreen TUIs — claude's fullscreen mode, vim, less — live on the
     // alternate buffer, which keeps no scrollback, so the viewport scroll
@@ -442,12 +399,10 @@ describe('Emulator interface', () => {
     em.dispose()
 
     expect(() => em.focus()).not.toThrow()
-    expect(() => em.stopReporting()).not.toThrow()
     expect(() => em.setTheme({ background: '#000000' })).not.toThrow()
     expect(em.contentSize()).toBeNull()
     expect(() => em.answerQueries(true)).not.toThrow()
     expect(em.applicationCursorKeys()).toBe(false)
-    expect(em.reportsPointer()).toBe(false)
   })
 
   it('attaches to an element with no WebGL context available', () => {

@@ -29,16 +29,6 @@ export interface FakeEmulator extends Emulator {
   appCursor: boolean
   /** Simulate the user typing. */
   send(text: string): void
-  /**
-   * Where each stopReporting() call landed, as a count of written chunks.
-   *
-   * A count rather than a flag because the ordering against the output
-   * stream is the property worth testing: clearing the modes before a
-   * replayed backlog has been written would be undone by the backlog.
-   */
-  readonly reportingStops: number[]
-  /** What reportsPointer() answers; set by hand like measured. */
-  pointerReports: boolean
   /** Every selectWordAt() cell, in order. */
   readonly wordPresses: Cell[]
   /** Every extendSelectionTo() cell, in order. */
@@ -74,7 +64,6 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
   const written: string[] = []
   const themes: TerminalTheme[] = []
   const queryAnswers: boolean[] = []
-  const reportingStops: number[] = []
   const wordPresses: Cell[] = []
   const extensions: Cell[] = []
   const pasted: string[] = []
@@ -83,7 +72,6 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
     written,
     themes,
     queryAnswers,
-    reportingStops,
     wordPresses,
     extensions,
     pasted,
@@ -99,7 +87,6 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
     measured: null,
     onGlass: null,
     appCursor: false,
-    pointerReports: false,
     detector: null,
 
     text: () => written.join(''),
@@ -155,13 +142,6 @@ export function createFakeEmulator(opts: FakeEmulatorOptions = {}): FakeEmulator
       pasted.push(text)
       self.send(text)
     },
-
-    stopReporting() {
-      reportingStops.push(written.length)
-      mutable(self).pointerReports = false
-    },
-
-    reportsPointer: () => self.pointerReports,
 
     attachTo(el: HTMLElement) {
       mutable(self).mountedOn = el

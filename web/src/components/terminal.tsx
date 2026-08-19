@@ -389,19 +389,12 @@ export function Terminal({
     // the shell's stdin. head === seq on a fresh spawn opens it immediately.
     let consumed = 0
     let muteUntil = 0
-    // Whether a replayed backlog is still arriving under this attachment.
-    //
-    // The gate above keeps the emulator's *answers* off the wire while the
-    // scrollback replays. This is the other half of the same problem: a
-    // replay also re-runs every mode change in that scrollback, and the
-    // modes outlive it. A shell killed with the daemon inside a
-    // mouse-tracking program wrote the sequence that turned tracking on and
-    // never the one that turns it off, so replaying its snapshot leaves this
-    // emulator reporting the pointer at a fresh prompt — see stopReporting.
-    // Turned off the moment the backlog has been consumed, which is where
-    // the reset goes; false already on a fresh spawn, whose head === seq
-    // means there is nothing replayed to answer for.
-    let replaying = false
+    // The modes a replay re-runs — mouse tracking, focus reporting — are
+    // deliberately left exactly where the backlog puts them. A live
+    // session's replay ends at the program's present state, so clearing
+    // anything here desyncs this emulator from a program that still holds
+    // those modes armed; and a revived session's preload already ends with
+    // the daemon's settleModes, so a dead shell's reset is in the bytes.
     // The attachment's epoch, stepped with every reseed. Each done callback
     // below closes over the value it was written under: one enqueued under a
     // previous attachment can fire after the reseed, and its bytes are
@@ -878,7 +871,6 @@ export function Terminal({
         epoch++
         consumed = a.seq
         muteUntil = a.head
-        replaying = a.head > a.seq
         if (a.truncated) emulator.write(RESET)
         emulator.resize(a.cols, a.rows)
         tabOsc = a.title
@@ -897,13 +889,6 @@ export function Terminal({
         emulator.write(bytes, () => {
           if (e !== epoch) return
           consumed += bytes.length
-          // In the done callback and not at frame arrival, for the same
-          // reason the gate is: this has to land after the parser has read
-          // the backlog, or the modes it clears are set again behind it.
-          if (replaying && consumed >= muteUntil) {
-            replaying = false
-            emulator.stopReporting()
-          }
         })
       }),
     )
