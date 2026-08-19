@@ -91,6 +91,33 @@ assert_contains "dry-run names the asset on the contract" "flue_0.1.0_darwin_arm
 assert_contains "dry-run honours FLUE_INSTALL_DIR" "/nowhere/bin/flue" "$out"
 assert_contains "dry-run ends with the next step" "next: flue enable" "$out"
 
+# --- an existing install makes the next step a restart, not enable -----------
+# The same script serves first installs and updates. When a flue binary is
+# already at the install path, the daemon keeps running the old build until
+# restarted, so the closing hint must say restart.
+utmp=$(mktemp -d)
+trap 'rm -rf "$tmp" "$utmp"' EXIT
+printf '#!/bin/sh\n' >"${utmp}/flue"
+chmod +x "${utmp}/flue"
+
+out=$(bash -c '
+  FLUE_INSTALL_SOURCED=1
+  . ./install.sh
+  fetch_latest() { printf "%s" "{\"tag_name\": \"v0.1.0\"}" >"$1"; printf "%s" 200; }
+  FLUE_OS=Darwin FLUE_ARCH=arm64 FLUE_INSTALL_DIR="$1" main --dry-run
+' _ "$utmp" 2>&1)
+rc=$?
+assert_eq "update dry-run exits 0" 0 "$rc"
+assert_contains "update ends with restart, not enable" "next: flue restart" "$out"
+case "$out" in
+  *"next: flue enable"*)
+    echo "FAIL update dry-run must not suggest flue enable"
+    printf '%s\n' "$out" | sed 's/^/     | /'
+    failures=$((failures + 1))
+    ;;
+  *) echo "ok   update dry-run does not suggest flue enable" ;;
+esac
+
 # --- x86_64 normalizes to amd64 ----------------------------------------------
 out=$(bash -c '
   FLUE_INSTALL_SOURCED=1
@@ -107,7 +134,7 @@ assert_contains "x86_64 becomes amd64 in the asset name" "flue_0.1.0_linux_amd64
 # directly: a real archive file plus a checksums.txt that names the wrong
 # sha256 for it, same as a tampered or corrupted download would produce.
 ctmp=$(mktemp -d)
-trap 'rm -rf "$tmp" "$ctmp"' EXIT
+trap 'rm -rf "$tmp" "$utmp" "$ctmp"' EXIT
 printf 'not the real archive bytes' >"${ctmp}/flue_0.1.0_darwin_arm64.tar.gz"
 printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  flue_0.1.0_darwin_arm64.tar.gz\n' \
   >"${ctmp}/checksums.txt"
