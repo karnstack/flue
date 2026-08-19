@@ -99,10 +99,7 @@ func TestSpawnDefaultsCwdToHome(t *testing.T) {
 	want := resolved(t, home)
 
 	r := NewRegistry(nil)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 
 	s.mu.Lock()
@@ -135,10 +132,7 @@ func TestSpawnKeepsExplicitCwd(t *testing.T) {
 	want := resolved(t, dir)
 
 	r := NewRegistry(nil)
-	s, err := r.Spawn(SpawnOpts{Cwd: dir, Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cwd: dir, Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 
 	s.mu.Lock()
@@ -207,10 +201,7 @@ func TestSpawnWrapsUnfindableCmdInLoginShell(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
 	r := NewRegistry(nil)
 	argv := []string{"flue-test-no-such-tool", "--resume", "abc123"}
-	s, err := r.Spawn(SpawnOpts{Cmd: argv, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: argv, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 
 	want := []string{"/bin/sh", "-l", "-i", "-c", `exec 'flue-test-no-such-tool' '--resume' 'abc123'`}
@@ -237,10 +228,7 @@ func TestSpawnWrapsUnfindableCmdInLoginShell(t *testing.T) {
 // reinterpretation of commands it can run fine.
 func TestSpawnExecsFindableCmdDirectly(t *testing.T) {
 	r := NewRegistry(nil)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 	if len(s.cmd.Args) != 2 || s.cmd.Args[0] != "sleep" || s.cmd.Args[1] != "5" {
 		t.Fatalf("exec argv = %v, want [sleep 5]", s.cmd.Args)
@@ -253,10 +241,7 @@ func TestSpawnExecsFindableCmdDirectly(t *testing.T) {
 // detour through a shell that would fail it the same way.
 func TestSpawnExecsPathedCmdDirectly(t *testing.T) {
 	r := NewRegistry(nil)
-	s, err := r.Spawn(SpawnOpts{Cmd: []string{"/bin/sleep", "5"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	s := spawnLocal(t, r, SpawnOpts{Cmd: []string{"/bin/sleep", "5"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = s.Close() })
 	if len(s.cmd.Args) != 2 || s.cmd.Args[0] != "/bin/sleep" {
 		t.Fatalf("exec argv = %v, want [/bin/sleep 5]", s.cmd.Args)

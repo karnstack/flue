@@ -12,13 +12,10 @@ func TestSpawnCarriesGroupAndEphemeral(t *testing.T) {
 	r := NewRegistry(nil)
 	anchor := spawnRunning(t, r)
 
-	member, err := r.Spawn(SpawnOpts{
+	member := spawnLocal(t, r, SpawnOpts{
 		Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24,
 		Group: anchor.ID(), Ephemeral: true,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	t.Cleanup(func() { _ = member.Close() })
 
 	info := member.Info()
@@ -42,16 +39,10 @@ func TestEphemeralExitedReapedFast(t *testing.T) {
 	now := time.Now()
 	r := NewRegistry(func() time.Time { return now })
 
-	plain, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	scratch, err := r.Spawn(SpawnOpts{
+	plain := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
+	scratch := spawnLocal(t, r, SpawnOpts{
 		Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24, Ephemeral: true,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	waitExited(t, plain, 5*time.Second)
 	waitExited(t, scratch, 5*time.Second)
 
@@ -73,18 +64,12 @@ func TestRunningEphemeralFollowsItsParent(t *testing.T) {
 	now := time.Now()
 	r := NewRegistry(func() time.Time { return now })
 
-	parent, err := r.Spawn(SpawnOpts{Cmd: []string{"sleep", "0.2"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	parent := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sleep", "0.2"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = parent.Close() })
-	scratch, err := r.Spawn(SpawnOpts{
+	scratch := spawnLocal(t, r, SpawnOpts{
 		Cmd: []string{"sleep", "60"}, Cols: 80, Rows: 24,
 		Group: parent.ID(), Ephemeral: true,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	t.Cleanup(func() { _ = scratch.Close() })
 
 	// Both alive: the sweep must leave the scratch running.
@@ -104,12 +89,9 @@ func TestRunningEphemeralFollowsItsParent(t *testing.T) {
 // to follow, and the sweep must not guess one.
 func TestRunningEphemeralWithoutAParentIsLeftAlone(t *testing.T) {
 	r := NewRegistry(nil)
-	scratch, err := r.Spawn(SpawnOpts{
+	scratch := spawnLocal(t, r, SpawnOpts{
 		Cmd: []string{"sleep", "60"}, Cols: 80, Rows: 24, Ephemeral: true,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	t.Cleanup(func() { _ = scratch.Close() })
 
 	r.Reap()
@@ -125,18 +107,12 @@ func TestApplyMetaClearsEphemeral(t *testing.T) {
 	now := time.Now()
 	r := NewRegistry(func() time.Time { return now })
 
-	parent, err := r.Spawn(SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	parent := spawnLocal(t, r, SpawnOpts{Cmd: []string{"sh", "-c", "exit 0"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = parent.Close() })
-	scratch, err := r.Spawn(SpawnOpts{
+	scratch := spawnLocal(t, r, SpawnOpts{
 		Cmd: []string{"sleep", "60"}, Cols: 80, Rows: 24,
 		Group: parent.ID(), Ephemeral: true,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	t.Cleanup(func() { _ = scratch.Close() })
 
 	kept := false
@@ -166,20 +142,14 @@ func TestSnapshotSkipsEphemeralAndCarriesGroup(t *testing.T) {
 	r := NewRegistry(nil)
 	anchor := spawnRunning(t, r)
 
-	member, err := r.Spawn(SpawnOpts{
+	member := spawnLocal(t, r, SpawnOpts{
 		Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24, Group: anchor.ID(),
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	t.Cleanup(func() { _ = member.Close() })
-	scratch, err := r.Spawn(SpawnOpts{
+	scratch := spawnLocal(t, r, SpawnOpts{
 		Cmd: []string{"sleep", "5"}, Cols: 80, Rows: 24,
 		Group: anchor.ID(), Ephemeral: true,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
 	t.Cleanup(func() { _ = scratch.Close() })
 
 	if _, ok := scratch.Snapshot(); ok {
@@ -196,10 +166,7 @@ func TestSnapshotSkipsEphemeralAndCarriesGroup(t *testing.T) {
 	// And the revival hands the link back.
 	_ = member.Close()
 	r2 := NewRegistry(nil)
-	revived, err := r2.Revive(snap)
-	if err != nil {
-		t.Fatalf("Revive: %v", err)
-	}
+	revived := reviveLocal(t, r2, snap)
 	t.Cleanup(func() { _ = revived.Close() })
 	if got := revived.Info().Group; got != anchor.ID() {
 		t.Errorf("revived Group = %q, want %q", got, anchor.ID())

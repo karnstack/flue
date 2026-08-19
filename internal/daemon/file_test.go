@@ -370,7 +370,7 @@ func TestEnqueueWaitForGivesUpWhenTheConnectionEnds(t *testing.T) {
 
 // readTarget spawns a session rooted at dir, which is what a read's relative
 // paths resolve against.
-func readTarget(t *testing.T, reg *session.Registry, dir string) *session.Session {
+func readTarget(t *testing.T, reg *session.Registry, dir string) session.Handle {
 	t.Helper()
 	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"cat"}, Cwd: dir, Cols: 80, Rows: 24})
 	if err != nil {

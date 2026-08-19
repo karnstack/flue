@@ -222,7 +222,14 @@ func (s *Session) Snapshot() (Snapshot, bool) {
 // already writing a file per session.
 func (r *Registry) Snapshots() []Snapshot {
 	var out []Snapshot
-	for _, s := range r.List() {
+	for _, h := range r.List() {
+		s, local := h.(*Session)
+		if !local {
+			// A holder-backed session's ring lives with its holder, and so
+			// does its revival: the holder writes the snapshot on its own
+			// SIGTERM. The daemon has nothing of it worth saving.
+			continue
+		}
 		snap, ok := s.Snapshot()
 		if !ok {
 			continue
@@ -246,7 +253,7 @@ func (r *Registry) Snapshots() []Snapshot {
 // and the one place that matters is CreatedAt: start reads the zero time as
 // "stamp this one now" rather than dating the session to the epoch. Everything
 // else is honestly empty when it is empty.
-func (r *Registry) Revive(snap Snapshot) (*Session, error) {
+func (r *Registry) Revive(snap Snapshot) (Handle, error) {
 	cwd := snap.Cwd
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
 		cwd, _ = os.UserHomeDir()

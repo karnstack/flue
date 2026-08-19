@@ -12,7 +12,7 @@ import (
 // peekTarget spawns a session, writes a line into it, and waits for the echo
 // to land in the ring — which is what a peek reads. The wait is a poll because
 // a pty round trip is the kernel's business and there is nothing to wait on.
-func peekTarget(t *testing.T, reg *session.Registry, say string) *session.Session {
+func peekTarget(t *testing.T, reg *session.Registry, say string) session.Handle {
 	t.Helper()
 	s, err := reg.Spawn(session.SpawnOpts{Cmd: []string{"cat"}, Cols: 80, Rows: 24})
 	if err != nil {
@@ -109,7 +109,7 @@ func TestPeekMintsNoRefAndLeavesNoSubscriber(t *testing.T) {
 // millisecond later catches the pump finishing its delivery and blames the
 // peek for it — which is exactly how this failed in CI and never once
 // locally.
-func quiet(t *testing.T, s *session.Session) time.Time {
+func quiet(t *testing.T, s session.Handle) time.Time {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	last := s.Info().LastActive

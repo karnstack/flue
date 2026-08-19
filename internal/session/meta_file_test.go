@@ -245,10 +245,7 @@ func TestReapDeletesTheMetaFile(t *testing.T) {
 		t.Fatalf("UpdateMeta: %v", err)
 	}
 
-	dying, err := r.Spawn(SpawnOpts{Cmd: []string{"true"}, Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	dying := spawnLocal(t, r, SpawnOpts{Cmd: []string{"true"}, Cols: 80, Rows: 24})
 	t.Cleanup(func() { _ = dying.Close() })
 	going := "going"
 	if _, err := r.UpdateMeta(dying.ID(), MetaPatch{Name: &going}); err != nil {
