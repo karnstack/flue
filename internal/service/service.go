@@ -43,6 +43,17 @@ type Manager interface {
 	Status() (Status, error)
 }
 
+// UnitRefresher is optionally implemented by a Manager that can converge
+// the unit file on disk — and only the file — without touching the running
+// service. It exists for restart paths: Restart bootstraps whatever unit is
+// on disk, so refreshing first is how a restart also delivers a unit change
+// (KillMode, AbandonProcessGroup) to installs from before the change. The
+// running daemon is deliberately left alone; the caller's Restart is what
+// makes the new unit take effect.
+type UnitRefresher interface {
+	RefreshUnit() error
+}
+
 // Warner is optionally implemented by a Manager whose Enable can succeed
 // while still owing the user a fact. Warnings reports advisories from the
 // most recent Enable — true and unfortunate but not failures, like

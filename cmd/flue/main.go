@@ -198,6 +198,17 @@ func cmdServe(args []string) error {
 			}
 		}
 	}
+	// First, the sessions that never died: every live holder under the
+	// holders root gets its registry entry back — same id, same ring, same
+	// running process. This is the pass that makes a daemon restart a
+	// non-event for sessions. Dead holder dirs (a reboot, a self-reap) are
+	// swept here; what they saved for revival is picked up just below.
+	if cfgDir, err := config.Dir(); err == nil {
+		reattached, swept := session.ReattachHolders(reg, filepath.Join(cfgDir, "holders"))
+		if reattached > 0 || swept > 0 {
+			logger.Info("holder reattach", "reattached", reattached, "swept", swept)
+		}
+	}
 	// Bring back what the previous daemon saved on its way out: each session
 	// returns under its old id with its scrollback and a fresh shell in its
 	// directory. Failures are reported and skipped — revival is a courtesy,
@@ -211,6 +222,15 @@ func cmdServe(args []string) error {
 	// wedge: LoadSnapshots ages out a snapshot that keeps failing (see
 	// maxReviveAttempts) instead of retrying it forever.
 	for _, snap := range session.LoadSnapshots(stateDir) {
+		if _, live := reg.Get(snap.ID); live {
+			// The session the snapshot describes is already here, alive,
+			// reattached above — a snapshot written by a holder whose
+			// SIGTERM turned out not to be the end (a logout that came
+			// back, a canceled shutdown). The live session wins and the
+			// stale record has nothing left to say.
+			session.ClearSnapshot(stateDir, snap.ID)
+			continue
+		}
 		if _, err := reg.Revive(snap); err != nil {
 			fmt.Fprintf(os.Stderr, "flue: could not revive session %s: %v\n", snap.ID, err)
 			session.RecordReviveFailure(stateDir, snap)
@@ -1573,6 +1593,14 @@ func runRestart(w io.Writer, wait time.Duration) error {
 	}
 	if !st.Installed {
 		return errors.New("login service is not installed; run \"flue enable\" to install and start it")
+	}
+	// Converge the unit file first, so the restart boots the service under
+	// the current template — this is how a unit change (the KillMode and
+	// AbandonProcessGroup settings holder sessions depend on) reaches an
+	// install from before it. Best-effort: a refresh that fails leaves
+	// exactly the restart the user asked for.
+	if ur, ok := mgr.(service.UnitRefresher); ok {
+		_ = ur.RefreshUnit()
 	}
 	if err := mgr.Restart(); err != nil {
 		return err

@@ -30,6 +30,8 @@ func TestLaunchdPlist(t *testing.T) {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>AbandonProcessGroup</key>
+  <true/>
 </dict>
 </plist>
 `,
@@ -51,6 +53,8 @@ func TestLaunchdPlist(t *testing.T) {
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
+  <true/>
+  <key>AbandonProcessGroup</key>
   <true/>
 </dict>
 </plist>
@@ -81,6 +85,7 @@ Description=flue daemon
 [Service]
 ExecStart="/usr/local/bin/flue" serve
 Restart=on-failure
+KillMode=process
 
 [Install]
 WantedBy=default.target
@@ -95,6 +100,7 @@ Description=flue daemon
 [Service]
 ExecStart="/home/karn/my tools/flue" serve
 Restart=on-failure
+KillMode=process
 
 [Install]
 WantedBy=default.target
@@ -109,6 +115,7 @@ Description=flue daemon
 [Service]
 ExecStart="/opt/100%%tools/flue" serve
 Restart=on-failure
+KillMode=process
 
 [Install]
 WantedBy=default.target

@@ -34,6 +34,23 @@ func (s *Systemd) unitPath() string {
 	return filepath.Join(s.home, ".config", "systemd", "user", "flue.service")
 }
 
+// RefreshUnit converges the unit file and reloads the manager's view of it,
+// without touching the running service; see UnitRefresher. The reload is
+// part of the file's delivery on systemd — a rewritten unit systemd has not
+// re-read changes nothing — and reload never restarts anything.
+func (s *Systemd) RefreshUnit() error {
+	if err := os.MkdirAll(filepath.Dir(s.unitPath()), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(s.unitPath(), SystemdUnit(s.exe), 0o644); err != nil {
+		return err
+	}
+	if out, err := s.run.Run("systemctl", "--user", "daemon-reload"); err != nil {
+		return fmt.Errorf("systemctl --user daemon-reload: %v: %s", err, out)
+	}
+	return nil
+}
+
 // available reports whether a user manager is reachable at all.
 //
 // `is-system-running` answers "degraded" with a non-zero exit on perfectly

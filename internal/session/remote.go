@@ -23,11 +23,13 @@ const HolderSocketName = "holder.sock"
 // identityName is the daemon-owned record beside the holder's socket.
 const identityName = "session.json"
 
-// maxSockPath is the ceiling this package enforces on a holder socket path.
-// sockaddr_un is 104 bytes on darwin and 108 on linux; refusing at 100
-// leaves slack and one clear error instead of a bind failure that blames
-// the wrong layer.
-const maxSockPath = 100
+// maxSockPath is the ceiling this package enforces on a holder socket
+// path: sun_path is 104 bytes on darwin and 108 on linux, NUL included, so
+// the usable length is one less. Checked up front for one clear error
+// instead of a bind failure that blames the wrong layer. No extra margin
+// on purpose — macOS temp directories already run ~50 characters, and a
+// margin here is spawn failures for real users, not safety.
+const maxSockPath = 104 - 1
 
 // remoteCallTimeout bounds every control round trip. The holder answers
 // from memory, so anything slower than this is a holder that is gone.
@@ -99,13 +101,17 @@ type Remote struct {
 	clock func() time.Time
 	cwdOf func(pid int) (string, error)
 
-	mu       sync.Mutex
-	info     Info
-	pid      int
-	exitedAt time.Time
-	closed   bool
-	ctrl     *remoteCtrl
-	subs     map[*Sub]net.Conn
+	mu   sync.Mutex
+	info Info
+	pid  int
+	// holderPid is the holder process itself, known only on the spawn path
+	// (a reattached daemon never learns it and never needs to). Diagnostics
+	// and tests; the protocol is how the holder is actually driven.
+	holderPid int
+	exitedAt  time.Time
+	closed    bool
+	ctrl      *remoteCtrl
+	subs      map[*Sub]net.Conn
 }
 
 var _ handle = (*Remote)(nil)
@@ -168,6 +174,7 @@ func SpawnRemote(exe, dir string, cfg ChildConfig, clock func() time.Time) (*Rem
 	if err != nil {
 		return nil, err
 	}
+	r.holderPid = cmd.Process.Pid
 	restore, err := json.Marshal(cfg.Restore)
 	if err != nil {
 		_ = r.Close()
@@ -476,6 +483,10 @@ func (r *Remote) ID() string {
 
 // Dir is the holder directory this Remote speaks to.
 func (r *Remote) Dir() string { return r.dir }
+
+// HolderPid is the holder process's pid when this Remote spawned it, and 0
+// for a Remote rebuilt by reattach.
+func (r *Remote) HolderPid() int { return r.holderPid }
 
 // Info mirrors Session.Info: the cache, with the child's cwd re-read from
 // the kernel while the session runs — the holder's pid makes that a local

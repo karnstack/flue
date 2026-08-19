@@ -29,6 +29,16 @@ func (l *Launchd) unitPath() string {
 	return filepath.Join(l.home, "Library", "LaunchAgents", LaunchdLabel+".plist")
 }
 
+// RefreshUnit converges the plist on disk and nothing else; see
+// UnitRefresher. Restart's bootstrap reads the file fresh, so a refresh
+// followed by Restart is how a plist change reaches an existing install.
+func (l *Launchd) RefreshUnit() error {
+	if err := os.MkdirAll(filepath.Dir(l.unitPath()), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(l.unitPath(), LaunchdPlist(l.exe), 0o644)
+}
+
 func (l *Launchd) domainTarget() string { return fmt.Sprintf("gui/%d", l.uid) }
 func (l *Launchd) serviceTarget() string {
 	return fmt.Sprintf("gui/%d/%s", l.uid, LaunchdLabel)
