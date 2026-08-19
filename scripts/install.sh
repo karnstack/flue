@@ -32,6 +32,7 @@ VERSION=""
 INSTALL_DIR=""
 NEED_SUDO=0
 PATH_HINT=0
+UPDATING=0
 tmp=""
 
 say() { printf '%s\n' "$*"; }
@@ -156,6 +157,19 @@ install_binary() {
   fi
 }
 
+# next_step_hint closes with what to run next. A first install needs the
+# login service set up, so: flue enable. An update overwrote a binary that
+# was already there, and a running daemon keeps executing the old build
+# until it is restarted, so: flue restart. UPDATING is decided before the
+# new binary lands, otherwise every install would look like an update.
+next_step_hint() {
+  if [ "$UPDATING" = 1 ]; then
+    say "next: flue restart"
+  else
+    say "next: flue enable"
+  fi
+}
+
 path_hint() {
   [ "$PATH_HINT" = 1 ] || return 0
   case ":${PATH}:" in
@@ -182,12 +196,15 @@ main() {
   asset="flue_${VERSION}_${OS}_${ARCH}.tar.gz"
   base_url="https://github.com/${REPO}/releases/download/${TAG}"
   choose_install_dir
+  if [ -x "${INSTALL_DIR}/flue" ]; then
+    UPDATING=1
+  fi
 
   if [ "$DRY_RUN" = 1 ]; then
     say "dry-run: would download ${base_url}/${asset}"
     say "dry-run: would verify its sha256 against ${base_url}/checksums.txt"
     say "dry-run: would install to ${INSTALL_DIR}/flue"
-    say "next: flue enable"
+    next_step_hint
     return 0
   fi
 
@@ -200,7 +217,7 @@ main() {
 
   say "flue ${VERSION} installed to ${INSTALL_DIR}/flue"
   path_hint
-  say "next: flue enable"
+  next_step_hint
 }
 
 # When sourced by the test suite (FLUE_INSTALL_SOURCED=1) nothing runs; the
