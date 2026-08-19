@@ -186,41 +186,24 @@ describe('Terminal', () => {
     expect(em.live().text()).toBe('\x1bcfresh')
   })
 
-  it('stops reporting the pointer once the replayed backlog has drained', () => {
-    // The bug: a daemon restart replays a snapshot's scrollback, and that
-    // scrollback carries the mouse-tracking sequence of a program that was
-    // killed with the daemon and so never wrote its own reset. The emulator
-    // ends the replay armed, with a brand new shell behind it, and every
-    // pointer move over the terminal is an SGR report typed at the prompt.
+  it('leaves a live program its modes once the replayed backlog has drained', () => {
+    // A replay ends at the live program's present state: mouse tracking in
+    // the backlog of a running session is not the orphan of a dead shell, it
+    // is what the program on the other end believes is armed right now.
+    // Clearing it here desynced this emulator from that program — with
+    // claude's fullscreen renderer (alternate screen plus tracking) the
+    // cleared emulator turned every wheel tick into arrow keys at the
+    // program's stdin until its next full redraw. A revived session needs no
+    // clearing from this side either: the daemon ends every revive preload
+    // with settleModes, so a dead shell's reset is already in these bytes.
     const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
 
     act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 8 })))
-    act(() => sock.emitOutput(1, 'backlog!'))
-
-    // After the backlog, never before it: clearing the modes first would be
-    // undone by the very bytes that set them.
-    expect(em.live().reportingStops).toEqual([1])
-  })
-
-  it('leaves the modes alone until the whole backlog is in', () => {
-    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
-
-    act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0, head: 12 })))
-    act(() => sock.emitOutput(1, 'part'))
-
-    expect(em.live().reportingStops).toEqual([])
-  })
-
-  it('says nothing about the modes when there is no backlog to replay', () => {
-    // A freshly spawned session has head === seq. Nothing was replayed, so
-    // there is no stale state to answer for, and a program that armed
-    // tracking on its first line must keep it.
-    const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
-
-    act(() => sock.emitControl(attached({ ref: 1, id: 's1', seq: 0 })))
     act(() => sock.emitOutput(1, '\x1b[?1003h'))
 
-    expect(em.live().reportingStops).toEqual([])
+    // The backlog and nothing after it: any settle sequence appended here
+    // would be this client overruling a program that is still running.
+    expect(em.live().text()).toBe('\x1b[?1003h')
   })
 
   it('does not reset when the attach is an ordinary continuation', () => {
