@@ -81,10 +81,14 @@ jobs:
       - name: Lint and test
         run: make lint test
 
-      # ubuntu-latest images ship shellcheck; apt keeps it deterministic
-      # either way.
-      - name: Install shellcheck
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      # ubuntu-latest images ship shellcheck, so this step normally does
+      # nothing. The guard is what keeps it honest: the unconditional
+      # apt-get it replaces once sat on a bad mirror for 40+ minutes, and a
+      # step that exists only for the day the image drops the tool must not
+      # be able to hold CI hostage — hence also the timeout.
+      - name: Install shellcheck if the image lost it
+        timeout-minutes: 3
+        run: command -v shellcheck || (sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck)
 
       - name: Shellcheck the install script
         run: shellcheck scripts/install.sh scripts/install_test.sh
