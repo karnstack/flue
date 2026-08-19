@@ -353,6 +353,20 @@ func (s *Session) Tail(n int) (data []byte, cols, rows uint16) {
 	return s.ring.Tail(n), s.info.Cols, s.info.Rows
 }
 
+// Pid is the child's pid, immutable after spawn. A holder's hello carries
+// it so the daemon can keep reading the child's cwd itself — processCwd
+// needs the same uid, not the same parent.
+func (s *Session) Pid() int { return s.pid }
+
+// Seqs reports the ring's retained range: the oldest byte still held and
+// the seq just past the newest. A holder's hello carries them so a daemon
+// deciding where to attach knows what the ring can still answer for.
+func (s *Session) Seqs() (base, end uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ring.BaseSeq(), s.ring.EndSeq()
+}
+
 // Write sends bytes to the PTY.
 func (s *Session) Write(p []byte) error {
 	s.mu.Lock()

@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/creack/pty"
 )
 
 // ErrNotFound is what the registry answers for an id it does not hold. A
@@ -191,134 +189,15 @@ func (r *Registry) Spawn(opts SpawnOpts) (Handle, error) {
 // CreatedAt is read as "this session begins now" — the Spawn case, and equally
 // a snapshot written before that field existed.
 func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info) (Handle, error) {
-	shell := loginShell()
-	argv := opts.Cmd
-	// run is what gets exec'd; argv stays the caller's own command and is
-	// what Info records — the login-shell wrapper execArgv may add is how a
-	// session starts, not what it is, and a snapshot revived elsewhere should
-	// re-resolve against that machine's daemon, not replay this one's detour.
-	var run []string
-	if len(argv) == 0 {
-		argv = []string{shell, "-l"}
-		run = argv
-	} else {
-		run = execArgv(shell, argv)
-	}
-
-	// An empty Cwd is a caller with no preference, and it must not fall
-	// through to the daemon's own directory: a service-started daemon runs at
-	// / — neither unit in internal/service sets a working directory — and a
-	// hand-started one runs wherever it happened to be launched from, so
-	// every default session would open somewhere nobody chose. Home is what
-	// a terminal emulator or sshd would have picked, and it is where Revive
-	// already lands a session whose directory has vanished. When even home is
-	// unknowable the empty string stands and the shell inherits — the old
-	// behaviour, kept as the floor rather than the default.
-	cwd := opts.Cwd
-	if cwd == "" {
-		cwd, _ = os.UserHomeDir()
-	}
-
-	cmd := exec.Command(run[0], run[1:]...)
-	cmd.Dir = cwd
-	cmd.Env = sessionEnv(os.Environ(), shell)
-
-	cols, rows := opts.Cols, opts.Rows
-	if cols == 0 {
-		cols = 80
-	}
-	if rows == 0 {
-		rows = 24
-	}
-
-	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: cols, Rows: rows})
+	cfg := ResolveSpawn(opts)
+	cfg.ID = id
+	cfg.Preload = preload
+	cfg.Restore = restore
+	cfg.Clock = r.clock
+	s, err := StartChild(cfg)
 	if err != nil {
 		return nil, err
 	}
-
-	size := opts.RingSize
-	if size == 0 {
-		size = DefaultRingSize
-	}
-
-	// The recorded cwd is the value resolved above, so what Info reports is
-	// where the shell actually started rather than a second opinion. It is
-	// only still empty when home was unresolvable, and then the child
-	// inherited the daemon's directory — so that is what gets recorded.
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-
-	// One reading for both stamps. A session that has just started has been
-	// active for exactly as long as it has existed, and taking the clock twice
-	// would let the two disagree by however long a spawn happens to take.
-	born := r.clock()
-
-	// A revival is not a birth: the session kept its age across the restart,
-	// and only the shell inside it is new. LastActive is the opposite case and
-	// takes the reading above either way — the old one describes a process that
-	// no longer exists.
-	created := restore.CreatedAt
-	if created.IsZero() {
-		created = born
-	}
-
-	s := &Session{
-		id:        id,
-		pty:       f,
-		cmd:       cmd,
-		clock:     r.clock,
-		pid:       cmd.Process.Pid,
-		kill:      killGroup,
-		setsize:   setWinsize,
-		cwdOf:     processCwd,
-		sigReq:    make(chan sigRequest),
-		masterEnd: make(chan struct{}, 1),
-		gone:      make(chan struct{}),
-		ring:      NewRing(size),
-		title:     NewTitleScanner(),
-		subs:      map[*Sub]struct{}{},
-		info: Info{
-			Cwd:    cwd,
-			Cmd:    argv,
-			State:  "running",
-			Cols:   cols,
-			Rows:   rows,
-			Name:   restore.Name,
-			Pinned: restore.Pinned,
-			// Through normalizeTags rather than assigned, so a hand-edited
-			// snapshot arrives in the same shape an edit would have left it in,
-			// and so the slice is this session's own rather than one the
-			// snapshot still holds a header to. It settles the no-tags case
-			// too: empty rather than nil, which is where the Spawn path lands —
-			// see normalizeTags on why no reader should ever meet a null here.
-			Tags:       normalizeTags(restore.Tags),
-			CreatedAt:  created,
-			LastActive: born,
-			// From the options, then from the restore record: a spawn names its
-			// group up front, and a revival hands back the one the dead session
-			// carried. Both empty is every session from before the field.
-			Group: opts.Group,
-			// Deliberately not restored: an ephemeral session is never
-			// snapshotted (see Session.Snapshot), so a restore record cannot
-			// carry the flag.
-			Ephemeral: opts.Ephemeral,
-		},
-	}
-	if s.info.Group == "" {
-		s.info.Group = restore.Group
-	}
-	s.info.ID = s.id
-	s.info.Title = restore.Title
-	// Before pump starts, so everything restored precedes everything live.
-	// The `head` a fresh attach reports covers the whole preloaded region as
-	// a consequence, which is what keeps the client's probe-reply mute gate
-	// correct over restored scrollback.
-	if len(preload) > 0 {
-		s.ring.Write(preload)
-	}
-	go s.pump()
-	go s.supervise()
 
 	r.mu.Lock()
 	r.sessions[s.id] = s
