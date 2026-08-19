@@ -187,6 +187,17 @@ func cmdServe(args []string) error {
 
 	stateDir := snapshotsDir()
 	reg := session.NewRegistry(time.Now)
+	// Sessions run under per-process holders so they outlive this daemon;
+	// FLUE_NO_HOLDER=1 is the escape hatch back to in-process sessions. Both
+	// lookups failing merely leaves the old behaviour, which is also why
+	// neither is fatal.
+	if os.Getenv("FLUE_NO_HOLDER") == "" {
+		if exe, err := os.Executable(); err == nil {
+			if cfgDir, err := config.Dir(); err == nil {
+				reg.SetHolderSpawning(exe, filepath.Join(cfgDir, "holders"))
+			}
+		}
+	}
 	// Bring back what the previous daemon saved on its way out: each session
 	// returns under its old id with its scrollback and a fresh shell in its
 	// directory. Failures are reported and skipped — revival is a courtesy,

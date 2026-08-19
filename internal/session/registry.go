@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -34,6 +35,13 @@ type Registry struct {
 	// metaLog receives the one thing that can go wrong out here — a write that
 	// failed — since nothing on the edit path is in a position to handle it.
 	metaLog *slog.Logger
+	// holderExe and holderRoot, both set, switch Spawn and Revive onto
+	// holder-backed sessions: each new session runs under `holderExe _holder`
+	// in its own directory beneath holderRoot. Unset — every test, and a
+	// daemon opted out via FLUE_NO_HOLDER — sessions run in-process exactly
+	// as they always have.
+	holderExe  string
+	holderRoot string
 }
 
 func NewRegistry(clock func() time.Time) *Registry {
@@ -194,6 +202,14 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info
 	cfg.Preload = preload
 	cfg.Restore = restore
 	cfg.Clock = r.clock
+
+	r.mu.Lock()
+	exe, root := r.holderExe, r.holderRoot
+	r.mu.Unlock()
+	if exe != "" && root != "" {
+		return r.startRemote(exe, filepath.Join(root, id), cfg)
+	}
+
 	s, err := StartChild(cfg)
 	if err != nil {
 		return nil, err
@@ -203,6 +219,47 @@ func (r *Registry) start(opts SpawnOpts, id string, preload []byte, restore Info
 	r.sessions[s.id] = s
 	r.mu.Unlock()
 	return s, nil
+}
+
+// startRemote is start's holder-backed half: the session runs under its own
+// holder process, and the identity record beside the socket is what a later
+// daemon needs to call the session by its right name.
+func (r *Registry) startRemote(exe, dir string, cfg ChildConfig) (Handle, error) {
+	rem, err := SpawnRemote(exe, dir, cfg, r.clock)
+	if err != nil {
+		return nil, err
+	}
+	info := rem.Info()
+	rec := IdentityRecord{
+		V: 1, ID: cfg.ID, Cmd: info.Cmd,
+		Group: info.Group, Ephemeral: info.Ephemeral,
+		CreatedAt: info.CreatedAt,
+	}
+	if err := SaveIdentity(dir, rec); err != nil {
+		// The session is up; a record that failed to write costs the next
+		// daemon some fields, not the user their shell. Same judgement as
+		// flushMeta.
+		_, log := r.metaSink()
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Warn("could not persist session identity", "session", cfg.ID, "err", err)
+	}
+
+	r.mu.Lock()
+	r.sessions[cfg.ID] = rem
+	r.mu.Unlock()
+	return rem, nil
+}
+
+// SetHolderSpawning points the registry at the holder executable and the
+// directory holder dirs live under; from then on every Spawn and Revive
+// runs its session out-of-process. Empty either disables, which is the
+// default and the whole of FLUE_NO_HOLDER.
+func (r *Registry) SetHolderSpawning(exe, root string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.holderExe, r.holderRoot = exe, root
 }
 
 func (r *Registry) Get(id string) (Handle, bool) {
@@ -232,6 +289,16 @@ func (r *Registry) UpdateMeta(id string, p MetaPatch) (Info, error) {
 	}
 	info := s.ApplyMeta(p)
 	r.flushMeta(info)
+	// The ephemeral flag is the one meta field a reattach reads from the
+	// identity record rather than the meta file, so the keep affordance has
+	// to land there too or a daemon restart would resurrect the scratch's
+	// death sentence.
+	if rem, ok := s.(*Remote); ok && p.Ephemeral != nil {
+		if rec, err := LoadIdentity(rem.Dir()); err == nil {
+			rec.Ephemeral = *p.Ephemeral
+			_ = SaveIdentity(rem.Dir(), rec)
+		}
+	}
 	return info, nil
 }
 
