@@ -651,6 +651,21 @@ describe('Terminal', () => {
       expect(strip()).toBeNull()
     })
 
+    it('wears the anchor tags in a member pane, where the group is what got tagged', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s2" createEmulator={e.create} />)
+      act(() =>
+        sock.emitControl({
+          type: 'sessions',
+          sessions: [
+            session({ id: 's1', tags: ['api'] }),
+            session({ id: 's2', group: 's1', tags: [] }),
+          ],
+        }),
+      )
+
+      expect(screen.getByText('api')).toBeTruthy()
+    })
+
     it('survives the minimal chrome, so a split pane still says whose it is', () => {
       const { sock } = mountTerminal((e) => (
         <Terminal sessionId="s1" chrome="minimal" createEmulator={e.create} />

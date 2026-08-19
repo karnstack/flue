@@ -24,6 +24,7 @@ import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
 import { createPathDetector } from '@/files/detector'
 import { FileViewer, type FileTarget } from '@/files/viewer'
 import { loadThemePref, onThemePref, saveThemePref, THEME_PREF_KEY } from '@/lib/theme-pref'
+import { anchorIdOf } from '@/sessions/groups'
 import {
   cellAt,
   cellBox,
@@ -934,10 +935,15 @@ export function Terminal({
         const own = list.find((s) => s.id === sessionId)
         if (!own) return
         setCwd(own.cwd)
+        // The tags belong to the group, and the sessions list edits them on
+        // the anchor — the row a group folds to. A member pane (a split, a
+        // tab) wears the anchor's tags for the same reason; its own list
+        // entry never carries any.
+        const tagged = list.find((s) => s.id === anchorIdOf(own)) ?? own
         setTags((prev) =>
-          prev.length === own.tags.length && prev.every((t, i) => t === own.tags[i])
+          prev.length === tagged.tags.length && prev.every((t, i) => t === tagged.tags[i])
             ? prev
-            : own.tags,
+            : tagged.tags,
         )
         tabName = own.name
         tabOsc = own.title
