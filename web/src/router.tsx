@@ -11,6 +11,7 @@ import { AppShell } from '@/components/app-shell'
 import { AgentViewerRoute } from '@/routes/agent-viewer'
 import { AgentsRoute } from '@/routes/agents'
 import { DevicesRoute } from '@/routes/devices'
+import { FilePeekRoute, validateFilePeekSearch } from '@/routes/file-peek'
 import { MachinesRoute } from '@/routes/machines'
 import { NewSessionRoute } from '@/routes/new-session'
 import { PairRoute } from '@/routes/pair'
@@ -260,6 +261,22 @@ const terminalRoute = createRoute({
 })
 
 /**
+ * A session's file as a page: the address the viewer's open-in-new-tab
+ * builds. Beside the terminal and outside the shell for the terminal's
+ * reason — the tab is the file, and this page rides the same machine-scoped
+ * client the terminal does. The path, like its route id, is exported for the
+ * tests that key on it.
+ */
+export const FILE_ROUTE_ID = '/d/$deviceId/s/$sessionId/file'
+
+const fileRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: FILE_ROUTE_ID,
+  validateSearch: validateFilePeekSearch,
+  component: FilePeekRoute,
+})
+
+/**
  * The page that starts a session, beside the terminal and outside the shell on
  * purpose: it is the terminal a moment before there is one, it replaces itself
  * with that terminal, and app chrome around it would be a dashboard flashing
@@ -343,6 +360,7 @@ const routeTree = rootRoute.addChildren([
     settingsRoute,
   ]),
   terminalRoute,
+  fileRoute,
   newSessionRoute,
   machinesRoute,
   pairRoute,
