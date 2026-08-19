@@ -348,6 +348,7 @@ describe('Terminal', () => {
     vi.useRealTimers()
   })
 
+
   it('reports the process exiting, with its code, once', () => {
     const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
     act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
@@ -664,6 +665,25 @@ describe('Terminal', () => {
       )
 
       expect(screen.getByText('api')).toBeTruthy()
+    })
+
+    it('yields the corner when the surface hands the tags to another pane', () => {
+      const { sock } = mountTerminal((e) => (
+        <Terminal sessionId="s1" showTags={false} createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
+
+      expect(strip()).toBeNull()
+    })
+
+    it('sits above the key bar on a coarse pointer, off the first line of output', () => {
+      coarsePointer()
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
+
+      expect(strip()!.className).toMatch(/\bbottom-17\b/)
+      expect(strip()!.className).toMatch(/\bleft-3\b/)
+      expect(strip()!.className).not.toMatch(/\btop-3\b/)
     })
 
     it('survives the minimal chrome, so a split pane still says whose it is', () => {
@@ -1680,14 +1700,6 @@ describe('Terminal', () => {
   })
 
   describe('the key bar', () => {
-    /** jsdom has no matchMedia; a coarse pointer is claimed explicitly. */
-    function coarsePointer() {
-      vi.stubGlobal('matchMedia', (query: string) => ({
-        matches: query.includes('coarse'),
-        addEventListener: () => {},
-        removeEventListener: () => {},
-      }))
-    }
     const bar = () => document.querySelector<HTMLElement>('[data-flue-keybar]')
     const key = (label: string) =>
       Array.from(document.querySelectorAll<HTMLButtonElement>('[data-flue-keybar] button')).find(
@@ -1840,6 +1852,15 @@ describe('Terminal', () => {
 })
 
 /** A complete SessionInfo, so a caller only names what it cares about. */
+/** jsdom has no matchMedia; a coarse pointer is claimed explicitly. */
+function coarsePointer() {
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: query.includes('coarse'),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }))
+}
+
 function session(over: Partial<SessionInfo> = {}): SessionInfo {
   return {
     id: 's1',

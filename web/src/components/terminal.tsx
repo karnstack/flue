@@ -100,6 +100,13 @@ export interface TerminalProps {
    */
   chrome?: 'full' | 'minimal'
   /**
+   * Whether this pane wears the group's tag strip. The tags name the group,
+   * not a pane, so a multi-pane surface shows them once — the route points
+   * this at its top-left leaf, the way chipsPane points the chips at the
+   * top-right one. A lone terminal wears them by default.
+   */
+  showTags?: boolean
+  /**
    * Whether the pane pins itself to the visual viewport (lib/viewport.ts).
    * True everywhere the terminal is the page — which is what the pinning
    * formula assumes. The desktop scratch modal turns it off: a centered
@@ -212,6 +219,7 @@ export function Terminal({
   onNewSession,
   onSplit,
   chrome = 'full',
+  showTags = true,
   fitViewport = true,
   viewportInset = 0,
   ownsTitle = true,
@@ -1257,18 +1265,22 @@ export function Terminal({
         />
       )}
       {/*
-        The session's tags, in the corner the control strip leaves free, in
-        every chrome: a split pane shows no other identity, so its tags are
-        the one hint of whose pane it is. Same z-10 as the controls, for the
-        reason theirs carries; the badges wear the chip surface so they read
-        quietly over whatever palette the pane is painted in. The strip takes
-        no pointer beyond its own footprint — nothing in it stretches over
-        the terminal.
+        The group's tags, once per surface (see showTags), in the corner the
+        control strip leaves free — except on a finger, where the top-left
+        is the first line of whatever just ran; there the strip sits above
+        the key bar instead. Same z-10 as the controls, for the reason
+        theirs carries; the badges wear the chip surface so they read
+        quietly over whatever palette the pane is painted in. The strip
+        takes no pointer beyond its own footprint — nothing in it stretches
+        over the terminal.
       */}
-      {tags.length > 0 && (
+      {showTags && tags.length > 0 && (
         <div
           data-flue-tags=""
-          className="absolute top-3 left-3 z-10 flex max-w-[40%] flex-wrap items-center gap-1.5"
+          className={cn(
+            'absolute left-3 z-10 flex max-w-[40%] flex-wrap items-center gap-1.5',
+            coarse ? 'bottom-17' : 'top-3',
+          )}
         >
           <TagBadges
             tags={tags}

@@ -23,6 +23,7 @@ import {
   saveTabs,
   splitInTabs,
   tabOf,
+  topLeftLeaf,
   topRightLeaf,
   withRatio,
   type PaneTree,
@@ -348,6 +349,9 @@ export function TerminalRoute() {
   shownRef.current = shownTab
   const activeTree = tabTrees[Math.max(0, tabOf(tabTrees, shownTab))]
   const chipsPane = isMobile || activeTree === undefined ? shownTab : topRightLeaf(activeTree)
+  // The tag strip's mirror image: one wearer per surface, at the corner the
+  // strip draws in. Follows the active tab the way the chips do.
+  const tagsPane = isMobile || activeTree === undefined ? shownTab : topLeftLeaf(activeTree)
 
   // A machine the fleet does not hold: never paired on this browser, or its
   // pinned key gone. Said in a pill, the way the terminal answers a session
@@ -382,6 +386,8 @@ export function TerminalRoute() {
             // splits whichever pane holds the keyboard, so the chips'
             // placement costs a sibling nothing but the pointer route.
             chrome={id === chipsPane ? 'full' : 'minimal'}
+            // And one tag strip, at the surface's top-left — see tagsPane.
+            showTags={id === tagsPane}
             onClosed={() => {
               // Fired by the exit itself — there is no overlay any more. A
               // session that was already over when this view opened is being
