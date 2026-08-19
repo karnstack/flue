@@ -74,6 +74,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -470,6 +471,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle(PairPagePath, s.withProvenance(s.ui))
 	mux.Handle(uiAssetPrefix, s.withProvenance(s.ui))
 	mux.Handle("/api/sessions", s.withAuth(http.HandlerFunc(s.handleSessions)))
+	// The CLI ending sessions. A POST, so methodPolicy names it, and behind
+	// withAuth like every other mutation the CLI reaches over HTTP.
+	mux.Handle(SessionsClosePath, s.withAuth(http.HandlerFunc(s.handleSessionsClose)))
 	// The Remote screen's relay endpoints (relayui.go). Loopback-only by the
 	// bind, mutating only by POST — methodPolicy names the ones that mutate.
 	mux.Handle(RelayInfoPath, s.withAuth(http.HandlerFunc(s.handleRelayInfo)))
@@ -542,7 +546,8 @@ func methodPolicy(next http.Handler) http.Handler {
 		postable := r.URL.Path == MintPath || r.URL.Path == PairPath ||
 			r.URL.Path == RelayDeployPath || r.URL.Path == RelayUpdatePath ||
 			r.URL.Path == RelayAddressPath || r.URL.Path == RelayLeavePath ||
-			r.URL.Path == RelayReloadPath || r.URL.Path == EnrolPath
+			r.URL.Path == RelayReloadPath || r.URL.Path == EnrolPath ||
+			r.URL.Path == SessionsClosePath
 		allowed := r.Method == http.MethodGet || r.Method == http.MethodHead ||
 			(postable && r.Method == http.MethodPost)
 		if !allowed {
@@ -985,6 +990,76 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": infos})
+}
+
+// SessionsClosePath is `POST /api/sessions/close`: the flue CLI ending
+// sessions on this daemon. It exists because sessions no longer die with the
+// daemon — each one runs under its own holder — so "stop the daemon" stopped
+// being a way to end them, and a deliberate close needs a verb of its own.
+// HTTP rather than the wire protocol because its caller is the CLI, which
+// already speaks loopback HTTP for everything else it does.
+const SessionsClosePath = "/api/sessions/close"
+
+// maxCloseBytes bounds the close request. The largest honest body is a list
+// of session ids at sixteen hex characters each; 64 KiB holds thousands of
+// them, and anything bigger is not a close request.
+const maxCloseBytes = 64 << 10
+
+// handleSessionsClose answers POST SessionsClosePath: `{"all":true}` closes
+// every session, `{"ids":[...]}` the named ones, and the reply says how many
+// went and which ids named nothing. A body that says both is an all-close —
+// the wider instruction subsumes the narrower — and one that says neither is
+// the client's bug, refused before anything is touched.
+//
+// The semantics live on the registry (CloseAll, CloseByID); this handler
+// only translates HTTP into those calls. An unknown id lands in missing
+// rather than failing the batch, because the caller closing three sessions
+// is owed the two that exist whatever became of the third.
+func (s *Server) handleSessionsClose(w http.ResponseWriter, r *http.Request) {
+	// methodPolicy names this path postable, which widens it to GET-or-POST;
+	// this narrows it back. A GET must never close — it is the one method a
+	// redirect can launder — and repeating the check locally means the rule
+	// survives this handler being mounted somewhere the middleware does not
+	// wrap.
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxCloseBytes+1))
+	if err != nil || len(body) > maxCloseBytes {
+		http.Error(w, "request body unreadable or too large", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		All bool     `json:"all"`
+		IDs []string `json:"ids"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "request body is not the expected JSON", http.StatusBadRequest)
+		return
+	}
+
+	closed, missing := 0, []string{}
+	switch {
+	case req.All:
+		closed = s.reg.CloseAll()
+	case len(req.IDs) > 0:
+		for _, id := range req.IDs {
+			if err := s.reg.CloseByID(id); err != nil {
+				missing = append(missing, id)
+				continue
+			}
+			closed++
+		}
+	default:
+		http.Error(w, `the body must set "all" or name "ids"`, http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"closed": closed, "missing": missing})
 }
 
 // handleMint issues a one-time handoff token to a local process that has
