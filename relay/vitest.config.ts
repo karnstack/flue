@@ -23,9 +23,13 @@ import { defineConfig } from 'vitest/config'
  * before they dial. A test that says nothing about the deadline is no longer
  * making a silent bet on how fast the runner is.
  *
- * The pairing deadline stays short and stays the looser of the two, because the
- * tests that must *not* hit it run a whole HTTP request through a WebSocket
- * round trip first.
+ * The pairing deadline is bound long by the same rule, and it earned its
+ * place the same way the handshake deadline did. It used to stay short —
+ * 250 ms, on the reasoning that the tests that must not hit it run a whole
+ * HTTP request through a WebSocket round trip first — and a loaded CI
+ * runner eventually stalled past that: four pair tests 504ed in one run,
+ * none reproducible locally. The one test about the timeout binds its own
+ * short deadline with `pairTimeout()` before it dials.
  *
  * CLIENT_IDLE_TIMEOUT_MS is bound the same way and for the same reason: a test
  * client sends when its test needs it to and is otherwise silent — it sends no
@@ -41,7 +45,7 @@ export default defineConfig({
         bindings: {
           HANDSHAKE_TIMEOUT_MS: 600_000,
           CLIENT_IDLE_TIMEOUT_MS: 600_000,
-          PAIR_TIMEOUT_MS: 250,
+          PAIR_TIMEOUT_MS: 600_000,
           // The directory's entry cap, bound small for the same reason the
           // deadlines above are bound at all: the only way to test a cap is to
           // reach it, and reaching the production 512 is 512 sequential round

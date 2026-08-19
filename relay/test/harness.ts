@@ -107,6 +107,23 @@ export async function idleTimeout(hub: DurableObjectStub, ms: number): Promise<v
   })
 }
 
+/**
+ * Bind one hub's pairing deadline, for the tests that are about the 504.
+ *
+ * Same shape and same rule as the two above. The pairing deadline was the
+ * last one still bound short for the whole pool — 250 ms, on the bet that a
+ * test's daemon always answers a round trip faster than that — and a loaded
+ * CI runner eventually collected on the bet: four pair tests 504ed at once
+ * while the runner stalled. Now the pool binds a deadline no test can
+ * outlive, and the one test about the timeout binds its own short one here.
+ */
+export async function pairTimeout(hub: DurableObjectStub, ms: number): Promise<void> {
+  await runInDurableObject(hub, (instance) => {
+    const withEnv = instance as unknown as { env: Record<string, unknown> }
+    withEnv.env = { ...withEnv.env, PAIR_TIMEOUT_MS: ms }
+  })
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }

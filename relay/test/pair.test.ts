@@ -10,10 +10,11 @@ import {
   freshHub,
   hubPath,
   MACHINE,
+  pairTimeout,
   type Leg,
 } from './harness'
 
-/** Mirrors the PAIR_TIMEOUT_MS binding in vitest.config.ts. */
+/** The deadline the one timeout test binds for itself via pairTimeout(). */
 const PAIR_TIMEOUT_MS = 250
 
 /** The body cap, matching the daemon's own maxPairBytes (internal/daemon/pairing.go). */
@@ -292,6 +293,7 @@ describe('the cap on concurrent pairing attempts', () => {
 describe('a daemon that does not answer', () => {
   it('times out with 504 daemon did not answer', async () => {
     const hub = freshHub()
+    await pairTimeout(hub, PAIR_TIMEOUT_MS)
     const daemon = await dial(hub, `/daemon/${MACHINE}`)
     const started = Date.now()
     const res = await post(hub, '{"token":"t"}')
