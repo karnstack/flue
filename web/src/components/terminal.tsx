@@ -1251,15 +1251,15 @@ export function Terminal({
         />
       )}
       {/*
-        The session's tags, in the corner the control strip leaves free, and
-        only in full chrome: a split pane's siblings share one URL and the
-        scratch modal has its own frame, so neither needs a second identity.
-        Same z-10 as the controls, for the reason theirs carries; the badges
-        wear the chip surface so they read quietly over whatever palette the
-        pane is painted in. The strip takes no pointer beyond its own
-        footprint — nothing in it stretches over the terminal.
+        The session's tags, in the corner the control strip leaves free, in
+        every chrome: a split pane shows no other identity, so its tags are
+        the one hint of whose pane it is. Same z-10 as the controls, for the
+        reason theirs carries; the badges wear the chip surface so they read
+        quietly over whatever palette the pane is painted in. The strip takes
+        no pointer beyond its own footprint — nothing in it stretches over
+        the terminal.
       */}
-      {chrome === 'full' && tags.length > 0 && (
+      {tags.length > 0 && (
         <div
           data-flue-tags=""
           className="absolute top-3 left-3 z-10 flex max-w-[40%] flex-wrap items-center gap-1.5"

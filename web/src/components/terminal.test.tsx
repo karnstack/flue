@@ -651,14 +651,14 @@ describe('Terminal', () => {
       expect(strip()).toBeNull()
     })
 
-    it('stays out of the minimal chrome, where a split pane already says whose it is', () => {
+    it('survives the minimal chrome, so a split pane still says whose it is', () => {
       const { sock } = mountTerminal((e) => (
         <Terminal sessionId="s1" chrome="minimal" createEmulator={e.create} />
       ))
       act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
 
-      expect(strip()).toBeNull()
-      expect(screen.queryByText('api')).toBeNull()
+      expect(strip()).not.toBeNull()
+      expect(screen.getByText('api')).toBeTruthy()
     })
   })
 
