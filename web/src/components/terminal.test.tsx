@@ -591,6 +591,77 @@ describe('Terminal', () => {
     expect(document.title).toBe('vim wire.go')
   })
 
+  describe('the tag strip', () => {
+    const strip = () => document.querySelector<HTMLElement>('[data-flue-tags]')
+
+    it('floats the session tags in the top-left corner, on the controls layer', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() =>
+        sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api', 'prod'] })] }),
+      )
+
+      expect(screen.getByText('api')).toBeTruthy()
+      expect(screen.getByText('prod')).toBeTruthy()
+      // Opposite corner from the control strip, same z-10: xterm's own layers
+      // carry z-indexes, and an unindexed sibling loses to them.
+      expect(strip()!.className).toMatch(/\btop-3\b/)
+      expect(strip()!.className).toMatch(/\bleft-3\b/)
+      expect(strip()!.className).toMatch(/\bz-10\b/)
+    })
+
+    it('draws nothing at all for a session without tags', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      expect(strip()).toBeNull()
+
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: [] })] }))
+      expect(strip()).toBeNull()
+    })
+
+    it('caps the badges and folds the remainder into a +n', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() =>
+        sock.emitControl({
+          type: 'sessions',
+          sessions: [session({ tags: ['api', 'edge', 'ops', 'prod', 'staging'] })],
+        }),
+      )
+
+      expect(screen.getByText('api')).toBeTruthy()
+      expect(screen.getByText('edge')).toBeTruthy()
+      expect(screen.getByText('ops')).toBeTruthy()
+      expect(screen.queryByText('prod')).toBeNull()
+      expect(screen.getByText('+2').getAttribute('title')).toBe('prod, staging')
+    })
+
+    it('follows the tags as the sessions poll moves them, for its own row only', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
+      expect(screen.getByText('api')).toBeTruthy()
+
+      act(() =>
+        sock.emitControl({
+          type: 'sessions',
+          sessions: [session({ tags: ['api', 'v2'] }), session({ id: 'other', tags: ['ops'] })],
+        }),
+      )
+      expect(screen.getByText('v2')).toBeTruthy()
+      expect(screen.queryByText('ops')).toBeNull()
+
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: [] })] }))
+      expect(strip()).toBeNull()
+    })
+
+    it('stays out of the minimal chrome, where a split pane already says whose it is', () => {
+      const { sock } = mountTerminal((e) => (
+        <Terminal sessionId="s1" chrome="minimal" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
+
+      expect(strip()).toBeNull()
+      expect(screen.queryByText('api')).toBeNull()
+    })
+  })
+
   describe('touch scrolling', () => {
     /** Attached at 80x24 with a 17px line, ready to be dragged. */
     function mountDraggable() {

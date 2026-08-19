@@ -15,6 +15,7 @@ import { KeyBar } from '@/components/key-bar'
 import { PasteBox } from '@/components/paste-box'
 import { SelectionMenu, type MenuEnd } from '@/components/selection-menu'
 import { ShortcutsHelp } from '@/components/shortcuts-help'
+import { TagBadges } from '@/components/tag-badges'
 import { ThemeMenu } from '@/components/theme-menu'
 import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
 import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
@@ -264,6 +265,10 @@ export function Terminal({
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
   const [cwd, setCwd] = useState<string | null>(null)
+  // And its tags, for the corner strip, from the same list. Kept only when
+  // they change: the poll repeats, and an unguarded set of a fresh array
+  // would re-render the pane on every tick.
+  const [tags, setTags] = useState<string[]>([])
   // The theme choice — global, every session wears it — read once per mount
   // and mirrored into a ref so the effect can resolve it without carrying
   // the state in its dependency array: a theme change must restyle the live
@@ -929,6 +934,11 @@ export function Terminal({
         const own = list.find((s) => s.id === sessionId)
         if (!own) return
         setCwd(own.cwd)
+        setTags((prev) =>
+          prev.length === own.tags.length && prev.every((t, i) => t === own.tags[i])
+            ? prev
+            : own.tags,
+        )
         tabName = own.name
         tabOsc = own.title
         tabCwd = own.cwd
@@ -1239,6 +1249,26 @@ export function Terminal({
             actionsRef.current?.focusSurface()
           }}
         />
+      )}
+      {/*
+        The session's tags, in the corner the control strip leaves free, and
+        only in full chrome: a split pane's siblings share one URL and the
+        scratch modal has its own frame, so neither needs a second identity.
+        Same z-10 as the controls, for the reason theirs carries; the badges
+        wear the chip surface so they read quietly over whatever palette the
+        pane is painted in. The strip takes no pointer beyond its own
+        footprint — nothing in it stretches over the terminal.
+      */}
+      {chrome === 'full' && tags.length > 0 && (
+        <div
+          data-flue-tags=""
+          className="absolute top-3 left-3 z-10 flex max-w-[40%] flex-wrap items-center gap-1.5"
+        >
+          <TagBadges
+            tags={tags}
+            className="bg-(--chip-bg) text-(--chip-dim) ring-1 ring-(--chip-ring) backdrop-blur-sm"
+          />
+        </div>
       )}
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar
