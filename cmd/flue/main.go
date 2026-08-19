@@ -80,6 +80,8 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "open":
 		err = cmdOpen(os.Args[2:])
+	case "close":
+		err = cmdClose(os.Args[2:])
 	case "enable":
 		err = cmdEnable()
 	case "disable":
@@ -124,6 +126,7 @@ const usageText = `flue — your terminal, as a browser tab
   flue relay leave        take this machine off its relay; the Worker stays deployed
   flue relay reset        empty the relay's fleet directory; the fleet republishes
   flue open [path]        spawn a session in path and open it in the browser
+  flue close <id>...      close the named sessions; --all closes every one
   flue serve [--port N] [--open]   run the daemon in the foreground
   flue update             download the newest release, swap this binary, restart the daemon
   flue version            print the version (also --version, -v)

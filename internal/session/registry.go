@@ -381,6 +381,59 @@ func (r *Registry) List() []Handle {
 	return out
 }
 
+// CloseAll retires every session on this daemon, running and exited alike,
+// and reports how many went. It is the registry half of `flue close --all`:
+// a deliberate "end it all now", so unlike Reap it consults no retention
+// window and asks no session whether it has exited.
+//
+// The choreography is Reap's, for Reap's reasons. Victims are collected and
+// removed from the map under r.mu and closed only after it is released,
+// because Close signals a process group and waits for the session's
+// supervisor to answer — done under r.mu, one stalled session would stall
+// Get, List and Spawn for everyone. And each session's meta file goes with
+// it: a registry that has finished with a session has nothing left for the
+// record to describe.
+func (r *Registry) CloseAll() int {
+	r.mu.Lock()
+	victims := make([]handle, 0, len(r.sessions))
+	for id, s := range r.sessions {
+		victims = append(victims, s)
+		delete(r.sessions, id)
+	}
+	r.mu.Unlock()
+
+	dir, _ := r.metaSink()
+	for _, s := range victims {
+		_ = s.Close()
+		DeleteMeta(dir, s.ID())
+	}
+	return len(victims)
+}
+
+// CloseByID retires the one session it names, with CloseAll's semantics and
+// ErrNotFound for an id the registry does not hold — the caller's cue to say
+// "no such session" rather than to fail the rest of a batch.
+//
+// The close error is discarded the way Reap discards it: the session left
+// the registry the moment the map entry went, and nothing the caller could
+// do with a failed group signal would put it back.
+func (r *Registry) CloseByID(id string) error {
+	r.mu.Lock()
+	s, ok := r.sessions[id]
+	if ok {
+		delete(r.sessions, id)
+	}
+	r.mu.Unlock()
+	if !ok {
+		return ErrNotFound
+	}
+
+	dir, _ := r.metaSink()
+	_ = s.Close()
+	DeleteMeta(dir, id)
+	return nil
+}
+
 // Reap removes sessions that exited more than their retention ago —
 // ExitedRetention ordinarily, EphemeralRetention for a scratch terminal —
 // and closes the running ephemeral children of parents that have ended.
