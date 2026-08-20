@@ -538,9 +538,10 @@ function useFormFleet(fleet: ReturnType<typeof useFleet>): FormFleet {
  * The missing-machine treatment, matched to the missing-session one: the same
  * full-bleed pane the terminal renders, the same pill in the same corner, a
  * dot that holds still because the state is final. Dark in both themes, as
- * the pill is when it floats over a terminal.
+ * the pill is when it floats over a terminal. Exported for the file page,
+ * which answers an unpaired machine the same way.
  */
-function MachineNotPaired() {
+export function MachineNotPaired() {
   return (
     <div className="relative h-full w-full overflow-hidden bg-white dark:bg-zinc-950">
       <div className="absolute top-3 right-3 z-10">

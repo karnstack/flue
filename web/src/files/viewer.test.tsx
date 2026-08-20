@@ -1,12 +1,15 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { RouterContextProvider } from '@tanstack/react-router'
+import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { FlueClientProvider } from '@/client/provider'
+import { createFlueRouter } from '@/router'
 import { fakeClient, type FakeSocket } from '@/testing/socket'
 import { FileViewer, type FileTarget } from './viewer'
 
-const openViewer = (target: FileTarget) => {
+const openViewer = (target: FileTarget, router?: ReturnType<typeof createFlueRouter>) => {
   // jsdom lays nothing out, and the virtualizer windows on measured boxes —
   // offsetWidth/offsetHeight for the scroll box, getBoundingClientRect for
   // row measurement. Every element pretending to be 800x480 is what
@@ -29,10 +32,20 @@ const openViewer = (target: FileTarget) => {
   client.connect()
   const sock = last()
   act(() => sock.open())
+  // The optional router rides in as context only — RouterContextProvider
+  // renders no matches — so the viewer mounts exactly as the terminal mounts
+  // it, with the tab's address in reach of its open-in-new-tab button.
+  const wrapper =
+    router === undefined
+      ? undefined
+      : ({ children }: { children: ReactNode }) => (
+          <RouterContextProvider router={router}>{children}</RouterContextProvider>
+        )
   const view = render(
     <FlueClientProvider client={client}>
       <FileViewer sessionId="s1" target={target} onClose={onClose} />
     </FlueClientProvider>,
+    { wrapper },
   )
   const sent = sock.control().find((m) => m.type === 'read')
   // Answer every stat not yet answered with one entry (or nothing for null).
@@ -73,7 +86,10 @@ const flowed = async (sock: FakeSocket, body: string) => {
   })
 }
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 describe('FileViewer', () => {
   it('asks for the file and says so while opening', () => {
@@ -413,6 +429,27 @@ describe('FileViewer', () => {
     expect(body().className).toContain('whitespace-pre')
     await userEvent.click(toggle)
     expect(body().className).toContain('whitespace-pre-wrap')
+  })
+
+  it('opens the file page for this machine and session in a new tab, staying open itself', async () => {
+    const open = vi.fn().mockReturnValue(null)
+    vi.stubGlobal('open', open)
+    window.history.replaceState(null, '', '/d/attic-pi/s/abc123')
+    const router = createFlueRouter()
+    await router.load()
+    const { sock, sent, onClose } = openViewer({ path: 'a.go' }, router)
+    served(sock, sent!.reqId)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open in new tab' }))
+
+    // The address is built by the router, so the search serialisation is the
+    // route's own — the path survives whatever characters it carries.
+    const url = new URL(open.mock.calls[0]![0] as string, 'http://localhost')
+    expect(url.pathname).toBe('/d/attic-pi/s/s1/file')
+    expect(url.searchParams.get('path')).toBe('/home/k/proj/a.go')
+    expect(open.mock.calls[0]![1]).toBe('_blank')
+    expect(screen.getByRole('dialog', { name: 'a.go' })).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
   })
 
   it('offers the resolved path to the clipboard', async () => {
