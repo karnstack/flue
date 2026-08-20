@@ -595,7 +595,7 @@ describe('Terminal', () => {
   describe('the tag strip', () => {
     const strip = () => document.querySelector<HTMLElement>('[data-flue-tags]')
 
-    it('leads the control row, where the corner is already spent on chrome', () => {
+    it('hangs below the control row, right-aligned over the emptiest ground', () => {
       const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
       act(() =>
         sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api', 'prod'] })] }),
@@ -603,9 +603,12 @@ describe('Terminal', () => {
 
       expect(screen.getByText('api')).toBeTruthy()
       expect(screen.getByText('prod')).toBeTruthy()
-      // Inline in the top-right control row, not floating over the output.
-      expect(strip()!.closest('[data-flue-controls]')).toBeTruthy()
-      expect(strip()!.className).not.toMatch(/\babsolute\b/)
+      // Under the chips at the right edge: terminal text is left-justified,
+      // so this is the quietest place a line of badges can stand.
+      expect(strip()!.className).toMatch(/\btop-12\b/)
+      expect(strip()!.className).toMatch(/\bright-3\b/)
+      expect(strip()!.className).toMatch(/\bjustify-end\b/)
+      expect(strip()!.className).toMatch(/\bz-10\b/)
     })
 
     it('draws nothing at all for a session without tags', () => {
@@ -665,14 +668,13 @@ describe('Terminal', () => {
       expect(screen.getByText('api')).toBeTruthy()
     })
 
-    it('sits above the key bar on a coarse pointer, off the first line of output', () => {
+    it('keeps the same berth on a coarse pointer', () => {
       coarsePointer()
       const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
       act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
 
-      expect(strip()!.className).toMatch(/\bbottom-17\b/)
-      expect(strip()!.className).toMatch(/\bleft-3\b/)
-      expect(strip()!.className).not.toMatch(/\btop-3\b/)
+      expect(strip()!.className).toMatch(/\btop-12\b/)
+      expect(strip()!.className).toMatch(/\bright-3\b/)
     })
 
     it('stays out of the minimal chrome, whose surface shows them elsewhere', () => {

@@ -1257,18 +1257,18 @@ export function Terminal({
         />
       )}
       {/*
-        The group's tags on a finger, above the key bar: both corners are
-        spoken for there — the top-left is the first line of whatever just
-        ran, the top-right is the control row, and a thumb's badges deserve
-        more width than the row spares. Full chrome only, so a surface reads
-        them once (see chipsPane). A fine pointer gets them in the control
-        row below instead. The strip takes no pointer beyond its own
-        footprint.
+        The group's tags, hung below the control row at the right edge.
+        Terminal text is left-justified, so the right margin under the chips
+        is the quietest ground on the screen — a floating badge anywhere
+        left sits on somebody's prompt. Right-aligned and wrapping downward,
+        so a long set grows into that same margin. Full chrome only, which
+        is what makes a surface read them once (see chipsPane). The strip
+        takes no pointer beyond its own footprint.
       */}
-      {chrome === 'full' && coarse && tags.length > 0 && (
+      {chrome === 'full' && tags.length > 0 && (
         <div
           data-flue-tags=""
-          className="absolute bottom-17 left-3 z-10 flex max-w-[70%] flex-wrap items-center gap-1.5"
+          className="absolute top-12 right-3 z-10 flex max-w-[50%] flex-wrap items-center justify-end gap-1.5"
         >
           <TagBadges
             tags={tags}
@@ -1279,21 +1279,7 @@ export function Terminal({
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar
           eats their clicks. */}
-      <div data-flue-controls="" className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
-        {/*
-          The group's tags lead the row: the corner is already spent on
-          chrome, so badges here cover nothing new. Height of the icon
-          buttons beside them, and clipped rather than wrapped — a row that
-          grows downward would be floating over output again.
-        */}
-        {chrome === 'full' && !coarse && tags.length > 0 && (
-          <div data-flue-tags="" className="flex h-7 max-w-64 items-center gap-1.5 overflow-hidden">
-            <TagBadges
-              tags={tags}
-              className="bg-(--chip-bg) text-(--chip-dim) ring-1 ring-(--chip-ring) backdrop-blur-sm"
-            />
-          </div>
-        )}
+      <div className="absolute top-3 right-3 z-10 flex items-start gap-x-2">
         {chrome === 'full' && <ThemeMenu value={themeId} dark={dark} onChange={handleTheme} />}
         {chrome === 'full' && (
           <>
