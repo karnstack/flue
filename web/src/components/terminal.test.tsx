@@ -348,6 +348,7 @@ describe('Terminal', () => {
     vi.useRealTimers()
   })
 
+
   it('reports the process exiting, with its code, once', () => {
     const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
     act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
@@ -589,6 +590,102 @@ describe('Terminal', () => {
       }),
     )
     expect(document.title).toBe('vim wire.go')
+  })
+
+  describe('the tag strip', () => {
+    const strip = () => document.querySelector<HTMLElement>('[data-flue-tags]')
+
+    it('hangs below the control row, right-aligned over the emptiest ground', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() =>
+        sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api', 'prod'] })] }),
+      )
+
+      expect(screen.getByText('api')).toBeTruthy()
+      expect(screen.getByText('prod')).toBeTruthy()
+      // Under the chips at the right edge: terminal text is left-justified,
+      // so this is the quietest place a line of badges can stand.
+      expect(strip()!.className).toMatch(/\btop-12\b/)
+      expect(strip()!.className).toMatch(/\bright-3\b/)
+      expect(strip()!.className).toMatch(/\bjustify-end\b/)
+      expect(strip()!.className).toMatch(/\bz-10\b/)
+    })
+
+    it('draws nothing at all for a session without tags', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      expect(strip()).toBeNull()
+
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: [] })] }))
+      expect(strip()).toBeNull()
+    })
+
+    it('caps the badges and folds the remainder into a +n', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() =>
+        sock.emitControl({
+          type: 'sessions',
+          sessions: [session({ tags: ['api', 'edge', 'ops', 'prod', 'staging'] })],
+        }),
+      )
+
+      expect(screen.getByText('api')).toBeTruthy()
+      expect(screen.getByText('edge')).toBeTruthy()
+      expect(screen.getByText('ops')).toBeTruthy()
+      expect(screen.queryByText('prod')).toBeNull()
+      expect(screen.getByText('+2').getAttribute('title')).toBe('prod, staging')
+    })
+
+    it('follows the tags as the sessions poll moves them, for its own row only', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
+      expect(screen.getByText('api')).toBeTruthy()
+
+      act(() =>
+        sock.emitControl({
+          type: 'sessions',
+          sessions: [session({ tags: ['api', 'v2'] }), session({ id: 'other', tags: ['ops'] })],
+        }),
+      )
+      expect(screen.getByText('v2')).toBeTruthy()
+      expect(screen.queryByText('ops')).toBeNull()
+
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: [] })] }))
+      expect(strip()).toBeNull()
+    })
+
+    it('wears the anchor tags in a member pane, where the group is what got tagged', () => {
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s2" createEmulator={e.create} />)
+      act(() =>
+        sock.emitControl({
+          type: 'sessions',
+          sessions: [
+            session({ id: 's1', tags: ['api'] }),
+            session({ id: 's2', group: 's1', tags: [] }),
+          ],
+        }),
+      )
+
+      expect(screen.getByText('api')).toBeTruthy()
+    })
+
+    it('keeps the same berth on a coarse pointer', () => {
+      coarsePointer()
+      const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
+
+      expect(strip()!.className).toMatch(/\btop-12\b/)
+      expect(strip()!.className).toMatch(/\bright-3\b/)
+    })
+
+    it('stays out of the minimal chrome, whose surface shows them elsewhere', () => {
+      const { sock } = mountTerminal((e) => (
+        <Terminal sessionId="s1" chrome="minimal" createEmulator={e.create} />
+      ))
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
+
+      expect(strip()).toBeNull()
+      expect(screen.queryByText('api')).toBeNull()
+    })
   })
 
   describe('touch scrolling', () => {
@@ -1594,14 +1691,6 @@ describe('Terminal', () => {
   })
 
   describe('the key bar', () => {
-    /** jsdom has no matchMedia; a coarse pointer is claimed explicitly. */
-    function coarsePointer() {
-      vi.stubGlobal('matchMedia', (query: string) => ({
-        matches: query.includes('coarse'),
-        addEventListener: () => {},
-        removeEventListener: () => {},
-      }))
-    }
     const bar = () => document.querySelector<HTMLElement>('[data-flue-keybar]')
     const key = (label: string) =>
       Array.from(document.querySelectorAll<HTMLButtonElement>('[data-flue-keybar] button')).find(
@@ -1754,6 +1843,15 @@ describe('Terminal', () => {
 })
 
 /** A complete SessionInfo, so a caller only names what it cares about. */
+/** jsdom has no matchMedia; a coarse pointer is claimed explicitly. */
+function coarsePointer() {
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: query.includes('coarse'),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }))
+}
+
 function session(over: Partial<SessionInfo> = {}): SessionInfo {
   return {
     id: 's1',

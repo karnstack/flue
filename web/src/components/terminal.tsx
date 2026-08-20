@@ -15,6 +15,7 @@ import { KeyBar } from '@/components/key-bar'
 import { PasteBox } from '@/components/paste-box'
 import { SelectionMenu, type MenuEnd } from '@/components/selection-menu'
 import { ShortcutsHelp } from '@/components/shortcuts-help'
+import { TagBadges } from '@/components/tag-badges'
 import { ThemeMenu } from '@/components/theme-menu'
 import { DARK_SCHEME_QUERY, prefersDark } from '@/emulator/palette'
 import { controlColors, resolveTheme, THEME_SYSTEM } from '@/emulator/themes'
@@ -23,6 +24,7 @@ import { createXtermEmulator, type XtermOptions } from '@/emulator/xterm'
 import { createPathDetector } from '@/files/detector'
 import { FileViewer, type FileTarget } from '@/files/viewer'
 import { loadThemePref, onThemePref, saveThemePref, THEME_PREF_KEY } from '@/lib/theme-pref'
+import { anchorIdOf } from '@/sessions/groups'
 import {
   cellAt,
   cellBox,
@@ -264,6 +266,10 @@ export function Terminal({
   // This session's directory, for Restart and the new-session link. From the
   // session list, because `attached` does not carry it.
   const [cwd, setCwd] = useState<string | null>(null)
+  // And its tags, for the corner strip, from the same list. Kept only when
+  // they change: the poll repeats, and an unguarded set of a fresh array
+  // would re-render the pane on every tick.
+  const [tags, setTags] = useState<string[]>([])
   // The theme choice — global, every session wears it — read once per mount
   // and mirrored into a ref so the effect can resolve it without carrying
   // the state in its dependency array: a theme change must restyle the live
@@ -929,6 +935,16 @@ export function Terminal({
         const own = list.find((s) => s.id === sessionId)
         if (!own) return
         setCwd(own.cwd)
+        // The tags belong to the group, and the sessions list edits them on
+        // the anchor — the row a group folds to. A member pane (a split, a
+        // tab) wears the anchor's tags for the same reason; its own list
+        // entry never carries any.
+        const tagged = list.find((s) => s.id === anchorIdOf(own)) ?? own
+        setTags((prev) =>
+          prev.length === tagged.tags.length && prev.every((t, i) => t === tagged.tags[i])
+            ? prev
+            : tagged.tags,
+        )
         tabName = own.name
         tabOsc = own.title
         tabCwd = own.cwd
@@ -1239,6 +1255,26 @@ export function Terminal({
             actionsRef.current?.focusSurface()
           }}
         />
+      )}
+      {/*
+        The group's tags, hung below the control row at the right edge.
+        Terminal text is left-justified, so the right margin under the chips
+        is the quietest ground on the screen — a floating badge anywhere
+        left sits on somebody's prompt. Right-aligned and wrapping downward,
+        so a long set grows into that same margin. Full chrome only, which
+        is what makes a surface read them once (see chipsPane). The strip
+        takes no pointer beyond its own footprint.
+      */}
+      {chrome === 'full' && tags.length > 0 && (
+        <div
+          data-flue-tags=""
+          className="absolute top-12 right-3 z-10 flex max-w-[50%] flex-wrap items-center justify-end gap-1.5"
+        >
+          <TagBadges
+            tags={tags}
+            className="bg-(--chip-bg) text-(--chip-dim) ring-1 ring-(--chip-ring) backdrop-blur-sm"
+          />
+        </div>
       )}
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling
           loses to them — the controls must win the stack or the scrollbar

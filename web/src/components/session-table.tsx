@@ -22,6 +22,7 @@ import {
 import { GripVerticalIcon } from 'lucide-react'
 
 import { SessionPreview } from '@/components/session-preview'
+import { TagBadges } from '@/components/tag-badges'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -169,14 +170,6 @@ function StateDot({ session }: { session: FleetSession }) {
 
 /** The quiet text the trailing details are set in. */
 const META_TEXT = 'text-xs/6 whitespace-nowrap text-zinc-500 dark:text-zinc-400'
-
-/**
- * How many tag badges a row shows before folding the rest into a "+n". A row
- * is one line that must never push the pane sideways — the old layout's
- * overflow-x wrapper died with it, so this cap is what holds the line now —
- * and the folded remainder rides in the +n badge's tooltip.
- */
-const TAG_CAP = 3
 
 /**
  * One session, one row: a single line with the identity on the left, the
@@ -370,20 +363,7 @@ function SessionRow({
       <div className="flex shrink-0 items-center gap-x-2.5">
         {shown.includes('tags') && s.tags.length > 0 && (
           <span className="flex items-center gap-x-1.5 max-sm:hidden">
-            {s.tags.slice(0, TAG_CAP).map((tag) => (
-              <Badge key={tag} variant="secondary">
-                {tag}
-              </Badge>
-            ))}
-            {s.tags.length > TAG_CAP && (
-              <Badge
-                variant="secondary"
-                title={s.tags.slice(TAG_CAP).join(', ')}
-                className="relative z-10"
-              >
-                +{s.tags.length - TAG_CAP}
-              </Badge>
-            )}
+            <TagBadges tags={s.tags} overflowClassName="relative z-10" />
           </span>
         )}
         {shown.includes('machine') && (
