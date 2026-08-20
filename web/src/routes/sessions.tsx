@@ -22,7 +22,7 @@ import {
 import { useSidebar } from '@/components/ui/sidebar'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { FleetGaps } from '@/fleet/fleet'
-import { useFleet } from '@/fleet/provider'
+import { useFleet, useLoopbackTab } from '@/fleet/provider'
 import { keyOf, LOCAL_MACHINE_ID, type FleetSession, type MachineState } from '@/fleet/types'
 import { useRefetchOnFocus } from '@/hooks/use-refetch-on-focus'
 import { takeCwd } from '@/lib/url'
@@ -562,6 +562,26 @@ export function SessionsRoute() {
     [machines, view.columns],
   )
 
+  /**
+   * Whether machines wear a local-or-remote mark here, and which one is the
+   * machine in front of the reader.
+   *
+   * Same trigger as the machine column, and for the same reason: a fleet of
+   * one has nothing to tell apart. Above one, the marks answer the question a
+   * hostname does not — machines are named after `os.Hostname` when they join
+   * a relay, and few people have theirs memorised.
+   *
+   * `home` is `null` on any tab the daemon did not serve. `local` names the
+   * machine this tab rides, which on a relay origin is reached over the relay
+   * exactly like the others — so on a phone every machine is a remote one,
+   * and saying otherwise would point at a box in another room.
+   */
+  const loopback = useLoopbackTab()
+  const machineMarks = useMemo(
+    () => ((machines?.length ?? 0) > 1 ? { home: loopback ? LOCAL_MACHINE_ID : null } : undefined),
+    [machines, loopback],
+  )
+
   const dirty = !sameArrangement(
     view,
     active === null ? DEFAULT_VIEW : (views.find((v) => v.name === active) ?? DEFAULT_VIEW),
@@ -819,6 +839,7 @@ export function SessionsRoute() {
           spawnLabel={spawnLabel}
           drag={dragToGroup}
           peek={peek}
+          machineMarks={machineMarks}
         />
       )}
 
