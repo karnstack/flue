@@ -57,7 +57,7 @@ web-dev:
 test: test-go test-web test-relay
 
 test-go: web relay
-	go test ./...
+	go test $(GOTESTFLAGS) ./...
 
 test-web:
 	cd web && pnpm test
