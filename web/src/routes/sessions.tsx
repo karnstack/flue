@@ -90,6 +90,7 @@ function defaultView(): ViewConfig {
 function configOf(v: SavedView): ViewConfig {
   return {
     grouping: v.grouping,
+    subgrouping: v.subgrouping,
     ordering: v.ordering,
     direction: v.direction,
     search: v.search,
@@ -109,6 +110,7 @@ function configOf(v: SavedView): ViewConfig {
 function sameArrangement(a: ViewConfig, b: ViewConfig): boolean {
   return (
     a.grouping === b.grouping &&
+    a.subgrouping === b.subgrouping &&
     a.ordering === b.ordering &&
     a.direction === b.direction &&
     a.search === b.search &&
@@ -462,7 +464,7 @@ export function SessionsRoute() {
    * can still start something tagged `api` and `staging`.
    */
   const spawnInGroup = (group: Group) => {
-    const want = spawnFromGroup(view.grouping, group.key)
+    const want = spawnFromGroup(view.grouping, group.key, view.subgrouping)
     if (want === null) return
     setCreating({
       machineId: want.machineId ?? primaryTarget,
@@ -479,7 +481,7 @@ export function SessionsRoute() {
    * offered for a group the click would refuse.
    */
   const spawnLabel = (group: Group): string | undefined => {
-    const want = spawnFromGroup(view.grouping, group.key)
+    const want = spawnFromGroup(view.grouping, group.key, view.subgrouping)
     if (want === null) return undefined
     if (want.tag !== undefined) return `New session tagged ${want.tag}`
     if (want.cwd !== undefined) return `New session in ${want.cwd}`
@@ -503,11 +505,11 @@ export function SessionsRoute() {
    */
   const dragToGroup = useMemo<DragToGroup | undefined>(() => {
     if (view.grouping === 'none') return undefined
-    const grouping = view.grouping
+    const { grouping, subgrouping } = view
     return {
-      droppable: () => groupAcceptsDrop(grouping),
+      droppable: () => groupAcceptsDrop(grouping, subgrouping),
       onDrop: (s, fromKey, group) => {
-        const verdict = dropOnGroup(grouping, s, fromKey, group.key)
+        const verdict = dropOnGroup(grouping, s, fromKey, group.key, subgrouping)
         if (verdict.kind === 'retag') {
           fleet.update(s.machineId, { id: s.id, tags: verdict.tags })
           fleet.list()
@@ -521,7 +523,7 @@ export function SessionsRoute() {
         }
       },
     }
-  }, [view.grouping, fleet])
+  }, [view.grouping, view.subgrouping, fleet])
 
   /**
    * How a row asks what it is doing, for the hover preview.

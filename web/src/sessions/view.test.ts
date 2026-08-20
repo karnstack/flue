@@ -21,6 +21,9 @@ import {
   ORDERINGS,
   orderSessions,
   spawnFromGroup,
+  SUBGROUPING_LABELS,
+  SUBKEY_SEP,
+  type Group,
 } from './view'
 
 /**
@@ -766,5 +769,170 @@ describe('dropOnGroup', () => {
     dropOnGroup('tag', row, 'tag:api', 'untagged')
     dropOnGroup('tag', row, 'tag:api', 'tag:edge')
     expect(row.tags).toEqual(['api', 'ops'])
+  })
+})
+
+describe('groupSessions, cut twice', () => {
+  const rows = [
+    s({ id: 'a', tags: ['api'] }),
+    s({ id: 'b', tags: ['ops', 'api'] }),
+    s({ id: 'c' }),
+    s({ id: 'z', machineId: 'zeta', machineName: 'zeta box', tags: ['api'] }),
+    s({ id: 'y', machineId: 'zeta', machineName: 'zeta box' }),
+    s({ id: 'p', machineId: 'pi', machineName: 'attic pi' }),
+  ]
+
+  it('cuts each group again by the second key, remainder last', () => {
+    const [local] = groupSessions(rows, 'machine', 'tag')
+    expect(local!.key).toBe('machine:local')
+    expect(local!.children!.map((g) => g.label)).toEqual(['api', 'ops', 'No tag'])
+    expect(local!.children!.map((g) => ids(g.sessions))).toEqual([['a', 'b'], ['b'], ['c']])
+  })
+
+  it('keeps the whole run on the parent, so a tally counts every row once', () => {
+    // A session under two tags is still one session on the machine.
+    const [local] = groupSessions(rows, 'machine', 'tag')
+    expect(ids(local!.sessions)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('keys a child under its parent, so one tag on two machines stays apart', () => {
+    const [local, , zeta] = groupSessions(rows, 'machine', 'tag')
+    const api = (g: Group) => g.children!.find((c) => c.label === 'api')!.key
+    expect(api(local!)).toBe(`machine:local${SUBKEY_SEP}tag:api`)
+    expect(api(zeta!)).toBe(`machine:zeta${SUBKEY_SEP}tag:api`)
+  })
+
+  it('flattens a group whose second cut is one heading', () => {
+    // One subheading over every row of a group says nothing the group's own
+    // heading did not, and "No tag" alone under a machine is a heading over
+    // the remainder of nothing.
+    const groups = groupSessions(rows, 'machine', 'tag')
+    const pi = groups.find((g) => g.key === 'machine:pi')!
+    expect(pi.children).toBeUndefined()
+    expect(ids(pi.sessions)).toEqual(['p'])
+  })
+
+  it('has no children at all when the second key is off', () => {
+    for (const g of groupSessions(rows, 'machine', 'none')) expect(g.children).toBeUndefined()
+    for (const g of groupSessions(rows, 'machine')) expect(g.children).toBeUndefined()
+  })
+
+  it('gives every heading, parent or child, a key no other can claim', () => {
+    const keys = groupSessions(rows, 'tag', 'machine').flatMap((g) => [
+      g.key,
+      ...(g.children ?? []).map((c) => c.key),
+    ])
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+})
+
+describe('DEFAULT_VIEW, cut twice', () => {
+  it('groups by machine, then by tag', () => {
+    expect(DEFAULT_VIEW.grouping).toBe('machine')
+    expect(DEFAULT_VIEW.subgrouping).toBe('tag')
+  })
+})
+
+describe('the words for the second key', () => {
+  it('labels every grouping, and calls the way out of it "Nothing"', () => {
+    // "Then by: No grouping" reads as a contradiction; "Then by: Nothing" is
+    // the sentence a person would say.
+    for (const g of GROUPINGS) expect(SUBGROUPING_LABELS[g], g).toMatch(/^[A-Z][^A-Z]*$/)
+    expect(SUBGROUPING_LABELS.none).toBe('Nothing')
+    expect(SUBGROUPING_LABELS.tag).toBe(GROUPING_LABELS.tag)
+  })
+})
+
+describe('applyView, cut twice', () => {
+  it('cuts by the second key the view names', () => {
+    const rows = [s({ id: 'a', tags: ['api'] }), s({ id: 'b', tags: ['ops'] })]
+    const once = applyView(rows, { ...DEFAULT_VIEW, subgrouping: 'none' })
+    const twice = applyView(rows, { ...DEFAULT_VIEW, subgrouping: 'tag' })
+    expect(once[0]!.children).toBeUndefined()
+    expect(twice[0]!.children!.map((g) => g.label)).toEqual(['api', 'ops'])
+  })
+})
+
+describe('spawnFromGroup, cut twice', () => {
+  it('merges what both headings imply', () => {
+    expect(spawnFromGroup('machine', `machine:m1${SUBKEY_SEP}tag:api`, 'tag')).toEqual({
+      machineId: 'm1',
+      tag: 'api',
+    })
+  })
+
+  it('hands a parent heading only its own fact', () => {
+    expect(spawnFromGroup('machine', 'machine:m1', 'tag')).toEqual({ machineId: 'm1' })
+  })
+
+  it('asks for no tag under a machine’s untagged remainder', () => {
+    expect(spawnFromGroup('machine', `machine:m1${SUBKEY_SEP}untagged`, 'tag')).toEqual({
+      machineId: 'm1',
+    })
+  })
+
+  it('offers nothing when either heading refuses', () => {
+    expect(spawnFromGroup('tag', `tag:api${SUBKEY_SEP}state:exited`, 'state')).toBeNull()
+    expect(spawnFromGroup('state', `state:exited${SUBKEY_SEP}tag:api`, 'tag')).toBeNull()
+  })
+})
+
+describe('groupAcceptsDrop, cut twice', () => {
+  it('admits a drop when either heading is a tag', () => {
+    expect(groupAcceptsDrop('machine', 'tag')).toBe(true)
+    expect(groupAcceptsDrop('tag', 'machine')).toBe(true)
+    expect(groupAcceptsDrop('machine', 'none')).toBe(false)
+    expect(groupAcceptsDrop('machine')).toBe(false)
+  })
+})
+
+describe('dropOnGroup, cut twice', () => {
+  const row = s({ tags: ['api'] })
+
+  it('moves a session between tags under the same machine', () => {
+    const verdict = dropOnGroup(
+      'machine',
+      row,
+      `machine:m1${SUBKEY_SEP}tag:api`,
+      `machine:m1${SUBKEY_SEP}tag:ops`,
+      'tag',
+    )
+    expect(verdict).toEqual({ kind: 'retag', tags: ['ops'] })
+  })
+
+  it('refuses a tag under another machine, for the machine’s reason', () => {
+    // The tag could be given; the machine cannot. A drop that did half of
+    // what the pointer asked would leave the row under neither heading.
+    const verdict = dropOnGroup(
+      'machine',
+      row,
+      `machine:m1${SUBKEY_SEP}tag:api`,
+      `machine:m2${SUBKEY_SEP}tag:api`,
+      'tag',
+    )
+    expect(verdict.kind).toBe('reject')
+    if (verdict.kind === 'reject') expect(verdict.reason).toMatch(/machine/)
+  })
+
+  it('has nothing to say about a drop onto its own machine’s heading', () => {
+    const verdict = dropOnGroup(
+      'machine',
+      row,
+      `machine:m1${SUBKEY_SEP}tag:api`,
+      'machine:m1',
+      'tag',
+    )
+    expect(verdict).toEqual({ kind: 'none' })
+  })
+
+  it('reads the tag from whichever level carries it', () => {
+    const verdict = dropOnGroup(
+      'tag',
+      row,
+      `tag:api${SUBKEY_SEP}machine:m1`,
+      `tag:ops${SUBKEY_SEP}machine:m1`,
+      'machine',
+    )
+    expect(verdict).toEqual({ kind: 'retag', tags: ['ops'] })
   })
 })

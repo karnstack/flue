@@ -94,6 +94,16 @@ export const GROUPING_LABELS: Record<Grouping, string> = {
   none: 'No grouping',
 }
 
+/**
+ * The same words, for the second cut. One differs: after "Then by", the way
+ * out is "Nothing" — "Then by: No grouping" reads as a contradiction rather
+ * than as a choice.
+ */
+export const SUBGROUPING_LABELS: Record<Grouping, string> = {
+  ...GROUPING_LABELS,
+  none: 'Nothing',
+}
+
 /** @see GROUPING_LABELS */
 export const ORDERING_LABELS: Record<Ordering, string> = {
   lastActive: 'Last active',
@@ -122,6 +132,12 @@ export const COLUMN_LABELS: Record<ColumnKey, string> = {
 /** One arrangement of the sessions list: what is shown, and how it reads. */
 export interface ViewConfig {
   grouping: Grouping
+  /**
+   * The second cut: how each group's rows are cut again into subheadings.
+   * `none` is a first-class answer — one cut — and `grouping` set to `none`
+   * makes this moot, since there is nothing to cut again.
+   */
+  subgrouping: Grouping
   ordering: Ordering
   direction: Direction
   search: string
@@ -153,6 +169,11 @@ export interface ViewConfig {
  */
 export const DEFAULT_VIEW: ViewConfig = Object.freeze<ViewConfig>({
   grouping: 'machine',
+  // Then by tag: a fleet with tagged work reads "what is running where, and
+  // what it is for" from the headings alone. A machine with no tags on it
+  // shows no subheadings at all (see groupSessions), so a fresh install with
+  // one untagged shell looks exactly as it did before this existed.
+  subgrouping: 'tag',
   ordering: 'lastActive',
   direction: DEFAULT_DIRECTIONS.lastActive,
   search: '',
@@ -185,8 +206,26 @@ function frozen<T>(list: T[]): T[] {
 export interface Group {
   key: string
   label: string
+  /** Every row under this heading, subheadings or not — what a tally counts. */
   sessions: FleetSession[]
+  /**
+   * The second cut, when the view asked for one and it said something: the
+   * same rows again, under subheadings. Absent when the view cuts once, and
+   * absent when the cut would have made one subheading over every row — a
+   * heading that repeats the heading above it. The list draws children
+   * where they exist and `sessions` where they do not.
+   */
+  children?: Group[]
 }
+
+/**
+ * What joins a parent's key to a child's own, so a child's key names both.
+ * The ASCII unit separator: not a character a tag, a path or a machine id
+ * carries, which is what lets the key be split back into its two halves
+ * without a grammar. The two halves are what `spawnFromGroup` and
+ * `dropOnGroup` read a child heading through.
+ */
+export const SUBKEY_SEP = '\u001f'
 
 /** The heading the sessions with no tags at all end up under. */
 const UNTAGGED_KEY = 'untagged'
@@ -346,8 +385,27 @@ function activeBucket(s: FleetSession): number {
  * counted twice. Sessions with no tags gather under one heading at the very
  * end, where they read as the remainder rather than as a tag someone invented.
  */
-export function groupSessions(list: FleetSession[], grouping: Grouping): Group[] {
-  return collect(list, BUCKETS[grouping])
+export function groupSessions(
+  list: FleetSession[],
+  grouping: Grouping,
+  subgrouping: Grouping = 'none',
+): Group[] {
+  const groups = collect(list, BUCKETS[grouping])
+  if (subgrouping === 'none') return groups
+  return groups.map((g) => {
+    // Cut again, and prefix each child's key with its parent's: `api` on two
+    // machines is two headings, folded and dropped on apart. The parent keeps
+    // its whole run — a session under two tags is still one session on the
+    // machine, and the tally over the parent heading should say so.
+    const children = collect(g.sessions, BUCKETS[subgrouping]).map((c) => ({
+      ...c,
+      key: `${g.key}${SUBKEY_SEP}${c.key}`,
+    }))
+    // One subheading over every row says nothing the parent's heading did
+    // not, and "No tag" alone under a machine is a heading over the remainder
+    // of nothing. Flat, then, and the list draws it as a plain group.
+    return children.length > 1 ? { ...g, children } : g
+  })
 }
 
 /**
@@ -423,7 +481,23 @@ export interface SpawnRequest {
   tag?: string
 }
 
-export function spawnFromGroup(grouping: Grouping, groupKey: string): SpawnRequest | null {
+export function spawnFromGroup(
+  grouping: Grouping,
+  groupKey: string,
+  subgrouping: Grouping = 'none',
+): SpawnRequest | null {
+  // A child heading names two facts, one per level, and a session made under
+  // it should carry both: `+` under `api` under `attic pi` makes a session on
+  // attic pi tagged api. Either level refusing refuses the whole — a `+`
+  // under an exited subheading has no more to offer than one under Exited.
+  const [own, sub] = groupKey.split(SUBKEY_SEP) as [string, string?]
+  const parent = spawnFromOne(grouping, own)
+  if (parent === null || sub === undefined) return parent
+  const child = spawnFromOne(subgrouping, sub)
+  return child === null ? null : { ...parent, ...child }
+}
+
+function spawnFromOne(grouping: Grouping, groupKey: string): SpawnRequest | null {
   switch (grouping) {
     case 'machine':
       return { machineId: after(groupKey, 'machine:') }
@@ -477,8 +551,8 @@ export type DropVerdict =
  * the rest answer the pointer with a no-drop cursor — so it is decided here,
  * beside the verdicts it must always agree with.
  */
-export function groupAcceptsDrop(grouping: Grouping): boolean {
-  return grouping === 'tag'
+export function groupAcceptsDrop(grouping: Grouping, subgrouping: Grouping = 'none'): boolean {
+  return grouping === 'tag' || subgrouping === 'tag'
 }
 
 /**
@@ -497,6 +571,31 @@ export function groupAcceptsDrop(grouping: Grouping): boolean {
  * the answer to the question the reader just asked with their pointer.
  */
 export function dropOnGroup(
+  grouping: Grouping,
+  s: FleetSession,
+  fromKey: string,
+  toKey: string,
+  subgrouping: Grouping = 'none',
+): DropVerdict {
+  if (fromKey === toKey) return { kind: 'none' }
+  // One verdict per level, read in parent-then-child order. A refusal at
+  // either level is the whole answer — a tag the session could take under a
+  // machine it cannot cross to is still a drop that cannot be honoured, and
+  // doing half of it would leave the row under neither heading. Otherwise
+  // the one level with something to change speaks, and the rest is silence.
+  const [fromOwn, fromSub] = fromKey.split(SUBKEY_SEP) as [string, string?]
+  const [toOwn, toSub] = toKey.split(SUBKEY_SEP) as [string, string?]
+  const verdicts = [dropOnOne(grouping, s, fromOwn, toOwn)]
+  if (fromSub !== undefined && toSub !== undefined) {
+    verdicts.push(dropOnOne(subgrouping, s, fromSub, toSub))
+  }
+  return (
+    verdicts.find((v) => v.kind === 'reject') ??
+    verdicts.find((v) => v.kind === 'retag') ?? { kind: 'none' }
+  )
+}
+
+function dropOnOne(
   grouping: Grouping,
   s: FleetSession,
   fromKey: string,
@@ -562,7 +661,11 @@ function collect(list: FleetSession[], bucketsOf: (s: FleetSession) => Bucket[])
 export function applyView(list: FleetSession[], v: ViewConfig): Group[] {
   const matched = filterSessions(list, v.search)
   const wanted = v.showExited ? matched : matched.filter((s) => s.state !== 'exited')
-  return groupSessions(orderSessions(wanted, v.ordering, v.direction), v.grouping)
+  return groupSessions(
+    orderSessions(wanted, v.ordering, v.direction),
+    v.grouping,
+    v.subgrouping,
+  )
 }
 
 /**

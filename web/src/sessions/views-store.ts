@@ -79,6 +79,7 @@ function isViewConfig(value: unknown): value is ViewConfig {
   const v = value as ViewConfig | null
   return (
     isMember(GROUPINGS, v?.grouping) &&
+    (v.subgrouping === undefined || isMember(GROUPINGS, v.subgrouping)) &&
     isMember(ORDERINGS, v.ordering) &&
     (v.direction === undefined || isMember(DIRECTIONS, v.direction)) &&
     typeof v.search === 'string' &&
@@ -91,6 +92,19 @@ function isViewConfig(value: unknown): value is ViewConfig {
 /** The direction a stored view meant, written down or not. See isViewConfig. */
 function direction(v: ViewConfig): ViewConfig['direction'] {
   return v.direction ?? DEFAULT_DIRECTIONS[v.ordering]
+}
+
+/**
+ * The second cut a stored view meant, written down or not.
+ *
+ * The same bargain as the direction, with a different answer: a view written
+ * before second cuts existed showed one cut, and comes back showing one cut.
+ * Not `DEFAULT_VIEW.subgrouping` — that is what a browser with nothing
+ * arranged opens on, and an arrangement someone kept must not sprout
+ * subheadings on the day this ships.
+ */
+function subgrouping(v: ViewConfig): ViewConfig['subgrouping'] {
+  return v.subgrouping ?? 'none'
 }
 
 /** Whether a stored word is still one of the words this build knows. */
@@ -129,6 +143,7 @@ export function listViews(): SavedView[] {
   return parsed.filter(isSavedView).map((v) => ({
     name: v.name,
     grouping: v.grouping,
+    subgrouping: subgrouping(v),
     ordering: v.ordering,
     direction: direction(v),
     search: v.search,
@@ -218,6 +233,7 @@ export function loadCurrent(): { view: ViewConfig; active: string | null } {
   if (record === null || !isViewConfig(record.view)) return fallback()
   const view: ViewConfig = {
     grouping: record.view.grouping,
+    subgrouping: subgrouping(record.view),
     ordering: record.view.ordering,
     direction: direction(record.view),
     search: record.view.search,

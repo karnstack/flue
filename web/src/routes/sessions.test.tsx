@@ -462,7 +462,9 @@ describe('SessionsRoute', () => {
       listed(sock, [info({ id: 's1', name: 'alpha', tags: ['api', 'prod'] })])
       listed(attic.sockets[0]!, [info({ id: 's2', name: 'beta', tags: ['api'] })])
 
-      await userEvent.click(screen.getByRole('checkbox', { name: 'Select alpha' }))
+      // The default view cuts each machine by tag, and alpha carries two — so
+      // it has a row under each, and either row's box selects the session.
+      await userEvent.click(screen.getAllByRole('checkbox', { name: 'Select alpha' })[0]!)
       await userEvent.click(screen.getByRole('checkbox', { name: 'Select beta' }))
       expect(screen.getByText('2 selected')).toBeTruthy()
       return mounted

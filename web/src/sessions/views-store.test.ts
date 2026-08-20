@@ -123,6 +123,7 @@ describe('listViews on a store it cannot believe', () => {
     { what: 'a row with an empty name', row: { ...DEFAULT_VIEW, name: '' } },
     { what: 'a row named with nothing but blanks', row: { ...DEFAULT_VIEW, name: '   ' } },
     { what: 'a grouping nothing groups by', row: { ...WORK, grouping: 'folder' } },
+    { what: 'a second grouping nothing groups by', row: { ...WORK, subgrouping: 'folder' } },
     { what: 'an ordering nothing orders by', row: { ...WORK, ordering: 'size' } },
     { what: 'a direction nothing reads in', row: { ...WORK, direction: 'sideways' } },
     { what: 'a search that is not text', row: { ...WORK, search: 3 } },
@@ -156,6 +157,21 @@ describe('listViews on a store it cannot believe', () => {
       { ...WORK, direction: 'desc' },
       { ...OPS, direction: 'asc' },
     ])
+  })
+
+  it('reads a view saved before second groupings existed as cut once', () => {
+    // Same bargain as the direction: what that build showed was one cut, and
+    // a saved tab someone arranged must not grow subheadings on the day this
+    // ships. The default for a fresh browser is another matter (DEFAULT_VIEW).
+    const { subgrouping: _, ...old } = OPS
+    stored([old])
+    expect(listViews()).toEqual([{ ...OPS, subgrouping: 'none' }])
+  })
+
+  it('round-trips a view cut twice', () => {
+    const nested: SavedView = { ...WORK, grouping: 'machine', subgrouping: 'tag' }
+    saveView(nested)
+    expect(listViews()).toEqual([nested])
   })
 })
 
@@ -213,6 +229,7 @@ describe('the current arrangement', () => {
       'null',
       JSON.stringify({ active: 'Ops' }),
       JSON.stringify({ view: { ...DEFAULT_VIEW, grouping: 'folder' }, active: null }),
+      JSON.stringify({ view: { ...DEFAULT_VIEW, subgrouping: 'folder' }, active: null }),
       JSON.stringify({ view: { ...DEFAULT_VIEW, direction: 'sideways' }, active: null }),
       JSON.stringify({ view: { ...DEFAULT_VIEW, columns: ['name', 'colour'] }, active: null }),
       JSON.stringify({ view: { ...DEFAULT_VIEW, showExited: 'yes' }, active: null }),
@@ -234,6 +251,12 @@ describe('the current arrangement', () => {
     const { direction: _, ...old } = { ...DEFAULT_VIEW, ordering: 'name' as const }
     localStorage.setItem(CURRENT_KEY, JSON.stringify({ view: old, active: null }))
     expect(loadCurrent().view).toEqual({ ...DEFAULT_VIEW, ordering: 'name', direction: 'asc' })
+  })
+
+  it('reads an arrangement saved before second groupings existed as cut once', () => {
+    const { subgrouping: _, ...old } = DEFAULT_VIEW
+    localStorage.setItem(CURRENT_KEY, JSON.stringify({ view: old, active: null }))
+    expect(loadCurrent().view).toEqual({ ...DEFAULT_VIEW, subgrouping: 'none' })
   })
 
   it('drops a pressed tab whose view is gone, and keeps the arrangement', () => {
