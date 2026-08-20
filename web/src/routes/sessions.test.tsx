@@ -59,7 +59,7 @@ function info(over: Partial<SessionInfo> & { id: string }): SessionInfo {
  * by navigating mounts into a connection that is already established, but the
  * very first paint of the tab does not, and both have to work.
  */
-async function mountSessions({ open = true, strict = false, solo = false } = {}) {
+async function mountSessions({ open = true, strict = false, solo = false, loopback = false } = {}) {
   const local = fakeClient()
   const attic = fakeClient()
   // `solo` is a browser paired with one machine, which is what a fresh
@@ -109,7 +109,13 @@ async function mountSessions({ open = true, strict = false, solo = false } = {})
   await act(async () => {
     view = render(
       <SidebarProvider>
-        <FleetProvider fleet={fleet}>
+        {/*
+          `loopback` is how the page says the daemon on this very machine
+          served it — the one fact that lets a machine be called this one.
+          False is the relay tab, which is the default here because it is the
+          stricter of the two: nothing on it may claim to be local.
+        */}
+        <FleetProvider fleet={fleet} loopback={loopback}>
           <RouterProvider router={router as never} />
         </FleetProvider>
       </SidebarProvider>,
@@ -213,6 +219,48 @@ describe('SessionsRoute', () => {
     listed(pair.attic.sockets[0]!, [info({ id: 's2' })])
 
     expect(screen.getByText('Attic Pi', { selector: '[data-slot="badge"]' })).toBeTruthy()
+  })
+
+  it('marks which machine the reader is sitting in front of', async () => {
+    // Machines are named after their hostnames when they join a relay, and a
+    // hostname is not a thing people have memorised — so the list says which
+    // of them is the box this browser is running on, and which are reached
+    // through the Cloudflare relay.
+    const { sock, attic, welcomeLocal } = await mountSessions({ loopback: true })
+    welcomeLocal()
+    act(() => attic.sockets[0]!.open())
+
+    listed(sock, [info({ id: 's1' })])
+    listed(attic.sockets[0]!, [info({ id: 's2' })])
+
+    // Once on the heading, once on the row's machine badge, for each side.
+    expect(screen.getAllByLabelText('This machine').length).toBe(2)
+    expect(screen.getAllByLabelText('Machine reached over the relay').length).toBe(2)
+  })
+
+  it('claims no local machine on a tab the relay served', async () => {
+    // A phone reaches every machine on the fleet the long way round, its own
+    // ride included, so a house on any of them would name a box in another
+    // room.
+    const { sock, attic, welcomeLocal } = await mountSessions()
+    welcomeLocal()
+    act(() => attic.sockets[0]!.open())
+
+    listed(sock, [info({ id: 's1' })])
+    listed(attic.sockets[0]!, [info({ id: 's2' })])
+
+    expect(screen.queryByLabelText('This machine')).toBeNull()
+    expect(screen.getAllByLabelText('Machine reached over the relay').length).toBe(4)
+  })
+
+  it('drops the marks with the chip, on a fleet of one', async () => {
+    // Same rule as the machine column: one machine is not a question.
+    const { sock, welcomeLocal } = await mountSessions({ solo: true, loopback: true })
+    welcomeLocal()
+    listed(sock, [info({ id: 's1' })])
+
+    expect(screen.queryByLabelText('This machine')).toBeNull()
+    expect(screen.queryByLabelText('Machine reached over the relay')).toBeNull()
   })
 
   it('keeps the chip while a second machine is merely unreachable', async () => {

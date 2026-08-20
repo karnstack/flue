@@ -21,6 +21,7 @@ import {
 } from '@heroicons/react/16/solid'
 import { GripVerticalIcon } from 'lucide-react'
 
+import { MachineMark } from '@/components/machine-mark'
 import { SessionPreview } from '@/components/session-preview'
 import { TagBadges } from '@/components/tag-badges'
 import { Badge } from '@/components/ui/badge'
@@ -36,10 +37,35 @@ import {
 import { keyOf, type FleetSession } from '@/fleet/types'
 import { ago } from '@/lib/time'
 import { cn } from '@/lib/utils'
-import { COLUMN_KEYS, displayName, type ColumnKey, type Group } from '@/sessions/view'
+import {
+  COLUMN_KEYS,
+  displayName,
+  machineOfGroup,
+  type ColumnKey,
+  type Group,
+} from '@/sessions/view'
 
 /** What a row's ⋯ menu can ask of a session. */
 export type RowAction = 'rename' | 'tags' | 'pin' | 'unpin' | 'close'
+
+/**
+ * Whether machines wear a mark on this screen, and which of them is the one
+ * the browser is running on.
+ *
+ * Undefined turns the marks off entirely, which is the one-machine fleet: a
+ * screen where every row and every heading names the same machine has nothing
+ * to tell apart, and a glyph repeated down it would be chrome answering a
+ * question nobody asked.
+ *
+ * `home` is null when no machine is the one in front of the reader — a phone
+ * on a relay origin reaches every machine the long way round, its own ride
+ * included — and the marks then read as all-remote, which is the truth there.
+ * The caller decides both, because only the route knows how this page was
+ * served (fleet/provider.tsx, `useLoopbackTab`).
+ */
+export interface MachineMarks {
+  home: string | null
+}
 
 /**
  * How a dragged row is let go, when the caller offers dragging at all.
@@ -206,6 +232,7 @@ function SessionRow({
   onToggleSelect,
   onAction,
   peek,
+  machineMarks,
 }: {
   s: FleetSession
   /** The heading this row renders under — what a drag is picked up from. */
@@ -221,6 +248,7 @@ function SessionRow({
   onToggleSelect: (key: string) => void
   onAction: (action: RowAction, s: FleetSession) => void
   peek?: PeekFn
+  machineMarks?: MachineMarks
 }) {
   const key = keyOf(s)
   const name = displayName(s)
@@ -367,7 +395,15 @@ function SessionRow({
           </span>
         )}
         {shown.includes('machine') && (
-          <Badge variant="outline" className="text-zinc-500 dark:text-zinc-400">
+          <Badge variant="outline" className="gap-x-1.5 text-zinc-500 dark:text-zinc-400">
+            {/*
+              The mark leads the name, because it is the coarser fact: which
+              kind of machine, then which one. Absent on a one-machine fleet,
+              where the badge is the plain name it always was.
+            */}
+            {machineMarks !== undefined && (
+              <MachineMark home={s.machineId === machineMarks.home} />
+            )}
             {s.machineName}
           </Badge>
         )}
@@ -495,6 +531,7 @@ export function SessionTable({
   spawnLabel,
   drag,
   peek,
+  machineMarks,
 }: {
   groups: Group[]
   /**
@@ -522,6 +559,8 @@ export function SessionTable({
   drag?: DragToGroup
   /** How a row asks what it is doing, for the hover preview. See PeekFn. */
   peek?: PeekFn
+  /** Whether machines are marked local or remote here. See MachineMarks. */
+  machineMarks?: MachineMarks
 }) {
   /**
    * The ghost's subject, held here because only the drag layer's own events
@@ -644,6 +683,7 @@ export function SessionTable({
             onAction={onAction}
             onSpawnIn={onSpawnIn}
             peek={peek}
+            machineMarks={machineMarks}
           />
         ))}
       </div>
@@ -693,6 +733,7 @@ function GroupSection({
   onAction,
   onSpawnIn,
   peek,
+  machineMarks,
 }: {
   g: Group
   /** How many headings sit above this one: 0 for a group, 1 for its children. */
@@ -710,6 +751,7 @@ function GroupSection({
   onAction(action: RowAction, s: FleetSession): void
   onSpawnIn?(group: Group): void
   peek?: PeekFn
+  machineMarks?: MachineMarks
 }) {
   /*
    * Registered even for a heading that refuses drops, and deliberately: the
@@ -736,6 +778,10 @@ function GroupSection({
    * announce it as.
    */
   const spawn = onSpawnIn === undefined ? undefined : spawnLabel?.(g)
+  // Which machine this heading names, when it names one at all: a tag or a
+  // directory heading gathers rows from every machine there is, and a mark on
+  // it would be a claim about all of them at once.
+  const headingMachine = machineMarks === undefined ? null : machineOfGroup(g.key)
   return (
     <section ref={setNodeRef} className="flex flex-col">
       {/*
@@ -783,6 +829,14 @@ function GroupSection({
             {g.label}
           </span>
         </button>
+        {/*
+          Beside the toggle, never inside it: the fold control's accessible
+          name is the group's own, and a mark swallowed into it would make
+          every machine heading announce two facts as one name.
+        */}
+        {headingMachine !== null && machineMarks !== undefined && (
+          <MachineMark home={headingMachine === machineMarks.home} />
+        )}
         <span className="shrink-0 text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
           {tally(g.sessions)}
         </span>
@@ -834,6 +888,7 @@ function GroupSection({
               onAction={onAction}
               onSpawnIn={onSpawnIn}
               peek={peek}
+              machineMarks={machineMarks}
             />
           ))}
         </div>
@@ -857,6 +912,7 @@ function GroupSection({
                 onToggleSelect={onToggleSelect}
                 onAction={onAction}
                 peek={peek}
+                machineMarks={machineMarks}
               />
             </Fragment>
           ))}

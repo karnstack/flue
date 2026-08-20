@@ -103,6 +103,52 @@ describe('SessionTable', () => {
       expect(text.indexOf('MacBook Pro')).toBeLessThan(text.indexOf('devbox'))
     })
 
+    it('marks a machine heading as this machine or as a relay one', async () => {
+      await renderTable({
+        groups: [
+          group('machine:m1', 'MacBook Pro', [fs({ id: 'a1' })]),
+          group('machine:m2', 'devbox', [fs({ id: 'b2', machineId: 'm2', machineName: 'devbox' })]),
+        ],
+        columns: ['name'],
+        machineMarks: { home: 'm1' },
+      })
+      expect(screen.getAllByLabelText('This machine').length).toBe(1)
+      expect(screen.getAllByLabelText('Machine reached over the relay').length).toBe(1)
+    })
+
+    it('marks a machine subheading too, wherever the second cut puts it', async () => {
+      const api = fs({ id: 'a1', tags: ['api'] })
+      await renderTable({
+        groups: [
+          {
+            ...group('tag:api', 'api', [api]),
+            children: [group(`tag:api${SUBKEY_SEP}machine:m1`, 'MacBook Pro', [api])],
+          },
+        ],
+        columns: ['name'],
+        machineMarks: { home: 'm1' },
+      })
+      expect(screen.getAllByLabelText('This machine').length).toBe(1)
+    })
+
+    it('leaves a heading about anything but a machine unmarked', async () => {
+      await renderTable({
+        groups: [group('tag:api', 'api', [fs({ id: 'a1', tags: ['api'] })])],
+        columns: ['name'],
+        machineMarks: { home: 'm1' },
+      })
+      expect(screen.queryByLabelText('This machine')).toBeNull()
+      expect(screen.queryByLabelText('Machine reached over the relay')).toBeNull()
+    })
+
+    it('keeps the fold control named after its group alone', async () => {
+      // The mark stands beside the toggle, never inside it: the button's
+      // accessible name is the heading's, and a glyph swallowed into it
+      // would make every machine heading announce two facts as one name.
+      await renderTable({ machineMarks: { home: 'm1' } })
+      expect(screen.getByRole('button', { name: 'MacBook Pro' })).toBeTruthy()
+    })
+
     it('folds a collapsed group down to its heading', async () => {
       await renderTable({ collapsed: new Set(['machine:m1']) })
 
@@ -311,6 +357,58 @@ describe('SessionTable', () => {
       await renderTable({
         groups: [group('tag:api', 'api', [fs({ id: 'a1', tags: ['api'] })])],
       })
+      expect(screen.getByText('MacBook Pro')).toBeTruthy()
+    })
+
+    it('marks a row on the machine this browser is running on', async () => {
+      // The house half of the pair: the name alone answers "which machine",
+      // and this answers "is that the one in front of me" — the question a
+      // hostname nobody has memorised cannot.
+      await renderTable({
+        groups: [group('tag:api', 'api', [fs({ id: 'a1', tags: ['api'] })])],
+        machineMarks: { home: 'm1' },
+      })
+      expect(screen.getAllByLabelText('This machine').length).toBe(1)
+      expect(screen.queryByLabelText('Machine reached over the relay')).toBeNull()
+    })
+
+    it('marks a row on any other machine as reached over the relay', async () => {
+      await renderTable({
+        groups: [
+          group('tag:api', 'api', [
+            fs({ id: 'a1', tags: ['api'] }),
+            fs({ id: 'b2', tags: ['api'], machineId: 'm2', machineName: 'devbox' }),
+          ]),
+        ],
+        machineMarks: { home: 'm1' },
+      })
+      expect(screen.getAllByLabelText('This machine').length).toBe(1)
+      expect(screen.getAllByLabelText('Machine reached over the relay').length).toBe(1)
+    })
+
+    it('calls every machine remote when no machine is the one in front of the reader', async () => {
+      // A phone on a relay origin: it reaches all of them the long way round,
+      // and a house on any of them would name a box in another room.
+      await renderTable({
+        groups: [
+          group('tag:api', 'api', [
+            fs({ id: 'a1', tags: ['api'] }),
+            fs({ id: 'b2', tags: ['api'], machineId: 'm2', machineName: 'devbox' }),
+          ]),
+        ],
+        machineMarks: { home: null },
+      })
+      expect(screen.queryByLabelText('This machine')).toBeNull()
+      expect(screen.getAllByLabelText('Machine reached over the relay').length).toBe(2)
+    })
+
+    it('draws no marks at all when the caller offers none', async () => {
+      // One machine on the fleet: there is nothing to tell apart, and a badge
+      // wearing a glyph about it would be chrome answering a question nobody
+      // asked.
+      await renderTable({ groups: [group('tag:api', 'api', [fs({ id: 'a1', tags: ['api'] })])] })
+      expect(screen.queryByLabelText('This machine')).toBeNull()
+      expect(screen.queryByLabelText('Machine reached over the relay')).toBeNull()
       expect(screen.getByText('MacBook Pro')).toBeTruthy()
     })
 

@@ -12,6 +12,7 @@ import {
 
 import { useFlueClient } from '@/client/provider'
 import { KeyBar } from '@/components/key-bar'
+import { MachineMark } from '@/components/machine-mark'
 import { PasteBox } from '@/components/paste-box'
 import { SelectionMenu, type MenuEnd } from '@/components/selection-menu'
 import { ShortcutsHelp } from '@/components/shortcuts-help'
@@ -121,6 +122,20 @@ export interface TerminalProps {
    * the tab.
    */
   ownsTitle?: boolean
+  /**
+   * The machine this session runs on, when saying so is worth the chrome.
+   *
+   * The route passes it only for a fleet of more than one reachable machine:
+   * on a single-machine fleet "which machine" has one answer and a chip
+   * spelling it out would sit over the output forever. `home` is whether that
+   * machine is the one this browser is running on, which is the route's
+   * judgement and not this component's — see MachineMark.
+   *
+   * A name and a flag rather than a machine id, for the reason the props
+   * above give: a terminal that knew the fleet existed could not be mounted
+   * without one, and the scratch modal and every test mount it without one.
+   */
+  machine?: { name: string; home: boolean }
 }
 
 /** Named so the test and the markup cannot drift apart. */
@@ -218,6 +233,7 @@ export function Terminal({
   fitViewport = true,
   viewportInset = 0,
   ownsTitle = true,
+  machine,
 }: TerminalProps) {
   const client = useFlueClient()
   const switcher = useSwitcher()
@@ -1274,23 +1290,48 @@ export function Terminal({
         />
       )}
       {/*
-        The group's tags, hung below the control row at the right edge.
-        Terminal text is left-justified, so the right margin under the chips
-        is the quietest ground on the screen — a floating badge anywhere
-        left sits on somebody's prompt. Right-aligned and wrapping downward,
-        so a long set grows into that same margin. Full chrome only, which
-        is what makes a surface read them once (see chipsPane). The strip
-        takes no pointer beyond its own footprint.
+        What this session is, hung below the control row at the right edge:
+        the machine it runs on, and the group's tags under that. Terminal text
+        is left-justified, so the right margin under the chips is the quietest
+        ground on the screen — a floating badge anywhere left sits on
+        somebody's prompt. Right-aligned and growing downward, so a long set
+        grows into that same margin. Full chrome only, which is what makes a
+        surface read them once (see chipsPane). The column takes no pointer
+        beyond its own footprint.
       */}
-      {chrome === 'full' && tags.length > 0 && (
+      {chrome === 'full' && (machine !== undefined || tags.length > 0) && (
         <div
-          data-flue-tags=""
-          className="absolute top-12 right-3 z-10 flex max-w-[50%] flex-wrap items-center justify-end gap-1.5"
+          data-flue-corner=""
+          className="absolute top-12 right-3 z-10 flex max-w-[50%] flex-col items-end gap-1.5"
         >
-          <TagBadges
-            tags={tags}
-            className="bg-(--chip-bg) text-(--chip-dim) ring-1 ring-(--chip-ring) backdrop-blur-sm"
-          />
+          {machine !== undefined && (
+            /*
+              Which machine, for a fleet where that is a real question. The
+              route hands it over only when more than one machine is
+              reachable, so a single-machine terminal stays as bare as it has
+              always been — and this component still knows nothing about the
+              fleet, which is the bargain the props at the top of this file
+              keep.
+            */
+            <span
+              data-flue-machine=""
+              className="flex max-w-full items-center gap-x-1.5 rounded-lg bg-(--chip-bg) px-2 py-1 text-xs/5 text-(--chip-dim) ring-1 ring-(--chip-ring) backdrop-blur-sm"
+            >
+              <MachineMark home={machine.home} />
+              <span className="truncate">{machine.name}</span>
+            </span>
+          )}
+          {tags.length > 0 && (
+            <div
+              data-flue-tags=""
+              className="flex max-w-full flex-wrap items-center justify-end gap-1.5"
+            >
+              <TagBadges
+                tags={tags}
+                className="bg-(--chip-bg) text-(--chip-dim) ring-1 ring-(--chip-ring) backdrop-blur-sm"
+              />
+            </div>
+          )}
         </div>
       )}
       {/* z-10: xterm's own layers carry z-indexes, and an unindexed sibling

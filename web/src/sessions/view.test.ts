@@ -17,6 +17,7 @@ import {
   GROUPINGS,
   groupSessions,
   hiddenExited,
+  machineOfGroup,
   ORDERING_LABELS,
   ORDERINGS,
   orderSessions,
@@ -665,6 +666,31 @@ describe('spawnFromGroup', () => {
     for (const grouping of GROUPINGS) {
       expect(spawnFromGroup(grouping, 'nonsense')).not.toBeUndefined()
     }
+  })
+})
+
+describe('machineOfGroup', () => {
+  it('reads the machine a heading names', () => {
+    expect(machineOfGroup('machine:m1')).toBe('m1')
+  })
+
+  it('says nothing for a heading about anything else', () => {
+    expect(machineOfGroup('tag:api')).toBeNull()
+    expect(machineOfGroup('dir:/Users/karn/code/flue')).toBeNull()
+    expect(machineOfGroup('state:running')).toBeNull()
+    expect(machineOfGroup('untagged')).toBeNull()
+    expect(machineOfGroup('all')).toBeNull()
+  })
+
+  it('finds the machine at either level of a two-cut heading', () => {
+    // Machine over tag is the default cut, and tag over machine is a click
+    // away — a subheading names a machine just as truly as a heading does.
+    expect(machineOfGroup(`machine:m1${SUBKEY_SEP}tag:api`)).toBe('m1')
+    expect(machineOfGroup(`tag:api${SUBKEY_SEP}machine:m1`)).toBe('m1')
+  })
+
+  it('keeps a colon that belongs to the id rather than to the prefix', () => {
+    expect(machineOfGroup('machine:a:b')).toBe('a:b')
   })
 })
 

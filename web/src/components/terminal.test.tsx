@@ -610,8 +610,76 @@ describe('Terminal', () => {
     expect(document.title).toBe('vim wire.go')
   })
 
+  describe('the machine chip', () => {
+    const corner = () => document.querySelector<HTMLElement>('[data-flue-corner]')
+    const chip = () => document.querySelector<HTMLElement>('[data-flue-machine]')
+
+    it('names the machine this session runs on, above the tags', () => {
+      const { sock } = mountTerminal((e) => (
+        <Terminal
+          sessionId="s1"
+          createEmulator={e.create}
+          machine={{ name: 'devbox', home: false }}
+        />
+      ))
+      act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
+
+      expect(screen.getByText('devbox')).toBeTruthy()
+      // Chip first, tags under it: both hang off the same right-edge column,
+      // and the machine is the coarser fact of the two.
+      const column = [...corner()!.children].map((el) => el.getAttribute('data-flue-machine'))
+      expect(column[0]).toBe('')
+      expect(corner()!.querySelector('[data-flue-tags]')).toBeTruthy()
+    })
+
+    it('says which of the two kinds of machine it is', () => {
+      const { show, em } = mountTerminal((e) => (
+        <Terminal
+          sessionId="s1"
+          createEmulator={e.create}
+          machine={{ name: 'mesa', home: true }}
+        />
+      ))
+      expect(screen.getByLabelText('This machine')).toBeTruthy()
+
+      // The same session opened from a phone: nothing on this fleet is the
+      // machine in front of the reader, so nothing claims to be.
+      act(() =>
+        show(
+          <Terminal
+            sessionId="s1"
+            createEmulator={em.create}
+            machine={{ name: 'mesa', home: false }}
+          />,
+        ),
+      )
+      expect(screen.queryByLabelText('This machine')).toBeNull()
+      expect(screen.getByLabelText('Machine reached over the relay')).toBeTruthy()
+    })
+
+    it('draws nothing when the fleet holds one machine', () => {
+      // Which machine is not a question a single-machine fleet asks, and a
+      // chip answering it would be permanent chrome on the common case.
+      mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      expect(chip()).toBeNull()
+    })
+
+    it('stays out of the scratch modal, like every other navigation chip', () => {
+      mountTerminal((e) => (
+        <Terminal
+          sessionId="s1"
+          createEmulator={e.create}
+          chrome="minimal"
+          machine={{ name: 'devbox', home: false }}
+        />
+      ))
+      expect(chip()).toBeNull()
+    })
+  })
+
   describe('the tag strip', () => {
     const strip = () => document.querySelector<HTMLElement>('[data-flue-tags]')
+    const corner = () => document.querySelector<HTMLElement>('[data-flue-corner]')
 
     it('hangs below the control row, right-aligned over the emptiest ground', () => {
       const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
@@ -622,11 +690,13 @@ describe('Terminal', () => {
       expect(screen.getByText('api')).toBeTruthy()
       expect(screen.getByText('prod')).toBeTruthy()
       // Under the chips at the right edge: terminal text is left-justified,
-      // so this is the quietest place a line of badges can stand.
-      expect(strip()!.className).toMatch(/\btop-12\b/)
-      expect(strip()!.className).toMatch(/\bright-3\b/)
+      // so this is the quietest place a line of badges can stand. The column
+      // that carries it is what holds that position, because the machine chip
+      // shares it.
+      expect(corner()!.className).toMatch(/\btop-12\b/)
+      expect(corner()!.className).toMatch(/\bright-3\b/)
+      expect(corner()!.className).toMatch(/\bz-10\b/)
       expect(strip()!.className).toMatch(/\bjustify-end\b/)
-      expect(strip()!.className).toMatch(/\bz-10\b/)
     })
 
     it('draws nothing at all for a session without tags', () => {
@@ -691,8 +761,8 @@ describe('Terminal', () => {
       const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
       act(() => sock.emitControl({ type: 'sessions', sessions: [session({ tags: ['api'] })] }))
 
-      expect(strip()!.className).toMatch(/\btop-12\b/)
-      expect(strip()!.className).toMatch(/\bright-3\b/)
+      expect(corner()!.className).toMatch(/\btop-12\b/)
+      expect(corner()!.className).toMatch(/\bright-3\b/)
     })
 
     it('stays out of the minimal chrome, whose surface shows them elsewhere', () => {

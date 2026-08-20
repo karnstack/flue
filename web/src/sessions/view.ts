@@ -419,6 +419,13 @@ interface Bucket {
   rank: number
 }
 
+/**
+ * What a machine heading's key starts with, spelled once: three places read
+ * or write it — the bucket below, `spawnFromOne`, and `machineOfGroup` — and
+ * a fourth spelling would be a heading nothing could resolve back.
+ */
+const MACHINE_PREFIX = 'machine:'
+
 const BUCKETS: Record<Grouping, (s: FleetSession) => Bucket[]> = {
   // Keyed by id and labelled by name, so two machines a user has given the
   // same name to stay apart. The machine this tab is riding leads: it is the
@@ -427,7 +434,7 @@ const BUCKETS: Record<Grouping, (s: FleetSession) => Bucket[]> = {
   // single-machine screen depend on what its owner happened to call it.
   machine: (s) => [
     {
-      key: `machine:${s.machineId}`,
+      key: `${MACHINE_PREFIX}${s.machineId}`,
       label: s.machineName,
       rank: s.machineId === LOCAL_MACHINE_ID ? 0 : 1,
     },
@@ -500,7 +507,7 @@ export function spawnFromGroup(
 function spawnFromOne(grouping: Grouping, groupKey: string): SpawnRequest | null {
   switch (grouping) {
     case 'machine':
-      return { machineId: after(groupKey, 'machine:') }
+      return { machineId: after(groupKey, MACHINE_PREFIX) }
     case 'directory':
       return { cwd: after(groupKey, 'dir:') }
     case 'tag':
@@ -524,6 +531,25 @@ function spawnFromOne(grouping: Grouping, groupKey: string): SpawnRequest | null
  */
 function after(key: string, prefix: string): string {
   return key.startsWith(prefix) ? key.slice(prefix.length) : key
+}
+
+/**
+ * The machine a heading names, or null for a heading about anything else.
+ *
+ * The key is read rather than the label, for the reason spawnFromGroup gives:
+ * the label is what a person sees, and a machine somebody called `api` must
+ * not be able to decide what its own heading is marked with.
+ *
+ * Both levels of a two-cut key are searched because either may be the machine
+ * one: the default cut is machine over tag, and tag over machine is one click
+ * away in the display options. A key names at most one machine, so the first
+ * segment carrying the prefix is the answer.
+ */
+export function machineOfGroup(groupKey: string): string | null {
+  for (const part of groupKey.split(SUBKEY_SEP)) {
+    if (part.startsWith(MACHINE_PREFIX)) return part.slice(MACHINE_PREFIX.length)
+  }
+  return null
 }
 
 /**

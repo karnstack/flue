@@ -6,8 +6,8 @@ import { FlueClientContext } from '@/client/provider'
 import { NewSessionDialog } from '@/components/new-session-dialog'
 import { SessionGroup } from '@/components/session-group'
 import { Terminal } from '@/components/terminal'
-import { useFleet } from '@/fleet/provider'
-import type { FleetSession, MachineState } from '@/fleet/types'
+import { useFleet, useLoopbackTab } from '@/fleet/provider'
+import { LOCAL_MACHINE_ID, type FleetSession, type MachineState } from '@/fleet/types'
 import {
   matchNewTabChord,
   matchSplitChord,
@@ -81,8 +81,15 @@ export function TerminalRoute() {
     useCallback((onChange: () => void) => fleet.onFleet(onChange), [fleet]),
     () => fleet.clientFor(deviceId),
   )
-  // What the dialog needs to fill its machine picker and its tag suggestions.
+  // What the dialog needs to fill its machine picker and its tag suggestions —
+  // and, from the same list, what the corner chip says about which machine
+  // this session is on. See machineChipFor.
   const fleetForForm = useFormFleet(fleet)
+  const loopback = useLoopbackTab()
+  const machineChip = useMemo(
+    () => machineChipFor(fleetForForm.machines, deviceId, loopback),
+    [fleetForForm.machines, deviceId, loopback],
+  )
 
   // This machine's rows, for the group view: which sessions share the URL
   // session's group, and what to call their tabs. Empty until the fleet's
@@ -382,6 +389,10 @@ export function TerminalRoute() {
             // splits whichever pane holds the keyboard, so the chips'
             // placement costs a sibling nothing but the pointer route.
             chrome={id === chipsPane ? 'full' : 'minimal'}
+            // One machine chip per surface, riding the same pane as the
+            // control strip: every pane of a split is on the same machine,
+            // so N of them would be one fact printed N times.
+            machine={id === chipsPane ? machineChip : undefined}
             onClosed={() => {
               // Fired by the exit itself — there is no overlay any more. A
               // session that was already over when this view opened is being
@@ -422,6 +433,41 @@ export function TerminalRoute() {
       />
     </FlueClientContext.Provider>
   )
+}
+
+/**
+ * What the terminal's corner chip should say about which machine this is, or
+ * undefined for a screen where that question has one answer.
+ *
+ * Three things have to hold before a terminal wears one:
+ *
+ *   More than one machine is reachable. "Connected" is what makes which-one a
+ *   question at all — a fleet of one would carry a chip over its output
+ *   forever to repeat the only answer there is.
+ *
+ *   The machine has a name to say. The fleet's local source is born nameless
+ *   and takes its name from the daemon's welcome a moment later, and a chip in
+ *   between would be an empty box floating over the shell.
+ *
+ * And `home` — whether this is the machine the reader is sitting in front of —
+ * needs both halves of its own. `LOCAL_MACHINE_ID` means the machine this tab
+ * *rides*, which on a relay origin is reached the long way round like all the
+ * rest; only a page the daemon itself served is standing on the machine it is
+ * showing.
+ *
+ * Exported for its own test: the route around it needs a fleet, two sockets
+ * and a router before it renders anything, and this rule is worth checking
+ * without them.
+ */
+export function machineChipFor(
+  machines: Array<{ id: string; name: string }>,
+  deviceId: string,
+  loopback: boolean,
+): { name: string; home: boolean } | undefined {
+  if (machines.length <= 1) return undefined
+  const own = machines.find((m) => m.id === deviceId)
+  if (own === undefined || own.name === '') return undefined
+  return { name: own.name, home: loopback && deviceId === LOCAL_MACHINE_ID }
 }
 
 /**

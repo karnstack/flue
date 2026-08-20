@@ -8,6 +8,27 @@ import { LOCAL_MACHINE_ID } from './types'
 
 const FleetContext = createContext<FleetClient | null>(null)
 
+/**
+ * Whether this page came off a daemon's own origin, for the screens that have
+ * to say so out loud.
+ *
+ * The flag is already threaded here for the fleet's own two loopback-only
+ * errands (see `loopback` below); this puts it where a component can read it,
+ * because "which of these machines am I sitting in front of" is a question
+ * only this fact answers. `LOCAL_MACHINE_ID` will not do on its own: it means
+ * the machine this tab *rides*, which on a relay tab is a machine in another
+ * room reached over the relay like every other.
+ *
+ * False by default, which is the safe way round — a tab that cannot prove it
+ * is on the machine says nothing rather than claiming a box it may not be.
+ */
+const LoopbackContext = createContext(false)
+
+/** Whether the daemon on this very machine served this page. */
+export function useLoopbackTab(): boolean {
+  return useContext(LoopbackContext)
+}
+
 export interface FleetProviderProps {
   children: ReactNode
   /**
@@ -145,11 +166,18 @@ function OwnFleetProvider({ children, fleet, client, pinned, loopback }: FleetPr
   const ride = active.clientFor(LOCAL_MACHINE_ID)
   return (
     <FleetContext.Provider value={active}>
-      {ride ? (
-        <FlueClientContext.Provider value={ride}>{children}</FlueClientContext.Provider>
-      ) : (
-        children
-      )}
+      {/*
+        Inside the fleet, so a nested pass-through provider (the case the
+        component above returns children for) keeps the outer tab's answer
+        rather than shadowing it with its own default.
+      */}
+      <LoopbackContext.Provider value={loopback === true}>
+        {ride ? (
+          <FlueClientContext.Provider value={ride}>{children}</FlueClientContext.Provider>
+        ) : (
+          children
+        )}
+      </LoopbackContext.Provider>
     </FleetContext.Provider>
   )
 }
