@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { FleetSession } from '@/fleet/types'
 import { renderWithRouter } from '@/testing/render'
-import { COLUMN_KEYS, type Group } from '@/sessions/view'
+import { COLUMN_KEYS, SUBKEY_SEP, type Group } from '@/sessions/view'
 import { SessionTable } from './session-table'
 
 /**
@@ -147,6 +147,88 @@ describe('SessionTable', () => {
       expect(
         screen.getByRole('button', { name: 'MacBook Pro' }).getAttribute('aria-expanded'),
       ).toBe('true')
+    })
+  })
+
+  describe('groups cut twice', () => {
+    const api = fs({ id: 'a1', title: 'api-shell', tags: ['api'] })
+    const ops = fs({ id: 'b2', title: 'ops-shell', tags: ['ops'] })
+    const nested: Group = {
+      ...group('machine:m1', 'MacBook Pro', [api, ops]),
+      children: [
+        group(`machine:m1${SUBKEY_SEP}tag:api`, 'api', [api]),
+        group(`machine:m1${SUBKEY_SEP}tag:ops`, 'ops', [ops]),
+      ],
+    }
+
+    it('draws a subheading per child, with its own tally, under the parent', async () => {
+      const { container } = await renderTable({ groups: [nested] })
+
+      expect(screen.getByRole('button', { name: 'api' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'ops' })).toBeTruthy()
+      const text = container.textContent!
+      expect(text.indexOf('MacBook Pro')).toBeLessThan(text.indexOf('api'))
+      expect(text.indexOf('api')).toBeLessThan(text.indexOf('ops'))
+    })
+
+    it('draws every row once, under its child and not again under the parent', async () => {
+      // The parent carries the whole run for its tally; the table must not
+      // print that run a second time above the subheadings.
+      await renderTable({ groups: [nested] })
+      expect(screen.getAllByRole('link', { name: /api-shell/ })).toHaveLength(1)
+      expect(screen.getAllByRole('link', { name: /ops-shell/ })).toHaveLength(1)
+    })
+
+    it('tallies the parent over every row and the child over its own', async () => {
+      await renderTable({ groups: [nested] })
+      expect(screen.getByText('2 running')).toBeTruthy()
+      expect(screen.getAllByText('1 running')).toHaveLength(2)
+    })
+
+    it('folds a child on its own key, leaving its siblings open', async () => {
+      await renderTable({
+        groups: [nested],
+        collapsed: new Set([`machine:m1${SUBKEY_SEP}tag:api`]),
+      })
+
+      expect(screen.getByRole('button', { name: 'api' }).getAttribute('aria-expanded')).toBe(
+        'false',
+      )
+      expect(screen.queryByRole('link', { name: /api-shell/ })).toBeNull()
+      expect(screen.getByRole('link', { name: /ops-shell/ })).toBeTruthy()
+    })
+
+    it('folds the parent over every child', async () => {
+      await renderTable({ groups: [nested], collapsed: new Set(['machine:m1']) })
+      expect(screen.queryByRole('button', { name: 'api' })).toBeNull()
+      expect(screen.queryByRole('link')).toBeNull()
+    })
+
+    it('reports a child toggle by the child’s key', async () => {
+      const { props } = await renderTable({ groups: [nested] })
+      await userEvent.click(screen.getByRole('button', { name: 'api' }))
+      expect(props.onToggleGroup).toHaveBeenCalledWith(`machine:m1${SUBKEY_SEP}tag:api`)
+    })
+
+    it('offers a spawn control on a child, named for the child', async () => {
+      const onSpawnIn = vi.fn()
+      await renderTable({
+        groups: [nested],
+        onSpawnIn,
+        spawnLabel: (g) => (g.children === undefined ? `New session tagged ${g.label}` : undefined),
+      })
+
+      expect(screen.queryByRole('button', { name: /on MacBook Pro/ })).toBeNull()
+      await userEvent.click(screen.getByRole('button', { name: 'New session tagged api' }))
+      expect(onSpawnIn).toHaveBeenCalledWith(nested.children![0])
+    })
+
+    it('wears a grip when only the children could take a drop', async () => {
+      await renderTable({
+        groups: [nested],
+        drag: { droppable: (g) => g.children === undefined, onDrop: vi.fn() },
+      })
+      expect(screen.getAllByTitle('Drag to move to another group').length).toBeGreaterThan(0)
     })
   })
 

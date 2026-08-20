@@ -11,6 +11,7 @@ import {
   GROUPINGS,
   ORDERING_LABELS,
   ORDERINGS,
+  SUBGROUPING_LABELS,
   type ViewConfig,
 } from '@/sessions/view'
 import { DisplayOptions } from './display-options'
@@ -112,12 +113,75 @@ describe('DisplayOptions', () => {
   })
 
   it('edits the grouping and nothing else', async () => {
-    const { user, onChange, view } = await open()
+    const { user, onChange, view } = await open({ subgrouping: 'none' })
 
     await pick(user, 'Grouping', 'Tag')
 
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange).toHaveBeenCalledWith({ ...view, grouping: 'tag' })
+  })
+
+  describe('the second cut', () => {
+    it('offers every grouping but the first, and calls the way out "Nothing"', async () => {
+      const { user } = await open({ grouping: 'machine' })
+      screen.getByRole('combobox', { name: 'Then by' }).focus()
+      await user.keyboard('{Enter}')
+
+      // The first cut again would be one subheading under every heading — a
+      // choice that can only ever draw nothing.
+      expect(screen.queryByRole('option', { name: 'Machine' })).toBeNull()
+      for (const grouping of GROUPINGS) {
+        if (grouping === 'machine') continue
+        expect(
+          screen.getByRole('option', { name: SUBGROUPING_LABELS[grouping] }),
+          grouping,
+        ).toBeTruthy()
+      }
+      expect(screen.getByRole('option', { name: 'Nothing' })).toBeTruthy()
+    })
+
+    it('reads back the second cut it was handed', async () => {
+      await open({ grouping: 'machine', subgrouping: 'tag' })
+      expect(screen.getByRole('combobox', { name: 'Then by' }).textContent).toContain('Tag')
+    })
+
+    it('edits the second cut and nothing else', async () => {
+      const { user, onChange, view } = await open({ grouping: 'machine', subgrouping: 'none' })
+
+      await pick(user, 'Then by', 'Tag')
+
+      expect(onChange).toHaveBeenCalledTimes(1)
+      expect(onChange).toHaveBeenCalledWith({ ...view, subgrouping: 'tag' })
+    })
+
+    it('turns the second cut off when the first cut takes its key', async () => {
+      // Machine then tag, and the reader picks Tag for the first cut: a view
+      // cut by tag then tag would draw exactly as tag alone, and a select
+      // still reading "Tag" under it would claim a second cut that is not
+      // there.
+      const { user, onChange, view } = await open({ grouping: 'machine', subgrouping: 'tag' })
+
+      await pick(user, 'Grouping', 'Tag')
+
+      expect(onChange).toHaveBeenCalledWith({ ...view, grouping: 'tag', subgrouping: 'none' })
+    })
+
+    it('turns the second cut off, and the control with it, when grouping is off', async () => {
+      // Nothing cut once cannot be cut twice.
+      const { user, onChange, view } = await open({ grouping: 'machine', subgrouping: 'tag' })
+
+      await pick(user, 'Grouping', 'No grouping')
+
+      expect(onChange).toHaveBeenCalledWith({ ...view, grouping: 'none', subgrouping: 'none' })
+    })
+
+    it('refuses the second cut while there is no first', async () => {
+      await open({ grouping: 'none', subgrouping: 'none' })
+      const then = screen.getByRole('combobox', { name: 'Then by' })
+      expect(then.hasAttribute('disabled') || then.getAttribute('aria-disabled') === 'true').toBe(
+        true,
+      )
+    })
   })
 
   it('edits the ordering, and turns the direction back to that key’s own', async () => {

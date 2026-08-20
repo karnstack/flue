@@ -582,7 +582,8 @@ export function SessionTable({
   // refusals are part of what it says — but an advertisement is a promise,
   // and a grip down a list with nowhere to go promises a move that every
   // release would refuse.
-  const liftable = drag !== undefined && groups.some((g) => drag.droppable(g))
+  const liftable =
+    drag !== undefined && groups.some((g) => drag.droppable(g) || g.children?.some(drag.droppable))
 
   /*
    * The drag layer's own bookkeeping, all of it about saying things: who the
@@ -628,21 +629,11 @@ export function SessionTable({
           <GroupSection
             key={g.key}
             g={g}
-            open={!collapsed.has(g.key)}
+            depth={0}
             // Where the pinned prefix ends; 0 and -1 both mean "no rule".
             boundary={ungrouped ? g.sessions.findIndex((s) => !s.pinned) : 0}
-            /*
-             * What this heading's `+` would be called, and therefore whether
-             * it exists at all.
-             *
-             * Resolved once, per group, and checked — not merely passed to
-             * aria-label. A group that refuses one answers undefined (see
-             * `spawnFromGroup`, and "Exited" for the case that motivates it),
-             * and an unchecked answer rendered a button with no accessible
-             * name: a `+` a pointer can press, a click the caller then
-             * refuses, and nothing for a screen reader to announce it as.
-             */
-            spawn={onSpawnIn === undefined ? undefined : spawnLabel?.(g)}
+            collapsed={collapsed}
+            spawnLabel={spawnLabel}
             drag={drag}
             handle={liftable}
             panes={panes}
@@ -688,9 +679,10 @@ export function SessionTable({
  */
 function GroupSection({
   g,
-  open,
+  depth,
   boundary,
-  spawn,
+  collapsed,
+  spawnLabel,
   drag,
   handle,
   panes,
@@ -703,9 +695,11 @@ function GroupSection({
   peek,
 }: {
   g: Group
-  open: boolean
+  /** How many headings sit above this one: 0 for a group, 1 for its children. */
+  depth: number
   boundary: number
-  spawn?: string
+  collapsed: ReadonlySet<string>
+  spawnLabel?(group: Group): string | undefined
   drag?: DragToGroup
   handle: boolean
   panes?: ReadonlyMap<string, number>
@@ -729,6 +723,19 @@ function GroupSection({
     disabled: drag === undefined,
   })
   const droppable = drag !== undefined && drag.droppable(g)
+  const open = !collapsed.has(g.key)
+  /*
+   * What this heading's `+` would be called, and therefore whether it exists
+   * at all.
+   *
+   * Resolved once, per group, and checked — not merely passed to aria-label.
+   * A group that refuses one answers undefined (see `spawnFromGroup`, and
+   * "Exited" for the case that motivates it), and an unchecked answer
+   * rendered a button with no accessible name: a `+` a pointer can press, a
+   * click the caller then refuses, and nothing for a screen reader to
+   * announce it as.
+   */
+  const spawn = onSpawnIn === undefined ? undefined : spawnLabel?.(g)
   return (
     <section ref={setNodeRef} className="flex flex-col">
       {/*
@@ -766,7 +773,15 @@ function GroupSection({
               !open && '-rotate-90',
             )}
           />
-          <span className="truncate">{g.label}</span>
+          {/*
+            A subheading reads a step quieter than the heading over it, so the
+            two levels tell apart by colour and indent alone — the heading's
+            weight would make every tag under a machine as loud as the
+            machine.
+          */}
+          <span className={cn('truncate', depth > 0 && 'text-zinc-600 dark:text-zinc-300')}>
+            {g.label}
+          </span>
         </button>
         <span className="shrink-0 text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
           {tally(g.sessions)}
@@ -791,7 +806,39 @@ function GroupSection({
           </Button>
         )}
       </div>
-      {open && (
+      {open && g.children !== undefined && (
+        /*
+         * The second cut, when there is one: the same rows again under
+         * subheadings, each a section of its own with its own fold, `+` and
+         * drop target. Indented by the width of the chevron and its gap, so
+         * a child's chevron sits under its parent's label and the tree reads
+         * as one. The parent's own `sessions` are not drawn — every one of
+         * them is under some child — but they are what its tally counted.
+         */
+        <div className="mt-1 flex flex-col gap-y-2 pl-5">
+          {g.children.map((c) => (
+            <GroupSection
+              key={c.key}
+              g={c}
+              depth={depth + 1}
+              boundary={0}
+              collapsed={collapsed}
+              spawnLabel={spawnLabel}
+              drag={drag}
+              handle={handle}
+              panes={panes}
+              shown={shown}
+              selected={selected}
+              onToggleSelect={onToggleSelect}
+              onToggleGroup={onToggleGroup}
+              onAction={onAction}
+              onSpawnIn={onSpawnIn}
+              peek={peek}
+            />
+          ))}
+        </div>
+      )}
+      {open && g.children === undefined && (
         <ul className="mt-1 flex flex-col">
           {g.sessions.map((s, at) => (
             // Keyed by the same composite the selection uses: unique

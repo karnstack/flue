@@ -22,6 +22,7 @@ import {
   GROUPINGS,
   ORDERING_LABELS,
   ORDERINGS,
+  SUBGROUPING_LABELS,
   type ColumnKey,
   type ViewConfig,
 } from '@/sessions/view'
@@ -80,7 +81,28 @@ export function DisplayOptions({ view, onChange }: DisplayOptionsProps) {
           value={view.grouping}
           options={GROUPINGS}
           labels={GROUPING_LABELS}
-          onPick={(grouping) => onChange({ ...view, grouping })}
+          // The first cut taking the second's key, or going away entirely,
+          // takes the second cut with it: tag then tag draws as tag alone,
+          // and nothing cut once cannot be cut twice. A select left reading
+          // "Tag" underneath would claim a second cut that is not there.
+          onPick={(grouping) =>
+            onChange({
+              ...view,
+              grouping,
+              subgrouping:
+                grouping === 'none' || grouping === view.subgrouping ? 'none' : view.subgrouping,
+            })
+          }
+        />
+        <Choice
+          label="Then by"
+          value={view.subgrouping}
+          // Every key but the first cut's own — see above for why — and the
+          // way out, which reads "Nothing" here rather than "No grouping".
+          options={GROUPINGS.filter((g) => g !== view.grouping)}
+          labels={SUBGROUPING_LABELS}
+          disabled={view.grouping === 'none'}
+          onPick={(subgrouping) => onChange({ ...view, subgrouping })}
         />
         <Choice
           label="Ordering"
@@ -207,12 +229,15 @@ function Choice<T extends string>({
   value,
   options,
   labels,
+  disabled = false,
   onPick,
 }: {
   label: string
   value: T
   options: readonly T[]
   labels: Record<T, string>
+  /** A choice with nothing to choose right now; it keeps its place and its word. */
+  disabled?: boolean
   onPick(value: T): void
 }) {
   return (
@@ -224,7 +249,7 @@ function Choice<T extends string>({
         `onValueChange` as a bare string; the only values it can emit are the
         ones rendered below, which are `T`.
       */}
-      <Select value={value} onValueChange={(next) => onPick(next as T)}>
+      <Select value={value} disabled={disabled} onValueChange={(next) => onPick(next as T)}>
         <SelectTrigger size="sm" aria-label={label} className="w-40">
           <SelectValue />
         </SelectTrigger>
