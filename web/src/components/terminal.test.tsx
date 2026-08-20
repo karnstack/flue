@@ -348,6 +348,24 @@ describe('Terminal', () => {
     vi.useRealTimers()
   })
 
+  it('holds the connecting pill behind a wordless skeleton until the connect drags', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    // A fresh mount connects in a blink on a local daemon; words would flash.
+    expect(screen.getByRole('status').textContent).not.toContain('Connecting')
+
+    await act(() => vi.advanceTimersByTimeAsync(2100))
+    expect(screen.getByRole('status').textContent).toContain('Connecting')
+    vi.useRealTimers()
+  })
+
+  it('drops the skeleton the moment the attach lands', () => {
+    const { sock } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+    expect(screen.getByRole('status')).toBeTruthy()
+
+    act(() => sock.emitControl(attached({ ref: 1, id: 's1' })))
+    expect(screen.queryByRole('status')).toBeNull()
+  })
 
   it('reports the process exiting, with its code, once', () => {
     const { sock, em } = mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
@@ -1409,9 +1427,14 @@ describe('Terminal', () => {
       expect(pane().getAttribute('data-flue-mode')).toBe('tab')
     })
 
-    it('offers the shortcut where there is already chrome to put it on', () => {
+    it('offers the shortcut where there is already chrome to put it on', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
       mountTerminal((e) => <Terminal sessionId="s1" createEmulator={e.create} />)
+      // The hint rides the worded pill, which a young connect holds behind
+      // the skeleton — so it, too, waits out the grace.
+      await act(() => vi.advanceTimersByTimeAsync(2100))
       expect(screen.getByRole('status').textContent).toContain(TERMINAL_SHORTCUT_HINT)
+      vi.useRealTimers()
     })
 
     it('enters focus mode on the shortcut, and takes the key before the terminal sees it', async () => {
